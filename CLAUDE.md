@@ -11,6 +11,9 @@ with any API or semantics change.**
 - Run tests: `julia --project -e 'using Pkg; Pkg.test()'`
 - Add a dependency: `julia --project -e 'using Pkg; Pkg.add("Name")'`
   (never hand-edit UUIDs; test-only deps also need an `[extras]` entry)
+- CI tests Julia 1.10 (minimum supported), 1.12, and pre-release — don't
+  use post-1.10 language/stdlib features
+- The default branch is `master`, not `main` — target PRs there
 
 ## Architecture
 
