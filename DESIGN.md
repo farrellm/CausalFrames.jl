@@ -66,33 +66,85 @@ Two kinds, both compatible with the chaining operator `|>`:
 | `readcsv(path)` | source | CSV file with a sorted `time` column; rows clipped to `[start, stop)` |
 | `filterrows(pred)` | transform | keep rows where `pred(row)` is `true` |
 | `addcolumns(f)` | transform | `f(row)` returns a `NamedTuple` of new column values for that row; may **not** contain a `time` key (this preserves the time invariant without re-validation) |
+| `summarize(ss; key)` | transform | summarize the whole context into rows at time `stop`; drops input columns |
+| `summarizecycles(ss; key)` | transform | summarize each cycle (maximal run of rows sharing a timestamp) independently; drops input columns |
+| `addsummarycolumns(ss; key)` | transform | keep input columns, append the running summary value after each row |
 
 Row functions (`pred`, `f`) receive a map-like row object supporting
 `row.name` and `row[:name]` access (Tables.jl row semantics), including
 `row.time`.
 
 Naming follows Julia convention: lowercase, no camelCase, and no shadowing
-of `Base.filter` / `Base.empty`.
+of `Base.filter` / `Base.empty` / `Base.count` / `Base.sum`.
+
+## Summarizers
+
+A summarization is described by a subtype of the abstract type `Summarizer`.
+An instance of a concrete subtype holds both the configuration (typically
+which column(s) to summarize) and the running state. The interface, extended
+by concrete subtypes (unexported — extend `CausalFrames.fresh` etc.):
+
+- `fresh(s) -> Summarizer` — a new instance with the same configuration and
+  zero state;
+- `update!(s, row)` — fold one row (map-like, as for row functions) into the
+  state; a summarizer reads whichever columns it needs, so multi-column
+  summarizers need no special support;
+- `value(s) -> NamedTuple` — the current summary; a summarizer may produce
+  **several values**, and the NamedTuple's keys are the output column names.
+
+Output column names are deterministic, formed by suffixing the column name:
+`Sum(:x)` produces `:x_sum`; `Count()` reads no column and produces `:count`.
+
+Concrete summarizers provided: `Count()` and `Sum(column)`. The sum of no
+rows is `0`.
+
+The three summarization functions take one summarizer or a collection of
+them, plus an optional `key` (one or more column names) to produce a separate
+summary per unique key value (key groups are emitted sorted by key value).
+The functions treat the given summarizers as *prototypes*: they only ever
+mutate `fresh` copies, one per key group (and, for `summarizecycles`, per
+cycle). Before running, prototypes are **deduplicated by output-name tuple** —
+identical configurations collapse to one shared instance — and the surviving
+output names must be pairwise disjoint and distinct from `:time` and the key
+columns.
+
+Planned refinements (not yet implemented):
+
+- structured subtypes: a **monoid** subtype (mergeable state, enabling
+  map-reduce evaluation) and a **group** subtype (invertible updates,
+  enabling O(1) rolling windows);
+- **dependent summarizers**: a summarizer will be able to declare the
+  summarizers it depends on (e.g. variance depends on sum and sum of
+  squares); dependencies will be resolved through the same name-keyed
+  deduplication so shared work is computed once.
 
 ## Interval semantics
 
 - **Sources** clip to the half-open interval `[start, stop)`. Adjacent
   contexts therefore tile without overlap, which is what makes chunked and
   streaming evaluation sound.
-- **Frames** tolerate the closed interval `[start, stop]`: future
-  intermediate operators (e.g. aggregations closing a window) may
-  legitimately emit a row exactly at `stop`.
+- **Frames** tolerate the closed interval `[start, stop]`: intermediate
+  operators may legitimately emit a row exactly at `stop` — `summarize`
+  does exactly this when closing its window.
 
 ## Causality and streaming
 
 Every operator must be **causal**: its output at time `t` may depend only on
 input rows with time `≤ t` (no lookahead). Row-wise operators satisfy this
-trivially.
+trivially; the summarization operators are causal because a summary emitted
+at time `t` folds only rows with time `≤ t`.
 
 Causality gives the *chunk-concatenation property*: for sources and row-wise
 transforms, loading `[a, c)` equals concatenating the chunks of loading
 `[a, b)` and `[b, c)`. This property is why `CausalFrame` is chunk-based and
 is the foundation for future incremental loading.
+
+The summarization operators are the first **stateful** operators, and the
+chunk-concatenation property does not hold for them (their state spans the
+whole window — e.g. `addsummarycolumns` carries its running summarizers
+across chunk boundaries, and a `summarizecycles` cycle may span a chunk
+boundary). This is expected: under streaming, stateful operators will carry
+their state across chunk boundaries rather than restart per chunk.
 
 v1 implements only eager `load`. The planned streaming entry point is
 
@@ -111,9 +163,11 @@ boundaries. Not yet implemented.
 | `src/context.jl` | `Context{T}` |
 | `src/frame.jl` | `CausalFrame{T}`, invariants, Tables.jl interface |
 | `src/pipeline.jl` | `CausalPipeline`, `load` |
-| `src/operators.jl` | sources and transforms |
+| `src/operators.jl` | sources and row-wise transforms |
+| `src/summarize.jl` | `Summarizer` interface, `Count`/`Sum`, summarization transforms |
 
 Exports: `Context`, `CausalFrame`, `CausalPipeline`, `load`, `context`,
-`emptyframe`, `clock`, `readcsv`, `filterrows`, `addcolumns`.
+`emptyframe`, `clock`, `readcsv`, `filterrows`, `addcolumns`, `Summarizer`,
+`Count`, `Sum`, `summarize`, `summarizecycles`, `addsummarycolumns`.
 
 Dependencies: DataFrames, CSV, Tables.

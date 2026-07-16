@@ -26,6 +26,9 @@ with any API or semantics change.**
 - `src/operators.jl` — sources return a `CausalPipeline`; transforms are
   curried (`filterrows(pred)` returns `CausalPipeline -> CausalPipeline`)
   so both chain with `|>`
+- `src/summarize.jl` — `Summarizer` abstract type and interface (`fresh`,
+  `update!`, `value` — unexported), `Count`/`Sum`, and the summarization
+  transforms `summarize`, `summarizecycles`, `addsummarycolumns`
 
 ## Invariants and conventions
 

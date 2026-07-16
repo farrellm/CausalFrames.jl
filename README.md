@@ -36,9 +36,25 @@ frame = load(Context(DateTime(2026, 1, 1), DateTime(2026, 2, 1)), p)
 | `readcsv(path)` | source | sorted CSV with a `time` column, clipped to `[start, stop)` |
 | `filterrows(pred)` | transform | keep rows where `pred(row)` |
 | `addcolumns(f)` | transform | `f(row)::NamedTuple` of new column values |
+| `summarize(ss; key)` | transform | summarize the whole window into rows at time `stop` |
+| `summarizecycles(ss; key)` | transform | summarize each unique timestamp independently |
+| `addsummarycolumns(ss; key)` | transform | append running summary values after each row |
 
 Row functions receive a map-like row object: `row.time`, `row.price`,
 `row[:price]`.
+
+## Summarizers
+
+The summarization transforms take one or more summarizers — `Count()`,
+`Sum(:col)`, or your own `Summarizer` subtype — and an optional `key` (one or
+more column names) to produce a separate summary per unique key value.
+Output columns are named by suffix: `Sum(:mid)` produces `:mid_sum`.
+
+```julia
+p = readcsv("ticks.csv") |>
+    addcolumns(r -> (; mid = (r.bid + r.ask) / 2)) |>
+    addsummarycolumns([Count(), Sum(:mid)]; key = :symbol)
+```
 
 Every operator is **causal** — its output at time `t` depends only on input
 rows with time `≤ t` — which is what makes chunked and (future) streaming
