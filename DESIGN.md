@@ -27,22 +27,26 @@ works — `DateTime`, `Date`, `Int` ticks, `Float64` seconds, …
 
 ### `CausalFrame{T}`
 
-A materialized table, backed by a single DataFrame. **Opaque**: it hides its
-backing storage; users never manipulate the underlying DataFrame directly.
+A materialized table. **Opaque**: it hides its backing storage because a
+frame is composed of one or more time-disjoint DataFrame chunks — the chunks
+a pipeline streamed, wrapped without copying. Users never manipulate the
+underlying DataFrames directly.
 
 Invariants, checked at construction:
 
-- there is a `:time` column whose element type is `<: T`;
-- time is non-decreasing;
+- every chunk has a `:time` column whose element type is `<: T`;
+- all chunks share the same column names (element types may differ between
+  chunks; `DataFrame(cf)` promotes on concatenation);
+- time is non-decreasing within each chunk and across chunk boundaries;
 - all times lie in the **closed** interval `[start, stop]` of the frame's
   context (see "Interval semantics" below).
 
 Public access is through:
 
-- the Tables.jl interface — row iteration in time order, so a `CausalFrame`
-  works anywhere a Tables.jl source is accepted;
-- `DataFrame(cf)` — copies into a plain DataFrame (an explicit exit from the
-  causal world);
+- the Tables.jl interface — row iteration over all chunks in time order, so
+  a `CausalFrame` works anywhere a Tables.jl source is accepted;
+- `DataFrame(cf)` — concatenates chunks into a plain DataFrame (an explicit
+  exit from the causal world, and the point where the data is copied);
 - `context(cf)`, `nrow(cf)`, `names(cf)`.
 
 ### `CausalPipeline`
@@ -53,10 +57,10 @@ non-decreasing within and across chunks and empty chunks never emitted.
 Nothing runs until the iterator is consumed. Two entry points evaluate a
 pipeline:
 
-- `load(ctx, pipeline) -> CausalFrame` — drains the iterator and collapses
-  the chunks into a single frame; the only operation that forces the whole
-  window into memory. An empty result yields a zero-row frame with only a
-  `:time` column.
+- `load(ctx, pipeline) -> CausalFrame` — drains the iterator into a frame
+  that wraps all the chunks, without copying; the only operation that
+  forces the whole window into memory. An empty result yields a zero-row
+  frame with only a `:time` column.
 - `stream(ctx, pipeline) -> iterator of CausalFrames` — yields one frame per
   chunk (see "Causality and streaming" below).
 

@@ -105,6 +105,12 @@ CausalFrames.value(::BadTime) = (; time = 0)
         @test_throws ArgumentError CausalFrame(ctx, DataFrame(time = [-1, 5]))
         # stop itself is allowed (closed interval for frames)
         @test nrow(CausalFrame(ctx, DataFrame(time = [5, 10]))) == 2
+        # non-decreasing across chunk boundaries
+        @test_throws ArgumentError CausalFrame(ctx,
+            [DataFrame(time = [4, 5]), DataFrame(time = [3])])
+        # chunks must share a schema
+        @test_throws ArgumentError CausalFrame(ctx,
+            [DataFrame(time = [1], x = [1]), DataFrame(time = [2])])
     end
 
     @testset "filterrows and addcolumns" begin
@@ -148,10 +154,11 @@ CausalFrames.value(::BadTime) = (; time = 0)
         whole = load(Context(0, 20), p)
         left = load(Context(0, 10), p)
         right = load(Context(10, 20), p)
-        stitched = vcat(DataFrame(left), DataFrame(right))
+        stitched = CausalFrame(Context(0, 20),
+            [DataFrame(left), DataFrame(right)])
 
-        @test DataFrame(whole) == stitched
-        @test nrow(whole) == nrow(left) + nrow(right)
+        @test DataFrame(whole) == DataFrame(stitched)
+        @test nrow(stitched) == nrow(left) + nrow(right)
         @test names(stitched) == ["time", "double"]
     end
 
@@ -194,6 +201,13 @@ CausalFrames.value(::BadTime) = (; time = 0)
             [DataFrame(time = [4, 5]), DataFrame(time = [3])])
         @test_throws ArgumentError collect(stream(Context(0, 9), disorder))
         @test_throws ArgumentError load(Context(0, 9), disorder)
+
+        # load wraps the streamed chunks without copying; DataFrame(frame)
+        # is the copy point
+        chunk = DataFrame(time = [1, 2])
+        frame = load(Context(0, 9), CausalPipeline(ctx -> [chunk]))
+        @test only(frame.chunks) === chunk
+        @test DataFrame(frame) !== chunk
 
         # empty streams yield no frames; load gives a zero-row time-only frame
         @test isempty(collect(stream(Context(0, 9), emptyframe())))
@@ -407,11 +421,12 @@ CausalFrames.value(::BadTime) = (; time = 0)
             readcsv(path) |> addsummarycolumns(Sum(:qty); key = :sym)))
         @test df.qty_sum == [10, 20, 40, 80]
 
-        # chunk structure preserved by stream, state carried across the boundary
+        # chunk structure preserved, state carried across the boundary
         twochunks = CausalPipeline(ctx ->
             [DataFrame(time = [1, 2], qty = [1, 2]),
              DataFrame(time = [3, 4], qty = [3, 4])])
         p = twochunks |> addsummarycolumns(Sum(:qty))
+        @test length(load(Context(0, 9), p).chunks) == 2
         frames = collect(stream(Context(0, 9), p))
         @test length(frames) == 2
         @test DataFrame(frames[1]).qty_sum == [1, 3]

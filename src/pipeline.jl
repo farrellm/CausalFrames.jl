@@ -26,19 +26,16 @@ end
     load(ctx::Context, p::CausalPipeline) -> CausalFrame
 
 Evaluate the pipeline over the time window `ctx`, materializing the whole
-window into a single frame. This is the only operation that forces the full
-window into memory; an empty result yields a zero-row frame with only a
-`:time` column.
+window into a frame. This is the only operation that forces the full window
+into memory; the frame wraps the streamed chunks as-is, without copying.
+An empty result yields a zero-row frame with only a `:time` column.
 """
 function load(ctx::Context, p::CausalPipeline)
-    T = timetype(ctx)
-    parts = DataFrame[]
+    chunks = DataFrame[]
     for c in p.run(ctx)
-        push!(parts, c)
+        push!(chunks, c)
     end
-    isempty(parts) && return CausalFrame(ctx, DataFrame(time = T[]))
-    df = length(parts) == 1 ? only(parts) : reduce(vcat, parts)
-    return CausalFrame(ctx, df)
+    return CausalFrame(ctx, chunks)
 end
 
 """

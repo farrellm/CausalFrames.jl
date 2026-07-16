@@ -24,8 +24,9 @@ frame = load(Context(DateTime(2026, 1, 1), DateTime(2026, 2, 1)), p)
   sources and chained with `|>`. Evaluation is streaming end to end:
   `load(ctx, pipeline)` materializes the whole window (the only operation
   that does), `stream(ctx, pipeline)` yields frames incrementally.
-- **`CausalFrame`** — a materialized table. It hides its backing storage and
-  is accessed via the Tables.jl interface or `DataFrame(frame)`.
+- **`CausalFrame`** — a materialized table. It hides its backing storage
+  (one or more time-disjoint chunks, wrapped without copying) and is
+  accessed via the Tables.jl interface or `DataFrame(frame)`.
 
 ## Operators
 
