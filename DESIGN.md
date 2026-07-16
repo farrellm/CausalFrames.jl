@@ -107,10 +107,28 @@ by concrete subtypes (unexported — extend `CausalFrames.fresh` etc.):
   **several values**, and the NamedTuple's keys are the output column names.
 
 Output column names are deterministic, formed by suffixing the column name:
-`Sum(:x)` produces `:x_sum`; `Count()` reads no column and produces `:count`.
+`Sum(:x)` produces `:x_sum`, `Min(:x)` produces `:x_min`, and `SumPower(:x, 2)`
+carries its exponent in the suffix to produce `:x_sum2`; `Count()` reads no
+column and produces `:count`.
 
-Concrete summarizers provided: `Count()` and `Sum(column)`. The sum of no
-rows is `0`.
+Concrete summarizers provided:
+
+| Summarizer | Output column | Value over no rows |
+|---|---|---|
+| `Count()` | `:count` | `0` |
+| `Sum(column)` | `:x_sum` | `0` |
+| `SumPower(column, n)` | `:x_sum2` for `n = 2` | `0` |
+| `Min(column)` | `:x_min` | `missing` |
+| `Max(column)` | `:x_max` | `missing` |
+| `First(column)` | `:x_first` | `missing` |
+| `Last(column)` | `:x_last` | `missing` |
+
+`Sum` and `SumPower` have an identity element, so they summarize no rows as
+`0`. The other four do not, and yield `missing` instead — reachable only
+through a keyless `summarize` of an empty input, since every key group and
+every cycle folds at least one row before emitting. `SumPower(column, 1)`
+produces `:x_sum1`, deliberately distinct from `Sum(column)`'s `:x_sum`, so
+the two never collapse under the name-keyed deduplication described below.
 
 The three summarization functions take one summarizer or a collection of
 them, plus an optional `key` (one or more column names) to produce a separate
@@ -128,9 +146,9 @@ Planned refinements (not yet implemented):
   map-reduce evaluation) and a **group** subtype (invertible updates,
   enabling O(1) rolling windows);
 - **dependent summarizers**: a summarizer will be able to declare the
-  summarizers it depends on (e.g. variance depends on sum and sum of
-  squares); dependencies will be resolved through the same name-keyed
-  deduplication so shared work is computed once.
+  summarizers it depends on (e.g. variance depends on `Sum(:x)` and the sum
+  of squares `SumPower(:x, 2)`); dependencies will be resolved through the
+  same name-keyed deduplication so shared work is computed once.
 
 ## Interval semantics
 

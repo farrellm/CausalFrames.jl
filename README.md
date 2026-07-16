@@ -47,15 +47,20 @@ Row functions receive a map-like row object: `row.time`, `row.price`,
 ## Summarizers
 
 The summarization transforms take one or more summarizers — `Count()`,
-`Sum(:col)`, or your own `Summarizer` subtype — and an optional `key` (one or
+`Sum(:col)`, `SumPower(:col, n)`, `Min(:col)`, `Max(:col)`, `First(:col)`,
+`Last(:col)`, or your own `Summarizer` subtype — and an optional `key` (one or
 more column names) to produce a separate summary per unique key value.
-Output columns are named by suffix: `Sum(:mid)` produces `:mid_sum`.
+Output columns are named by suffix: `Sum(:mid)` produces `:mid_sum`,
+`Min(:mid)` produces `:mid_min`, and `SumPower(:mid, 2)` produces `:mid_sum2`.
 
 ```julia
 p = readcsv("ticks.csv") |>
     addcolumns(r -> (; mid = (r.bid + r.ask) / 2)) |>
-    addsummarycolumns([Count(), Sum(:mid)]; key = :symbol)
+    addsummarycolumns([Count(), Sum(:mid), Min(:mid), Max(:mid)]; key = :symbol)
 ```
+
+`Sum` and `SumPower` summarize no rows as `0`; `Min`, `Max`, `First`, and
+`Last` have no identity element and yield `missing` instead.
 
 Every operator is **causal** — its output at time `t` depends only on input
 rows with time `≤ t` — which is what makes streaming evaluation sound. See

@@ -325,6 +325,44 @@ CausalFrames.value(::BadTime) = (; time = 0)
             readcsv(path) |> summarize([Sum(:qty), Sum(:qty)])))
         @test names(df) == ["time", "qty_sum"]
 
+        # min, max, first, last
+        df = DataFrame(load(Context(0, 9), readcsv(path) |>
+            summarize([Min(:qty), Max(:qty), First(:qty), Last(:qty)])))
+        @test names(df) == ["time", "qty_min", "qty_max", "qty_first", "qty_last"]
+        @test df.qty_min == [10]
+        @test df.qty_max == [40]
+        @test df.qty_first == [10]
+        @test df.qty_last == [40]
+
+        # sum of elements to the Nth power; :x_sum2 never dedups against :x_sum
+        df = DataFrame(load(Context(0, 9),
+            readcsv(path) |> summarize([Sum(:qty), SumPower(:qty, 2)])))
+        @test names(df) == ["time", "qty_sum", "qty_sum2"]
+        @test df.qty_sum == [100]
+        @test df.qty_sum2 == [3000]      # 10^2 + 20^2 + 30^2 + 40^2
+
+        # power 1 is a distinct column from Sum, not a duplicate of it
+        df = DataFrame(load(Context(0, 9),
+            readcsv(path) |> summarize([Sum(:qty), SumPower(:qty, 1)])))
+        @test names(df) == ["time", "qty_sum", "qty_sum1"]
+        @test df.qty_sum1 == [100]
+
+        # no identity element: empty input summarizes to missing, not an error
+        df = DataFrame(load(Context(0, 9), emptyframe() |>
+            summarize([Min(:qty), Max(:qty), First(:qty), Last(:qty)])))
+        @test df.time == [9]
+        @test ismissing(only(df.qty_min))
+        @test ismissing(only(df.qty_max))
+        @test ismissing(only(df.qty_first))
+        @test ismissing(only(df.qty_last))
+
+        # keyed first/last pin down per-group ordering
+        df = DataFrame(load(Context(0, 9),
+            readcsv(path) |> summarize([First(:qty), Last(:qty)]; key = :sym)))
+        @test df.sym == ["a", "b"]
+        @test df.qty_first == [10, 20]
+        @test df.qty_last == [40, 20]
+
         # key: one row per unique key value, sorted by key
         df = DataFrame(load(Context(0, 9),
             readcsv(path) |> summarize([Count(), Sum(:qty)]; key = :sym)))
@@ -420,6 +458,12 @@ CausalFrames.value(::BadTime) = (; time = 0)
         df = DataFrame(load(Context(0, 9),
             readcsv(path) |> addsummarycolumns(Sum(:qty); key = :sym)))
         @test df.qty_sum == [10, 20, 40, 80]
+
+        # a running min/last never sees an empty group, so never yields missing
+        df = DataFrame(load(Context(0, 9),
+            readcsv(path) |> addsummarycolumns([Min(:qty), Last(:qty)])))
+        @test df.qty_min == [10, 10, 10, 10]
+        @test df.qty_last == [10, 20, 30, 40]
 
         # chunk structure preserved, state carried across the boundary
         twochunks = CausalPipeline(ctx ->
