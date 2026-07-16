@@ -20,12 +20,12 @@ frame = load(Context(DateTime(2026, 1, 1), DateTime(2026, 2, 1)), p)
 - **`Context(start, stop)`** — a time window. The time type is generic:
   `DateTime`, `Int` ticks, `Float64` seconds, anything ordered.
 - **`CausalPipeline`** — a lazy description of how to produce data;
-  conceptually a function from a `Context` to a frame. Built from sources
-  and chained with `|>`.
-- **`CausalFrame`** — the materialized result of `load(ctx, pipeline)`. It
-  hides its backing storage (one or more time-disjoint chunks, the basis
-  for streaming) and is accessed via the Tables.jl interface or
-  `DataFrame(frame)`.
+  conceptually a function from a `Context` to a stream of chunks. Built from
+  sources and chained with `|>`. Evaluation is streaming end to end:
+  `load(ctx, pipeline)` materializes the whole window (the only operation
+  that does), `stream(ctx, pipeline)` yields frames incrementally.
+- **`CausalFrame`** — a materialized table. It hides its backing storage and
+  is accessed via the Tables.jl interface or `DataFrame(frame)`.
 
 ## Operators
 
@@ -33,7 +33,7 @@ frame = load(Context(DateTime(2026, 1, 1), DateTime(2026, 2, 1)), p)
 |---|---|---|
 | `emptyframe()` | source | zero rows, just a `:time` column |
 | `clock(interval)` | source | one row per `interval` in `[start, stop)` |
-| `readcsv(path)` | source | sorted CSV with a `time` column, clipped to `[start, stop)` |
+| `readcsv(path)` | source | sorted CSV with a `time` column, clipped to `[start, stop)`, read incrementally |
 | `filterrows(pred)` | transform | keep rows where `pred(row)` |
 | `addcolumns(f)` | transform | `f(row)::NamedTuple` of new column values |
 | `summarize(ss; key)` | transform | summarize the whole window into rows at time `stop` |
@@ -57,5 +57,5 @@ p = readcsv("ticks.csv") |>
 ```
 
 Every operator is **causal** — its output at time `t` depends only on input
-rows with time `≤ t` — which is what makes chunked and (future) streaming
-evaluation sound. See [DESIGN.md](DESIGN.md) for the full design.
+rows with time `≤ t` — which is what makes streaming evaluation sound. See
+[DESIGN.md](DESIGN.md) for the full design.

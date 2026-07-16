@@ -1,52 +1,39 @@
 """
-    CausalFrame(ctx::Context, chunks)
     CausalFrame(ctx::Context, df::DataFrame)
 
-A materialized time-series table over the window `ctx`. Backed by one or
-more time-disjoint DataFrame chunks; the chunk structure is an
-implementation detail and is not part of the public API.
+A materialized time-series table over the window `ctx`, backed by a single
+DataFrame. **Opaque**: the backing storage is an implementation detail and is
+not part of the public API.
 
 Invariants, checked at construction:
 
-- every chunk has a `:time` column with element type `<: T`;
-- all (non-empty) chunks share the same schema;
-- time is non-decreasing within each chunk and across chunk boundaries;
+- the DataFrame has a `:time` column with element type `<: T`;
+- time is non-decreasing;
 - all times lie in the closed interval `[ctx.start, ctx.stop]`.
 
 Access the data via the Tables.jl interface, `DataFrame(frame)`,
 [`context`](@ref), `nrow(frame)`, or `names(frame)`. The constructor takes
-ownership of the passed DataFrames; do not mutate them afterwards.
+ownership of the passed DataFrame; do not mutate it afterwards.
 """
 struct CausalFrame{T}
     context::Context{T}
-    chunks::Vector{DataFrame}
+    data::DataFrame
 
-    function CausalFrame{T}(ctx::Context{T}, chunks::Vector{DataFrame}) where {T}
-        kept = DataFrame[c for c in chunks if nrow(c) > 0]
-        for c in kept
-            "time" in names(c) ||
-                throw(ArgumentError("every chunk must have a :time column"))
-            eltype(c.time) <: T || throw(ArgumentError(
-                "chunk :time column has element type $(eltype(c.time)), expected <: $T"))
-            issorted(c.time) ||
-                throw(ArgumentError("chunk :time column is not non-decreasing"))
-            names(c) == names(first(kept)) ||
-                throw(ArgumentError("all chunks must share the same schema"))
-            first(c.time) >= ctx.start && last(c.time) <= ctx.stop ||
-                throw(ArgumentError(
-                    "chunk times must lie in [$(ctx.start), $(ctx.stop)]"))
-        end
-        for i in 2:length(kept)
-            last(kept[i - 1].time) <= first(kept[i].time) ||
-                throw(ArgumentError("chunks must be non-decreasing across boundaries"))
-        end
-        return new{T}(ctx, kept)
+    function CausalFrame{T}(ctx::Context{T}, df::DataFrame) where {T}
+        "time" in names(df) ||
+            throw(ArgumentError("frame must have a :time column"))
+        eltype(df.time) <: T || throw(ArgumentError(
+            ":time column has element type $(eltype(df.time)), expected <: $T"))
+        issorted(df.time) ||
+            throw(ArgumentError(":time column is not non-decreasing"))
+        nrow(df) == 0 || (first(df.time) >= ctx.start && last(df.time) <= ctx.stop) ||
+            throw(ArgumentError(
+                "times must lie in [$(ctx.start), $(ctx.stop)]"))
+        return new{T}(ctx, df)
     end
 end
 
-CausalFrame(ctx::Context{T}, chunks::Vector{DataFrame}) where {T} =
-    CausalFrame{T}(ctx, chunks)
-CausalFrame(ctx::Context, df::DataFrame) = CausalFrame(ctx, [df])
+CausalFrame(ctx::Context{T}, df::DataFrame) where {T} = CausalFrame{T}(ctx, df)
 
 """
     context(frame::CausalFrame) -> Context
@@ -57,23 +44,17 @@ context(frame::CausalFrame) = frame.context
 
 timetype(::CausalFrame{T}) where {T} = T
 
-DataFrames.nrow(frame::CausalFrame) = sum(nrow, frame.chunks; init = 0)
+DataFrames.nrow(frame::CausalFrame) = nrow(frame.data)
 
-Base.names(frame::CausalFrame) =
-    isempty(frame.chunks) ? ["time"] : names(first(frame.chunks))
+Base.names(frame::CausalFrame) = names(frame.data)
 
 """
     DataFrame(frame::CausalFrame)
 
-Concatenate the frame's chunks into a plain `DataFrame` — an explicit exit
-from the causal world. A frame with no rows yields a zero-row DataFrame
-with only its `:time` column.
+Copy the frame's data into a plain `DataFrame` — an explicit exit from the
+causal world.
 """
-function DataFrames.DataFrame(frame::CausalFrame{T}) where {T}
-    isempty(frame.chunks) && return DataFrame(time = T[])
-    length(frame.chunks) == 1 && return copy(only(frame.chunks))
-    return reduce(vcat, frame.chunks)
-end
+DataFrames.DataFrame(frame::CausalFrame) = copy(frame.data)
 
 Tables.istable(::Type{<:CausalFrame}) = true
 Tables.rowaccess(::Type{<:CausalFrame}) = true

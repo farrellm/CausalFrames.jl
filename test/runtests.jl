@@ -105,12 +105,6 @@ CausalFrames.value(::BadTime) = (; time = 0)
         @test_throws ArgumentError CausalFrame(ctx, DataFrame(time = [-1, 5]))
         # stop itself is allowed (closed interval for frames)
         @test nrow(CausalFrame(ctx, DataFrame(time = [5, 10]))) == 2
-        # non-decreasing across chunk boundaries
-        @test_throws ArgumentError CausalFrame(ctx,
-            [DataFrame(time = [4, 5]), DataFrame(time = [3])])
-        # chunks must share a schema
-        @test_throws ArgumentError CausalFrame(ctx,
-            [DataFrame(time = [1], x = [1]), DataFrame(time = [2])])
     end
 
     @testset "filterrows and addcolumns" begin
@@ -154,12 +148,126 @@ CausalFrames.value(::BadTime) = (; time = 0)
         whole = load(Context(0, 20), p)
         left = load(Context(0, 10), p)
         right = load(Context(10, 20), p)
-        stitched = CausalFrame(Context(0, 20),
-            [DataFrame(left), DataFrame(right)])
+        stitched = vcat(DataFrame(left), DataFrame(right))
 
-        @test DataFrame(whole) == DataFrame(stitched)
-        @test nrow(stitched) == nrow(left) + nrow(right)
+        @test DataFrame(whole) == stitched
+        @test nrow(whole) == nrow(left) + nrow(right)
         @test names(stitched) == ["time", "double"]
+    end
+
+    @testset "stream" begin
+        # sub-contexts tile [start, stop): boundaries at the next chunk's
+        # first time, last context stops at ctx.stop
+        frames = collect(stream(Context(0, 10), clock(2; batchsize = 2)))
+        @test length(frames) == 3
+        @test [DataFrame(f).time for f in frames] == [[0, 2], [4, 6], [8]]
+        @test [context(f) for f in frames] ==
+              [Context(0, 4), Context(4, 8), Context(8, 10)]
+
+        # laziness: nothing is pulled until iteration, then one chunk of
+        # lookahead; the failing third chunk is only reached on demand
+        pulled = Ref(0)
+        lazyfail = CausalPipeline() do ctx
+            (begin
+                 pulled[] += 1
+                 pulled[] <= 2 || throw(ArgumentError("chunk 3 pulled"))
+                 DataFrame(time = [i])
+             end for i in 1:3)
+        end
+        it = stream(Context(0, 10), lazyfail)
+        @test pulled[] == 0
+        f1, st = iterate(it)
+        @test pulled[] == 2
+        @test DataFrame(f1).time == [1]
+        @test_throws ArgumentError iterate(it, st)
+        pulled[] = 0
+        @test_throws ArgumentError load(Context(0, 10), lazyfail)
+
+        # transforms are lazy too: composing and streaming pulls nothing
+        pulled[] = 0
+        p = lazyfail |> filterrows(r -> true) |> summarize(Count())
+        it = stream(Context(0, 10), p)
+        @test pulled[] == 0
+
+        # cross-chunk time disorder is caught while streaming and by load
+        disorder = CausalPipeline(ctx ->
+            [DataFrame(time = [4, 5]), DataFrame(time = [3])])
+        @test_throws ArgumentError collect(stream(Context(0, 9), disorder))
+        @test_throws ArgumentError load(Context(0, 9), disorder)
+
+        # empty streams yield no frames; load gives a zero-row time-only frame
+        @test isempty(collect(stream(Context(0, 9), emptyframe())))
+        @test isempty(collect(stream(Context(5, 5), clock(1))))
+        allgone = clock(1) |> filterrows(r -> false)
+        @test isempty(collect(stream(Context(0, 9), allgone)))
+        @test nrow(load(Context(0, 9), allgone)) == 0
+        @test names(load(Context(0, 9), allgone)) == ["time"]
+
+        # chunks emptied by a filter are skipped; tiling stays sound
+        sparse = clock(1; batchsize = 2) |> filterrows(r -> r.time in (0, 5))
+        frames = collect(stream(Context(0, 8), sparse))
+        @test [DataFrame(f).time for f in frames] == [[0], [5]]
+        @test [context(f) for f in frames] == [Context(0, 5), Context(5, 8)]
+
+        # summarize streams as a single frame at stop, over [start, stop]
+        frames = collect(stream(Context(0, 9), clock(1) |> summarize(Count())))
+        @test length(frames) == 1
+        @test context(only(frames)) == Context(0, 9)
+        @test DataFrame(only(frames)).time == [9]
+        @test DataFrame(only(frames)).count == [9]
+        # keyed summarize of an empty input streams no frames
+        @test isempty(collect(stream(Context(0, 9),
+            emptyframe() |> summarize(Count(); key = :sym))))
+
+        # summarizecycles closes a cycle once a later time arrives; the open
+        # cycle is buffered across the chunk boundary and flushed at the end
+        twochunks = CausalPipeline(ctx ->
+            [DataFrame(time = [1, 2, 2], qty = [1, 2, 3]),
+             DataFrame(time = [2, 3], qty = [4, 5])])
+        frames = collect(stream(Context(0, 9),
+            twochunks |> summarizecycles([Count(), Sum(:qty)])))
+        @test [DataFrame(f).time for f in frames] == [[1], [2], [3]]
+        @test [only(DataFrame(f).count) for f in frames] == [1, 3, 1]
+        @test [only(DataFrame(f).qty_sum) for f in frames] == [1, 9, 5]
+    end
+
+    @testset "readcsv chunked" begin
+        dir = mktempdir()
+        path = joinpath(dir, "long.csv")
+        open(path, "w") do io
+            println(io, "time,x")
+            for t in 1:50
+                println(io, "$t,$(2t)")
+            end
+        end
+
+        # small chunks stream as several frames but load identically
+        p = readcsv(path; chunkbytes = 64)
+        frames = collect(stream(Context(0, 100), p))
+        @test length(frames) > 1
+        @test DataFrame(load(Context(0, 100), p)) ==
+              DataFrame(load(Context(0, 100), readcsv(path)))
+        @test DataFrame(load(Context(0, 100), p)).time == 1:50
+
+        # clipping to [start, stop) works across chunk boundaries
+        @test DataFrame(load(Context(10, 20), p)).time == 10:19
+
+        # early stop: disorder past the window is never read ...
+        badtail = joinpath(dir, "badtail.csv")
+        open(badtail, "w") do io
+            println(io, "time,x")
+            for t in 1:50
+                println(io, "$t,$(2t)")
+            end
+            println(io, "7,0")   # unsorted, far past stop below
+        end
+        @test DataFrame(load(Context(0, 10),
+            readcsv(badtail; chunkbytes = 64))).time == 1:9
+        # ... but reading through it throws
+        @test_throws ArgumentError load(Context(0, 1000),
+            readcsv(badtail; chunkbytes = 64))
+
+        @test_throws ArgumentError readcsv(path; chunkbytes = 0)
     end
 
     @testset "Tables.jl interface" begin
@@ -264,10 +372,9 @@ CausalFrames.value(::BadTime) = (; time = 0)
         @test df.qty_sum == [10, 30, 20, 40]
 
         # a cycle spanning a chunk boundary is one cycle
-        twochunks = CausalPipeline() do ctx
-            CausalFrame(ctx, [DataFrame(time = [1, 2, 2], qty = [1, 2, 3]),
-                              DataFrame(time = [2, 3], qty = [4, 5])])
-        end
+        twochunks = CausalPipeline(ctx ->
+            [DataFrame(time = [1, 2, 2], qty = [1, 2, 3]),
+             DataFrame(time = [2, 3], qty = [4, 5])])
         df = DataFrame(load(Context(0, 9),
             twochunks |> summarizecycles([Count(), Sum(:qty)])))
         @test df.time == [1, 2, 3]
@@ -300,14 +407,18 @@ CausalFrames.value(::BadTime) = (; time = 0)
             readcsv(path) |> addsummarycolumns(Sum(:qty); key = :sym)))
         @test df.qty_sum == [10, 20, 40, 80]
 
-        # chunk structure preserved, state carried across the boundary
-        twochunks = CausalPipeline() do ctx
-            CausalFrame(ctx, [DataFrame(time = [1, 2], qty = [1, 2]),
-                              DataFrame(time = [3, 4], qty = [3, 4])])
-        end
-        frame = load(Context(0, 9), twochunks |> addsummarycolumns(Sum(:qty)))
-        @test length(frame.chunks) == 2
-        @test DataFrame(frame).qty_sum == [1, 3, 6, 10]
+        # chunk structure preserved by stream, state carried across the boundary
+        twochunks = CausalPipeline(ctx ->
+            [DataFrame(time = [1, 2], qty = [1, 2]),
+             DataFrame(time = [3, 4], qty = [3, 4])])
+        p = twochunks |> addsummarycolumns(Sum(:qty))
+        frames = collect(stream(Context(0, 9), p))
+        @test length(frames) == 2
+        @test DataFrame(frames[1]).qty_sum == [1, 3]
+        @test DataFrame(frames[2]).qty_sum == [6, 10]
+        @test context(frames[1]) == Context(0, 3)
+        @test context(frames[2]) == Context(3, 9)
+        @test DataFrame(load(Context(0, 9), p)).qty_sum == [1, 3, 6, 10]
 
         # collision with an existing column
         @test_throws ArgumentError load(Context(0, 9),

@@ -1,9 +1,11 @@
 # CausalFrames.jl — Design
 
 CausalFrames represents time-series tables: tabular data with a monotonically
-non-decreasing `time` column. Data is described *lazily* as a pipeline; a
-time window (`Context`) plus a pipeline yields a materialized `CausalFrame`
-via `load`.
+non-decreasing `time` column. Data is described *lazily* as a pipeline;
+evaluation is streaming end to end — operators pass chunks between each other
+lazily. A time window (`Context`) plus a pipeline yields a materialized
+`CausalFrame` via `load` (the only operation that forces the whole window
+into memory) or an iterator of frames via `stream`.
 
 ```julia
 using CausalFrames, Dates
@@ -25,30 +27,38 @@ works — `DateTime`, `Date`, `Int` ticks, `Float64` seconds, …
 
 ### `CausalFrame{T}`
 
-A materialized table. **Opaque**: it hides its backing storage because a
-frame may be composed of multiple time-disjoint DataFrame chunks (the basis
-for streaming). Users never manipulate the underlying DataFrames directly.
+A materialized table, backed by a single DataFrame. **Opaque**: it hides its
+backing storage; users never manipulate the underlying DataFrame directly.
 
 Invariants, checked at construction:
 
-- every chunk has a `:time` column whose element type is `T`;
-- all chunks share the same schema;
-- time is non-decreasing within each chunk and across chunk boundaries;
+- there is a `:time` column whose element type is `<: T`;
+- time is non-decreasing;
 - all times lie in the **closed** interval `[start, stop]` of the frame's
   context (see "Interval semantics" below).
 
 Public access is through:
 
-- the Tables.jl interface — row iteration over all chunks in time order, so
-  a `CausalFrame` works anywhere a Tables.jl source is accepted;
-- `DataFrame(cf)` — concatenates chunks into a plain DataFrame (an explicit
-  exit from the causal world);
+- the Tables.jl interface — row iteration in time order, so a `CausalFrame`
+  works anywhere a Tables.jl source is accepted;
+- `DataFrame(cf)` — copies into a plain DataFrame (an explicit exit from the
+  causal world);
 - `context(cf)`, `nrow(cf)`, `names(cf)`.
 
 ### `CausalPipeline`
 
-A lazy description of how to produce a frame: conceptually a function
-`Context -> CausalFrame`. `load(ctx, pipeline)` runs it.
+A lazy description of how to produce data: conceptually a function
+`Context -> single-pass lazy iterator of DataFrame chunks`, with time
+non-decreasing within and across chunks and empty chunks never emitted.
+Nothing runs until the iterator is consumed. Two entry points evaluate a
+pipeline:
+
+- `load(ctx, pipeline) -> CausalFrame` — drains the iterator and collapses
+  the chunks into a single frame; the only operation that forces the whole
+  window into memory. An empty result yields a zero-row frame with only a
+  `:time` column.
+- `stream(ctx, pipeline) -> iterator of CausalFrames` — yields one frame per
+  chunk (see "Causality and streaming" below).
 
 ## Operators
 
@@ -62,8 +72,8 @@ Two kinds, both compatible with the chaining operator `|>`:
 | Operator | Kind | Semantics |
 |---|---|---|
 | `emptyframe()` | source | zero rows, just a `:time` column |
-| `clock(interval)` | source | rows at `start, start + interval, …` while `< stop`; no other columns |
-| `readcsv(path)` | source | CSV file with a sorted `time` column; rows clipped to `[start, stop)` |
+| `clock(interval; batchsize)` | source | rows at `start, start + interval, …` while `< stop`; no other columns; generated lazily in chunks of `batchsize` rows |
+| `readcsv(path; chunkbytes)` | source | CSV file with a sorted `time` column; rows clipped to `[start, stop)`; read incrementally in chunks of roughly `chunkbytes` bytes — never all at once — stopping as soon as a time `>= stop` is seen |
 | `filterrows(pred)` | transform | keep rows where `pred(row)` is `true` |
 | `addcolumns(f)` | transform | `f(row)` returns a `NamedTuple` of new column values for that row; may **not** contain a `time` key (this preserves the time invariant without re-validation) |
 | `summarize(ss; key)` | transform | summarize the whole context into rows at time `stop`; drops input columns |
@@ -135,25 +145,37 @@ trivially; the summarization operators are causal because a summary emitted
 at time `t` folds only rows with time `≤ t`.
 
 Causality gives the *chunk-concatenation property*: for sources and row-wise
-transforms, loading `[a, c)` equals concatenating the chunks of loading
-`[a, b)` and `[b, c)`. This property is why `CausalFrame` is chunk-based and
-is the foundation for future incremental loading.
+transforms, loading `[a, c)` equals concatenating the results of loading
+`[a, b)` and `[b, c)`. This property is what makes chunked evaluation sound.
 
-The summarization operators are the first **stateful** operators, and the
-chunk-concatenation property does not hold for them (their state spans the
-whole window — e.g. `addsummarycolumns` carries its running summarizers
-across chunk boundaries, and a `summarizecycles` cycle may span a chunk
-boundary). This is expected: under streaming, stateful operators will carry
-their state across chunk boundaries rather than restart per chunk.
-
-v1 implements only eager `load`. The planned streaming entry point is
+Evaluation is streaming end to end: operators pass chunks between each other
+lazily and only `load` materializes the whole window. The incremental entry
+point is
 
 ```julia
-stream(ctx, pipeline; chunk) # -> iterator of CausalFrames over sub-contexts
+stream(ctx, pipeline) # -> iterator of CausalFrames over sub-contexts
 ```
 
-where stateful (aggregating) operators will carry their state across chunk
-boundaries. Not yet implemented.
+Chunk boundaries are **source-native**: each source picks its own batch
+sizes (`clock`'s `batchsize`, `readcsv`'s `chunkbytes`); there is no time
+alignment. The streamed frames' contexts tile `[start, stop)`: frame `i`
+covers `[bᵢ₋₁, bᵢ)` where `b₀ = start`, `bᵢ` is the first time of chunk
+`i + 1`, and the last frame's context stops at `stop`. The iterator is
+single-pass and maintains one chunk of lookahead (needed to place the next
+boundary).
+
+Row-wise transforms map over chunks independently. The summarization
+operators are **stateful**: their state spans the whole window, carried
+across chunk boundaries rather than restarting per chunk —
+`addsummarycolumns` carries its running summarizers across boundaries
+(preserving the chunk structure), `summarizecycles` buffers the open cycle
+across boundaries (a cycle closes, causally, when a row with a later time
+arrives or the stream ends), and `summarize` folds chunk by chunk and emits
+once, at `stop`, when its input is exhausted (so its stream is a single
+frame over `[start, stop]`). Consequently concatenating the frames of
+`stream(ctx, p)` always equals `load(ctx, p)`, even for stateful operators —
+but the chunk-concatenation property over *split contexts* still does not
+hold for them.
 
 ## Module layout
 
@@ -162,12 +184,14 @@ boundaries. Not yet implemented.
 | `src/CausalFrames.jl` | module, includes, exports |
 | `src/context.jl` | `Context{T}` |
 | `src/frame.jl` | `CausalFrame{T}`, invariants, Tables.jl interface |
-| `src/pipeline.jl` | `CausalPipeline`, `load` |
+| `src/chunks.jl` | internal chunk-iterator machinery (`ChunkSource`, `chunkmap`) |
+| `src/pipeline.jl` | `CausalPipeline`, `load`, `stream` |
 | `src/operators.jl` | sources and row-wise transforms |
 | `src/summarize.jl` | `Summarizer` interface, `Count`/`Sum`, summarization transforms |
 
-Exports: `Context`, `CausalFrame`, `CausalPipeline`, `load`, `context`,
-`emptyframe`, `clock`, `readcsv`, `filterrows`, `addcolumns`, `Summarizer`,
-`Count`, `Sum`, `summarize`, `summarizecycles`, `addsummarycolumns`.
+Exports: `Context`, `CausalFrame`, `CausalPipeline`, `load`, `stream`,
+`context`, `emptyframe`, `clock`, `readcsv`, `filterrows`, `addcolumns`,
+`Summarizer`, `Count`, `Sum`, `summarize`, `summarizecycles`,
+`addsummarycolumns`.
 
 Dependencies: DataFrames, CSV, Tables.
