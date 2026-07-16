@@ -6,7 +6,8 @@ using Tables
 
 export Context, CausalFrame, CausalPipeline, load, stream, context, timetype,
     emptyframe, clock, readcsv, filterrows, addcolumns,
-    Summarizer, Count, Sum, summarize, summarizecycles, addsummarycolumns
+    Summarizer, Count, Sum, SumPower, Min, Max, First, Last,
+    summarize, summarizecycles, addsummarycolumns
 
 include("context.jl")
 include("frame.jl")

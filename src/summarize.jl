@@ -84,6 +84,123 @@ fresh(s::Sum) = Sum(s.column)
 update!(s::Sum, row) = (s.total += row[s.column]; nothing)
 value(s::Sum) = NamedTuple{(Symbol(s.column, :_sum),)}((s.total,))
 
+"""
+    SumPower(column, n) -> Summarizer
+
+Sums `column` raised to the power `n`. Produces the output column
+`Symbol(column, :_sum, n)`, e.g. `SumPower(:x, 2)` produces `:x_sum2`. The
+sum of no rows is `0`.
+
+`SumPower(column, 1)` produces `:x_sum1`, a distinct column from `Sum(:x)`'s
+`:x_sum`.
+"""
+mutable struct SumPower <: Summarizer
+    column::Symbol
+    power::Int
+    total::Any
+end
+SumPower(column::Symbol, power::Integer) = SumPower(column, Int(power), 0)
+
+fresh(s::SumPower) = SumPower(s.column, s.power)
+update!(s::SumPower, row) = (s.total += row[s.column]^s.power; nothing)
+value(s::SumPower) = NamedTuple{(Symbol(s.column, :_sum, s.power),)}((s.total,))
+
+# Min/Max/First/Last have no identity element, so each carries a `seen` flag:
+# it keeps "no rows folded in" (which yields missing) distinct from a column
+# holding missing or nothing.
+
+"""
+    Min(column) -> Summarizer
+
+Tracks the minimum of `column`. Produces the output column
+`Symbol(column, :_min)`, e.g. `Min(:x)` produces `:x_min`. The minimum of no
+rows is `missing`.
+"""
+mutable struct Min <: Summarizer
+    column::Symbol
+    seen::Bool
+    lo::Any
+end
+Min(column::Symbol) = Min(column, false, nothing)
+
+fresh(s::Min) = Min(s.column)
+function update!(s::Min, row)
+    v = row[s.column]
+    s.lo = s.seen ? min(s.lo, v) : v
+    s.seen = true
+    return nothing
+end
+value(s::Min) = NamedTuple{(Symbol(s.column, :_min),)}((s.seen ? s.lo : missing,))
+
+"""
+    Max(column) -> Summarizer
+
+Tracks the maximum of `column`. Produces the output column
+`Symbol(column, :_max)`, e.g. `Max(:x)` produces `:x_max`. The maximum of no
+rows is `missing`.
+"""
+mutable struct Max <: Summarizer
+    column::Symbol
+    seen::Bool
+    hi::Any
+end
+Max(column::Symbol) = Max(column, false, nothing)
+
+fresh(s::Max) = Max(s.column)
+function update!(s::Max, row)
+    v = row[s.column]
+    s.hi = s.seen ? max(s.hi, v) : v
+    s.seen = true
+    return nothing
+end
+value(s::Max) = NamedTuple{(Symbol(s.column, :_max),)}((s.seen ? s.hi : missing,))
+
+"""
+    First(column) -> Summarizer
+
+Keeps the value of `column` from the first row folded in. Produces the output
+column `Symbol(column, :_first)`, e.g. `First(:x)` produces `:x_first`. The
+first of no rows is `missing`.
+"""
+mutable struct First <: Summarizer
+    column::Symbol
+    seen::Bool
+    val::Any
+end
+First(column::Symbol) = First(column, false, nothing)
+
+fresh(s::First) = First(s.column)
+function update!(s::First, row)
+    if !s.seen
+        s.val = row[s.column]
+        s.seen = true
+    end
+    return nothing
+end
+value(s::First) = NamedTuple{(Symbol(s.column, :_first),)}((s.seen ? s.val : missing,))
+
+"""
+    Last(column) -> Summarizer
+
+Keeps the value of `column` from the most recent row folded in. Produces the
+output column `Symbol(column, :_last)`, e.g. `Last(:x)` produces `:x_last`.
+The last of no rows is `missing`.
+"""
+mutable struct Last <: Summarizer
+    column::Symbol
+    seen::Bool
+    val::Any
+end
+Last(column::Symbol) = Last(column, false, nothing)
+
+fresh(s::Last) = Last(s.column)
+function update!(s::Last, row)
+    s.val = row[s.column]
+    s.seen = true
+    return nothing
+end
+value(s::Last) = NamedTuple{(Symbol(s.column, :_last),)}((s.seen ? s.val : missing,))
+
 # --- shared plumbing -------------------------------------------------------
 
 tosummarizers(s::Summarizer) = Summarizer[s]
