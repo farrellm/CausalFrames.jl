@@ -9,7 +9,8 @@ implementation detail and is not part of the public API.
 Invariants, checked at construction:
 
 - every chunk has a `:time` column with element type `<: T`;
-- all (non-empty) chunks share the same schema;
+- all (non-empty) chunks share the same column names (element types may
+  differ between chunks; `DataFrame(frame)` promotes on concatenation);
 - time is non-decreasing within each chunk and across chunk boundaries;
 - all times lie in the closed interval `[ctx.start, ctx.stop]`.
 
@@ -66,8 +67,8 @@ Base.names(frame::CausalFrame) =
     DataFrame(frame::CausalFrame)
 
 Concatenate the frame's chunks into a plain `DataFrame` — an explicit exit
-from the causal world. A frame with no rows yields a zero-row DataFrame
-with only its `:time` column.
+from the causal world, and the point where the data is copied. A frame with
+no rows yields a zero-row DataFrame with only its `:time` column.
 """
 function DataFrames.DataFrame(frame::CausalFrame{T}) where {T}
     isempty(frame.chunks) && return DataFrame(time = T[])

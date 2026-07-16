@@ -20,9 +20,13 @@ with any API or semantics change.**
 - `src/context.jl` — `Context{T}`: time window, generic ordered time type
 - `src/frame.jl` — `CausalFrame{T}`: opaque, backed by a vector of
   time-disjoint DataFrame chunks; invariants checked in the inner
-  constructor; Tables.jl interface
-- `src/pipeline.jl` — `CausalPipeline` (lazy `Context -> CausalFrame`),
-  `load`
+  constructor; Tables.jl interface; `DataFrame(frame)` is the copy point
+- `src/chunks.jl` — internal chunk protocol: `ChunkSource` and `chunkmap`,
+  single-pass lazy iterators of non-empty DataFrame chunks
+- `src/pipeline.jl` — `CausalPipeline` (lazy `Context -> iterator of
+  DataFrame chunks`), `load` (drains into one frame without copying — the
+  only operation that materializes the whole window), `stream` (one frame
+  per chunk)
 - `src/operators.jl` — sources return a `CausalPipeline`; transforms are
   curried (`filterrows(pred)` returns `CausalPipeline -> CausalPipeline`)
   so both chain with `|>`
@@ -38,6 +42,7 @@ with any API or semantics change.**
   rows with time `<= t`. This guarantees the chunk-concatenation property
   that streaming will rely on.
 - Never expose the backing DataFrames of a `CausalFrame`; `DataFrame(frame)`
-  copies. Empty chunks are dropped at construction.
+  copies. The internal chunk protocol yields only non-empty chunks; `load`
+  of an empty stream gives a zero-row frame with only `:time`.
 - Naming is Julian: lowercase, no camelCase, no shadowing of Base functions
   (`filterrows` not `filter`, `emptyframe` not `empty`).

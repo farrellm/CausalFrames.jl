@@ -1,5 +1,6 @@
 # Summarizers fold rows into running state; the summarization transforms
-# (summarize, summarizecycles, addsummarycolumns) drive them over a frame.
+# (summarize, summarizecycles, addsummarycolumns) drive them over the stream
+# of chunks, carrying state across chunk boundaries.
 
 """
     Summarizer
@@ -150,27 +151,27 @@ by key; an empty input yields no rows.
 function summarize(summarizers; key = nothing)
     return function (p::CausalPipeline)
         return CausalPipeline() do ctx::Context
-            frame = load(ctx, p)
             keycols = tokeycolumns(key)
             protos = prototypes(tosummarizers(summarizers), keycols)
-            if isempty(keycols)
-                states = freshall(protos)
-                for r in Tables.rows(frame)
-                    foreach(s -> update!(s, r), states)
-                end
-                row = merge((; time = ctx.stop), summaryvalues(states))
-                return CausalFrame(ctx, DataFrame(NamedTuple[row]))
-            end
             keynames = Tuple(keycols)
+            states = freshall(protos)
             groups = Dict{Any,Vector{Summarizer}}()
-            for r in Tables.rows(frame)
-                states = groupstates!(groups, protos, r, keynames)
-                foreach(s -> update!(s, r), states)
+            step = function (c)
+                for r in eachrow(c)
+                    rstates = isempty(keycols) ? states :
+                        groupstates!(groups, protos, r, keynames)
+                    foreach(s -> update!(s, r), rstates)
+                end
+                return nothing
             end
-            rows = NamedTuple[merge((; time = ctx.stop), k, summaryvalues(states))
-                              for (k, states) in sortedgroups(groups)]
-            chunks = isempty(rows) ? DataFrame[] : [DataFrame(rows)]
-            return CausalFrame(ctx, chunks)
+            flush = function ()
+                isempty(keycols) && return DataFrame(NamedTuple[
+                    merge((; time = ctx.stop), summaryvalues(states))])
+                rows = NamedTuple[merge((; time = ctx.stop), k, summaryvalues(gs))
+                                  for (k, gs) in sortedgroups(groups)]
+                return isempty(rows) ? nothing : DataFrame(rows)
+            end
+            return chunkmap(step, p.run(ctx); flush = flush)
         end
     end
 end
@@ -187,16 +188,14 @@ boundary is summarized as a single cycle.
 function summarizecycles(summarizers; key = nothing)
     return function (p::CausalPipeline)
         return CausalPipeline() do ctx::Context
-            frame = load(ctx, p)
             keycols = tokeycolumns(key)
             protos = prototypes(tosummarizers(summarizers), keycols)
             keynames = Tuple(keycols)
-            rows = NamedTuple[]
             groups = Dict{Any,Vector{Summarizer}}()
             states = Summarizer[]
             started = false
             cycletime = nothing
-            function closecycle()
+            function closecycle!(rows)
                 if isempty(keycols)
                     push!(rows, merge((; time = cycletime), summaryvalues(states)))
                 else
@@ -208,20 +207,31 @@ function summarizecycles(summarizers; key = nothing)
                 end
                 return nothing
             end
-            for r in Tables.rows(frame)
-                if !started || r.time != cycletime
-                    started && closecycle()
-                    cycletime = r.time
-                    started = true
-                    isempty(keycols) && (states = freshall(protos))
+            # A cycle closes when a row with a later time arrives (causal), so
+            # the open cycle's state is buffered across chunk boundaries and
+            # only flushed at the end of the stream.
+            step = function (c)
+                rows = NamedTuple[]
+                for r in eachrow(c)
+                    if !started || r.time != cycletime
+                        started && closecycle!(rows)
+                        cycletime = r.time
+                        started = true
+                        isempty(keycols) && (states = freshall(protos))
+                    end
+                    cstates = isempty(keycols) ? states :
+                        groupstates!(groups, protos, r, keynames)
+                    foreach(s -> update!(s, r), cstates)
                 end
-                cstates = isempty(keycols) ? states :
-                    groupstates!(groups, protos, r, keynames)
-                foreach(s -> update!(s, r), cstates)
+                return isempty(rows) ? nothing : DataFrame(rows)
             end
-            started && closecycle()
-            chunks = isempty(rows) ? DataFrame[] : [DataFrame(rows)]
-            return CausalFrame(ctx, chunks)
+            flush = function ()
+                started || return nothing
+                rows = NamedTuple[]
+                closecycle!(rows)
+                return DataFrame(rows)
+            end
+            return chunkmap(step, p.run(ctx); flush = flush)
         end
     end
 end
@@ -239,17 +249,20 @@ with existing columns.
 function addsummarycolumns(summarizers; key = nothing)
     return function (p::CausalPipeline)
         return CausalPipeline() do ctx::Context
-            frame = load(ctx, p)
             keycols = tokeycolumns(key)
             protos = prototypes(tosummarizers(summarizers), keycols)
-            for s in protos, n in keys(value(s))
-                String(n) in names(frame) && throw(ArgumentError(
-                    "summary column $n collides with an existing column"))
-            end
             keynames = Tuple(keycols)
             groups = Dict{Any,Vector{Summarizer}}()
             states = freshall(protos)
-            chunks = map(frame.chunks) do c
+            checked = false   # collision check needs the schema: first chunk
+            step = function (c)
+                if !checked
+                    for s in protos, n in keys(value(s))
+                        String(n) in names(c) && throw(ArgumentError(
+                            "summary column $n collides with an existing column"))
+                    end
+                    checked = true
+                end
                 vals = NamedTuple[]
                 for r in eachrow(c)
                     rstates = isempty(keycols) ? states :
@@ -259,7 +272,7 @@ function addsummarycolumns(summarizers; key = nothing)
                 end
                 return hcat(c, DataFrame(vals))
             end
-            return CausalFrame(ctx, chunks)
+            return chunkmap(step, p.run(ctx))
         end
     end
 end
