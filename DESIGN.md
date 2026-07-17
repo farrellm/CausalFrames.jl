@@ -126,13 +126,20 @@ The interface, extended by concrete subtypes (unexported — extend
   **several values**, and the NamedTuple's keys are the output column names
   and its value types the element types of the columns produced. Only ever
   called on a state that has folded at least one row;
+- `value(st, vals) -> NamedTuple` — optional (defaults to `value(st)`);
+  receives in `vals` the already-computed values of every summarizer earlier
+  in topological order; see "Dependent summarizers" below;
 - `widenstate(st, intypes) -> SummarizerState` — optional (defaults to `st`);
-  see "Element types across chunks" below.
+  see "Element types across chunks" below;
+- `dependencies(s) -> Tuple` — optional (defaults to `()`); the summarizers
+  whose values `s` reads in the two-argument `value`; see "Dependent
+  summarizers" below.
 
 Output column names are deterministic, formed by suffixing the column name:
 `Sum(:x)` produces `:x_sum`, `Min(:x)` produces `:x_min`, and `SumPower(:x, 2)`
-carries its exponent in the suffix to produce `:x_sum2`; `Count()` reads no
-column and produces `:count`.
+and `Moment(:x, 2)` carry their exponent in the suffix to produce
+`:x_sumpower_2` and `:x_moment_2`; `Count()` reads no column and produces
+`:count`.
 
 Concrete summarizers provided, for an input column of element type `T`:
 
@@ -140,7 +147,8 @@ Concrete summarizers provided, for an input column of element type `T`:
 |---|---|---|---|
 | `Count()` | `:count` | `Int` | `0` |
 | `Sum(column)` | `:x_sum` | `sum` of `T` | `0` |
-| `SumPower(column, n)` | `:x_sum2` for `n = 2` | `sum` of `T^n` | `0` |
+| `SumPower(column, n)` | `:x_sumpower_2` for `n = 2` | `sum` of `T^n` | `0` |
+| `Moment(column, n)` | `:x_moment_2` for `n = 2` | `sum` of `T^n` over `Int` | `missing` |
 | `Min(column)` | `:x_min` | `T` | `missing` |
 | `Max(column)` | `:x_max` | `T` | `missing` |
 | `First(column)` | `:x_first` | `T` | `missing` |
@@ -157,14 +165,14 @@ a plain `+` that cannot overflow the way accumulating in the input's own type
 would.
 
 `Sum` and `SumPower` have an identity element, so they summarize no rows as
-`0`. The other four do not, and yield `missing` instead — reachable only
+`0`. The others do not, and yield `missing` instead — reachable only
 through a keyless `summarize` of an empty input, since every key group and
 every cycle folds at least one row before emitting. That case is answered by
 `emptyvalue` and is also the one case with no type to speak of: the chunk
 protocol never yields an empty chunk, so an input with no rows carries no
 schema and no state is ever built for it. `SumPower(column, 1)` produces
-`:x_sum1`, deliberately distinct from `Sum(column)`'s `:x_sum`, so the two
-never collapse under the name-keyed deduplication described below.
+`:x_sumpower_1`, deliberately distinct from `Sum(column)`'s `:x_sum`, so the
+two never collapse under the name-keyed deduplication described below.
 
 ### Element types across chunks
 
@@ -193,9 +201,10 @@ concrete, the key names carried in a `Val`) and specialize, so the per-row
 work compiles to direct field access with no dispatch or boxing. Folding a
 million rows allocates on the order of kilobytes.
 
-One consequence worth knowing: more than about 32 summarizers in a single call
-exceeds Julia's tuple inference limits, and the fold degrades to dynamic
-dispatch. It stays correct, just no longer specialized.
+One consequence worth knowing: more than about 32 summarizers in a single
+call — counting hidden dependencies after expansion — exceeds Julia's tuple
+inference limits, and the fold degrades to dynamic dispatch. It stays
+correct, just no longer specialized.
 
 The three summarization functions take one summarizer or a collection of
 them, plus an optional `key` (one or more column names) to produce a separate
@@ -204,18 +213,43 @@ The functions treat the given summarizers as *prototypes*: they only ever
 mutate `fresh` copies, one per key group (and, for `summarizecycles`, per
 cycle). Before running, prototypes are **deduplicated by output-name tuple** —
 identical configurations collapse to one shared instance — and the surviving
-output names must be pairwise disjoint and distinct from `:time` and the key
-columns.
+output names must be pairwise disjoint; the requested (emitted) names must
+additionally be distinct from `:time` and the key columns.
 
-Planned refinements (not yet implemented):
+### Dependent summarizers
 
-- structured subtypes: a **monoid** subtype (mergeable state, enabling
-  map-reduce evaluation) and a **group** subtype (invertible updates,
-  enabling O(1) rolling windows);
-- **dependent summarizers**: a summarizer will be able to declare the
-  summarizers it depends on (e.g. variance depends on `Sum(:x)` and the sum
-  of squares `SumPower(:x, 2)`); dependencies will be resolved through the
-  same name-keyed deduplication so shared work is computed once.
+A summarizer may compute its value from the values of other summarizers by
+implementing `dependencies(s)` — a tuple of summarizer configurations — and
+the two-argument `value(st, vals)`. `Moment(:x, n)`, the `n`-th raw moment,
+is the built-in example: it depends on `Count()` and `SumPower(:x, n)` and
+emits their quotient.
+
+Before running, the transforms expand the requested summarizers into the
+full set to fold: each one's dependencies recursively, in topological order
+by a post-order depth-first walk (dependencies may themselves be dependent;
+a dependency cycle is an `ArgumentError`), deduplicated by output-name tuple
+as above — so a dependency equal to a requested summarizer, or shared by two
+dependents, is folded once. The dependent's state is typically fieldless:
+its `update!` is a no-op and the names it reads are baked into its type
+parameters, so the two-argument `value` infers. Its value's declared type
+should be computed from `vals`'s *field types* (via `Base.promote_op` over
+`fieldtype(typeof(vals), name)`, as `Moment` does), not `typeof` of the
+runtime result — a missing-poisoned dependency would otherwise collapse the
+output column's `Union{Missing, ...}` element type to `Missing`.
+
+At emission time, values accumulate left to right over the topologically
+ordered state tuple — each state's `value` sees the values of everything
+before it, which is how a dependent reads its dependencies — and the
+accumulated NamedTuple is then **projected down to the requested output
+names**, which ride through the folding kernels in a `Val` just like the key
+names. A hidden dependency is therefore folded but never emitted (and may
+even share a name with a key column or, under `addsummarycolumns`, an
+existing input column); requesting it alongside the dependent emits it, in
+request order, from the same shared state.
+
+Planned refinements (not yet implemented): structured subtypes — a
+**monoid** subtype (mergeable state, enabling map-reduce evaluation) and a
+**group** subtype (invertible updates, enabling O(1) rolling windows).
 
 ## Interval semantics
 
@@ -283,7 +317,7 @@ hold for them.
 Exports: `Context`, `CausalFrame`, `CausalPipeline`, `load`, `stream`,
 `context`, `timetype`, `emptyframe`, `clock`, `readcsv`, `filterrows`,
 `addcolumns`, `Summarizer`, `SummarizerState`, `Count`, `Sum`, `SumPower`,
-`Min`, `Max`, `First`, `Last`, `summarize`, `summarizecycles`,
+`Moment`, `Min`, `Max`, `First`, `Last`, `summarize`, `summarizecycles`,
 `addsummarycolumns`.
 
 Dependencies: DataFrames, CSV, Tables, PrecompileTools.

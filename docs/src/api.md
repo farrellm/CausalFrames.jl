@@ -42,6 +42,7 @@ addsummarycolumns
 Count
 Sum
 SumPower
+Moment
 Min
 Max
 First
@@ -61,6 +62,7 @@ CausalFrames.fresh
 CausalFrames.update!
 CausalFrames.value
 CausalFrames.widenstate
+CausalFrames.dependencies
 ```
 
 ## Internals

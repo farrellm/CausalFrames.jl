@@ -15,32 +15,55 @@ tokeycolumns(::Nothing) = Symbol[]
 tokeycolumns(k::Symbol) = Symbol[k]
 tokeycolumns(ks) = collect(Symbol, ks)
 
-# Deduplicate prototypes by output-name tuple (identical configurations
-# collapse to one shared instance) and validate the surviving output names
-# against :time, the key columns, and each other. The transforms then hold the
-# survivors in a tuple, so the states derived from them are a concrete tuple
-# too and the folding loops specialize on it.
+# Expand the requested summarizers into the full set to fold — each one's
+# dependencies recursively, deduplicated by output-name tuple (identical
+# configurations collapse to one shared instance) and ordered topologically by
+# a post-order depth-first walk, so every state precedes its dependents in the
+# tuple and its values are accumulated first at emission time. Output names
+# are validated against each other across the whole expanded set, but against
+# :time and the key columns only for the *requested* names — a hidden
+# dependency never reaches the output, so it cannot collide with it. Returns
+# the expanded prototypes as a tuple (so the states derived from them are a
+# concrete tuple too and the folding loops specialize on it) plus the
+# requested output names, in request order, for projecting emitted rows.
 function prototypes(ss::Vector{Summarizer}, keycols::Vector{Symbol})
     isempty(ss) && throw(ArgumentError("at least one summarizer is required"))
     protos = Summarizer[]
-    seen = Set{Tuple{Vararg{Symbol}}}()
+    seen = Set{Tuple{Vararg{Symbol}}}()      # finished, by output-name tuple
+    visiting = Set{Tuple{Vararg{Symbol}}}()  # walk in progress: cycle guard
     used = Set{Symbol}()
-    for s in ss
+    function expand(s::Summarizer)
         outnames = keys(emptyvalue(s))
-        outnames in seen && continue
+        outnames in seen && return
+        outnames in visiting && throw(ArgumentError(
+            "summarizer dependency cycle through $(first(outnames))"))
+        push!(visiting, outnames)
+        foreach(expand, dependencies(s))
+        delete!(visiting, outnames)
         for n in outnames
-            n === :time && throw(ArgumentError(
-                "summarizer output column may not be named time"))
-            n in keycols && throw(ArgumentError(
-                "summarizer output column $n collides with a key column"))
             n in used && throw(ArgumentError(
                 "output column $n is produced by more than one summarizer"))
             push!(used, n)
         end
         push!(seen, outnames)
         push!(protos, s)
+        return
     end
-    return Tuple(protos)
+    requested = Symbol[]
+    for s in ss
+        outnames = keys(emptyvalue(s))
+        for n in outnames
+            n === :time && throw(ArgumentError(
+                "summarizer output column may not be named time"))
+            n in keycols && throw(ArgumentError(
+                "summarizer output column $n collides with a key column"))
+        end
+        expand(s)
+        for n in outnames
+            n in requested || push!(requested, n)
+        end
+    end
+    return Tuple(protos), Tuple(requested)
 end
 
 # Input column element types, mirroring the row access in update!.
@@ -76,12 +99,27 @@ end
 newgroups(stateprotos::S, nt::NamedTuple, keynames::Val) where {S} =
     Dict{typeof(keyvalues(first(Tables.rows(nt)), keynames)),S}()
 
-@inline summaryvalues(states::Tuple) = merge(map(value, states)...)
-emptyvalues(protos::Tuple) = merge(map(emptyvalue, protos)...)
+# Values accumulate left to right over the topologically ordered state tuple,
+# each state seeing the values of everything before it — which is how a
+# dependent summarizer reads its dependencies. The states peel off as
+# positional arguments (afoldl-style) rather than by Base.tail on a tuple:
+# the accumulated NamedTuple grows while the states shrink, and only the
+# vararg form keeps inference from widening on that recursion. The
+# accumulated values are then projected down to the requested output names,
+# riding in a Val like the key names, so hidden dependencies are folded but
+# never emitted.
+@inline accvalues(vals::NamedTuple) = vals
+@inline accvalues(vals::NamedTuple, st, rest...) =
+    accvalues(merge(vals, value(st, vals)), rest...)
+@inline summaryvalues(states::Tuple, ::Val{R}) where {R} =
+    NamedTuple{R}(accvalues((;), states...))
+emptyvalues(protos::Tuple, ::Val{R}) where {R} =
+    NamedTuple{R}(merge(map(emptyvalue, protos)...))
 
-@inline summaryrow(t, states::Tuple) = merge((; time = t), summaryvalues(states))
-@inline summaryrow(t, k::NamedTuple, states::Tuple) =
-    merge((; time = t), k, summaryvalues(states))
+@inline summaryrow(t, states::Tuple, r::Val) =
+    merge((; time = t), summaryvalues(states, r))
+@inline summaryrow(t, k::NamedTuple, states::Tuple, r::Val) =
+    merge((; time = t), k, summaryvalues(states, r))
 
 # The key names ride in a Val so the group key's NamedTuple type — and hence
 # the group table's Dict type — is known to the compiler.
@@ -93,10 +131,12 @@ sortedgroups(groups) = sort!(collect(groups); by = kv -> Tuple(first(kv)))
 # The row types the kernels emit. The state prototypes cannot simply be run
 # through `value` to find out: Min/Max/First/Last leave their value field
 # undefined until a row is folded in.
-rowtype(::Type{T}, ::Type{S}) where {T,S} = Base.promote_op(summaryrow, T, S)
-rowtype(::Type{T}, ::Type{K}, ::Type{S}) where {T,K,S} =
-    Base.promote_op(summaryrow, T, K, S)
-valuetype(::Type{S}) where {S} = Base.promote_op(summaryvalues, S)
+rowtype(::Type{T}, ::Type{S}, ::Val{R}) where {T,S,R} =
+    Base.promote_op(summaryrow, T, S, Val{R})
+rowtype(::Type{T}, ::Type{K}, ::Type{S}, ::Val{R}) where {T,K,S,R} =
+    Base.promote_op(summaryrow, T, K, S, Val{R})
+valuetype(::Type{S}, ::Val{R}) where {S,R} =
+    Base.promote_op(summaryvalues, S, Val{R})
 
 # Per-run mutable state shared by the three transforms. It lives in fields
 # rather than in the step/flush closures' captured locals because captured
@@ -162,13 +202,13 @@ end
 # A cycle closes when a row with a later time arrives (causal), so the open
 # cycle's state is carried across chunk boundaries and only closed by flush.
 function foldcycles!(states::S, stateprotos::S, nt::NamedTuple,
-                     cycletime) where {S<:Tuple}
-    rows = rowtype(eltype(nt.time), S)[]
+                     cycletime, r::Val) where {S<:Tuple}
+    rows = rowtype(eltype(nt.time), S, r)[]
     for row in Tables.rows(nt)
         t = row.time
         if cycletime === nothing || t != cycletime
             cycletime === nothing ||
-                push!(rows, summaryrow(something(cycletime), states))
+                push!(rows, summaryrow(something(cycletime), states, r))
             cycletime = t
             states = map(fresh, stateprotos)
         end
@@ -178,12 +218,13 @@ function foldcycles!(states::S, stateprotos::S, nt::NamedTuple,
 end
 
 function foldcyclesgrouped!(groups::Dict{K,S}, stateprotos::S, nt::NamedTuple,
-                            cycletime, ::Val{KN}) where {K,S,KN}
-    rows = rowtype(eltype(nt.time), K, S)[]
+                            cycletime, ::Val{KN}, r::Val) where {K,S,KN}
+    rows = rowtype(eltype(nt.time), K, S, r)[]
     for row in Tables.rows(nt)
         t = row.time
         if cycletime === nothing || t != cycletime
-            cycletime === nothing || closecycle!(rows, groups, something(cycletime))
+            cycletime === nothing ||
+                closecycle!(rows, groups, something(cycletime), r)
             cycletime = t
         end
         states = get!(() -> map(fresh, stateprotos), groups, keyvalues(row, Val(KN)))
@@ -192,32 +233,33 @@ function foldcyclesgrouped!(groups::Dict{K,S}, stateprotos::S, nt::NamedTuple,
     return rows, cycletime
 end
 
-function closecycle!(rows, groups, t)
+function closecycle!(rows, groups, t, r::Val)
     for (k, states) in sortedgroups(groups)
-        push!(rows, summaryrow(t, k, states))
+        push!(rows, summaryrow(t, k, states, r))
     end
     empty!(groups)
     return rows
 end
 
-function foldrunning!(states::S, nt::NamedTuple, n::Int) where {S<:Tuple}
-    vals = Vector{valuetype(S)}(undef, n)
+function foldrunning!(states::S, nt::NamedTuple, n::Int,
+                      r::Val) where {S<:Tuple}
+    vals = Vector{valuetype(S, r)}(undef, n)
     i = 0
     for row in Tables.rows(nt)
         foreach(st -> update!(st, row), states)
-        vals[i += 1] = summaryvalues(states)
+        vals[i += 1] = summaryvalues(states, r)
     end
     return vals
 end
 
 function foldrunninggrouped!(groups::Dict{K,S}, stateprotos::S, nt::NamedTuple,
-                             n::Int, ::Val{KN}) where {K,S,KN}
-    vals = Vector{valuetype(S)}(undef, n)
+                             n::Int, ::Val{KN}, r::Val) where {K,S,KN}
+    vals = Vector{valuetype(S, r)}(undef, n)
     i = 0
     for row in Tables.rows(nt)
         states = get!(() -> map(fresh, stateprotos), groups, keyvalues(row, Val(KN)))
         foreach(st -> update!(st, row), states)
-        vals[i += 1] = summaryvalues(states)
+        vals[i += 1] = summaryvalues(states, r)
     end
     return vals
 end
@@ -242,8 +284,9 @@ function summarize(summarizers; key = nothing)
     return function (p::CausalPipeline)
         return CausalPipeline() do ctx::Context
             keycols = tokeycolumns(key)
-            protos = prototypes(tosummarizers(summarizers), keycols)
+            protos, requested = prototypes(tosummarizers(summarizers), keycols)
             keynames = Val(Tuple(keycols))
+            outs = Val(requested)
             keyed = !isempty(keycols)
             fold = SummaryFold()
             step = function (c)
@@ -254,12 +297,12 @@ function summarize(summarizers; key = nothing)
             end
             flush = function ()
                 if !keyed
-                    vals = fold.states === nothing ? emptyvalues(protos) :
-                        summaryvalues(fold.states)
+                    vals = fold.states === nothing ? emptyvalues(protos, outs) :
+                        summaryvalues(fold.states, outs)
                     return DataFrame([merge((; time = ctx.stop), vals)])
                 end
                 fold.groups === nothing && return nothing
-                rows = [summaryrow(ctx.stop, k, gs)
+                rows = [summaryrow(ctx.stop, k, gs, outs)
                         for (k, gs) in sortedgroups(fold.groups)]
                 return isempty(rows) ? nothing : DataFrame(rows)
             end
@@ -281,8 +324,9 @@ function summarizecycles(summarizers; key = nothing)
     return function (p::CausalPipeline)
         return CausalPipeline() do ctx::Context
             keycols = tokeycolumns(key)
-            protos = prototypes(tosummarizers(summarizers), keycols)
+            protos, requested = prototypes(tosummarizers(summarizers), keycols)
             keynames = Val(Tuple(keycols))
+            outs = Val(requested)
             keyed = !isempty(keycols)
             fold = SummaryFold()
             step = function (c)
@@ -290,11 +334,12 @@ function summarizecycles(summarizers; key = nothing)
                 rows = if keyed
                     rs, fold.cycletime = foldcyclesgrouped!(
                         fold.groups, fold.stateprotos, nt, fold.cycletime,
-                        keynames)
+                        keynames, outs)
                     rs
                 else
                     rs, fold.states, fold.cycletime = foldcycles!(
-                        fold.states, fold.stateprotos, nt, fold.cycletime)
+                        fold.states, fold.stateprotos, nt, fold.cycletime,
+                        outs)
                     rs
                 end
                 return isempty(rows) ? nothing : DataFrame(rows)
@@ -303,9 +348,9 @@ function summarizecycles(summarizers; key = nothing)
                 fold.cycletime === nothing && return nothing
                 rows = keyed ? closecycle!(
                         rowtype(typeof(fold.cycletime), keytype(fold.groups),
-                                valtype(fold.groups))[], fold.groups,
-                        fold.cycletime) :
-                    [summaryrow(fold.cycletime, fold.states)]
+                                valtype(fold.groups), outs)[], fold.groups,
+                        fold.cycletime, outs) :
+                    [summaryrow(fold.cycletime, fold.states, outs)]
                 return isempty(rows) ? nothing : DataFrame(rows)
             end
             return chunkmap(step, p.run(ctx); flush = flush)
@@ -327,13 +372,14 @@ function addsummarycolumns(summarizers; key = nothing)
     return function (p::CausalPipeline)
         return CausalPipeline() do ctx::Context
             keycols = tokeycolumns(key)
-            protos = prototypes(tosummarizers(summarizers), keycols)
+            protos, requested = prototypes(tosummarizers(summarizers), keycols)
             keynames = Val(Tuple(keycols))
+            outs = Val(requested)
             keyed = !isempty(keycols)
             fold = SummaryFold()
             step = function (c)
                 if !fold.checked   # needs the schema: first chunk only
-                    for s in protos, n in keys(emptyvalue(s))
+                    for n in requested   # hidden dependencies are never added
                         String(n) in names(c) && throw(ArgumentError(
                             "summary column $n collides with an existing column"))
                     end
@@ -341,8 +387,8 @@ function addsummarycolumns(summarizers; key = nothing)
                 end
                 nt = preparechunk!(fold, protos, keyed, keynames, c)
                 vals = keyed ? foldrunninggrouped!(fold.groups, fold.stateprotos,
-                                                   nt, nrow(c), keynames) :
-                    foldrunning!(fold.states, nt, nrow(c))
+                                                   nt, nrow(c), keynames, outs) :
+                    foldrunning!(fold.states, nt, nrow(c), outs)
                 return hcat(c, DataFrame(vals); copycols = false)
             end
             return chunkmap(step, p.run(ctx))

@@ -35,12 +35,16 @@ with any API or semantics change.**
 - `src/summarizers.jl` — `Summarizer` (immutable config, column name in a
   type parameter) and `SummarizerState` (running state, typed from the input
   schema) plus their interface (`emptyvalue`, `fresh`, `update!`, `value`,
-  `widenstate` — unexported), and the concrete summarizers (`Min`/`Max`/
-  `First`/`Last` share one state type, parameterized by the combiner)
+  `widenstate`, `dependencies` — unexported), and the concrete summarizers
+  (`Min`/`Max`/`First`/`Last` share one state type, parameterized by the
+  combiner; `Moment` is the dependent-summarizer example, reading its
+  dependencies' values through the two-argument `value(st, vals)`)
 - `src/summarize.jl` — the folding kernels and the transforms `summarize`,
-  `summarizecycles`, `addsummarycolumns`; per-run mutable state lives in the
-  `SummaryFold` struct, never in reassigned closure captures (those get
-  boxed)
+  `summarizecycles`, `addsummarycolumns`; `prototypes` expands dependencies
+  topologically and returns the requested output names, which ride through
+  the kernels in a `Val` to project hidden dependencies out of the output;
+  per-run mutable state lives in the `SummaryFold` struct, never in
+  reassigned closure captures (those get boxed)
 - `src/precompile.jl` — PrecompileTools workload over the main paths
 
 ## Invariants and conventions
