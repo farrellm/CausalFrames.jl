@@ -93,42 +93,101 @@ of `Base.filter` / `Base.empty` / `Base.count` / `Base.sum`.
 
 ## Summarizers
 
-A summarization is described by a subtype of the abstract type `Summarizer`.
-An instance of a concrete subtype holds both the configuration (typically
-which column(s) to summarize) and the running state. The interface, extended
-by concrete subtypes (unexported — extend `CausalFrames.fresh` etc.):
+A summarization is split in two: a subtype of `Summarizer` holding only the
+**configuration**, and a subtype of `SummarizerState` holding the **running
+state**. The configuration is immutable and carries the column to summarize as
+a *type parameter*, so the output column names it implies are known to the
+compiler. The state is built from the input columns' element types, which is
+what makes an output column's element type a consequence of the input schema
+rather than an accident of the values it happens to hold.
 
-- `fresh(s) -> Summarizer` — a new instance with the same configuration and
-  zero state;
-- `update!(s, row)` — fold one row (map-like, as for row functions) into the
+The interface, extended by concrete subtypes (unexported — extend
+`CausalFrames.fresh` etc.):
+
+- `emptyvalue(s) -> NamedTuple` — the summary of no rows; also where the
+  transforms read a summarizer's output column names before any data is seen;
+- `fresh(s, intypes) -> SummarizerState` — a zero state, typed for input
+  columns whose element types are given by `intypes` (a NamedTuple mapping
+  column name to element type, mirroring `update!`'s row access: `update!`
+  reads `row[column]` where `fresh` reads `intypes[column]`);
+- `fresh(st) -> SummarizerState` — a zero state of the same concrete type,
+  which is how the transforms get per-key-group and per-cycle states without
+  re-consulting the schema;
+- `update!(st, row)` — fold one row (map-like, as for row functions) into the
   state; a summarizer reads whichever columns it needs, so multi-column
   summarizers need no special support;
-- `value(s) -> NamedTuple` — the current summary; a summarizer may produce
-  **several values**, and the NamedTuple's keys are the output column names.
+- `value(st) -> NamedTuple` — the current summary; a summarizer may produce
+  **several values**, and the NamedTuple's keys are the output column names
+  and its value types the element types of the columns produced. Only ever
+  called on a state that has folded at least one row;
+- `widenstate(st, intypes) -> SummarizerState` — optional (defaults to `st`);
+  see "Element types across chunks" below.
 
 Output column names are deterministic, formed by suffixing the column name:
 `Sum(:x)` produces `:x_sum`, `Min(:x)` produces `:x_min`, and `SumPower(:x, 2)`
 carries its exponent in the suffix to produce `:x_sum2`; `Count()` reads no
 column and produces `:count`.
 
-Concrete summarizers provided:
+Concrete summarizers provided, for an input column of element type `T`:
 
-| Summarizer | Output column | Value over no rows |
-|---|---|---|
-| `Count()` | `:count` | `0` |
-| `Sum(column)` | `:x_sum` | `0` |
-| `SumPower(column, n)` | `:x_sum2` for `n = 2` | `0` |
-| `Min(column)` | `:x_min` | `missing` |
-| `Max(column)` | `:x_max` | `missing` |
-| `First(column)` | `:x_first` | `missing` |
-| `Last(column)` | `:x_last` | `missing` |
+| Summarizer | Output column | Output type | Value over no rows |
+|---|---|---|---|
+| `Count()` | `:count` | `Int` | `0` |
+| `Sum(column)` | `:x_sum` | `sum` of `T` | `0` |
+| `SumPower(column, n)` | `:x_sum2` for `n = 2` | `sum` of `T^n` | `0` |
+| `Min(column)` | `:x_min` | `T` | `missing` |
+| `Max(column)` | `:x_max` | `T` | `missing` |
+| `First(column)` | `:x_first` | `T` | `missing` |
+| `Last(column)` | `:x_last` | `T` | `missing` |
+
+`Min`/`Max`/`First`/`Last` produce the input column's element type verbatim.
+`Sum` and `SumPower` produce the element type `Base.sum` would: small signed
+and unsigned integers widen (`Int32` sums to `Int64`, `Bool` to `Int64`,
+`UInt8` to `UInt64`), everything else keeps its type (`Float32` sums to
+`Float32`). Their accumulator is built at that width up front, so the fold is
+a plain `+` that cannot overflow the way accumulating in the input's own type
+would.
 
 `Sum` and `SumPower` have an identity element, so they summarize no rows as
 `0`. The other four do not, and yield `missing` instead — reachable only
 through a keyless `summarize` of an empty input, since every key group and
-every cycle folds at least one row before emitting. `SumPower(column, 1)`
-produces `:x_sum1`, deliberately distinct from `Sum(column)`'s `:x_sum`, so
-the two never collapse under the name-keyed deduplication described below.
+every cycle folds at least one row before emitting. That case is answered by
+`emptyvalue` and is also the one case with no type to speak of: the chunk
+protocol never yields an empty chunk, so an input with no rows carries no
+schema and no state is ever built for it. `SumPower(column, 1)` produces
+`:x_sum1`, deliberately distinct from `Sum(column)`'s `:x_sum`, so the two
+never collapse under the name-keyed deduplication described below.
+
+### Element types across chunks
+
+A source may infer a column's element type per chunk — `readcsv` does — so a
+column can be `Int` in one chunk and `Float64` in the next. The summarization
+transforms therefore track the promotion of every input type seen so far and
+call `widenstate` when that promotion moves, rebuilding a state for the wider
+type and carrying its accumulated value over. Summaries emitted before the
+widening keep the narrower type, which frames already tolerate (see "Core
+types"), and `DataFrame(cf)` promotes them on concatenation.
+
+### Typing and performance
+
+The two properties are the same mechanism. Because a state's fields are
+concrete, `value(st)` returns a concretely typed NamedTuple, so the rows the
+transforms collect are concretely typed, so `DataFrame` receives a known
+Tables.jl schema and builds typed columns directly — there is no conversion
+pass over the output.
+
+The transforms exploit this with a **function barrier** per chunk. The
+type-unstable setup — reading the schema, building or widening the states,
+turning the chunk into a column table — happens once per chunk; the folding
+kernels then take concretely typed arguments (a *tuple* of states, never a
+`Vector{Summarizer}`; a `Dict{K,S}` of key groups with both parameters
+concrete, the key names carried in a `Val`) and specialize, so the per-row
+work compiles to direct field access with no dispatch or boxing. Folding a
+million rows allocates on the order of kilobytes.
+
+One consequence worth knowing: more than about 32 summarizers in a single call
+exceeds Julia's tuple inference limits, and the fold degrades to dynamic
+dispatch. It stays correct, just no longer specialized.
 
 The three summarization functions take one summarizer or a collection of
 them, plus an optional `key` (one or more column names) to produce a separate
@@ -209,11 +268,11 @@ hold for them.
 | `src/chunks.jl` | internal chunk-iterator machinery (`ChunkSource`, `chunkmap`) |
 | `src/pipeline.jl` | `CausalPipeline`, `load`, `stream` |
 | `src/operators.jl` | sources and row-wise transforms |
-| `src/summarize.jl` | `Summarizer` interface, `Count`/`Sum`, summarization transforms |
+| `src/summarize.jl` | `Summarizer`/`SummarizerState` interface, `Count`/`Sum`, folding kernels, summarization transforms |
 
 Exports: `Context`, `CausalFrame`, `CausalPipeline`, `load`, `stream`,
 `context`, `emptyframe`, `clock`, `readcsv`, `filterrows`, `addcolumns`,
-`Summarizer`, `Count`, `Sum`, `summarize`, `summarizecycles`,
-`addsummarycolumns`.
+`Summarizer`, `SummarizerState`, `Count`, `Sum`, `summarize`,
+`summarizecycles`, `addsummarycolumns`.
 
 Dependencies: DataFrames, CSV, Tables.

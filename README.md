@@ -62,6 +62,13 @@ p = readcsv("ticks.csv") |>
 `Sum` and `SumPower` summarize no rows as `0`; `Min`, `Max`, `First`, and
 `Last` have no identity element and yield `missing` instead.
 
+An output column takes its element type from the input column: `Min`, `Max`,
+`First`, and `Last` reproduce it verbatim, while `Sum` and `SumPower` widen it
+exactly as `Base.sum` does (`Int32` sums to `Int64`, `Float32` to `Float32`).
+Summarizers are typed from the input schema, so folding a large window
+allocates on the order of kilobytes — see DESIGN.md for the interface a custom
+`Summarizer` implements.
+
 Every operator is **causal** — its output at time `t` depends only on input
 rows with time `≤ t` — which is what makes streaming evaluation sound. See
 [DESIGN.md](DESIGN.md) for the full design.
