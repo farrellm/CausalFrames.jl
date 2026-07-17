@@ -49,11 +49,12 @@ Row functions receive a map-like row object: `row.time`, `row.price`,
 ## Summarizers
 
 The summarization transforms take one or more summarizers — `Count()`,
-`Sum(:col)`, `SumPower(:col, n)`, `Min(:col)`, `Max(:col)`, `First(:col)`,
-`Last(:col)`, or your own `Summarizer` subtype — and an optional `key` (one or
-more column names) to produce a separate summary per unique key value.
-Output columns are named by suffix: `Sum(:mid)` produces `:mid_sum`,
-`Min(:mid)` produces `:mid_min`, and `SumPower(:mid, 2)` produces `:mid_sum2`.
+`Sum(:col)`, `SumPower(:col, n)`, `Moment(:col, n)`, `Min(:col)`,
+`Max(:col)`, `First(:col)`, `Last(:col)`, or your own `Summarizer` subtype —
+and an optional `key` (one or more column names) to produce a separate
+summary per unique key value. Output columns are named by suffix:
+`Sum(:mid)` produces `:mid_sum`, `Min(:mid)` produces `:mid_min`, and
+`SumPower(:mid, 2)` produces `:mid_sumpower_2`.
 
 ```julia
 p = readcsv("ticks.csv") |>
@@ -61,8 +62,12 @@ p = readcsv("ticks.csv") |>
     addsummarycolumns([Count(), Sum(:mid), Min(:mid), Max(:mid)]; key = :symbol)
 ```
 
-`Sum` and `SumPower` summarize no rows as `0`; `Min`, `Max`, `First`, and
-`Last` have no identity element and yield `missing` instead.
+`Sum` and `SumPower` summarize no rows as `0`; `Moment`, `Min`, `Max`,
+`First`, and `Last` have no identity element and yield `missing` instead.
+`Moment(:mid, n)` — the `n`-th raw moment, producing `:mid_moment_n` — is a
+*dependent* summarizer, computed from `Count()` and `SumPower(:mid, n)`;
+those are folded alongside it but appear in the output only if requested
+themselves.
 
 An output column takes its element type from the input column: `Min`, `Max`,
 `First`, and `Last` reproduce it verbatim, while `Sum` and `SumPower` widen it

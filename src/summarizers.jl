@@ -24,11 +24,15 @@ Output column names are deterministic, formed by suffixing the column name
 (e.g. `Sum(:x)` produces `:x_sum`); summarizers with identical output names
 are treated as identical and share state.
 
+A summarizer may depend on the values of other summarizers by implementing
+[`dependencies`](@ref)`(s)` and the two-argument form of [`value`](@ref);
+dependencies are resolved through the same name-keyed deduplication, so
+shared work is computed once, and appear in the output only when requested
+by the user themselves.
+
 Planned refinements will add structured subtypes: a monoid subtype (mergeable
 state, enabling map-reduce) and a group subtype (invertible updates, enabling
-efficient rolling windows), plus a mechanism for a summarizer to declare
-dependent summarizers (e.g. variance depending on sum and sum of squares) so
-shared work is computed once.
+efficient rolling windows).
 """
 abstract type Summarizer end
 
@@ -88,15 +92,24 @@ function update! end
 
 """
     value(st::SummarizerState) -> NamedTuple
+    value(st::SummarizerState, vals::NamedTuple) -> NamedTuple
 
 The current summary. A summarizer may produce several values; the keys of the
 returned `NamedTuple` are the output column names, and its value types are the
 element types of the columns produced.
 
+The two-argument form receives in `vals` the already-computed values of every
+summarizer earlier in topological order — in particular of everything named by
+[`dependencies`](@ref). It defaults to calling the one-argument form; a
+dependent summarizer implements the two-argument form instead and may omit
+the one-argument form entirely.
+
 Only ever called on a state that has folded at least one row — the summary of
 no rows is [`emptyvalue`](@ref).
 """
 function value end
+
+value(st::SummarizerState, ::NamedTuple) = value(st)
 
 """
     widenstate(st::SummarizerState, intypes::NamedTuple) -> SummarizerState
@@ -111,6 +124,20 @@ Defaults to returning `st` unchanged, which is correct for any state whose
 type does not depend on the input, and which lets a summarizer opt out.
 """
 widenstate(st::SummarizerState, ::NamedTuple) = st
+
+"""
+    dependencies(s::Summarizer) -> Tuple
+
+The summarizers whose values `s` reads in the two-argument form of
+[`value`](@ref). The summarization transforms expand dependencies —
+recursively, in topological order — into the set of summarizers they fold,
+deduplicated by output name, so a dependency equal to a user-requested
+summarizer is computed once. Dependencies appear in the output only when the
+user requested them themselves.
+
+Defaults to `()`, which is correct for any self-contained summarizer.
+"""
+dependencies(::Summarizer) = ()
 
 # The element type Base.sum produces over a column of eltype T: small signed
 # and unsigned integers widen to Int/UInt, everything else keeps its type. The
@@ -172,12 +199,12 @@ end
     SumPower(column, n) -> Summarizer
 
 Sums `column` raised to the power `n`. Produces the output column
-`Symbol(column, :_sum, n)`, e.g. `SumPower(:x, 2)` produces `:x_sum2`. The
-sum of no rows is `0`. The output column's element type follows the same rule
-as [`Sum`](@ref), applied to the type of `column ^ n`.
+`Symbol(column, :_sumpower_, n)`, e.g. `SumPower(:x, 2)` produces
+`:x_sumpower_2`. The sum of no rows is `0`. The output column's element type
+follows the same rule as [`Sum`](@ref), applied to the type of `column ^ n`.
 
-`SumPower(column, 1)` produces `:x_sum1`, a distinct column from `Sum(:x)`'s
-`:x_sum`.
+`SumPower(column, 1)` produces `:x_sumpower_1`, a distinct column from
+`Sum(:x)`'s `:x_sum`.
 """
 struct SumPower{C} <: Summarizer
     power::Int
@@ -191,10 +218,12 @@ end
 
 powertype(::Type{T}, ::Int) where {T} = sumtype(Base.promote_op(^, T, Int))
 
-emptyvalue(s::SumPower{C}) where {C} = NamedTuple{(Symbol(C, :_sum, s.power),)}((0,))
+emptyvalue(s::SumPower{C}) where {C} =
+    NamedTuple{(Symbol(C, :_sumpower_, s.power),)}((0,))
 function fresh(s::SumPower{C}, intypes::NamedTuple) where {C}
     A = powertype(intypes[C], s.power)
-    return SumPowerState{C,Symbol(C, :_sum, s.power),A}(s.power, convert(A, 0))
+    return SumPowerState{C,Symbol(C, :_sumpower_, s.power),A}(s.power,
+                                                              convert(A, 0))
 end
 fresh(st::SumPowerState{C,N,A}) where {C,N,A} =
     SumPowerState{C,N,A}(st.power, convert(A, 0))
@@ -206,6 +235,47 @@ function widenstate(st::SumPowerState{C,N,A}, intypes::NamedTuple) where {C,N,A}
     A2 = powertype(intypes[C], st.power)
     A2 === A && return st
     return SumPowerState{C,N,A2}(st.power, convert(A2, st.total))
+end
+
+"""
+    Moment(column, n) -> Summarizer
+
+The `n`-th raw moment of `column`: the mean of `column ^ n`. Produces the
+output column `Symbol(column, :_moment_, n)`, e.g. `Moment(:x, 2)` produces
+`:x_moment_2`; `Moment(:x, 1)` is the mean. The moment of no rows is
+`missing`.
+
+A dependent summarizer, computed as `SumPower(column, n)` divided by
+[`Count`](@ref) — those are folded alongside it but appear in the output only
+if requested themselves. The output column's element type is the division's
+result (`Int` input divides to `Float64`, `Float32` stays `Float32`).
+"""
+struct Moment{C} <: Summarizer
+    order::Int
+end
+Moment(column::Symbol, order::Integer) = Moment{column}(Int(order))
+
+# The state is fieldless: the moment is derived entirely from its
+# dependencies' values at emission time, so its own name N and the power
+# sum's name D are all it needs, baked as type parameters so the two-argument
+# `value` infers.
+struct MomentState{C,N,D} <: SummarizerState end
+
+dependencies(m::Moment{C}) where {C} = (Count(), SumPower(C, m.order))
+emptyvalue(m::Moment{C}) where {C} =
+    NamedTuple{(Symbol(C, :_moment_, m.order),)}((missing,))
+fresh(m::Moment{C}, ::NamedTuple) where {C} =
+    MomentState{C,Symbol(C, :_moment_, m.order),
+                Symbol(C, :_sumpower_, m.order)}()
+fresh(st::MomentState) = st
+@inline update!(::MomentState, row) = nothing
+# The value type comes from the dependencies' declared field types, not from
+# `typeof` of the runtime quotient — a missing-poisoned power sum would
+# otherwise collapse the output column's Union{Missing,...} eltype to Missing.
+@inline function value(::MomentState{C,N,D}, vals::NamedTuple) where {C,N,D}
+    V = Base.promote_op(/, fieldtype(typeof(vals), D),
+                        fieldtype(typeof(vals), :count))
+    return NamedTuple{(N,),Tuple{V}}((vals[D] / vals.count,))
 end
 
 # Min/Max/First/Last have no identity element, and all four track one value of
