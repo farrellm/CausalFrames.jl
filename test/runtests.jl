@@ -1,3 +1,4 @@
+using Aqua
 using CausalFrames
 using DataFrames
 using Dates
@@ -38,6 +39,10 @@ struct BadTime <: Summarizer end
 CausalFrames.emptyvalue(::BadTime) = (; time = 0)
 
 @testset "CausalFrames.jl" begin
+    @testset "Aqua" begin
+        Aqua.test_all(CausalFrames)
+    end
+
     @testset "Context" begin
         ctx = Context(1, 10)
         @test ctx.start == 1

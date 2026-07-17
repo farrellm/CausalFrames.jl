@@ -23,18 +23,25 @@ with any API or semantics change.**
   constructor; Tables.jl interface; `DataFrame(frame)` is the copy point
 - `src/chunks.jl` — internal chunk protocol: `ChunkSource` and `chunkmap`,
   single-pass lazy iterators of non-empty DataFrame chunks
-- `src/pipeline.jl` — `CausalPipeline` (lazy `Context -> iterator of
-  DataFrame chunks`), `load` (drains into one frame without copying — the
+- `src/pipeline.jl` — `CausalPipeline{F}` (lazy `Context -> iterator of
+  DataFrame chunks`; the run function's type is a parameter, not an abstract
+  `Function` field), `load` (drains into one frame without copying — the
   only operation that materializes the whole window), `stream` (one frame
   per chunk)
 - `src/operators.jl` — sources return a `CausalPipeline`; transforms are
   curried (`filterrows(pred)` returns `CausalPipeline -> CausalPipeline`)
-  so both chain with `|>`
-- `src/summarize.jl` — `Summarizer` (immutable config, column name in a type
-  parameter) and `SummarizerState` (running state, typed from the input
+  so both chain with `|>`; row functions run over concretely typed column
+  table rows behind a per-chunk function barrier, never `DataFrameRow`s
+- `src/summarizers.jl` — `Summarizer` (immutable config, column name in a
+  type parameter) and `SummarizerState` (running state, typed from the input
   schema) plus their interface (`emptyvalue`, `fresh`, `update!`, `value`,
-  `widenstate` — unexported), `Count`/`Sum`, the folding kernels, and the
-  transforms `summarize`, `summarizecycles`, `addsummarycolumns`
+  `widenstate` — unexported), and the concrete summarizers (`Min`/`Max`/
+  `First`/`Last` share one state type, parameterized by the combiner)
+- `src/summarize.jl` — the folding kernels and the transforms `summarize`,
+  `summarizecycles`, `addsummarycolumns`; per-run mutable state lives in the
+  `SummaryFold` struct, never in reassigned closure captures (those get
+  boxed)
+- `src/precompile.jl` — PrecompileTools workload over the main paths
 
 ## Invariants and conventions
 

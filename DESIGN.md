@@ -45,6 +45,8 @@ Public access is through:
 
 - the Tables.jl interface — row iteration over all chunks in time order, so
   a `CausalFrame` works anywhere a Tables.jl source is accepted;
+  `Tables.partitions(cf)` yields one partition per backing chunk (as copies,
+  keeping the backing opaque) for partition-aware sinks;
 - `DataFrame(cf)` — concatenates chunks into a plain DataFrame (an explicit
   exit from the causal world, and the point where the data is copied);
 - `context(cf)`, `nrow(cf)`, `names(cf)`.
@@ -54,7 +56,8 @@ Public access is through:
 A lazy description of how to produce data: conceptually a function
 `Context -> single-pass lazy iterator of DataFrame chunks`, with time
 non-decreasing within and across chunks and empty chunks never emitted.
-Nothing runs until the iterator is consumed. Two entry points evaluate a
+The run function's type is a parameter (`CausalPipeline{F}`), never an
+abstract `Function` field. Nothing runs until the iterator is consumed. Two entry points evaluate a
 pipeline:
 
 - `load(ctx, pipeline) -> CausalFrame` — drains the iterator into a frame
@@ -86,7 +89,10 @@ Two kinds, both compatible with the chaining operator `|>`:
 
 Row functions (`pred`, `f`) receive a map-like row object supporting
 `row.name` and `row[:name]` access (Tables.jl row semantics), including
-`row.time`.
+`row.time`. The transforms iterate the concretely typed rows of a column
+table behind a per-chunk function barrier — never `DataFrameRow`s, whose
+column accesses are type-unstable — so a row function compiles to direct
+field access, exactly like a summarizer's `update!`.
 
 Naming follows Julia convention: lowercase, no camelCase, and no shadowing
 of `Base.filter` / `Base.empty` / `Base.count` / `Base.sum`.
@@ -140,7 +146,9 @@ Concrete summarizers provided, for an input column of element type `T`:
 | `First(column)` | `:x_first` | `T` | `missing` |
 | `Last(column)` | `:x_last` | `T` | `missing` |
 
-`Min`/`Max`/`First`/`Last` produce the input column's element type verbatim.
+`Min`/`Max`/`First`/`Last` produce the input column's element type verbatim;
+all four are backed by one shared state type, parameterized by the combining
+function.
 `Sum` and `SumPower` produce the element type `Base.sum` would: small signed
 and unsigned integers widen (`Int32` sums to `Int64`, `Bool` to `Int64`,
 `UInt8` to `UInt64`), everything else keeps its type (`Float32` sums to
@@ -266,13 +274,20 @@ hold for them.
 | `src/context.jl` | `Context{T}` |
 | `src/frame.jl` | `CausalFrame{T}`, invariants, Tables.jl interface |
 | `src/chunks.jl` | internal chunk-iterator machinery (`ChunkSource`, `chunkmap`) |
-| `src/pipeline.jl` | `CausalPipeline`, `load`, `stream` |
+| `src/pipeline.jl` | `CausalPipeline{F}`, `load`, `stream` |
 | `src/operators.jl` | sources and row-wise transforms |
-| `src/summarize.jl` | `Summarizer`/`SummarizerState` interface, `Count`/`Sum`, folding kernels, summarization transforms |
+| `src/summarizers.jl` | `Summarizer`/`SummarizerState` interface and the concrete summarizers |
+| `src/summarize.jl` | folding kernels and the summarization transforms |
+| `src/precompile.jl` | PrecompileTools workload covering the main pipeline paths |
 
 Exports: `Context`, `CausalFrame`, `CausalPipeline`, `load`, `stream`,
-`context`, `emptyframe`, `clock`, `readcsv`, `filterrows`, `addcolumns`,
-`Summarizer`, `SummarizerState`, `Count`, `Sum`, `summarize`,
-`summarizecycles`, `addsummarycolumns`.
+`context`, `timetype`, `emptyframe`, `clock`, `readcsv`, `filterrows`,
+`addcolumns`, `Summarizer`, `SummarizerState`, `Count`, `Sum`, `SumPower`,
+`Min`, `Max`, `First`, `Last`, `summarize`, `summarizecycles`,
+`addsummarycolumns`.
 
-Dependencies: DataFrames, CSV, Tables.
+Dependencies: DataFrames, CSV, Tables, PrecompileTools.
+
+Package infrastructure: `test/` runs the unit tests plus an Aqua.jl quality
+testset; `benchmark/benchmarks.jl` is a PkgBenchmark-compatible suite over
+the hot paths; `docs/` is a Documenter.jl site built and deployed by CI.

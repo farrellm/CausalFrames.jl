@@ -1,8 +1,4 @@
-# CausalFrames
-
-[![Build Status](https://github.com/farrellm/CausalFrames.jl/actions/workflows/CI.yml/badge.svg?branch=master)](https://github.com/farrellm/CausalFrames.jl/actions/workflows/CI.yml?query=branch%3Amaster)
-[![Dev Docs](https://img.shields.io/badge/docs-dev-blue.svg)](https://farrellm.github.io/CausalFrames.jl/dev/)
-[![Aqua](https://raw.githubusercontent.com/JuliaTesting/Aqua.jl/master/badge.svg)](https://github.com/JuliaTesting/Aqua.jl)
+# CausalFrames.jl
 
 Time-series tables for Julia: DataFrames with a monotonically non-decreasing
 `time` column, built lazily from composable pipelines.
@@ -68,9 +64,9 @@ An output column takes its element type from the input column: `Min`, `Max`,
 `First`, and `Last` reproduce it verbatim, while `Sum` and `SumPower` widen it
 exactly as `Base.sum` does (`Int32` sums to `Int64`, `Float32` to `Float32`).
 Summarizers are typed from the input schema, so folding a large window
-allocates on the order of kilobytes — see DESIGN.md for the interface a custom
-`Summarizer` implements.
+allocates on the order of kilobytes.
 
 Every operator is **causal** — its output at time `t` depends only on input
 rows with time `≤ t` — which is what makes streaming evaluation sound. See
-[DESIGN.md](DESIGN.md) for the full design.
+`DESIGN.md` in the repository for the full design, including the interface a
+custom `Summarizer` implements.

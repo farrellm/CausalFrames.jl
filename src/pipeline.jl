@@ -18,8 +18,8 @@ p = readcsv("ticks.csv") |>
 Every operator must be *causal*: its output at time `t` may depend only on
 input rows with time `<= t`.
 """
-struct CausalPipeline
-    run::Function
+struct CausalPipeline{F}
+    run::F
 end
 
 """
