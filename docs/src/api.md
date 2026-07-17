@@ -33,6 +33,12 @@ filterrows
 addcolumns
 ```
 
+## Joins
+
+```@docs
+asofjoin
+```
+
 ## Summarization
 
 ```@docs

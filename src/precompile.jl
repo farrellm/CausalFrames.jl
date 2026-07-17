@@ -20,6 +20,10 @@
         DataFrame(load(ctx, p |> summarize([Count(), Sum(:v)]; key = :sym)))
         DataFrame(load(ctx, p |> summarizecycles(Sum(:v); key = :sym)))
         DataFrame(load(ctx, p |> addsummarycolumns([First(:v), Last(:v)])))
+        DataFrame(load(ctx, p |> asofjoin(readcsv(csv); key = :sym,
+                                          rightprefix = "r", righttime = :rt)))
+        DataFrame(load(ctx, clock(1) |> asofjoin(readcsv(csv); tolerance = 2,
+                                                 rightprefix = "r")))
         foreach(DataFrame, stream(ctx, clock(1) |> summarize(Count())))
         DataFrame(load(ctx, emptyframe()))
     end

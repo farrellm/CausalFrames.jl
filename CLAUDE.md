@@ -45,6 +45,10 @@ with any API or semantics change.**
   the kernels in a `Val` to project hidden dependencies out of the output;
   per-run mutable state lives in the `SummaryFold` struct, never in
   reassigned closure captures (those get boxed)
+- `src/join.jl` — `asofjoin`, the binary as-of join transform: a chunkmap
+  over the left stream pulls right chunks on demand (two-pointer merge, per
+  left row) into a concretely typed per-key store; `tolerance` widens the
+  right context by `start - tolerance` (the one place times are subtracted)
 - `src/precompile.jl` — PrecompileTools workload over the main paths
 
 ## Invariants and conventions

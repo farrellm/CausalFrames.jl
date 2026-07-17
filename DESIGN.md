@@ -86,6 +86,7 @@ Two kinds, both compatible with the chaining operator `|>`:
 | `summarize(ss; key)` | transform | summarize the whole context into rows at time `stop`; drops input columns |
 | `summarizecycles(ss; key)` | transform | summarize each cycle (maximal run of rows sharing a timestamp) independently; drops input columns |
 | `addsummarycolumns(ss; key)` | transform | keep input columns, append the running summary value after each row |
+| `asofjoin(right; key, tolerance, strict, leftprefix, rightprefix, righttime)` | transform | left as-of join: append the most recent right row with time `<= time` (`strict`: `<`), per key; `missing` where none qualifies (see "As-of join") |
 
 Row functions (`pred`, `f`) receive a map-like row object supporting
 `row.name` and `row[:name]` access (Tables.jl row semantics), including
@@ -95,7 +96,58 @@ column accesses are type-unstable — so a row function compiles to direct
 field access, exactly like a summarizer's `update!`.
 
 Naming follows Julia convention: lowercase, no camelCase, and no shadowing
-of `Base.filter` / `Base.empty` / `Base.count` / `Base.sum`.
+of `Base.filter` / `Base.empty` / `Base.count` / `Base.sum` /
+`Base.join`.
+
+## As-of join
+
+`asofjoin(right; ...)` is the first **binary** operator: the curried
+transform closes over a second pipeline, so `left |> asofjoin(right)` joins
+two streams. Each left row is joined to the most recent right row whose time
+is not after the left row's time (`strict = true`: strictly before). Every
+left row is kept; the right table's value columns are appended with element
+type `Union{Missing, T}` and are `missing` where no right row qualifies.
+Among right rows sharing one time, the last in stream order wins. The right
+`time` column is dropped unless `righttime` names an output column to
+receive the matched row's time.
+
+- **Keys.** With `key` (a column name or collection, present in both
+  tables — validated on each side's first chunk) rows join per unique key
+  value, exact-matched with `isequal`. The key columns appear once in the
+  output, taken from the left row, never prefixed. `time` may not be a key.
+- **Tolerance.** With `tolerance` a match additionally requires
+  `time - rtime <= tolerance` (inclusive; checked per left row against the
+  stored right row, never by eager eviction). The right pipeline then runs
+  over the widened context `[start - tolerance, stop)` so lookback near the
+  window start is fully covered — the only place the time type needs
+  subtraction (`T - tolerance` yielding a time, `T - T` comparable to
+  `tolerance`; numbers and `Dates` types qualify). Without `tolerance` the
+  right pipeline sees only `[start, stop)`, so left rows near `start` may
+  find no earlier right row. Negative tolerance is rejected at run time,
+  generically, via `start - tolerance <= start` (the `clock` precedent).
+- **Prefixes.** `leftprefix` / `rightprefix` rename that side's non-time,
+  non-key columns to `"{prefix}_{name}"`. Output names must be unique after
+  prefixing — checked once, when both schemas are first known — so a
+  no-prefix self join fails deterministically.
+- **Self join.** `p |> asofjoin(p; rightprefix = "prev", strict = true)`
+  gives previous-row semantics. It works because pipelines are lazy: each
+  `run(ctx)` builds fresh iterators (a readcsv-backed self join reads the
+  file twice).
+- **Empty right stream.** A right stream producing no chunks over the
+  (widened) window passes left chunks through unchanged apart from the
+  `leftprefix` rename: no right columns, no `righttime`. Schemas are
+  data-driven everywhere in this package, and with no right chunk there is
+  no right schema to emit (or validate against).
+
+The implementation is a single-pass two-pointer merge: a `chunkmap` over the
+left stream pulls right chunks on demand — the right pointer advances per
+left *row* — maintaining a `Dict` of the most recent admitted right row per
+key. The store's key and value types are concrete NamedTuple types derived
+from the promoted right schema (widened when a later chunk moves it, as the
+summarizer states are), and the per-row merge sits behind a function barrier
+in the `summarize.jl` style. `strict` and `tolerance` ride in type
+parameters (`strict` as the comparison function `<` vs `<=`), so neither
+costs a per-row branch.
 
 ## Summarizers
 
@@ -325,10 +377,14 @@ across chunk boundaries rather than restarting per chunk —
 across boundaries (a cycle closes, causally, when a row with a later time
 arrives or the stream ends), and `summarize` folds chunk by chunk and emits
 once, at `stop`, when its input is exhausted (so its stream is a single
-frame over `[start, stop]`). Consequently concatenating the frames of
-`stream(ctx, p)` always equals `load(ctx, p)`, even for stateful operators —
-but the chunk-concatenation property over *split contexts* still does not
-hold for them.
+frame over `[start, stop]`). `asofjoin` is stateful too: its store of
+most-recent right rows and its position in the right stream carry across
+left chunk boundaries (it is causal — a row emitted at time `t` looks only
+at right rows with time `<= t`, possibly from before `start` when
+`tolerance` widens the right window). Consequently concatenating the frames
+of `stream(ctx, p)` always equals `load(ctx, p)`, even for stateful
+operators — but the chunk-concatenation property over *split contexts*
+still does not hold for them.
 
 ## Module layout
 
@@ -342,14 +398,15 @@ hold for them.
 | `src/operators.jl` | sources and row-wise transforms |
 | `src/summarizers.jl` | `Summarizer`/`SummarizerState` interface and the concrete summarizers |
 | `src/summarize.jl` | folding kernels and the summarization transforms |
+| `src/join.jl` | the as-of join transform (`asofjoin`) |
 | `src/precompile.jl` | PrecompileTools workload covering the main pipeline paths |
 
 Exports: `Context`, `CausalFrame`, `CausalPipeline`, `load`, `stream`,
 `context`, `timetype`, `emptyframe`, `clock`, `readcsv`, `filterrows`,
 `addcolumns`, `Summarizer`, `SummarizerState`, `Count`, `Sum`, `SumPower`,
 `Moment`, `Product`, `DotProduct`, `Mean`, `Variance`, `Std`, `Covariance`,
-`Min`, `Max`, `First`, `Last`, `summarize`, `summarizecycles`,
-`addsummarycolumns`.
+`Correlation`, `Min`, `Max`, `First`, `Last`, `summarize`,
+`summarizecycles`, `addsummarycolumns`, `asofjoin`.
 
 Dependencies: DataFrames, CSV, Tables, PrecompileTools.
 

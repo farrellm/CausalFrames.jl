@@ -38,6 +38,7 @@ frame = load(Context(DateTime(2026, 1, 1), DateTime(2026, 2, 1)), p)
 | `summarize(ss; key)` | transform | summarize the whole window into rows at time `stop` |
 | `summarizecycles(ss; key)` | transform | summarize each unique timestamp independently |
 | `addsummarycolumns(ss; key)` | transform | append running summary values after each row |
+| `asofjoin(right; key, tolerance, strict, ...)` | transform | append the most recent right row not after each left row, per key; `missing` where none |
 
 Row functions receive a map-like row object: `row.time`, `row.price`,
 `row[:price]`.
