@@ -1,0 +1,4 @@
+[deps]
+CausalFrames = "388faf74-d151-4224-8c39-96f47ad15296"
+DataFrames = "a93c6f00-e57d-5684-b7b6-d8193f3e46c0"
+Documenter = "e30172f5-a6a5-5a46-863b-614d45cd2de4"

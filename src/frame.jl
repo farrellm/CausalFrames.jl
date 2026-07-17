@@ -24,6 +24,7 @@ struct CausalFrame{T}
 
     function CausalFrame{T}(ctx::Context{T}, chunks::Vector{DataFrame}) where {T}
         kept = DataFrame[c for c in chunks if nrow(c) > 0]
+        schema = isempty(kept) ? String[] : names(first(kept))
         for c in kept
             "time" in names(c) ||
                 throw(ArgumentError("every chunk must have a :time column"))
@@ -31,7 +32,7 @@ struct CausalFrame{T}
                 "chunk :time column has element type $(eltype(c.time)), expected <: $T"))
             issorted(c.time) ||
                 throw(ArgumentError("chunk :time column is not non-decreasing"))
-            names(c) == names(first(kept)) ||
+            names(c) == schema ||
                 throw(ArgumentError("all chunks must share the same schema"))
             first(c.time) >= ctx.start && last(c.time) <= ctx.stop ||
                 throw(ArgumentError(
@@ -81,6 +82,8 @@ Tables.rowaccess(::Type{<:CausalFrame}) = true
 Tables.rows(frame::CausalFrame) = Tables.rows(DataFrame(frame))
 Tables.columnaccess(::Type{<:CausalFrame}) = true
 Tables.columns(frame::CausalFrame) = Tables.columns(DataFrame(frame))
+# One partition per backing chunk; the copies keep the backing opaque.
+Tables.partitions(frame::CausalFrame) = (copy(c) for c in frame.chunks)
 
 function Base.show(io::IO, mime::MIME"text/plain", frame::CausalFrame{T}) where {T}
     ctx = frame.context
