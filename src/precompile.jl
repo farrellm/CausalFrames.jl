@@ -12,7 +12,11 @@
             filterrows(r -> r.qty > 0) |>
             addcolumns(r -> (; v = 2.0 * r.qty))
         DataFrame(load(ctx, p |> summarize([Count(), Sum(:v), SumPower(:v, 2),
-                                            Moment(:v, 2), Min(:v), Max(:v)])))
+                                            Moment(:v, 2), Min(:v), Max(:v),
+                                            Product(:v), Mean(:v), Variance(:v),
+                                            Std(:v), DotProduct(:v, :qty),
+                                            Covariance(:v, :qty),
+                                            Correlation(:v, :qty)])))
         DataFrame(load(ctx, p |> summarize([Count(), Sum(:v)]; key = :sym)))
         DataFrame(load(ctx, p |> summarizecycles(Sum(:v); key = :sym)))
         DataFrame(load(ctx, p |> addsummarycolumns([First(:v), Last(:v)])))

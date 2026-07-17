@@ -148,7 +148,14 @@ Concrete summarizers provided, for an input column of element type `T`:
 | `Count()` | `:count` | `Int` | `0` |
 | `Sum(column)` | `:x_sum` | `sum` of `T` | `0` |
 | `SumPower(column, n)` | `:x_sumpower_2` for `n = 2` | `sum` of `T^n` | `0` |
+| `Product(column)` | `:x_product` | `prod` of `T` | `1` |
+| `DotProduct(a, b)` | `:a_b_dotproduct` | `sum` of `Ta * Tb` | `0` |
 | `Moment(column, n)` | `:x_moment_2` for `n = 2` | `sum` of `T^n` over `Int` | `missing` |
+| `Mean(column)` | `:x_mean` | `sum` of `T` over `Int` | `missing` |
+| `Variance(column; corrected)` | `:x_variance` | division result | `missing` |
+| `Std(column; corrected)` | `:x_std` | `sqrt` of the variance | `missing` |
+| `Covariance(a, b; corrected)` | `:a_b_covariance` | division result | `missing` |
+| `Correlation(a, b)` | `:a_b_correlation` | division result | `missing` |
 | `Min(column)` | `:x_min` | `T` | `missing` |
 | `Max(column)` | `:x_max` | `T` | `missing` |
 | `First(column)` | `:x_first` | `T` | `missing` |
@@ -162,10 +169,13 @@ and unsigned integers widen (`Int32` sums to `Int64`, `Bool` to `Int64`,
 `UInt8` to `UInt64`), everything else keeps its type (`Float32` sums to
 `Float32`). Their accumulator is built at that width up front, so the fold is
 a plain `+` that cannot overflow the way accumulating in the input's own type
-would.
+would. `Product` is the same story with `Base.prod`'s widening and a `*` fold,
+and `DotProduct(a, b)` sums the products `a * b`, forming each term in that
+widened accumulator type so a per-row product cannot overflow either.
 
-`Sum` and `SumPower` have an identity element, so they summarize no rows as
-`0`. The others do not, and yield `missing` instead — reachable only
+`Sum`, `SumPower`, `Product`, and `DotProduct` have an identity element, so
+they summarize no rows as `0` (`Product` as `1`). The others do not, and yield
+`missing` instead — reachable only
 through a keyless `summarize` of an empty input, since every key group and
 every cycle folds at least one row before emitting. That case is answered by
 `emptyvalue` and is also the one case with no type to speak of: the chunk
@@ -222,7 +232,27 @@ A summarizer may compute its value from the values of other summarizers by
 implementing `dependencies(s)` — a tuple of summarizer configurations — and
 the two-argument `value(st, vals)`. `Moment(:x, n)`, the `n`-th raw moment,
 is the built-in example: it depends on `Count()` and `SumPower(:x, n)` and
-emits their quotient.
+emits their quotient. `Mean`, `Variance`, `Std`, and `Covariance` are the
+statistical dependents: `Mean(:x)` is `Sum(:x) / Count()`; `Variance(:x)`
+combines `Count()`, `Sum(:x)`, and `SumPower(:x, 2)` by the computational
+identity `(Σx² − (Σx)²/n) / (n − corrected)`; `Std(:x)` is the square root of
+`Variance(:x)`; `Covariance(:x, :y)` combines `Count()`, `Sum(:x)`,
+`Sum(:y)`, and `DotProduct(:x, :y)` analogously; and `Correlation(:x, :y)` is
+`Covariance(:x, :y) / (Std(:x) · Std(:y))`, clamped to `[-1, 1]`. Dependencies
+may themselves be dependent — `Std` depends on `Variance`, which depends on the
+raw sums, and `Correlation` depends on all three — and the topological
+expansion handles that.
+
+`Variance`, `Std`, and `Covariance` follow `Statistics`: a `corrected::Bool`
+keyword (default `true`) selects the divisor `n − Int(corrected)`, so the
+default is the unbiased `n − 1` estimator. `corrected` is baked into the state
+type (not the output name), keeping the value fieldless and inferrable; it also
+means a corrected and an uncorrected variant of the same column share an output
+name and cannot be requested together in one call. `Std` clamps a
+round-off-negative variance to zero before the square root, so folding never
+raises a `DomainError`. `Correlation` takes no `corrected` keyword — the factor
+cancels between the covariance and the standard deviations — and its result is
+clamped to `[-1, 1]`, both matching `Statistics.cor`.
 
 Before running, the transforms expand the requested summarizers into the
 full set to fold: each one's dependencies recursively, in topological order
@@ -317,7 +347,8 @@ hold for them.
 Exports: `Context`, `CausalFrame`, `CausalPipeline`, `load`, `stream`,
 `context`, `timetype`, `emptyframe`, `clock`, `readcsv`, `filterrows`,
 `addcolumns`, `Summarizer`, `SummarizerState`, `Count`, `Sum`, `SumPower`,
-`Moment`, `Min`, `Max`, `First`, `Last`, `summarize`, `summarizecycles`,
+`Moment`, `Product`, `DotProduct`, `Mean`, `Variance`, `Std`, `Covariance`,
+`Min`, `Max`, `First`, `Last`, `summarize`, `summarizecycles`,
 `addsummarycolumns`.
 
 Dependencies: DataFrames, CSV, Tables, PrecompileTools.

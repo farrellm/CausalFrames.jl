@@ -43,6 +43,13 @@ Count
 Sum
 SumPower
 Moment
+Product
+DotProduct
+Mean
+Variance
+Std
+Covariance
+Correlation
 Min
 Max
 First
