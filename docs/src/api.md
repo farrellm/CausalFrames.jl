@@ -49,6 +49,7 @@ Mean
 Variance
 Std
 Covariance
+Correlation
 Min
 Max
 First

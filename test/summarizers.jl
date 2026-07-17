@@ -232,4 +232,35 @@ end
     end
     @test @inferred(CausalFrames.summaryvalues(states, Val(requested))) ===
         (x_std = sqrt(2.0), x_y_covariance = -3.0)
+
+    # Correlation: cov / (std * std), clamped to [-1, 1], following
+    # Statistics.cor — no corrected keyword (the factor cancels)
+    df = stats(Int32[3, 1, 2], Int32[2, 5, 4], [Correlation(:x, :y)])
+    @test only(df.x_y_correlation) ≈ -1.5 / (1.0 * sqrt(7 / 3))
+    @test eltype(df.x_y_correlation) == Float64
+
+    # a variable correlates perfectly with itself
+    df = stats(Int32[3, 1, 2], Int32[2, 5, 4], [Correlation(:x, :x)])
+    @test only(df.x_x_correlation) ≈ 1.0
+
+    # Float32 stays Float32
+    df = stats(Float32[3, 1, 2], Float32[2, 5, 4], [Correlation(:x, :y)])
+    @test eltype(df.x_y_correlation) == Float32
+
+    # a single sample is NaN, never a DivideError or DomainError
+    df = single([Correlation(:x, :x)])
+    @test isnan(only(df.x_x_correlation))
+
+    # missing-permitting input stays missing-permitting and poisons the value
+    df = stats(Union{Missing,Int}[1, missing, 3], Int[2, 5, 4],
+               [Correlation(:x, :y)])
+    @test eltype(df.x_y_correlation) == Union{Missing,Float64}
+    @test ismissing(only(df.x_y_correlation))
+
+    # the dependent value infers, with the dependency names baked into the
+    # state type
+    st = CausalFrames.fresh(Correlation(:x, :y), (time = Int64, x = Int32, y = Int32))
+    @test @inferred(CausalFrames.value(st,
+        (x_y_covariance = -1.5, x_std = 1.0, y_std = 2.0))) ===
+        (x_y_correlation = -0.75,)
 end

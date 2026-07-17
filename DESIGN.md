@@ -155,6 +155,7 @@ Concrete summarizers provided, for an input column of element type `T`:
 | `Variance(column; corrected)` | `:x_variance` | division result | `missing` |
 | `Std(column; corrected)` | `:x_std` | `sqrt` of the variance | `missing` |
 | `Covariance(a, b; corrected)` | `:a_b_covariance` | division result | `missing` |
+| `Correlation(a, b)` | `:a_b_correlation` | division result | `missing` |
 | `Min(column)` | `:x_min` | `T` | `missing` |
 | `Max(column)` | `:x_max` | `T` | `missing` |
 | `First(column)` | `:x_first` | `T` | `missing` |
@@ -235,10 +236,12 @@ emits their quotient. `Mean`, `Variance`, `Std`, and `Covariance` are the
 statistical dependents: `Mean(:x)` is `Sum(:x) / Count()`; `Variance(:x)`
 combines `Count()`, `Sum(:x)`, and `SumPower(:x, 2)` by the computational
 identity `(Σx² − (Σx)²/n) / (n − corrected)`; `Std(:x)` is the square root of
-`Variance(:x)`; and `Covariance(:x, :y)` combines `Count()`, `Sum(:x)`,
-`Sum(:y)`, and `DotProduct(:x, :y)` analogously. Dependencies may themselves be
-dependent — `Std` depends on `Variance`, which depends on the raw sums — and
-the topological expansion handles that.
+`Variance(:x)`; `Covariance(:x, :y)` combines `Count()`, `Sum(:x)`,
+`Sum(:y)`, and `DotProduct(:x, :y)` analogously; and `Correlation(:x, :y)` is
+`Covariance(:x, :y) / (Std(:x) · Std(:y))`, clamped to `[-1, 1]`. Dependencies
+may themselves be dependent — `Std` depends on `Variance`, which depends on the
+raw sums, and `Correlation` depends on all three — and the topological
+expansion handles that.
 
 `Variance`, `Std`, and `Covariance` follow `Statistics`: a `corrected::Bool`
 keyword (default `true`) selects the divisor `n − Int(corrected)`, so the
@@ -247,7 +250,9 @@ type (not the output name), keeping the value fieldless and inferrable; it also
 means a corrected and an uncorrected variant of the same column share an output
 name and cannot be requested together in one call. `Std` clamps a
 round-off-negative variance to zero before the square root, so folding never
-raises a `DomainError`.
+raises a `DomainError`. `Correlation` takes no `corrected` keyword — the factor
+cancels between the covariance and the standard deviations — and its result is
+clamped to `[-1, 1]`, both matching `Statistics.cor`.
 
 Before running, the transforms expand the requested summarizers into the
 full set to fold: each one's dependencies recursively, in topological order

@@ -8,7 +8,7 @@ using Tables
 export Context, CausalFrame, CausalPipeline, load, stream, context, timetype,
     emptyframe, clock, readcsv, filterrows, addcolumns,
     Summarizer, SummarizerState, Count, Sum, SumPower, Moment, Product,
-    DotProduct, Mean, Variance, Std, Covariance, Min, Max,
+    DotProduct, Mean, Variance, Std, Covariance, Correlation, Min, Max,
     First, Last, summarize, summarizecycles, addsummarycolumns
 
 include("context.jl")

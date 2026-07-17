@@ -515,6 +515,50 @@ fresh(st::CovarianceState) = st
     return NamedTuple{(N,),Tuple{V}}(((d - sa * sb / n) / (n - Int(R)),))
 end
 
+"""
+    Correlation(a, b) -> Summarizer
+
+The Pearson correlation of columns `a` and `b`, following `Statistics.cor`:
+[`Covariance`](@ref)`(a, b)` divided by the product of the two columns'
+[`Std`](@ref)s, clamped to `[-1, 1]`. Produces the output column
+`Symbol(a, :_, b, :_correlation)`, e.g. `Correlation(:x, :y)` produces
+`:x_y_correlation`. The correlation of no rows is `missing`, and of a single
+row is `NaN`.
+
+Unlike [`Covariance`](@ref) and [`Std`](@ref), `Correlation` takes no
+`corrected` keyword: the `n - 1` (or `n`) factor cancels between the
+covariance and the standard deviations, so the value is the same either way.
+It is a dependent summarizer over `Covariance(a, b)`, `Std(a)`, and `Std(b)`;
+those are folded alongside it but appear in the output only if requested
+themselves.
+"""
+struct Correlation{A,B} <: Summarizer end
+Correlation(a::Symbol, b::Symbol) = Correlation{a,b}()
+
+struct CorrelationState{A,B,N,CV,SA,SB} <: SummarizerState end
+
+_clampcor(::Missing) = missing
+_clampcor(x) = clamp(x, -one(x), one(x))
+
+corname(a, b) = Symbol(a, :_, b, :_correlation)
+dependencies(::Correlation{A,B}) where {A,B} =
+    (Covariance(A, B), Std(A), Std(B))
+emptyvalue(::Correlation{A,B}) where {A,B} =
+    NamedTuple{(corname(A, B),)}((missing,))
+fresh(::Correlation{A,B}, ::NamedTuple) where {A,B} =
+    CorrelationState{A,B,corname(A, B),covname(A, B),Symbol(A, :_std),
+                     Symbol(B, :_std)}()
+fresh(st::CorrelationState) = st
+@inline update!(::CorrelationState, row) = nothing
+@inline function value(::CorrelationState{A,B,N,CV,SA,SB},
+                       vals::NamedTuple) where {A,B,N,CV,SA,SB}
+    Cvf = fieldtype(typeof(vals), CV)
+    Saf = fieldtype(typeof(vals), SA)
+    Sbf = fieldtype(typeof(vals), SB)
+    V = Base.promote_op(/, Cvf, Base.promote_op(*, Saf, Sbf))
+    return NamedTuple{(N,),Tuple{V}}((_clampcor(vals[CV] / (vals[SA] * vals[SB])),))
+end
+
 # Min/Max/First/Last have no identity element, and all four track one value of
 # the input column's type, so they share a state. `F` is the singleton type of
 # the combiner (min, max, keepfirst, keeplast), recovered as `F.instance`, so
