@@ -45,12 +45,14 @@ Row functions receive a map-like row object: `row.time`, `row.price`,
 ## Summarizers
 
 The summarization transforms take one or more summarizers — `Count()`,
-`Sum(:col)`, `SumPower(:col, n)`, `Moment(:col, n)`, `Min(:col)`,
-`Max(:col)`, `First(:col)`, `Last(:col)`, or your own `Summarizer` subtype —
-and an optional `key` (one or more column names) to produce a separate
-summary per unique key value. Output columns are named by suffix:
-`Sum(:mid)` produces `:mid_sum`, `Min(:mid)` produces `:mid_min`, and
-`SumPower(:mid, 2)` produces `:mid_sumpower_2`.
+`Sum(:col)`, `SumPower(:col, n)`, `Product(:col)`, `DotProduct(:a, :b)`,
+`Moment(:col, n)`, `Mean(:col)`, `Variance(:col)`, `Std(:col)`,
+`Covariance(:a, :b)`, `Min(:col)`, `Max(:col)`, `First(:col)`, `Last(:col)`,
+or your own `Summarizer` subtype — and an optional `key` (one or more column
+names) to produce a separate summary per unique key value. Output columns are
+named by suffix: `Sum(:mid)` produces `:mid_sum`, `Min(:mid)` produces
+`:mid_min`, `SumPower(:mid, 2)` produces `:mid_sumpower_2`, and the two-column
+`DotProduct(:bid, :ask)` produces `:bid_ask_dotproduct`.
 
 ```julia
 p = readcsv("ticks.csv") |>
@@ -58,12 +60,15 @@ p = readcsv("ticks.csv") |>
     addsummarycolumns([Count(), Sum(:mid), Min(:mid), Max(:mid)]; key = :symbol)
 ```
 
-`Sum` and `SumPower` summarize no rows as `0`; `Moment`, `Min`, `Max`,
-`First`, and `Last` have no identity element and yield `missing` instead.
-`Moment(:mid, n)` — the `n`-th raw moment, producing `:mid_moment_n` — is a
-*dependent* summarizer, computed from `Count()` and `SumPower(:mid, n)`;
-those are folded alongside it but appear in the output only if requested
-themselves.
+`Sum`, `SumPower`, `Product`, and `DotProduct` have an identity element, so
+they summarize no rows as `0` (`Product` as `1`); the rest have none and yield
+`missing` instead. `Moment(:mid, n)` — the `n`-th raw moment, producing
+`:mid_moment_n` — is a *dependent* summarizer, computed from `Count()` and
+`SumPower(:mid, n)`; `Mean`, `Variance`, `Std`, and `Covariance` are dependent
+too. Dependencies are folded alongside a summarizer but appear in the output
+only if requested themselves. `Variance`, `Std`, and `Covariance` follow
+`Statistics`, taking a `corrected::Bool = true` keyword (the divisor is
+`n - Int(corrected)`).
 
 An output column takes its element type from the input column: `Min`, `Max`,
 `First`, and `Last` reproduce it verbatim, while `Sum` and `SumPower` widen it

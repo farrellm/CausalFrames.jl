@@ -146,6 +146,14 @@ dependencies(::Summarizer) = ()
 # the input's own type would risk.
 sumtype(::Type{T}) where {T} = Base.promote_op(Base.add_sum, T, T)
 
+# The analogous widths for a product and for a dot product. `prodtype` is the
+# element type `Base.prod` produces (small ints widen through `mul_prod` just
+# as they do through `add_sum`); `dottype` is `sumtype` applied to the type of
+# one `a * b` term, since a dot product is a sum of products.
+prodtype(::Type{T}) where {T} = Base.promote_op(Base.mul_prod, T, T)
+dottype(::Type{Ta}, ::Type{Tb}) where {Ta,Tb} =
+    sumtype(Base.promote_op(*, Ta, Tb))
+
 """
     Count() -> Summarizer
 
@@ -238,6 +246,77 @@ function widenstate(st::SumPowerState{C,N,A}, intypes::NamedTuple) where {C,N,A}
 end
 
 """
+    Product(column) -> Summarizer
+
+Multiplies `column`. Produces the output column `Symbol(column, :_product)`,
+e.g. `Product(:x)` produces `:x_product`. The product of no rows is `1`.
+
+The output column's element type is the one `Base.prod` would produce: small
+signed and unsigned integers widen (`Int32` multiplies to `Int64`), everything
+else keeps its type (`Float32` stays `Float32`). Like [`Sum`](@ref), the
+accumulator is built at that width up front.
+"""
+struct Product{C} <: Summarizer end
+Product(column::Symbol) = Product{column}()
+
+mutable struct ProductState{C,N,A} <: SummarizerState
+    total::A
+end
+
+emptyvalue(::Product{C}) where {C} = NamedTuple{(Symbol(C, :_product),)}((1,))
+function fresh(::Product{C}, intypes::NamedTuple) where {C}
+    A = prodtype(intypes[C])
+    return ProductState{C,Symbol(C, :_product),A}(convert(A, 1))
+end
+fresh(::ProductState{C,N,A}) where {C,N,A} = ProductState{C,N,A}(convert(A, 1))
+@inline update!(st::ProductState{C}, row) where {C} =
+    (st.total *= getproperty(row, C); nothing)
+value(st::ProductState{C,N,A}) where {C,N,A} = NamedTuple{(N,),Tuple{A}}((st.total,))
+function widenstate(st::ProductState{C,N,A}, intypes::NamedTuple) where {C,N,A}
+    A2 = prodtype(intypes[C])
+    A2 === A && return st
+    return ProductState{C,N,A2}(convert(A2, st.total))
+end
+
+"""
+    DotProduct(a, b) -> Summarizer
+
+Sums the elementwise product of columns `a` and `b`. Produces the output
+column `Symbol(a, :_, b, :_dotproduct)`, e.g. `DotProduct(:x, :y)` produces
+`:x_y_dotproduct`. The dot product of no rows is `0`.
+
+The output column's element type is `Base.sum` applied to the type of `a * b`,
+so it widens the same way [`Sum`](@ref) does. Each term is formed in the
+accumulator's (widened) type, so a per-row product cannot overflow the way
+multiplying in the input columns' own types would.
+"""
+struct DotProduct{A,B} <: Summarizer end
+DotProduct(a::Symbol, b::Symbol) = DotProduct{a,b}()
+
+mutable struct DotProductState{A,B,N,Acc} <: SummarizerState
+    total::Acc
+end
+
+dotname(a, b) = Symbol(a, :_, b, :_dotproduct)
+emptyvalue(::DotProduct{A,B}) where {A,B} = NamedTuple{(dotname(A, B),)}((0,))
+function fresh(::DotProduct{A,B}, intypes::NamedTuple) where {A,B}
+    Acc = dottype(intypes[A], intypes[B])
+    return DotProductState{A,B,dotname(A, B),Acc}(convert(Acc, 0))
+end
+fresh(::DotProductState{A,B,N,Acc}) where {A,B,N,Acc} =
+    DotProductState{A,B,N,Acc}(convert(Acc, 0))
+@inline update!(st::DotProductState{A,B,N,Acc}, row) where {A,B,N,Acc} =
+    (st.total += convert(Acc, getproperty(row, A)) * convert(Acc, getproperty(row, B));
+     nothing)
+value(st::DotProductState{A,B,N,Acc}) where {A,B,N,Acc} =
+    NamedTuple{(N,),Tuple{Acc}}((st.total,))
+function widenstate(st::DotProductState{A,B,N,Acc}, intypes::NamedTuple) where {A,B,N,Acc}
+    Acc2 = dottype(intypes[A], intypes[B])
+    Acc2 === Acc && return st
+    return DotProductState{A,B,N,Acc2}(convert(Acc2, st.total))
+end
+
+"""
     Moment(column, n) -> Summarizer
 
 The `n`-th raw moment of `column`: the mean of `column ^ n`. Produces the
@@ -276,6 +355,164 @@ fresh(st::MomentState) = st
     V = Base.promote_op(/, fieldtype(typeof(vals), D),
                         fieldtype(typeof(vals), :count))
     return NamedTuple{(N,),Tuple{V}}((vals[D] / vals.count,))
+end
+
+"""
+    Mean(column) -> Summarizer
+
+The mean of `column`. Produces the output column `Symbol(column, :_mean)`,
+e.g. `Mean(:x)` produces `:x_mean`. The mean of no rows is `missing`.
+
+A dependent summarizer, computed as [`Sum`](@ref)`(column)` divided by
+[`Count`](@ref) — those are folded alongside it but appear in the output only
+if requested themselves. The output column's element type is the division's
+result (`Int` input divides to `Float64`, `Float32` stays `Float32`).
+"""
+struct Mean{C} <: Summarizer end
+Mean(column::Symbol) = Mean{column}()
+
+struct MeanState{C,N,S} <: SummarizerState end
+
+dependencies(::Mean{C}) where {C} = (Count(), Sum(C))
+emptyvalue(::Mean{C}) where {C} = NamedTuple{(Symbol(C, :_mean),)}((missing,))
+fresh(::Mean{C}, ::NamedTuple) where {C} =
+    MeanState{C,Symbol(C, :_mean),Symbol(C, :_sum)}()
+fresh(st::MeanState) = st
+@inline update!(::MeanState, row) = nothing
+@inline function value(::MeanState{C,N,S}, vals::NamedTuple) where {C,N,S}
+    V = Base.promote_op(/, fieldtype(typeof(vals), S), fieldtype(typeof(vals), :count))
+    return NamedTuple{(N,),Tuple{V}}((vals[S] / vals.count,))
+end
+
+"""
+    Variance(column; corrected = true) -> Summarizer
+
+The variance of `column`, following `Statistics.var`: divided by `n - 1` when
+`corrected` (the default), by `n` otherwise. Produces the output column
+`Symbol(column, :_variance)`, e.g. `Variance(:x)` produces `:x_variance`. The
+variance of no rows is `missing`; the corrected variance of a single row is
+`NaN` (`0.0` when `corrected = false`).
+
+A dependent summarizer, computed from [`Count`](@ref), [`Sum`](@ref)`(column)`,
+and [`SumPower`](@ref)`(column, 2)` by the identity
+`(Σx² − (Σx)²/n) / (n − corrected)`; those are folded alongside it but appear
+in the output only if requested themselves. The output column's element type is
+the computation's result (`Float64` for integer input, `Float32` for
+`Float32`).
+
+`corrected` is not part of the output name, so a corrected and an uncorrected
+`Variance` of the same column cannot be requested together in one call — they
+would share `:x_variance` and collapse under the name-keyed deduplication.
+"""
+struct Variance{C} <: Summarizer
+    corrected::Bool
+end
+Variance(column::Symbol; corrected::Bool = true) = Variance{column}(corrected)
+
+# R (the corrected flag) is baked into the state type so the derived value
+# stays fieldless and inferrable; the divisor is `n - Int(R)`.
+struct VarianceState{C,N,S,Q,R} <: SummarizerState end
+
+dependencies(::Variance{C}) where {C} = (Count(), Sum(C), SumPower(C, 2))
+emptyvalue(::Variance{C}) where {C} =
+    NamedTuple{(Symbol(C, :_variance),)}((missing,))
+fresh(v::Variance{C}, ::NamedTuple) where {C} =
+    VarianceState{C,Symbol(C, :_variance),Symbol(C, :_sum),
+                  Symbol(C, :_sumpower_, 2),v.corrected}()
+fresh(st::VarianceState) = st
+@inline update!(::VarianceState, row) = nothing
+@inline function value(::VarianceState{C,N,S,Q,R}, vals::NamedTuple) where {C,N,S,Q,R}
+    Sf = fieldtype(typeof(vals), S)
+    Qf = fieldtype(typeof(vals), Q)
+    V = Base.promote_op(/, Base.promote_op(-, Qf,
+            Base.promote_op(/, Base.promote_op(*, Sf, Sf), Int)), Int)
+    s = vals[S]
+    q = vals[Q]
+    n = vals.count
+    return NamedTuple{(N,),Tuple{V}}(((q - s * s / n) / (n - Int(R)),))
+end
+
+"""
+    Std(column; corrected = true) -> Summarizer
+
+The standard deviation of `column`, following `Statistics.std`: the square
+root of [`Variance`](@ref)`(column; corrected)`. Produces the output column
+`Symbol(column, :_std)`, e.g. `Std(:x)` produces `:x_std`. The standard
+deviation of no rows is `missing`, and of a single corrected row is `NaN`.
+
+A dependent summarizer that folds `Variance(column; corrected)` alongside it
+(which appears in the output only if requested itself). A round-off-negative
+variance is clamped to zero before the square root, so folding never raises a
+`DomainError`.
+"""
+struct Std{C} <: Summarizer
+    corrected::Bool
+end
+Std(column::Symbol; corrected::Bool = true) = Std{column}(corrected)
+
+struct StdState{C,N,V} <: SummarizerState end
+
+_stdsqrt(::Missing) = missing
+_stdsqrt(v) = sqrt(max(v, zero(v)))
+
+dependencies(s::Std{C}) where {C} = (Variance(C; corrected = s.corrected),)
+emptyvalue(::Std{C}) where {C} = NamedTuple{(Symbol(C, :_std),)}((missing,))
+fresh(::Std{C}, ::NamedTuple) where {C} =
+    StdState{C,Symbol(C, :_std),Symbol(C, :_variance)}()
+fresh(st::StdState) = st
+@inline update!(::StdState, row) = nothing
+@inline function value(::StdState{C,N,V}, vals::NamedTuple) where {C,N,V}
+    T = Base.promote_op(sqrt, fieldtype(typeof(vals), V))
+    return NamedTuple{(N,),Tuple{T}}((_stdsqrt(vals[V]),))
+end
+
+"""
+    Covariance(a, b; corrected = true) -> Summarizer
+
+The covariance of columns `a` and `b`, following `Statistics.cov`: divided by
+`n - 1` when `corrected` (the default), by `n` otherwise. Produces the output
+column `Symbol(a, :_, b, :_covariance)`, e.g. `Covariance(:x, :y)` produces
+`:x_y_covariance`. The covariance of no rows is `missing`; the corrected
+covariance of a single row is `NaN`.
+
+A dependent summarizer, computed from [`Count`](@ref), [`Sum`](@ref)`(a)`,
+[`Sum`](@ref)`(b)`, and [`DotProduct`](@ref)`(a, b)` by the identity
+`(Σ(ab) − ΣaΣb/n) / (n − corrected)`; those are folded alongside it but appear
+in the output only if requested themselves. `Covariance(:x, :x; corrected)`
+equals `Variance(:x; corrected)`.
+
+Like [`Variance`](@ref), `corrected` is not part of the output name.
+"""
+struct Covariance{A,B} <: Summarizer
+    corrected::Bool
+end
+Covariance(a::Symbol, b::Symbol; corrected::Bool = true) =
+    Covariance{a,b}(corrected)
+
+struct CovarianceState{A,B,N,D,SA,SB,R} <: SummarizerState end
+
+covname(a, b) = Symbol(a, :_, b, :_covariance)
+dependencies(::Covariance{A,B}) where {A,B} =
+    (Count(), Sum(A), Sum(B), DotProduct(A, B))
+emptyvalue(::Covariance{A,B}) where {A,B} =
+    NamedTuple{(covname(A, B),)}((missing,))
+fresh(c::Covariance{A,B}, ::NamedTuple) where {A,B} =
+    CovarianceState{A,B,covname(A, B),dotname(A, B),Symbol(A, :_sum),
+                    Symbol(B, :_sum),c.corrected}()
+fresh(st::CovarianceState) = st
+@inline update!(::CovarianceState, row) = nothing
+@inline function value(::CovarianceState{A,B,N,D,SA,SB,R},
+                       vals::NamedTuple) where {A,B,N,D,SA,SB,R}
+    Df = fieldtype(typeof(vals), D)
+    Saf = fieldtype(typeof(vals), SA)
+    Sbf = fieldtype(typeof(vals), SB)
+    V = Base.promote_op(/, Base.promote_op(-, Df,
+            Base.promote_op(/, Base.promote_op(*, Saf, Sbf), Int)), Int)
+    d = vals[D]
+    sa = vals[SA]
+    sb = vals[SB]
+    n = vals.count
+    return NamedTuple{(N,),Tuple{V}}(((d - sa * sb / n) / (n - Int(R)),))
 end
 
 # Min/Max/First/Last have no identity element, and all four track one value of

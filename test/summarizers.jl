@@ -113,3 +113,123 @@
     @test @inferred(CausalFrames.summaryvalues(states, Val(requested))) ===
         (x_moment_2 = 4.0,)
 end
+
+@testset "statistical summarizers" begin
+    chunks(cs...) = CausalPipeline(ctx -> collect(cs))
+    # x and y over three rows; the reference values are computed by hand:
+    # sum(x)=6, prod(x)=6, sum(x^2)=14, mean(x)=2, and (corrected) var(x)=1;
+    # dot(x,y)=19 and (corrected) cov(x,y)=-1.5.
+    input(xcol, ycol) = chunks(DataFrame(time = [1, 2, 3], x = xcol, y = ycol))
+    stats(xcol, ycol, ss) =
+        DataFrame(load(Context(0, 9), input(xcol, ycol) |> summarize(ss)))
+
+    # values, checked against the hand-computed references
+    df = stats(Int32[3, 1, 2], Int32[2, 5, 4],
+               [Product(:x), DotProduct(:x, :y), Mean(:x), Variance(:x),
+                Std(:x), Covariance(:x, :y)])
+    @test only(df.x_product) == 6
+    @test only(df.x_y_dotproduct) == 19
+    @test only(df.x_mean) == 2.0
+    @test only(df.x_variance) == 1.0
+    @test only(df.x_std) == 1.0
+    @test only(df.x_y_covariance) == -1.5
+
+    # Covariance(:x, :x) is Variance(:x)
+    df = stats(Int32[3, 1, 2], Int32[2, 5, 4], [Covariance(:x, :x)])
+    @test only(df.x_x_covariance) == 1.0
+
+    # element types: Product/DotProduct widen like Sum; the statistical
+    # dependents divide integers to Float64
+    @test eltype(df.x_x_covariance) == Float64
+    df = stats(Int32[3, 1, 2], Int32[2, 5, 4],
+               [Product(:x), DotProduct(:x, :y), Mean(:x), Variance(:x),
+                Std(:x), Covariance(:x, :y)])
+    @test eltype(df.x_product) == Int64
+    @test eltype(df.x_y_dotproduct) == Int64
+    @test all(eltype(df[!, c]) == Float64
+              for c in [:x_mean, :x_variance, :x_std, :x_y_covariance])
+
+    # Float32 stays Float32 throughout
+    df = stats(Float32[3, 1, 2], Float32[2, 5, 4],
+               [Product(:x), DotProduct(:x, :y), Mean(:x), Variance(:x),
+                Std(:x), Covariance(:x, :y)])
+    @test all(eltype(df[!, c]) == Float32
+              for c in [:x_product, :x_y_dotproduct, :x_mean, :x_variance,
+                        :x_std, :x_y_covariance])
+
+    # corrected = false follows Statistics: divide by n rather than n - 1
+    df = stats(Int32[3, 1, 2], Int32[2, 5, 4],
+               [Variance(:x; corrected = false), Std(:x; corrected = false),
+                Covariance(:x, :y; corrected = false)])
+    @test only(df.x_variance) ≈ 2 / 3
+    @test only(df.x_std) ≈ sqrt(2 / 3)
+    @test only(df.x_y_covariance) == -1.0
+
+    # a single corrected sample is NaN (0/0), never a DivideError; uncorrected
+    # is 0
+    single(ss) = DataFrame(load(Context(0, 9),
+        chunks(DataFrame(time = [1], x = Int[5])) |> summarize(ss)))
+    df = single([Variance(:x), Std(:x)])
+    @test isnan(only(df.x_variance)) && isnan(only(df.x_std))
+    df = single([Variance(:x; corrected = false)])
+    @test only(df.x_variance) == 0.0
+
+    # the accumulators widen up front, so per-row products cannot overflow the
+    # way multiplying in the input's own type would
+    df = stats(Int8[100, 100, 100], Int8[100, 100, 100],
+               [Product(:x), DotProduct(:x, :y)])
+    @test eltype(df.x_product) == Int64 && only(df.x_product) == 1_000_000
+    @test eltype(df.x_y_dotproduct) == Int64 && only(df.x_y_dotproduct) == 30_000
+
+    # missing-permitting input stays missing-permitting and poisons the value
+    df = stats(Union{Missing,Int}[1, missing, 3], Int[2, 5, 4],
+               [Product(:x), DotProduct(:x, :y), Mean(:x), Variance(:x),
+                Std(:x), Covariance(:x, :y)])
+    @test all(eltype(df[!, c]) == Union{Missing,Float64}
+              for c in [:x_mean, :x_variance, :x_std, :x_y_covariance])
+    @test eltype(df.x_product) == Union{Missing,Int64}
+    @test eltype(df.x_y_dotproduct) == Union{Missing,Int64}
+    @test all(ismissing(only(df[!, c]))
+              for c in [:x_product, :x_y_dotproduct, :x_mean, :x_variance,
+                        :x_std, :x_y_covariance])
+
+    # a column's type may widen across chunks, so the two-column accumulator
+    # states widen too, carrying their accumulated total over
+    df = DataFrame(load(Context(0, 9),
+        chunks(DataFrame(time = [1, 2], x = Int[2, 3], y = Int[1, 2]),
+               DataFrame(time = [3], x = Float64[4.0], y = Float64[0.5])) |>
+            summarize([Product(:x), DotProduct(:x, :y)])))
+    @test eltype(df.x_product) == Float64 && only(df.x_product) == 24.0
+    @test eltype(df.x_y_dotproduct) == Float64 && only(df.x_y_dotproduct) == 10.0
+
+    # the value property the typing rests on: each dependent summarizer's
+    # two-argument value is inferrable, with the divisor and dependency names
+    # baked into the state type
+    st = CausalFrames.fresh(Mean(:x), (time = Int64, x = Int32))
+    @test @inferred(CausalFrames.value(st, (count = 3, x_sum = Int64(6)))) ===
+        (x_mean = 2.0,)
+    st = CausalFrames.fresh(Variance(:x), (time = Int64, x = Int32))
+    @test @inferred(CausalFrames.value(st,
+        (count = 3, x_sum = Int64(6), x_sumpower_2 = Int64(14)))) ===
+        (x_variance = 1.0,)
+    st = CausalFrames.fresh(Std(:x), (time = Int64, x = Int32))
+    @test @inferred(CausalFrames.value(st, (x_variance = 4.0,))) === (x_std = 2.0,)
+    st = CausalFrames.fresh(Covariance(:x, :y), (time = Int64, x = Int32, y = Int32))
+    @test @inferred(CausalFrames.value(st,
+        (count = 3, x_sum = Int64(6), y_sum = Int64(11),
+         x_y_dotproduct = Int64(19)))) === (x_y_covariance = -1.5,)
+
+    # nested dependency expansion (Std -> Variance -> raw sums) stays inferrable
+    # through the accumulate-then-project fold, and hidden dependencies are
+    # folded but not emitted
+    protos, requested =
+        CausalFrames.prototypes(Summarizer[Std(:x), Covariance(:x, :y)], Symbol[])
+    @test requested === (:x_std, :x_y_covariance)
+    states = map(s -> CausalFrames.fresh(s, (time = Int64, x = Int64, y = Int64)),
+                 protos)
+    for (t, xv, yv) in [(1, 3, 2), (2, 1, 5)]
+        foreach(s -> CausalFrames.update!(s, (time = t, x = xv, y = yv)), states)
+    end
+    @test @inferred(CausalFrames.summaryvalues(states, Val(requested))) ===
+        (x_std = sqrt(2.0), x_y_covariance = -3.0)
+end
