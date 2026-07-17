@@ -30,8 +30,10 @@ with any API or semantics change.**
 - `src/operators.jl` — sources return a `CausalPipeline`; transforms are
   curried (`filterrows(pred)` returns `CausalPipeline -> CausalPipeline`)
   so both chain with `|>`
-- `src/summarize.jl` — `Summarizer` abstract type and interface (`fresh`,
-  `update!`, `value` — unexported), `Count`/`Sum`, and the summarization
+- `src/summarize.jl` — `Summarizer` (immutable config, column name in a type
+  parameter) and `SummarizerState` (running state, typed from the input
+  schema) plus their interface (`emptyvalue`, `fresh`, `update!`, `value`,
+  `widenstate` — unexported), `Count`/`Sum`, the folding kernels, and the
   transforms `summarize`, `summarizecycles`, `addsummarycolumns`
 
 ## Invariants and conventions
@@ -46,3 +48,8 @@ with any API or semantics change.**
   of an empty stream gives a zero-row frame with only `:time`.
 - Naming is Julian: lowercase, no camelCase, no shadowing of Base functions
   (`filterrows` not `filter`, `emptyframe` not `empty`).
+- A summarizer's output column takes its element type from the input column
+  (`Sum`/`SumPower` widen as `Base.sum` does). The summarization transforms
+  keep their per-row folding behind a function barrier taking concretely typed
+  arguments — don't reintroduce `Vector{Summarizer}`, `::Any` state fields, or
+  `Dict{Any,...}` group tables on those paths.
