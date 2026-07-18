@@ -45,6 +45,7 @@ asofjoin
 summarize
 summarizecycles
 addsummarycolumns
+addrollingcolumns
 Count
 Sum
 SumPower

@@ -90,6 +90,7 @@ Two kinds, both compatible with the chaining operator `|>`:
 | `summarize(ss; key)` | transform | summarize the whole context into rows at time `stop`; drops input columns |
 | `summarizecycles(ss; key)` | transform | summarize each cycle (maximal run of rows sharing a timestamp) independently; drops input columns |
 | `addsummarycolumns(ss; key)` | transform | keep input columns, append the running summary value after each row |
+| `addrollingcolumns(windows, ss; key, from)` | transform | keep input columns, append each summarizer's value over each named trailing window, prefixed `"{window}_"` (see "Rolling windows") |
 | `asofjoin(right; key, tolerance, strict, leftprefix, rightprefix, righttime)` | transform | left as-of join: append the most recent right row with time `<= time` (`strict`: `<`), per key; `missing` where none qualifies (see "As-of join") |
 
 Row functions (`pred`, `f`) receive a map-like row object supporting
@@ -152,6 +153,67 @@ summarizer states are), and the per-row merge sits behind a function barrier
 in the `summarize.jl` style. `strict` and `tolerance` ride in type
 parameters (`strict` as the comparison function `<` vs `<=`), so neither
 costs a per-row branch.
+
+## Rolling windows
+
+`addrollingcolumns(windows, ss; key, from)` is the second binary operator:
+it keeps every input row and column and appends, for each named window, each
+summarizer's value columns computed over that row's trailing window.
+`windows` maps window names to look-backs — a NamedTuple
+(`(m5 = Minute(5), h1 = Hour(1))`), a single pair, or a collection of
+pairs — and each summary column is the window name prefixed onto the
+summarizer's usual output name: `m5_price_sum`. A row at time `t`
+summarizes the rows with time `s` satisfying `s <= t` and
+`t - s <= lookback`, inclusive on both ends (the `asofjoin` tolerance
+convention, not the sources' half-open one) — so under self-summarization
+the row itself, and every row sharing its timestamp, is in its own window.
+
+- **The summarized stream.** By default the summaries are computed over the
+  pipeline being augmented itself, which then runs twice — pipelines are
+  lazy, so each `run(ctx)` builds fresh iterators (the self-join precedent;
+  a readcsv-backed pipeline reads the file twice). `from` names a different
+  pipeline to summarize instead. Either way summarized rows relate to
+  output rows by time (and key) only, never by row identity.
+- **Context extension.** The summarized pipeline runs over the widened
+  context `[minimum over windows of start - lookback, stop)`, so the first
+  output row already sees a full look-back of history. Look-backs are never
+  compared to *each other* (mixed `Minute`/`Hour` look-backs need not be
+  comparable) — the widened starts all live in the time type, where the
+  earliest is found, and a negative look-back is rejected at run time,
+  generically, via `start - lookback <= start` (the `asofjoin` precedent).
+  Zero look-back is legal: the window holds exactly the rows at time `t`.
+- **Keys.** With `key` (a column name or collection, present in both
+  inputs — validated on each side's first chunk) each row's window holds
+  only the summarized rows sharing its key value, matched with `isequal`.
+  `time` may not be a key.
+- **Empty windows.** A window holding no rows — under a short look-back on
+  a sparse stream, or a key never seen — yields the summarizers' empty
+  values, so an output column's element type is the field-wise promotion of
+  the summary value type with the empty value's (`Min` over an `Int` column
+  gives `Union{Missing, Int}`). A summarized stream producing no chunks
+  yields the empty values everywhere; with no chunk there is no schema to
+  type states from, so those columns are typed from the configs alone.
+- **Names.** The prefixed output names must not collide with the input's
+  columns, nor with each other — distinct window names do not guarantee the
+  latter (window `:a` with output `:b_x_sum` collides with window `:a_b`
+  with output `:x_sum`), so uniqueness is checked over the full window ×
+  output cross product, at construction time.
+
+The implementation is a `chunkmap` over the augmented stream that pulls
+summarized chunks on demand (the `asofjoin` machinery): rows with time
+`<= t` are admitted into a buffer typed concretely from the promoted
+summarized schema, and rows that have left every window are dropped from
+its front — times are non-decreasing, so eviction is final, and the dead
+prefix is compacted amortized-O(1). Summarizer states are accumulate-only —
+there is no inverse of `update!` — so each output row folds *fresh* states
+over its window's buffered rows, oldest to newest (`First`/`Last` depend on
+the order), behind a function barrier in the `summarize.jl` style; the
+per-row cost is one buffer scan plus one `update!` per in-window row per
+window. The planned **group** summarizer subtype (invertible updates) is
+the future O(1)-per-row refinement, and per-key buffers the refinement for
+heavily keyed streams. Because states are rebuilt per row, a schema
+widening mid-stream rebuilds only the state prototypes, the buffer, and the
+emitted value vectors — there is no accumulated state to carry.
 
 ## Summarizers
 
@@ -335,7 +397,8 @@ request order, from the same shared state.
 
 Planned refinements (not yet implemented): structured subtypes — a
 **monoid** subtype (mergeable state, enabling map-reduce evaluation) and a
-**group** subtype (invertible updates, enabling O(1) rolling windows).
+**group** subtype (invertible updates, enabling O(1) rolling windows —
+`addrollingcolumns` today re-folds each window from fresh states).
 
 ## Interval semantics
 
@@ -385,7 +448,9 @@ frame over `[start, stop]`). `asofjoin` is stateful too: its store of
 most-recent right rows and its position in the right stream carry across
 left chunk boundaries (it is causal — a row emitted at time `t` looks only
 at right rows with time `<= t`, possibly from before `start` when
-`tolerance` widens the right window). Consequently concatenating the frames
+`tolerance` widens the right window), and so is `addrollingcolumns`, whose
+buffer of summarized rows and position in the summarized stream carry
+across augmented chunk boundaries. Consequently concatenating the frames
 of `stream(ctx, p)` always equals `load(ctx, p)`, even for stateful
 operators — but the chunk-concatenation property over *split contexts*
 still does not hold for them.
@@ -403,6 +468,7 @@ still does not hold for them.
 | `src/summarizers.jl` | `Summarizer`/`SummarizerState` interface and the concrete summarizers |
 | `src/summarize.jl` | folding kernels and the summarization transforms |
 | `src/join.jl` | the as-of join transform (`asofjoin`) |
+| `src/rolling.jl` | the rolling-window summarization transform (`addrollingcolumns`) |
 | `src/precompile.jl` | PrecompileTools workload covering the main pipeline paths |
 
 Exports: `Context`, `CausalFrame`, `CausalPipeline`, `load`, `stream`,
@@ -410,7 +476,7 @@ Exports: `Context`, `CausalFrame`, `CausalPipeline`, `load`, `stream`,
 `addcolumns`, `Summarizer`, `SummarizerState`, `Count`, `Sum`, `SumPower`,
 `Moment`, `Product`, `DotProduct`, `Mean`, `Variance`, `Std`, `Covariance`,
 `Correlation`, `Min`, `Max`, `First`, `Last`, `summarize`,
-`summarizecycles`, `addsummarycolumns`, `asofjoin`.
+`summarizecycles`, `addsummarycolumns`, `addrollingcolumns`, `asofjoin`.
 
 Dependencies: DataFrames, CSV, Tables, PrecompileTools.
 

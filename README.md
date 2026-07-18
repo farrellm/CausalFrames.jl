@@ -42,6 +42,8 @@ frame = load(Context(DateTime(2026, 1, 1), DateTime(2026, 2, 1)), p)
 | `summarize(ss; key)` | transform | summarize the whole window into rows at time `stop` |
 | `summarizecycles(ss; key)` | transform | summarize each unique timestamp independently |
 | `addsummarycolumns(ss; key)` | transform | append running summary values after each row |
+| `addrollingcolumns(windows, ss; key, from)` | transform | append summaries over named trailing windows, columns prefixed `{window}_` |
+| `asofjoin(right; key, tolerance, ...)` | transform | append the most recent right-pipeline row at or before each row's time |
 
 Each transform also has an uncurried, pipeline-first form — `filterrows(p, pred)`,
 `addcolumns(p, f)`, `summarize(p, ss; key)` — equivalent to the `|>` chain
@@ -72,6 +74,15 @@ p = readcsv("ticks.csv") |>
 *dependent* summarizer, computed from `Count()` and `SumPower(:mid, n)`;
 those are folded alongside it but appear in the output only if requested
 themselves.
+
+`addrollingcolumns` summarizes named trailing windows instead of the whole
+window so far: `addrollingcolumns((m5 = Minute(5), h1 = Hour(1)), Mean(:mid);
+key = :symbol)` appends `m5_mid_mean` and `h1_mid_mean`, each row
+summarizing the rows within its look-back (`t - lookback <= time <= t`). By
+default the pipeline summarizes itself; `from` names another pipeline to
+summarize. The summarized pipeline runs over a context widened backward by
+the longest look-back, so the first row already sees a full window; an
+empty window yields the summarizer's identity or `missing` as above.
 
 An output column takes its element type from the input column: `Min`, `Max`,
 `First`, and `Last` reproduce it verbatim, while `Sum` and `SumPower` widen it

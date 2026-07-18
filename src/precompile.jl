@@ -20,6 +20,11 @@
         DataFrame(load(ctx, p |> summarize([Count(), Sum(:v)]; key = :sym)))
         DataFrame(load(ctx, p |> summarizecycles(Sum(:v); key = :sym)))
         DataFrame(load(ctx, p |> addsummarycolumns([First(:v), Last(:v)])))
+        DataFrame(load(ctx, p |> addrollingcolumns((w2 = 2,),
+                                                   [Sum(:v), Mean(:v)];
+                                                   key = :sym)))
+        DataFrame(load(ctx, clock(1) |> addrollingcolumns(
+            (w1 = 1, w3 = 3), [Count(), Min(:qty)]; from = readcsv(csv))))
         DataFrame(load(ctx, p |> asofjoin(readcsv(csv); key = :sym,
                                           rightprefix = "r", righttime = :rt)))
         DataFrame(load(ctx, clock(1) |> asofjoin(readcsv(csv); tolerance = 2,
