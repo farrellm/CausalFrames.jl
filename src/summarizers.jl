@@ -325,6 +325,8 @@ function widenstate(st::SumPowerState{C,N,A}, intypes::NamedTuple) where {C,N,A}
     return SumPowerState{C,N,A2}(st.power, convert(A2, st.total))
 end
 
+# A monoid but not a group: dividing a row back out fails outright at zero
+# (the total is 0 no matter what else was folded) and truncates for integers.
 """
     Product(column) -> Summarizer
 
@@ -336,8 +338,6 @@ signed and unsigned integers widen (`Int32` multiplies to `Int64`), everything
 else keeps its type (`Float32` stays `Float32`). Like [`Sum`](@ref), the
 accumulator is built at that width up front.
 """
-# A monoid but not a group: dividing a row back out fails outright at zero
-# (the total is 0 no matter what else was folded) and truncates for integers.
 struct Product{C} <: MonoidSummarizer end
 Product(column::Symbol) = Product{column}()
 
