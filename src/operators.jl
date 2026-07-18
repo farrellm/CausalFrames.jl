@@ -142,10 +142,14 @@ end
 
 """
     filterrows(pred) -> (CausalPipeline -> CausalPipeline)
+    filterrows(p::CausalPipeline, pred) -> CausalPipeline
 
 A transform keeping the rows where `pred(row)` is `true`. `pred` receives a
 map-like row object supporting `row.name` and `row[:name]` access,
 including `row.time`.
+
+The curried form composes with `|>`; the uncurried form applies directly, so
+`filterrows(p, pred)` is equivalent to `p |> filterrows(pred)`.
 """
 function filterrows(pred)
     return function (p::CausalPipeline)
@@ -154,6 +158,7 @@ function filterrows(pred)
         end
     end
 end
+filterrows(p::CausalPipeline, pred) = filterrows(pred)(p)
 
 function filterchunk(pred, c::DataFrame)
     mask = rowmask(pred, Tables.columntable(c))
@@ -171,11 +176,15 @@ end
 
 """
     addcolumns(f) -> (CausalPipeline -> CausalPipeline)
+    addcolumns(p::CausalPipeline, f) -> CausalPipeline
 
 A transform adding columns computed row by row: `f(row)` must return a
 `NamedTuple` mapping new column names to that row's values. The returned
 tuple may not contain a `time` key. `f` receives the same map-like row
 object as [`filterrows`](@ref).
+
+The curried form composes with `|>`; the uncurried form applies directly, so
+`addcolumns(p, f)` is equivalent to `p |> addcolumns(f)`.
 """
 function addcolumns(f)
     return function (p::CausalPipeline)
@@ -184,6 +193,7 @@ function addcolumns(f)
         end
     end
 end
+addcolumns(p::CausalPipeline, f) = addcolumns(f)(p)
 
 function addchunk(f, c::DataFrame)
     vals = rowvalues(f, Tables.columntable(c))

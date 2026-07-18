@@ -285,3 +285,29 @@ end
         readcsv(path) |> addsummarycolumns(MinMax(:qty)) |>
             addsummarycolumns(MinMax(:qty)))
 end
+
+@testset "uncurried summarization forms" begin
+    path = joinpath(mktempdir(), "trades.csv")
+    write(path, """
+        time,sym,qty
+        1,a,10
+        2,b,20
+        2,a,30
+        4,a,40
+        """)
+    src = readcsv(path)
+
+    # the pipeline-first forms match the |> chain, including the key keyword
+    for (curried, uncurried) in (
+            (src |> summarize([Count(), Sum(:qty)]),
+             summarize(src, [Count(), Sum(:qty)])),
+            (src |> summarize(Sum(:qty); key = :sym),
+             summarize(src, Sum(:qty); key = :sym)),
+            (src |> summarizecycles(Sum(:qty)),
+             summarizecycles(src, Sum(:qty))),
+            (src |> addsummarycolumns(Sum(:qty); key = :sym),
+             addsummarycolumns(src, Sum(:qty); key = :sym)))
+        @test DataFrame(load(Context(0, 9), curried)) ==
+              DataFrame(load(Context(0, 9), uncurried))
+    end
+end

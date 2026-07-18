@@ -74,7 +74,11 @@ Two kinds, both compatible with the chaining operator `|>`:
 - **Sources** take ordinary arguments and return a `CausalPipeline`.
 - **Transforms** are curried: `filterrows(pred)` returns a
   `CausalPipeline -> CausalPipeline` function, so
-  `source |> transform(args)` chains naturally.
+  `source |> transform(args)` chains naturally. Each transform also has an
+  uncurried, pipeline-first form `transform(p, args)` (e.g.
+  `filterrows(p, pred)`), equivalent to `p |> transform(args)`, for when the
+  applied form reads clearer than a chain. The curried form is primary; the
+  uncurried form is a thin wrapper, so `|>` stays overhead-free.
 
 | Operator | Kind | Semantics |
 |---|---|---|

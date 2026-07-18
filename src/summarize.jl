@@ -268,6 +268,7 @@ end
 
 """
     summarize(summarizers; key = nothing) -> (CausalPipeline -> CausalPipeline)
+    summarize(p::CausalPipeline, summarizers; key = nothing) -> CausalPipeline
 
 A transform summarizing the whole context: every input row is folded into the
 summarizers and a single batch of rows is emitted at the context's end time
@@ -279,6 +280,9 @@ Without `key` the output is exactly one row (the identity summary — e.g.
 `count = 0` — when the input is empty). With `key` (a column name or
 collection of column names) one row is emitted per unique key value, sorted
 by key; an empty input yields no rows.
+
+The curried form composes with `|>`; the uncurried form applies directly, so
+`summarize(p, ss; key)` is equivalent to `p |> summarize(ss; key)`.
 """
 function summarize(summarizers; key = nothing)
     return function (p::CausalPipeline)
@@ -310,15 +314,21 @@ function summarize(summarizers; key = nothing)
         end
     end
 end
+summarize(p::CausalPipeline, summarizers; kwargs...) =
+    summarize(summarizers; kwargs...)(p)
 
 """
     summarizecycles(summarizers; key = nothing) -> (CausalPipeline -> CausalPipeline)
+    summarizecycles(p::CausalPipeline, summarizers; key = nothing) -> CausalPipeline
 
 A transform summarizing each *cycle* — a maximal run of rows sharing one
 timestamp — independently, with fresh state per cycle. For every cycle one
 row is emitted at the cycle's time (per unique key value, sorted by key, when
 `key` is given), dropping the input columns. A cycle spanning a chunk
 boundary is summarized as a single cycle.
+
+The curried form composes with `|>`; the uncurried form applies directly, so
+`summarizecycles(p, ss; key)` is equivalent to `p |> summarizecycles(ss; key)`.
 """
 function summarizecycles(summarizers; key = nothing)
     return function (p::CausalPipeline)
@@ -357,9 +367,12 @@ function summarizecycles(summarizers; key = nothing)
         end
     end
 end
+summarizecycles(p::CausalPipeline, summarizers; kwargs...) =
+    summarizecycles(summarizers; kwargs...)(p)
 
 """
     addsummarycolumns(summarizers; key = nothing) -> (CausalPipeline -> CausalPipeline)
+    addsummarycolumns(p::CausalPipeline, summarizers; key = nothing) -> CausalPipeline
 
 A transform keeping all existing columns and appending each summarizer's
 value columns, holding the running summary *after* that row has been folded
@@ -367,6 +380,10 @@ in. With `key` (a column name or collection of column names) a separate
 running summary is kept per unique key value. State runs over the whole
 window, carried across chunk boundaries. The output columns may not collide
 with existing columns.
+
+The curried form composes with `|>`; the uncurried form applies directly, so
+`addsummarycolumns(p, ss; key)` is equivalent to
+`p |> addsummarycolumns(ss; key)`.
 """
 function addsummarycolumns(summarizers; key = nothing)
     return function (p::CausalPipeline)
@@ -395,3 +412,5 @@ function addsummarycolumns(summarizers; key = nothing)
         end
     end
 end
+addsummarycolumns(p::CausalPipeline, summarizers; kwargs...) =
+    addsummarycolumns(summarizers; kwargs...)(p)
