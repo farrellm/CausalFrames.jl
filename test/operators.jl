@@ -78,6 +78,15 @@ end
     # transforms on an empty frame are no-ops
     p = emptyframe() |> filterrows(r -> true) |> addcolumns(r -> (; y = 1))
     @test nrow(load(Context(0, 100), p)) == 0
+
+    # the uncurried, pipeline-first forms are equivalent to the |> chain
+    src = readcsv(path)
+    curried = src |> filterrows(r -> r.bid >= 9.5) |>
+        addcolumns(r -> (; mid = (r.bid + r.ask) / 2))
+    uncurried = addcolumns(filterrows(src, r -> r.bid >= 9.5),
+                           r -> (; mid = (r.bid + r.ask) / 2))
+    @test DataFrame(load(Context(0, 100), curried)) ==
+          DataFrame(load(Context(0, 100), uncurried))
 end
 
 @testset "readcsv chunked" begin

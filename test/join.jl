@@ -198,4 +198,15 @@
         @test nrow(frame) == 0
         @test names(frame) == ["time"]
     end
+
+    @testset "uncurried form" begin
+        left = onechunk(time = [1, 2, 3, 5], sym = ["a", "b", "a", "b"])
+        right = onechunk(time = [0, 2, 4], sym = ["a", "b", "b"],
+                         qty = [1, 2, 3])
+        # the pipeline-first form matches the |> chain, keywords forwarded
+        curried = left |> asofjoin(right; key = :sym, strict = true)
+        uncurried = asofjoin(left, right; key = :sym, strict = true)
+        @test isequal(DataFrame(load(Context(0, 10), curried)),
+                      DataFrame(load(Context(0, 10), uncurried)))
+    end
 end

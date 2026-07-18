@@ -9,6 +9,8 @@
     asofjoin(right::CausalPipeline; key = nothing, tolerance = nothing,
              strict = false, leftprefix = nothing, rightprefix = nothing,
              righttime = nothing) -> (CausalPipeline -> CausalPipeline)
+    asofjoin(left::CausalPipeline, right::CausalPipeline; key = nothing,
+             ...) -> CausalPipeline
 
 A transform joining each left row to the most recent right row whose time is
 not after the left row's time (`strict = true`: strictly before). Every left
@@ -33,6 +35,9 @@ type to support subtraction (numbers and `Dates` types do). Without
 in particular a self join (`p |> asofjoin(p)`) needs a prefix. A right
 stream producing no chunks passes left chunks through unchanged (no right
 columns, no `righttime`), except for the `leftprefix` rename.
+
+The curried form composes with `|>`; the uncurried form applies directly, so
+`asofjoin(left, right; ...)` is equivalent to `left |> asofjoin(right; ...)`.
 """
 function asofjoin(right::CausalPipeline; key = nothing, tolerance = nothing,
                   strict::Bool = false, leftprefix = nothing,
@@ -58,6 +63,8 @@ function asofjoin(right::CausalPipeline; key = nothing, tolerance = nothing,
         end
     end
 end
+asofjoin(left::CausalPipeline, right::CausalPipeline; kwargs...) =
+    asofjoin(right; kwargs...)(left)
 
 normprefix(::Nothing) = nothing
 normprefix(p::Union{Symbol,AbstractString}) = String(p)
