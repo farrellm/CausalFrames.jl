@@ -9,7 +9,8 @@ export Context, CausalFrame, CausalPipeline, load, stream, context, timetype,
     emptyframe, clock, readcsv, filterrows, addcolumns,
     Summarizer, SummarizerState, Count, Sum, SumPower, Moment, Product,
     DotProduct, Mean, Variance, Std, Covariance, Correlation, Min, Max,
-    First, Last, summarize, summarizecycles, addsummarycolumns, asofjoin
+    First, Last, summarize, summarizecycles, addsummarycolumns,
+    addrollingcolumns, asofjoin
 
 include("context.jl")
 include("frame.jl")
@@ -19,6 +20,7 @@ include("operators.jl")
 include("summarizers.jl")
 include("summarize.jl")
 include("join.jl")
+include("rolling.jl")
 include("precompile.jl")
 
 end

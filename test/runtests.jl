@@ -17,6 +17,7 @@ include("fixtures.jl")
     include("operators.jl")
     include("stream.jl")
     include("join.jl")
+    include("rolling.jl")
     include("summarize.jl")
     include("summarizers.jl")
 end
