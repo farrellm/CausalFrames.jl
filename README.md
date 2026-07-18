@@ -43,6 +43,10 @@ frame = load(Context(DateTime(2026, 1, 1), DateTime(2026, 2, 1)), p)
 | `summarizecycles(ss; key)` | transform | summarize each unique timestamp independently |
 | `addsummarycolumns(ss; key)` | transform | append running summary values after each row |
 
+Each transform also has an uncurried, pipeline-first form — `filterrows(p, pred)`,
+`addcolumns(p, f)`, `summarize(p, ss; key)` — equivalent to the `|>` chain
+(`p |> filterrows(pred)`) for when the applied form reads clearer.
+
 Row functions receive a map-like row object: `row.time`, `row.price`,
 `row[:price]`.
 
