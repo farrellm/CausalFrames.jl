@@ -264,3 +264,100 @@ end
         (x_y_covariance = -1.5, x_std = 1.0, y_std = 2.0))) ===
         (x_y_correlation = -0.75,)
 end
+
+@testset "monoid and group structure" begin
+    intypes = (time = Int64, x = Int64, y = Int64)
+    rows = [(time = 1, x = 3, y = 2), (time = 2, x = 1, y = 7),
+            (time = 3, x = 4, y = 1), (time = 4, x = 1, y = 8)]
+    function fold(s, rs)
+        st = CausalFrames.fresh(s, intypes)
+        foreach(r -> CausalFrames.update!(st, r), rs)
+        return st
+    end
+
+    # the hierarchy: the accumulators and the dependent summarizers are
+    # groups; Product and the trackers are monoids only; a plain Summarizer
+    # is neither
+    @test all(s -> s isa GroupSummarizer,
+              [Count(), Sum(:x), SumPower(:x, 2), DotProduct(:x, :y),
+               Moment(:x, 2), Mean(:x), Variance(:x), Std(:x),
+               Covariance(:x, :y), Correlation(:x, :y)])
+    @test all(s -> s isa MonoidSummarizer && !(s isa GroupSummarizer),
+              [Product(:x), Min(:x), Max(:x), First(:x), Last(:x), MinMax(:x)])
+    @test !(Opaque(Sum(:x)) isa MonoidSummarizer)
+
+    monoids = [Count(), Sum(:x), SumPower(:x, 2), DotProduct(:x, :y),
+               Product(:x), Min(:x), Max(:x), First(:x), Last(:x), MinMax(:x)]
+
+    # combine!(dest, a, b) equals folding a's rows then b's rows, for every
+    # split — including an empty (fresh, identity) side — and tolerates dest
+    # aliasing either argument
+    for s in monoids
+        whole = CausalFrames.value(fold(s, rows))
+        for k in 0:length(rows)
+            a = fold(s, rows[1:k])
+            b = fold(s, rows[(k + 1):end])
+            dest = CausalFrames.fresh(a)
+            @test @inferred(CausalFrames.combine!(dest, a, b)) === nothing
+            @test CausalFrames.value(dest) == whole
+        end
+        a = fold(s, rows[1:2])
+        CausalFrames.combine!(a, a, fold(s, rows[3:4]))
+        @test CausalFrames.value(a) == whole
+        b = fold(s, rows[3:4])
+        CausalFrames.combine!(b, fold(s, rows[1:2]), b)
+        @test CausalFrames.value(b) == whole
+    end
+
+    # associativity, on uneven splits: (r1 ⊕ r23) ⊕ r4 == r1 ⊕ (r23 ⊕ r4)
+    for s in monoids
+        p1, p2, p3 = fold(s, rows[1:1]), fold(s, rows[2:3]), fold(s, rows[4:4])
+        l = CausalFrames.fresh(p1)
+        CausalFrames.combine!(l, p1, p2)
+        CausalFrames.combine!(l, l, p3)
+        r = CausalFrames.fresh(p1)
+        CausalFrames.combine!(r, p2, p3)
+        CausalFrames.combine!(r, p1, r)
+        @test CausalFrames.value(l) == CausalFrames.value(r)
+    end
+
+    # combining two identities stays an identity (the unseen tracker case),
+    # and the state remains usable afterwards
+    st = CausalFrames.fresh(Min(:x), intypes)
+    CausalFrames.combine!(st, CausalFrames.fresh(st), CausalFrames.fresh(st))
+    @test !st.seen
+    CausalFrames.update!(st, rows[1])
+    @test CausalFrames.value(st) == (x_min = 3,)
+
+    # the group inverse: downdating the oldest rows equals folding the rest —
+    # exact for integer accumulators
+    for s in [Count(), Sum(:x), SumPower(:x, 2), DotProduct(:x, :y)]
+        st = fold(s, rows)
+        @test @inferred(CausalFrames.downdate!(st, rows[1])) === nothing
+        CausalFrames.downdate!(st, rows[2])
+        @test CausalFrames.value(st) == CausalFrames.value(fold(s, rows[3:4]))
+    end
+
+    # a float accumulator inverts approximately (sliding-sum drift)
+    fst = CausalFrames.fresh(Sum(:x), (time = Int64, x = Float64))
+    CausalFrames.update!(fst, (time = 1, x = 0.1))
+    CausalFrames.update!(fst, (time = 2, x = 0.2))
+    CausalFrames.downdate!(fst, (time = 2, x = 0.2))
+    @test CausalFrames.value(fst).x_sum ≈ 0.1
+
+    # the derived states are fieldless, so both operations are no-ops
+    for s in [Mean(:x), Variance(:x), Correlation(:x, :y)]
+        st = CausalFrames.fresh(s, intypes)
+        @test CausalFrames.combine!(st, st, st) === nothing
+        @test CausalFrames.downdate!(st, rows[1]) === nothing
+    end
+
+    # invertibility is a property of the realized accumulator type: a
+    # missing-permitting accumulator absorbs and cannot be downdated
+    @test CausalFrames.isinvertible(CausalFrames.fresh(Sum(:x), intypes))
+    @test CausalFrames.isinvertible(CausalFrames.fresh(Count(), intypes))
+    mintypes = (time = Int64, x = Union{Missing,Int}, y = Union{Missing,Int})
+    for s in [Sum(:x), SumPower(:x, 2), DotProduct(:x, :y)]
+        @test !CausalFrames.isinvertible(CausalFrames.fresh(s, mintypes))
+    end
+end

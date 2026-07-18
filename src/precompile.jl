@@ -20,11 +20,18 @@
         DataFrame(load(ctx, p |> summarize([Count(), Sum(:v)]; key = :sym)))
         DataFrame(load(ctx, p |> summarizecycles(Sum(:v); key = :sym)))
         DataFrame(load(ctx, p |> addsummarycolumns([First(:v), Last(:v)])))
+        # all-group summarizers take the running window mode, the mixed
+        # group/monoid set the tree mode; the re-fold mode is reachable
+        # only through user summarizers without the structure, so it
+        # specializes at first call like any custom summarizer
         DataFrame(load(ctx, p |> addrollingcolumns((w2 = 2,),
                                                    [Sum(:v), Mean(:v)];
                                                    key = :sym)))
         DataFrame(load(ctx, clock(1) |> addrollingcolumns(
             (w1 = 1, w3 = 3), [Count(), Min(:qty)]; from = readcsv(csv))))
+        DataFrame(load(ctx, p |> addrollingcolumns((w2 = 2,),
+                                                   [Min(:v), Last(:v)];
+                                                   key = :sym)))
         DataFrame(load(ctx, p |> asofjoin(readcsv(csv); key = :sym,
                                           rightprefix = "r", righttime = :rt)))
         DataFrame(load(ctx, clock(1) |> asofjoin(readcsv(csv); tolerance = 2,

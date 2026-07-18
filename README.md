@@ -84,6 +84,14 @@ summarize. The summarized pipeline runs over a context widened backward by
 the longest look-back, so the first row already sees a full window; an
 empty window yields the summarizer's identity or `missing` as above.
 
+Rolling windows pick their algorithm from the summarizers' declared
+structure: `GroupSummarizer`s (`Sum`, `Mean`, …) slide a running state in
+O(1) per row by subtracting exiting rows, `MonoidSummarizer`s (`Min`,
+`Product`, …) fold each window from a segment tree of partial combinations
+in O(log window), and summarizers declaring neither re-fold each window
+from scratch — see DESIGN.md for the `combine!`/`downdate!` interface a
+custom structured summarizer implements.
+
 An output column takes its element type from the input column: `Min`, `Max`,
 `First`, and `Last` reproduce it verbatim, while `Sum` and `SumPower` widen it
 exactly as `Base.sum` does (`Int32` sums to `Int64`, `Float32` to `Float32`).

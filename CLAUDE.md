@@ -35,10 +35,15 @@ with any API or semantics change.**
 - `src/summarizers.jl` — `Summarizer` (immutable config, column name in a
   type parameter) and `SummarizerState` (running state, typed from the input
   schema) plus their interface (`emptyvalue`, `fresh`, `update!`, `value`,
-  `widenstate`, `dependencies` — unexported), and the concrete summarizers
-  (`Min`/`Max`/`First`/`Last` share one state type, parameterized by the
-  combiner; `Moment` is the dependent-summarizer example, reading its
-  dependencies' values through the two-argument `value(st, vals)`)
+  `widenstate`, `dependencies`, `combine!`, `downdate!`, `isinvertible` —
+  unexported), the structured subtypes `MonoidSummarizer` (associative
+  `combine!` over stream-ordered ranges, fresh state as identity) and
+  `GroupSummarizer <: MonoidSummarizer` (invertible via `downdate!`), and
+  the concrete summarizers (`Min`/`Max`/`First`/`Last` share one state
+  type, parameterized by the combiner — monoids only, as is `Product`;
+  the accumulators and all dependent summarizers are groups; `Moment` is
+  the dependent-summarizer example, reading its dependencies' values
+  through the two-argument `value(st, vals)`)
 - `src/summarize.jl` — the folding kernels and the transforms `summarize`,
   `summarizecycles`, `addsummarycolumns`; `prototypes` expands dependencies
   topologically and returns the requested output names, which ride through
@@ -49,6 +54,17 @@ with any API or semantics change.**
   over the left stream pulls right chunks on demand (two-pointer merge, per
   left row) into a concretely typed per-key store; `tolerance` widens the
   right context by `start - tolerance` (the one place times are subtracted)
+- `src/segtree.jl` — the monoid segment tree behind the rolling tree mode:
+  implicit array tree of `combine!`d partial state tuples, append-only rows,
+  logical front expiry (`head`), amortized rebuilds, order-preserving
+  two-accumulator range queries (`treepush!`, `treequery`, `windowstart`)
+- `src/rolling.jl` — `addrollingcolumns` picks its window algorithm from the
+  expanded prototype tuple's structure: all-group → per-key running states
+  with per-window eviction heads, O(1)/row (`rollsegmentrunning!`);
+  all-monoid → per-key segment trees, O(log n)/row (`rollsegmenttree!`);
+  otherwise the re-fold baseline (`rollsegment!`, the differential-test
+  oracle). Running demotes to tree when widening lets `missing` into an
+  accumulator (`isinvertible`); widening rebuilds structures from live rows
 - `src/precompile.jl` — PrecompileTools workload over the main paths
 
 ## Invariants and conventions
