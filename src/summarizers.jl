@@ -30,11 +30,38 @@ dependencies are resolved through the same name-keyed deduplication, so
 shared work is computed once, and appear in the output only when requested
 by the user themselves.
 
-Planned refinements will add structured subtypes: a monoid subtype (mergeable
-state, enabling map-reduce) and a group subtype (invertible updates, enabling
-efficient rolling windows).
+Structured subtypes refine what the state supports: a
+[`MonoidSummarizer`](@ref)'s states combine associatively
+([`combine!`](@ref)), and a [`GroupSummarizer`](@ref)'s updates are
+additionally invertible ([`downdate!`](@ref)). `addrollingcolumns` selects
+faster window algorithms when every summarizer it folds declares the
+structure.
 """
 abstract type Summarizer end
+
+"""
+    MonoidSummarizer <: Summarizer
+
+A summarizer whose states form a monoid: [`combine!`](@ref) merges the states
+of two adjacent, stream-ordered row ranges into the state of their
+concatenation, associatively, with a [`fresh`](@ref) state as the identity.
+`addrollingcolumns` exploits this to answer each window from a tree of
+partial combinations — O(log window) per row — instead of re-folding every
+window row.
+"""
+abstract type MonoidSummarizer <: Summarizer end
+
+"""
+    GroupSummarizer <: MonoidSummarizer
+
+A monoid summarizer whose updates can also be undone: [`downdate!`](@ref)
+removes a previously folded row. `addrollingcolumns` exploits this to slide
+each window in O(1) amortized per row, subtracting the exiting rows from a
+running state — unless [`isinvertible`](@ref) reports that the realized
+accumulator type defeats the inverse (a `missing` absorbs), in which case it
+falls back to the monoid tree.
+"""
+abstract type GroupSummarizer <: MonoidSummarizer end
 
 """
     SummarizerState
@@ -139,6 +166,44 @@ Defaults to `()`, which is correct for any self-contained summarizer.
 """
 dependencies(::Summarizer) = ()
 
+"""
+    combine!(dest::SummarizerState, a::SummarizerState, b::SummarizerState)
+
+Overwrite `dest` with the combination of `a` and `b`: the state that folding
+`a`'s rows and then `b`'s rows into a fresh state would produce. Required of
+a [`MonoidSummarizer`](@ref)'s states, with the monoid laws: combination is
+associative, and a [`fresh`](@ref) state is the identity on either side.
+Callers guarantee that every row folded into `a` precedes every row folded
+into `b` in stream order — which is what lets order-sensitive summarizers
+like `First` and `Last` combine. All three states are of the same concrete
+type, and `dest` may alias `a` or `b`, so an implementation reads its inputs
+before writing.
+"""
+function combine! end
+
+"""
+    downdate!(st::SummarizerState, row)
+
+Remove one previously folded row from the state — the inverse of
+[`update!`](@ref). Required of a [`GroupSummarizer`](@ref)'s states. The
+inverse is exact when the accumulator arithmetic is (integer sums); a
+floating-point accumulator carries the usual sliding-sum round-off drift,
+and an absorbing accumulated value (`missing`, `NaN`) cannot be subtracted
+away at all — [`isinvertible`](@ref) reports the statically detectable case.
+"""
+function downdate! end
+
+"""
+    isinvertible(st::SummarizerState) -> Bool
+
+Whether [`downdate!`](@ref) actually inverts [`update!`](@ref) for this
+state's realized accumulator type. Defaults to `true`; states whose
+accumulator admits `missing` return `false`, since one `missing` row would
+poison the running total beyond recovery. `addrollingcolumns` consults this
+when choosing the running-state window algorithm.
+"""
+isinvertible(::SummarizerState) = true
+
 # The element type Base.sum produces over a column of eltype T: small signed
 # and unsigned integers widen to Int/UInt, everything else keeps its type. The
 # accumulator is built at this width up front, so the folding loop is a plain
@@ -159,7 +224,7 @@ dottype(::Type{Ta}, ::Type{Tb}) where {Ta,Tb} =
 
 Counts rows. Produces the output column `:count`, of type `Int`.
 """
-struct Count <: Summarizer end
+struct Count <: GroupSummarizer end
 
 mutable struct CountState <: SummarizerState
     n::Int
@@ -169,6 +234,9 @@ emptyvalue(::Count) = (; count = 0)
 fresh(::Count, ::NamedTuple) = CountState(0)
 fresh(::CountState) = CountState(0)
 @inline update!(st::CountState, row) = (st.n += 1; nothing)
+@inline downdate!(st::CountState, row) = (st.n -= 1; nothing)
+combine!(dest::CountState, a::CountState, b::CountState) =
+    (dest.n = a.n + b.n; nothing)
 value(st::CountState) = (; count = st.n)
 
 """
@@ -181,7 +249,7 @@ The output column's element type is the one `Base.sum` would produce: small
 signed and unsigned integers widen (`Int32` sums to `Int64`), everything else
 keeps its type (`Float32` sums to `Float32`).
 """
-struct Sum{C} <: Summarizer end
+struct Sum{C} <: GroupSummarizer end
 Sum(column::Symbol) = Sum{column}()
 
 mutable struct SumState{C,N,A} <: SummarizerState
@@ -196,6 +264,12 @@ end
 fresh(::SumState{C,N,A}) where {C,N,A} = SumState{C,N,A}(convert(A, 0))
 @inline update!(st::SumState{C}, row) where {C} =
     (st.total += getproperty(row, C); nothing)
+@inline downdate!(st::SumState{C}, row) where {C} =
+    (st.total -= getproperty(row, C); nothing)
+combine!(dest::SumState{C,N,A}, a::SumState{C,N,A},
+         b::SumState{C,N,A}) where {C,N,A} =
+    (dest.total = a.total + b.total; nothing)
+isinvertible(::SumState{C,N,A}) where {C,N,A} = !(Missing <: A)
 value(st::SumState{C,N,A}) where {C,N,A} = NamedTuple{(N,),Tuple{A}}((st.total,))
 function widenstate(st::SumState{C,N,A}, intypes::NamedTuple) where {C,N,A}
     A2 = sumtype(intypes[C])
@@ -214,7 +288,7 @@ follows the same rule as [`Sum`](@ref), applied to the type of `column ^ n`.
 `SumPower(column, 1)` produces `:x_sumpower_1`, a distinct column from
 `Sum(:x)`'s `:x_sum`.
 """
-struct SumPower{C} <: Summarizer
+struct SumPower{C} <: GroupSummarizer
     power::Int
 end
 SumPower(column::Symbol, power::Integer) = SumPower{column}(Int(power))
@@ -237,6 +311,12 @@ fresh(st::SumPowerState{C,N,A}) where {C,N,A} =
     SumPowerState{C,N,A}(st.power, convert(A, 0))
 @inline update!(st::SumPowerState{C}, row) where {C} =
     (st.total += getproperty(row, C)^st.power; nothing)
+@inline downdate!(st::SumPowerState{C}, row) where {C} =
+    (st.total -= getproperty(row, C)^st.power; nothing)
+combine!(dest::SumPowerState{C,N,A}, a::SumPowerState{C,N,A},
+         b::SumPowerState{C,N,A}) where {C,N,A} =
+    (dest.total = a.total + b.total; nothing)
+isinvertible(::SumPowerState{C,N,A}) where {C,N,A} = !(Missing <: A)
 value(st::SumPowerState{C,N,A}) where {C,N,A} =
     NamedTuple{(N,),Tuple{A}}((st.total,))
 function widenstate(st::SumPowerState{C,N,A}, intypes::NamedTuple) where {C,N,A}
@@ -245,6 +325,8 @@ function widenstate(st::SumPowerState{C,N,A}, intypes::NamedTuple) where {C,N,A}
     return SumPowerState{C,N,A2}(st.power, convert(A2, st.total))
 end
 
+# A monoid but not a group: dividing a row back out fails outright at zero
+# (the total is 0 no matter what else was folded) and truncates for integers.
 """
     Product(column) -> Summarizer
 
@@ -256,7 +338,7 @@ signed and unsigned integers widen (`Int32` multiplies to `Int64`), everything
 else keeps its type (`Float32` stays `Float32`). Like [`Sum`](@ref), the
 accumulator is built at that width up front.
 """
-struct Product{C} <: Summarizer end
+struct Product{C} <: MonoidSummarizer end
 Product(column::Symbol) = Product{column}()
 
 mutable struct ProductState{C,N,A} <: SummarizerState
@@ -271,6 +353,9 @@ end
 fresh(::ProductState{C,N,A}) where {C,N,A} = ProductState{C,N,A}(convert(A, 1))
 @inline update!(st::ProductState{C}, row) where {C} =
     (st.total *= getproperty(row, C); nothing)
+combine!(dest::ProductState{C,N,A}, a::ProductState{C,N,A},
+         b::ProductState{C,N,A}) where {C,N,A} =
+    (dest.total = a.total * b.total; nothing)
 value(st::ProductState{C,N,A}) where {C,N,A} = NamedTuple{(N,),Tuple{A}}((st.total,))
 function widenstate(st::ProductState{C,N,A}, intypes::NamedTuple) where {C,N,A}
     A2 = prodtype(intypes[C])
@@ -290,7 +375,7 @@ so it widens the same way [`Sum`](@ref) does. Each term is formed in the
 accumulator's (widened) type, so a per-row product cannot overflow the way
 multiplying in the input columns' own types would.
 """
-struct DotProduct{A,B} <: Summarizer end
+struct DotProduct{A,B} <: GroupSummarizer end
 DotProduct(a::Symbol, b::Symbol) = DotProduct{a,b}()
 
 mutable struct DotProductState{A,B,N,Acc} <: SummarizerState
@@ -308,6 +393,13 @@ fresh(::DotProductState{A,B,N,Acc}) where {A,B,N,Acc} =
 @inline update!(st::DotProductState{A,B,N,Acc}, row) where {A,B,N,Acc} =
     (st.total += convert(Acc, getproperty(row, A)) * convert(Acc, getproperty(row, B));
      nothing)
+@inline downdate!(st::DotProductState{A,B,N,Acc}, row) where {A,B,N,Acc} =
+    (st.total -= convert(Acc, getproperty(row, A)) * convert(Acc, getproperty(row, B));
+     nothing)
+combine!(dest::DotProductState{A,B,N,Acc}, a::DotProductState{A,B,N,Acc},
+         b::DotProductState{A,B,N,Acc}) where {A,B,N,Acc} =
+    (dest.total = a.total + b.total; nothing)
+isinvertible(::DotProductState{A,B,N,Acc}) where {A,B,N,Acc} = !(Missing <: Acc)
 value(st::DotProductState{A,B,N,Acc}) where {A,B,N,Acc} =
     NamedTuple{(N,),Tuple{Acc}}((st.total,))
 function widenstate(st::DotProductState{A,B,N,Acc}, intypes::NamedTuple) where {A,B,N,Acc}
@@ -329,7 +421,7 @@ A dependent summarizer, computed as `SumPower(column, n)` divided by
 if requested themselves. The output column's element type is the division's
 result (`Int` input divides to `Float64`, `Float32` stays `Float32`).
 """
-struct Moment{C} <: Summarizer
+struct Moment{C} <: GroupSummarizer
     order::Int
 end
 Moment(column::Symbol, order::Integer) = Moment{column}(Int(order))
@@ -368,7 +460,7 @@ A dependent summarizer, computed as [`Sum`](@ref)`(column)` divided by
 if requested themselves. The output column's element type is the division's
 result (`Int` input divides to `Float64`, `Float32` stays `Float32`).
 """
-struct Mean{C} <: Summarizer end
+struct Mean{C} <: GroupSummarizer end
 Mean(column::Symbol) = Mean{column}()
 
 struct MeanState{C,N,S} <: SummarizerState end
@@ -404,7 +496,7 @@ the computation's result (`Float64` for integer input, `Float32` for
 `Variance` of the same column cannot be requested together in one call — they
 would share `:x_variance` and collapse under the name-keyed deduplication.
 """
-struct Variance{C} <: Summarizer
+struct Variance{C} <: GroupSummarizer
     corrected::Bool
 end
 Variance(column::Symbol; corrected::Bool = true) = Variance{column}(corrected)
@@ -445,7 +537,7 @@ A dependent summarizer that folds `Variance(column; corrected)` alongside it
 variance is clamped to zero before the square root, so folding never raises a
 `DomainError`.
 """
-struct Std{C} <: Summarizer
+struct Std{C} <: GroupSummarizer
     corrected::Bool
 end
 Std(column::Symbol; corrected::Bool = true) = Std{column}(corrected)
@@ -483,7 +575,7 @@ equals `Variance(:x; corrected)`.
 
 Like [`Variance`](@ref), `corrected` is not part of the output name.
 """
-struct Covariance{A,B} <: Summarizer
+struct Covariance{A,B} <: GroupSummarizer
     corrected::Bool
 end
 Covariance(a::Symbol, b::Symbol; corrected::Bool = true) =
@@ -532,7 +624,7 @@ It is a dependent summarizer over `Covariance(a, b)`, `Std(a)`, and `Std(b)`;
 those are folded alongside it but appear in the output only if requested
 themselves.
 """
-struct Correlation{A,B} <: Summarizer end
+struct Correlation{A,B} <: GroupSummarizer end
 Correlation(a::Symbol, b::Symbol) = Correlation{a,b}()
 
 struct CorrelationState{A,B,N,CV,SA,SB} <: SummarizerState end
@@ -558,6 +650,15 @@ fresh(st::CorrelationState) = st
     V = Base.promote_op(/, Cvf, Base.promote_op(*, Saf, Sbf))
     return NamedTuple{(N,),Tuple{V}}((_clampcor(vals[CV] / (vals[SA] * vals[SB])),))
 end
+
+# The derived states are fieldless — the summary is computed from the
+# dependencies' values at emission time — so combining and downdating them is
+# a no-op; their group structure is exactly that of their (transitively all
+# group) dependencies, which the transforms fold alongside them.
+const DerivedState = Union{MomentState,MeanState,VarianceState,StdState,
+                           CovarianceState,CorrelationState}
+combine!(::DerivedState, ::DerivedState, ::DerivedState) = nothing
+@inline downdate!(::DerivedState, row) = nothing
 
 # Min/Max/First/Last have no identity element, and all four track one value of
 # the input column's type, so they share a state. `F` is the singleton type of
@@ -591,6 +692,25 @@ fresh(::TrackState{C,N,T,F}) where {C,N,T,F} = TrackState{C,N,T,F}()
     st.seen = true
     return nothing
 end
+# Reads both inputs before writing, so it tolerates dest aliasing a or b; the
+# ordered-ranges law is what makes keepfirst/keeplast correct here.
+function combine!(dest::TrackState{C,N,T,F}, a::TrackState{C,N,T,F},
+                  b::TrackState{C,N,T,F}) where {C,N,T,F}
+    if a.seen && b.seen
+        v = F.instance(a.val, b.val)
+        dest.val = v
+        dest.seen = true
+    elseif a.seen
+        dest.val = a.val
+        dest.seen = true
+    elseif b.seen
+        dest.val = b.val
+        dest.seen = true
+    else
+        dest.seen = false
+    end
+    return nothing
+end
 value(st::TrackState{C,N,T}) where {C,N,T} = NamedTuple{(N,),Tuple{T}}((st.val,))
 function widenstate(st::TrackState{C,N,T,F}, intypes::NamedTuple) where {C,N,T,F}
     T2 = intypes[C]
@@ -606,7 +726,7 @@ Tracks the minimum of `column`. Produces the output column
 `Symbol(column, :_min)`, e.g. `Min(:x)` produces `:x_min`, with the same
 element type as `column`. The minimum of no rows is `missing`.
 """
-struct Min{C} <: Summarizer end
+struct Min{C} <: MonoidSummarizer end
 Min(column::Symbol) = Min{column}()
 
 emptyvalue(::Min{C}) where {C} = NamedTuple{(Symbol(C, :_min),)}((missing,))
@@ -620,7 +740,7 @@ Tracks the maximum of `column`. Produces the output column
 `Symbol(column, :_max)`, e.g. `Max(:x)` produces `:x_max`, with the same
 element type as `column`. The maximum of no rows is `missing`.
 """
-struct Max{C} <: Summarizer end
+struct Max{C} <: MonoidSummarizer end
 Max(column::Symbol) = Max{column}()
 
 emptyvalue(::Max{C}) where {C} = NamedTuple{(Symbol(C, :_max),)}((missing,))
@@ -634,7 +754,7 @@ Keeps the value of `column` from the first row folded in. Produces the output
 column `Symbol(column, :_first)`, e.g. `First(:x)` produces `:x_first`, with
 the same element type as `column`. The first of no rows is `missing`.
 """
-struct First{C} <: Summarizer end
+struct First{C} <: MonoidSummarizer end
 First(column::Symbol) = First{column}()
 
 emptyvalue(::First{C}) where {C} = NamedTuple{(Symbol(C, :_first),)}((missing,))
@@ -648,7 +768,7 @@ Keeps the value of `column` from the most recent row folded in. Produces the
 output column `Symbol(column, :_last)`, e.g. `Last(:x)` produces `:x_last`,
 with the same element type as `column`. The last of no rows is `missing`.
 """
-struct Last{C} <: Summarizer end
+struct Last{C} <: MonoidSummarizer end
 Last(column::Symbol) = Last{column}()
 
 emptyvalue(::Last{C}) where {C} = NamedTuple{(Symbol(C, :_last),)}((missing,))

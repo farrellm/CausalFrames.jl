@@ -70,6 +70,8 @@ summarizer.
 
 ```@docs
 Summarizer
+MonoidSummarizer
+GroupSummarizer
 SummarizerState
 CausalFrames.emptyvalue
 CausalFrames.fresh
@@ -77,6 +79,9 @@ CausalFrames.update!
 CausalFrames.value
 CausalFrames.widenstate
 CausalFrames.dependencies
+CausalFrames.combine!
+CausalFrames.downdate!
+CausalFrames.isinvertible
 ```
 
 ## Internals

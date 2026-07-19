@@ -200,20 +200,49 @@ the row itself, and every row sharing its timestamp, is in its own window.
   output cross product, at construction time.
 
 The implementation is a `chunkmap` over the augmented stream that pulls
-summarized chunks on demand (the `asofjoin` machinery): rows with time
-`<= t` are admitted into a buffer typed concretely from the promoted
-summarized schema, and rows that have left every window are dropped from
-its front — times are non-decreasing, so eviction is final, and the dead
-prefix is compacted amortized-O(1). Summarizer states are accumulate-only —
-there is no inverse of `update!` — so each output row folds *fresh* states
-over its window's buffered rows, oldest to newest (`First`/`Last` depend on
-the order), behind a function barrier in the `summarize.jl` style; the
-per-row cost is one buffer scan plus one `update!` per in-window row per
-window. The planned **group** summarizer subtype (invertible updates) is
-the future O(1)-per-row refinement, and per-key buffers the refinement for
-heavily keyed streams. Because states are rebuilt per row, a schema
-widening mid-stream rebuilds only the state prototypes, the buffer, and the
-emitted value vectors — there is no accumulated state to carry.
+summarized chunks on demand (the `asofjoin` machinery). Times are
+non-decreasing, so windows slide forward monotonically: per window and key,
+rows enter in stream order and expire for good. The window algorithm
+follows the summarizers' structure, classified over the *expanded*
+prototype tuple at construction time:
+
+- **All `GroupSummarizer`s — running mode.** Each window keeps per-key
+  running states (a `Dict` from key to state tuple plus a live-row count):
+  admitted rows are `update!`d in, and a per-window eviction head over the
+  shared row buffer `downdate!`s rows as they age out — O(1) amortized per
+  row per window. A key's group is deleted when its last row leaves, so an
+  absent key *means* an empty window and emits the empty values (`Mean`
+  over an empty window is `missing`, never `0/0`), exactly as the re-fold
+  path's seen-flag decides it. Floating-point accumulators carry the usual
+  sliding-sum drift (subtraction is not a bit-exact inverse of addition),
+  and an absorbing accumulated value (`NaN`) persists until its key's
+  window empties; both are inherent to running-state sliding windows.
+- **All `MonoidSummarizer`s — tree mode.** Rows append to per-key segment
+  trees (`segtree.jl`) whose nodes hold the `combine!` of their children;
+  each output row binary-searches its window's start per look-back — using
+  the kernel's exact membership predicate `t - s <= lookback`, never a
+  rearrangement of it — and folds the window from O(log n) partial
+  combinations, order-preserved for `First`/`Last`. Expired rows leave the
+  tree only logically (a head index) and are dropped at the next
+  capacity-triggered rebuild, amortized O(1) per append; a query never
+  touches a node unless its whole range is in the window, which is also
+  what makes an expired absorbing leaf (`missing`, `NaN`) harmless.
+- **Anything less — re-fold mode.** Each output row folds *fresh* states
+  over its window's buffered rows, oldest to newest, one buffer scan plus
+  one `update!` per in-window row per window; the always-correct baseline,
+  and the oracle the fast paths are differentially tested against.
+
+The candidate mode is re-checked against the realized states whenever they
+are built or widened: an accumulator widened to admit `missing` absorbs and
+defeats `downdate!` (`isinvertible`), demoting running to tree mid-stream —
+the tree recovers a poisoned window once the missing row expires, where a
+running state never could. Widening only promotes, so a mode can demote but
+never return. A schema widening rebuilds the incremental structures from
+the live rows — rare, O(live), and correct for every transition. In every
+mode the type-unstable setup happens once per chunk and the per-row work
+sits behind concretely-typed function barriers; only the (possibly
+heterogeneous) look-backs peel vararg-style, the per-window dicts and value
+vectors being homogeneous and indexable type-stably.
 
 ## Summarizers
 
@@ -251,7 +280,22 @@ The interface, extended by concrete subtypes (unexported — extend
   see "Element types across chunks" below;
 - `dependencies(s) -> Tuple` — optional (defaults to `()`); the summarizers
   whose values `s` reads in the two-argument `value`; see "Dependent
-  summarizers" below.
+  summarizers" below;
+- `combine!(dest, a, b)` — required of a `MonoidSummarizer`'s states (see
+  "Structured subtypes" below): overwrite `dest` with the state that folding
+  `a`'s rows and then `b`'s rows into a fresh state would produce. The laws:
+  combination is associative, a `fresh` state is the identity on either
+  side, and callers guarantee that every row folded into `a` precedes every
+  row folded into `b` in stream order — which is what lets the
+  order-sensitive `First`/`Last` combine. All three states are of the same
+  concrete type, and `dest` may alias `a` or `b`, so implementations read
+  their inputs before writing;
+- `downdate!(st, row)` — required of a `GroupSummarizer`'s states: remove a
+  previously folded row, the inverse of `update!`;
+- `isinvertible(st) -> Bool` — optional (defaults to `true`): whether
+  `downdate!` actually inverts `update!` for the state's realized
+  accumulator type; a `Missing`-admitting accumulator returns `false`,
+  since one `missing` row would poison the running total beyond recovery.
 
 Output column names are deterministic, formed by suffixing the column name:
 `Sum(:x)` produces `:x_sum`, `Min(:x)` produces `:x_min`, and `SumPower(:x, 2)`
@@ -395,10 +439,36 @@ even share a name with a key column or, under `addsummarycolumns`, an
 existing input column); requesting it alongside the dependent emits it, in
 request order, from the same shared state.
 
-Planned refinements (not yet implemented): structured subtypes — a
-**monoid** subtype (mergeable state, enabling map-reduce evaluation) and a
-**group** subtype (invertible updates, enabling O(1) rolling windows —
-`addrollingcolumns` today re-folds each window from fresh states).
+### Structured subtypes
+
+Two abstract refinements sit between `Summarizer` and the concrete types,
+declaring what a summarizer's states support beyond folding:
+
+- `MonoidSummarizer <: Summarizer` — states combine associatively over
+  adjacent, stream-ordered row ranges (`combine!`), with a `fresh` state as
+  the identity.
+- `GroupSummarizer <: MonoidSummarizer` — updates are additionally
+  invertible (`downdate!`), modulo `isinvertible`'s per-accumulator-type
+  escape hatch.
+
+`addrollingcolumns` selects its window algorithm from this structure (see
+"Rolling windows"). The classification of the built-ins:
+
+- **Groups**: `Count`, `Sum`, `SumPower`, `DotProduct` — subtraction is the
+  exact inverse of addition for integer accumulators (floats carry the
+  usual sliding-sum drift). The dependent summarizers (`Moment` through
+  `Correlation`) are groups too: their states are fieldless, so `combine!`
+  and `downdate!` are no-ops, and their effective structure is that of
+  their transitive dependencies — all of which are the group accumulators
+  above.
+- **Monoids only**: `Product` — dividing a row back out fails outright at
+  zero (the total is `0` regardless of what else was folded) and truncates
+  for integers; `Min`/`Max`/`First`/`Last` — no inverse exists, but two
+  ordered sub-ranges combine (for `First`/`Last` *because* the ranges are
+  ordered, which is why the law requires it).
+
+A custom summarizer that declares neither still works everywhere; the
+rolling transform just keeps its re-fold path for any tuple containing one.
 
 ## Interval semantics
 
@@ -468,12 +538,14 @@ still does not hold for them.
 | `src/summarizers.jl` | `Summarizer`/`SummarizerState` interface and the concrete summarizers |
 | `src/summarize.jl` | folding kernels and the summarization transforms |
 | `src/join.jl` | the as-of join transform (`asofjoin`) |
+| `src/segtree.jl` | the monoid segment tree behind the rolling tree mode |
 | `src/rolling.jl` | the rolling-window summarization transform (`addrollingcolumns`) |
 | `src/precompile.jl` | PrecompileTools workload covering the main pipeline paths |
 
 Exports: `Context`, `CausalFrame`, `CausalPipeline`, `load`, `stream`,
 `context`, `timetype`, `emptyframe`, `clock`, `readcsv`, `filterrows`,
-`addcolumns`, `Summarizer`, `SummarizerState`, `Count`, `Sum`, `SumPower`,
+`addcolumns`, `Summarizer`, `MonoidSummarizer`, `GroupSummarizer`,
+`SummarizerState`, `Count`, `Sum`, `SumPower`,
 `Moment`, `Product`, `DotProduct`, `Mean`, `Variance`, `Std`, `Covariance`,
 `Correlation`, `Min`, `Max`, `First`, `Last`, `summarize`,
 `summarizecycles`, `addsummarycolumns`, `addrollingcolumns`, `asofjoin`.
