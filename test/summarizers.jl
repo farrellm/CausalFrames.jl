@@ -338,12 +338,22 @@ end
         @test CausalFrames.value(st) == CausalFrames.value(fold(s, rows[3:4]))
     end
 
-    # a float accumulator inverts approximately (sliding-sum drift)
+    # a float accumulator inverts approximately (compensation shrinks but
+    # does not eliminate the round-trip error in general) ...
     fst = CausalFrames.fresh(Sum(:x), (time = Int64, x = Float64))
     CausalFrames.update!(fst, (time = 1, x = 0.1))
     CausalFrames.update!(fst, (time = 2, x = 0.2))
     CausalFrames.downdate!(fst, (time = 2, x = 0.2))
     @test CausalFrames.value(fst).x_sum ≈ 0.1
+
+    # ... and exactly when every intermediate value is representable
+    dst = CausalFrames.fresh(Sum(:x), (time = Int64, x = Float64))
+    for v in (0.5, 0.25, 0.125)
+        CausalFrames.update!(dst, (; x = v))
+    end
+    CausalFrames.downdate!(dst, (; x = 0.5))
+    CausalFrames.downdate!(dst, (; x = 0.25))
+    @test CausalFrames.value(dst) === (x_sum = 0.125,)
 
     # the derived states are fieldless, so both operations are no-ops
     for s in [Mean(:x), Variance(:x), Correlation(:x, :y)]
@@ -360,4 +370,119 @@ end
     for s in [Sum(:x), SumPower(:x, 2), DotProduct(:x, :y)]
         @test !CausalFrames.isinvertible(CausalFrames.fresh(s, mintypes))
     end
+end
+
+@testset "compensated float summation" begin
+    chunks(cs...) = CausalPipeline(ctx -> collect(cs))
+    ftypes = (time = Int64, x = Float64, y = Float64)
+    function fold(s, xs)
+        st = CausalFrames.fresh(s, ftypes)
+        foreach(x -> CausalFrames.update!(st, (; x)), xs)
+        return st
+    end
+
+    # float accumulators get the compensated state; missing-permitting and
+    # BigFloat accumulators keep the plain one
+    @test CausalFrames.fresh(Sum(:x), ftypes) isa
+        CausalFrames.CompensatedSumState{:x,:x_sum,Float64}
+    @test CausalFrames.fresh(Sum(:x), (time = Int64, x = Union{Missing,Float64})) isa
+        CausalFrames.SumState
+    @test CausalFrames.fresh(Sum(:x), (time = Int64, x = BigFloat)) isa
+        CausalFrames.SumState
+
+    # value is concretely typed and declared at the same element type as the
+    # plain state, so nothing downstream can tell the states apart
+    st = fold(Sum(:x), [1.5])
+    @test @inferred(CausalFrames.value(st)) === (x_sum = 1.5,)
+
+    # error-correcting summation: naive folding gives 0.0 here
+    cancel = [1.0, 1e100, 1.0, -1e100]
+    @test CausalFrames.value(fold(Sum(:x), cancel)) === (x_sum = 2.0,)
+    df = DataFrame(load(Context(0, 9),
+        chunks(DataFrame(time = 1:4, x = cancel)) |> summarize(Sum(:x))))
+    @test eltype(df.x_sum) == Float64 && only(df.x_sum) == 2.0
+
+    # a NaN reports NaN (Base.sum semantics) but is counted, not folded in,
+    # so downdating it recovers the finite sum exactly
+    st = fold(Sum(:x), [1.5, NaN, 2.5])
+    @test isnan(CausalFrames.value(st).x_sum)
+    CausalFrames.downdate!(st, (; x = NaN))
+    @test CausalFrames.value(st) === (x_sum = 4.0,)
+
+    # infinities are counted by sign and reconstructed by IEEE rules; the
+    # naive inverse would leave Inf - Inf = NaN behind forever
+    st = fold(Sum(:x), [Inf, 1.0])
+    @test CausalFrames.value(st).x_sum == Inf
+    CausalFrames.update!(st, (; x = -Inf))
+    @test isnan(CausalFrames.value(st).x_sum)
+    CausalFrames.downdate!(st, (; x = Inf))
+    @test CausalFrames.value(st).x_sum == -Inf
+    CausalFrames.downdate!(st, (; x = -Inf))
+    @test CausalFrames.value(st) === (x_sum = 1.0,)
+
+    # the classified term is the folded one: after the power for SumPower
+    # (NaN^0 == Inf^0 == 1.0 are finite terms), the per-row product for
+    # DotProduct (Inf * 0.0 is a NaN term)
+    @test CausalFrames.value(fold(SumPower(:x, 0), [NaN, Inf])) ===
+        (x_sumpower_0 = 2.0,)
+    st = fold(SumPower(:x, 2), [3.0, NaN])
+    @test isnan(CausalFrames.value(st).x_sumpower_2)
+    CausalFrames.downdate!(st, (; x = NaN))
+    @test CausalFrames.value(st) === (x_sumpower_2 = 9.0,)
+    st = CausalFrames.fresh(DotProduct(:x, :y), ftypes)
+    CausalFrames.update!(st, (x = 2.0, y = 3.0))
+    CausalFrames.update!(st, (x = Inf, y = 0.0))
+    @test isnan(CausalFrames.value(st).x_y_dotproduct)
+    CausalFrames.downdate!(st, (x = Inf, y = 0.0))
+    @test CausalFrames.value(st) === (x_y_dotproduct = 6.0,)
+
+    # combine! carries the compensation and the counts: every split of the
+    # cancellation rows still gives the exact total, dest may alias, and a
+    # fresh state is an identity
+    whole = CausalFrames.value(fold(Sum(:x), cancel))
+    for k in 0:length(cancel)
+        a = fold(Sum(:x), cancel[1:k])
+        b = fold(Sum(:x), cancel[(k + 1):end])
+        dest = CausalFrames.fresh(a)
+        CausalFrames.combine!(dest, a, b)
+        @test CausalFrames.value(dest) === whole
+    end
+    a = fold(Sum(:x), cancel[1:2])
+    CausalFrames.combine!(a, a, fold(Sum(:x), cancel[3:4]))
+    @test CausalFrames.value(a) === whole
+    nanful = fold(Sum(:x), [1.0, NaN])
+    dest = CausalFrames.fresh(nanful)
+    CausalFrames.combine!(dest, nanful, fold(Sum(:x), [2.0]))
+    @test isnan(CausalFrames.value(dest).x_sum)
+    CausalFrames.downdate!(dest, (; x = NaN))
+    @test CausalFrames.value(dest) === (x_sum = 3.0,)
+
+    # widening carries the state across representation changes: plain Int
+    # promotes into the compensated state, a compensated Float32 promotes to
+    # a compensated Float64 keeping its compensation and counts, and a
+    # missing-permitting promotion falls back to the plain (absorbing) state
+    # holding the reconstructed value
+    ist = CausalFrames.fresh(Sum(:x), (time = Int64, x = Int64))
+    CausalFrames.update!(ist, (; x = 5))
+    wst = CausalFrames.widenstate(ist, (time = Int64, x = Float64))
+    @test wst isa CausalFrames.CompensatedSumState{:x,:x_sum,Float64}
+    @test CausalFrames.value(wst) === (x_sum = 5.0,)
+
+    f32 = CausalFrames.fresh(Sum(:x), (time = Int64, x = Float32))
+    foreach(x -> CausalFrames.update!(f32, (; x)),
+            Float32[1.0f10, 1.0f0, NaN32, Inf32])
+    f64 = CausalFrames.widenstate(f32, (time = Int64, x = Float64))
+    @test f64 isa CausalFrames.CompensatedSumState{:x,:x_sum,Float64}
+    @test f64.acc.comp == Float64(f32.acc.comp) && f64.acc.comp != 0.0
+    @test f64.acc.nans == 1 && f64.acc.posinf == 1
+    CausalFrames.downdate!(f64, (; x = NaN))
+    CausalFrames.downdate!(f64, (; x = Inf))
+    @test CausalFrames.value(f64) === (x_sum = Float64(1.0f10) + 1.0,)
+
+    nst = fold(Sum(:x), [1.0, NaN])
+    mst = CausalFrames.widenstate(nst, (time = Int64, x = Union{Missing,Float64}))
+    @test mst isa CausalFrames.SumState{:x,:x_sum,Union{Missing,Float64}}
+    @test isnan(CausalFrames.value(mst).x_sum)
+    @test !CausalFrames.isinvertible(mst)
+    @test CausalFrames.isinvertible(nst)
 end

@@ -43,7 +43,9 @@ with any API or semantics change.**
   type, parameterized by the combiner — monoids only, as is `Product`;
   the accumulators and all dependent summarizers are groups; `Moment` is
   the dependent-summarizer example, reading its dependencies' values
-  through the two-argument `value(st, vals)`)
+  through the two-argument `value(st, vals)`; float sum accumulators use
+  the shared `Compensated` pair — Neumaier summation over finite terms,
+  NaN/±Inf counted separately, IEEE result reconstructed in `value`)
 - `src/summarize.jl` — the folding kernels and the transforms `summarize`,
   `summarizecycles`, `addsummarycolumns`; `prototypes` expands dependencies
   topologically and returns the requested output names, which ride through
@@ -64,7 +66,9 @@ with any API or semantics change.**
   all-monoid → per-key segment trees, O(log n)/row (`rollsegmenttree!`);
   otherwise the re-fold baseline (`rollsegment!`, the differential-test
   oracle). Running demotes to tree when widening lets `missing` into an
-  accumulator (`isinvertible`); widening rebuilds structures from live rows
+  accumulator (`isinvertible`); float sums stay running because the
+  compensated states evict NaN/±Inf rows cleanly; widening rebuilds
+  structures from live rows
 - `src/precompile.jl` — PrecompileTools workload over the main paths
 
 ## Invariants and conventions

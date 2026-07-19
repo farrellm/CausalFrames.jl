@@ -346,6 +346,38 @@ end
         @test df.w2_y_sum[4] == 5 && df.w2_y_mean[4] == 5.0
     end
 
+    @testset "nonfinite rows recover in running mode" begin
+        # a float accumulator counts NaN and ±Inf inputs instead of folding
+        # them in, so the running path stays running (no demotion) and the
+        # window recovers exactly once the nonfinite row expires — a naive
+        # running sum would emit NaN forever
+        for bad in (NaN, Inf)
+            p = onechunk(time = [1, 2, 3, 10], y = [1.0, 2.0, bad, 5.0])
+            df = DataFrame(load(Context(0, 20),
+                p |> addrollingcolumns((w2 = 2,), [Sum(:y), Mean(:y)])))
+            @test eltype(df.w2_y_sum) == Float64
+            @test df.w2_y_sum[1:2] == [1.0, 3.0]
+            @test isequal(df.w2_y_sum[3], bad + 3.0)
+            @test df.w2_y_sum[4] == 5.0 && df.w2_y_mean[4] == 5.0
+        end
+    end
+
+    @testset "compensated sliding accuracy" begin
+        # once the large value leaves the window, the compensation term is
+        # all that remains — the naive running sum would emit 0.0, which not
+        # even the oracle's isapprox would accept
+        p = onechunk(time = [1, 2, 3], x = [1e16, 1.0, 1.0])
+        df = DataFrame(load(Context(0, 10),
+            p |> addrollingcolumns((w1 = 1,), Sum(:x))))
+        @test df.w1_x_sum[3] == 2.0
+
+        # the tree path combines the same compensated states
+        p = onechunk(time = [1, 2, 3, 4], x = [1.0, 1e100, 1.0, -1e100])
+        df = DataFrame(load(Context(0, 10),
+            p |> addrollingcolumns((w9 = 9,), [Sum(:x), Min(:x)])))
+        @test df.w9_x_sum[4] == 2.0
+    end
+
     @testset "tree path order sensitivity" begin
         # First/Last through ties: every row at time t sees all rows tied
         # at t, in stream order
