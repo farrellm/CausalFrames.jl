@@ -213,10 +213,11 @@ prototype tuple at construction time:
   row per window. A key's group is deleted when its last row leaves, so an
   absent key *means* an empty window and emits the empty values (`Mean`
   over an empty window is `missing`, never `0/0`), exactly as the re-fold
-  path's seen-flag decides it. Floating-point accumulators carry the usual
-  sliding-sum drift (subtraction is not a bit-exact inverse of addition),
-  and an absorbing accumulated value (`NaN`) persists until its key's
-  window empties; both are inherent to running-state sliding windows.
+  path's seen-flag decides it. The floating-point sum accumulators use
+  compensated summation and count nonfinite terms instead of folding them
+  in (see "Summarizers"), so eviction is clean: a window recovers exactly
+  once a `NaN` or `±Inf` row ages out, and finite values carry only the
+  compensated round-off rather than the usual sliding-sum drift.
 - **All `MonoidSummarizer`s — tree mode.** Rows append to per-key segment
   trees (`segtree.jl`) whose nodes hold the `combine!` of their children;
   each output row binary-searches its window's start per look-back — using
@@ -334,6 +335,28 @@ a plain `+` that cannot overflow the way accumulating in the input's own type
 would. `Product` is the same story with `Base.prod`'s widening and a `*` fold,
 and `DotProduct(a, b)` sums the products `a * b`, forming each term in that
 widened accumulator type so a per-row product cannot overflow either.
+
+When the realized accumulator type is a fixed-precision float (a non-BigFloat
+`AbstractFloat`; `Union{Missing,...}` keeps the plain state), the sum
+accumulators (`Sum`, `SumPower`, `DotProduct`) switch to a compensated state:
+Kahan-Babuška-Neumaier summation over the finite terms only, with `NaN`, `+Inf`,
+and `-Inf` terms counted in separate `Int` fields rather than folded in. The
+classified term is the folded one — the value after `SumPower`'s power, the
+per-row product for `DotProduct` (so `Inf * 0.0` counts as a `NaN` term).
+`value` reconstructs the IEEE result `Base.sum` would produce (any `NaN`, or
+infinities of both signs, gives `NaN`; one infinity sign gives that infinity;
+otherwise the compensated total), at the same declared element type as the
+plain state, so nothing downstream can tell the representations apart.
+Keeping nonfinites out of the running pair is what makes `downdate!` a clean
+inverse for rolling windows: subtracted naively, a `NaN` absorbs and an
+evicted infinity leaves `Inf - Inf = NaN` behind. BigFloat is excluded
+because compensation buys nothing at arbitrary precision and a non-isbits
+compensated pair would allocate on every row; `missing`-admitting
+accumulators keep the plain absorbing state that `isinvertible` reports.
+`widenstate` carries the whole representation across schema promotions —
+including plain→compensated (an `Int` column promoted to float) and
+compensated→plain (`missing` appearing, at which point the reconstructed
+value is carried).
 
 `Sum`, `SumPower`, `Product`, and `DotProduct` have an identity element, so
 they summarize no rows as `0` (`Product` as `1`). The others do not, and yield
@@ -455,8 +478,9 @@ declaring what a summarizer's states support beyond folding:
 "Rolling windows"). The classification of the built-ins:
 
 - **Groups**: `Count`, `Sum`, `SumPower`, `DotProduct` — subtraction is the
-  exact inverse of addition for integer accumulators (floats carry the
-  usual sliding-sum drift). The dependent summarizers (`Moment` through
+  exact inverse of addition for integer accumulators; float accumulators
+  use the compensated, nonfinite-counting states (see above), leaving only
+  the compensated round-off. The dependent summarizers (`Moment` through
   `Correlation`) are groups too: their states are fieldless, so `combine!`
   and `downdate!` are no-ops, and their effective structure is that of
   their transitive dependencies — all of which are the group accumulators

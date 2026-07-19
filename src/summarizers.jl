@@ -186,10 +186,12 @@ function combine! end
 
 Remove one previously folded row from the state — the inverse of
 [`update!`](@ref). Required of a [`GroupSummarizer`](@ref)'s states. The
-inverse is exact when the accumulator arithmetic is (integer sums); a
-floating-point accumulator carries the usual sliding-sum round-off drift,
-and an absorbing accumulated value (`missing`, `NaN`) cannot be subtracted
-away at all — [`isinvertible`](@ref) reports the statically detectable case.
+inverse is exact when the accumulator arithmetic is (integer sums); the
+floating-point sum accumulators use compensated summation with NaN and ±Inf
+terms counted separately, so nonfinite rows subtract away exactly and finite
+ones leave only the small compensated round-off. An absorbing `missing`
+accumulated value cannot be subtracted away at all — [`isinvertible`](@ref)
+reports the statically detectable case.
 """
 function downdate! end
 
@@ -218,6 +220,84 @@ sumtype(::Type{T}) where {T} = Base.promote_op(Base.add_sum, T, T)
 prodtype(::Type{T}) where {T} = Base.promote_op(Base.mul_prod, T, T)
 dottype(::Type{Ta}, ::Type{Tb}) where {Ta,Tb} =
     sumtype(Base.promote_op(*, Ta, Tb))
+
+# Floating-point sum accumulators use Kahan-Babuška-Neumaier compensated
+# summation, and nonfinite terms are counted rather than folded in: only
+# finite terms enter the (total, comp) pair, while NaN and signed-infinity
+# terms bump Int counts, and `compvalue` reconstructs the IEEE result
+# `Base.sum` would produce (any NaN, or infinities of both signs, -> NaN; one
+# infinity sign -> that infinity). Keeping nonfinites out of the running pair
+# is what lets `downdate!` invert exactly once such a row leaves a rolling
+# window — folded in naively, NaN absorbs and an evicted infinity leaves
+# Inf - Inf = NaN behind. `Union{Missing,...}` accumulators keep the plain
+# states (`missing` still absorbs; `isinvertible` reports it), and BigFloat is
+# excluded because compensation buys nothing at arbitrary precision and a
+# non-isbits Compensated{BigFloat} would heap-allocate on every row.
+compensable(::Type{T}) where {T} = T <: AbstractFloat && T !== BigFloat
+
+struct Compensated{A<:AbstractFloat}
+    total::A     # Neumaier sum of the finite terms only
+    comp::A      # running compensation
+    nans::Int    # NaN terms currently folded
+    posinf::Int  # +Inf terms
+    neginf::Int  # -Inf terms
+end
+
+compzero(::Type{A}) where {A<:AbstractFloat} =
+    Compensated{A}(zero(A), zero(A), 0, 0, 0)
+
+# One Neumaier step. The isfinite guard keeps comp finite when the total
+# overflows to infinity from all-finite terms, so compvalue reconstructs the
+# Inf that Base.sum would produce rather than Inf + (-Inf) = NaN.
+@inline function neumaier(s::A, c::A, x::A) where {A<:AbstractFloat}
+    t = s + x
+    if isfinite(t)
+        c += abs(s) >= abs(x) ? (s - t) + x : (x - t) + s
+    end
+    return t, c
+end
+
+@inline function compadd(a::Compensated{A}, x::A) where {A}
+    if isfinite(x)
+        t, c = neumaier(a.total, a.comp, x)
+        return Compensated{A}(t, c, a.nans, a.posinf, a.neginf)
+    elseif isnan(x)
+        return Compensated{A}(a.total, a.comp, a.nans + 1, a.posinf, a.neginf)
+    elseif x > zero(A)
+        return Compensated{A}(a.total, a.comp, a.nans, a.posinf + 1, a.neginf)
+    else
+        return Compensated{A}(a.total, a.comp, a.nans, a.posinf, a.neginf + 1)
+    end
+end
+
+# Inverse of compadd over the identically computed term, so the counts always
+# balance; negating a finite float is exact.
+@inline function compsub(a::Compensated{A}, x::A) where {A}
+    if isfinite(x)
+        t, c = neumaier(a.total, a.comp, -x)
+        return Compensated{A}(t, c, a.nans, a.posinf, a.neginf)
+    elseif isnan(x)
+        return Compensated{A}(a.total, a.comp, a.nans - 1, a.posinf, a.neginf)
+    elseif x > zero(A)
+        return Compensated{A}(a.total, a.comp, a.nans, a.posinf - 1, a.neginf)
+    else
+        return Compensated{A}(a.total, a.comp, a.nans, a.posinf, a.neginf - 1)
+    end
+end
+
+@inline function compmerge(a::Compensated{A}, b::Compensated{A}) where {A}
+    t, c = neumaier(a.total, a.comp, b.total)
+    t, c = neumaier(t, c, b.comp)
+    return Compensated{A}(t, c, a.nans + b.nans, a.posinf + b.posinf,
+                          a.neginf + b.neginf)
+end
+
+@inline function compvalue(a::Compensated{A}) where {A}
+    a.nans > 0 && return convert(A, NaN)
+    a.posinf > 0 && return a.neginf > 0 ? convert(A, NaN) : convert(A, Inf)
+    a.neginf > 0 && return convert(A, -Inf)
+    return a.total + a.comp
+end
 
 """
     Count() -> Summarizer
@@ -248,6 +328,10 @@ Sums `column`. Produces the output column `Symbol(column, :_sum)`, e.g.
 The output column's element type is the one `Base.sum` would produce: small
 signed and unsigned integers widen (`Int32` sums to `Int64`), everything else
 keeps its type (`Float32` sums to `Float32`).
+
+Floating-point accumulators use compensated (Neumaier) summation and count
+NaN and ±Inf inputs separately: results match `Base.sum`, and a rolling
+window recovers exactly once a nonfinite row leaves the window.
 """
 struct Sum{C} <: GroupSummarizer end
 Sum(column::Symbol) = Sum{column}()
@@ -259,7 +343,9 @@ end
 emptyvalue(::Sum{C}) where {C} = NamedTuple{(Symbol(C, :_sum),)}((0,))
 function fresh(::Sum{C}, intypes::NamedTuple) where {C}
     A = sumtype(intypes[C])
-    return SumState{C,Symbol(C, :_sum),A}(convert(A, 0))
+    N = Symbol(C, :_sum)
+    compensable(A) && return CompensatedSumState{C,N,A}(compzero(A))
+    return SumState{C,N,A}(convert(A, 0))
 end
 fresh(::SumState{C,N,A}) where {C,N,A} = SumState{C,N,A}(convert(A, 0))
 @inline update!(st::SumState{C}, row) where {C} =
@@ -274,7 +360,34 @@ value(st::SumState{C,N,A}) where {C,N,A} = NamedTuple{(N,),Tuple{A}}((st.total,)
 function widenstate(st::SumState{C,N,A}, intypes::NamedTuple) where {C,N,A}
     A2 = sumtype(intypes[C])
     A2 === A && return st
+    compensable(A2) && return CompensatedSumState{C,N,A2}(
+        compadd(compzero(A2), convert(A2, st.total)))
     return SumState{C,N,A2}(convert(A2, st.total))
+end
+
+mutable struct CompensatedSumState{C,N,A<:AbstractFloat} <: SummarizerState
+    acc::Compensated{A}
+end
+
+fresh(::CompensatedSumState{C,N,A}) where {C,N,A} =
+    CompensatedSumState{C,N,A}(compzero(A))
+@inline update!(st::CompensatedSumState{C,N,A}, row) where {C,N,A} =
+    (st.acc = compadd(st.acc, convert(A, getproperty(row, C))); nothing)
+@inline downdate!(st::CompensatedSumState{C,N,A}, row) where {C,N,A} =
+    (st.acc = compsub(st.acc, convert(A, getproperty(row, C))); nothing)
+combine!(dest::CompensatedSumState{C,N,A}, a::CompensatedSumState{C,N,A},
+         b::CompensatedSumState{C,N,A}) where {C,N,A} =
+    (dest.acc = compmerge(a.acc, b.acc); nothing)
+value(st::CompensatedSumState{C,N,A}) where {C,N,A} =
+    NamedTuple{(N,),Tuple{A}}((compvalue(st.acc),))
+function widenstate(st::CompensatedSumState{C,N,A},
+                    intypes::NamedTuple) where {C,N,A}
+    A2 = sumtype(intypes[C])
+    A2 === A && return st
+    a = st.acc
+    compensable(A2) && return CompensatedSumState{C,N,A2}(Compensated{A2}(
+        convert(A2, a.total), convert(A2, a.comp), a.nans, a.posinf, a.neginf))
+    return SumState{C,N,A2}(convert(A2, compvalue(a)))
 end
 
 """
@@ -284,6 +397,9 @@ Sums `column` raised to the power `n`. Produces the output column
 `Symbol(column, :_sumpower_, n)`, e.g. `SumPower(:x, 2)` produces
 `:x_sumpower_2`. The sum of no rows is `0`. The output column's element type
 follows the same rule as [`Sum`](@ref), applied to the type of `column ^ n`.
+Floating-point accumulators use compensated summation with NaN and ±Inf
+*terms* (the value after raising to the power) counted separately, as in
+[`Sum`](@ref).
 
 `SumPower(column, 1)` produces `:x_sumpower_1`, a distinct column from
 `Sum(:x)`'s `:x_sum`.
@@ -304,8 +420,9 @@ emptyvalue(s::SumPower{C}) where {C} =
     NamedTuple{(Symbol(C, :_sumpower_, s.power),)}((0,))
 function fresh(s::SumPower{C}, intypes::NamedTuple) where {C}
     A = powertype(intypes[C], s.power)
-    return SumPowerState{C,Symbol(C, :_sumpower_, s.power),A}(s.power,
-                                                              convert(A, 0))
+    N = Symbol(C, :_sumpower_, s.power)
+    compensable(A) && return CompensatedSumPowerState{C,N,A}(s.power, compzero(A))
+    return SumPowerState{C,N,A}(s.power, convert(A, 0))
 end
 fresh(st::SumPowerState{C,N,A}) where {C,N,A} =
     SumPowerState{C,N,A}(st.power, convert(A, 0))
@@ -322,7 +439,40 @@ value(st::SumPowerState{C,N,A}) where {C,N,A} =
 function widenstate(st::SumPowerState{C,N,A}, intypes::NamedTuple) where {C,N,A}
     A2 = powertype(intypes[C], st.power)
     A2 === A && return st
+    compensable(A2) && return CompensatedSumPowerState{C,N,A2}(
+        st.power, compadd(compzero(A2), convert(A2, st.total)))
     return SumPowerState{C,N,A2}(st.power, convert(A2, st.total))
+end
+
+mutable struct CompensatedSumPowerState{C,N,A<:AbstractFloat} <: SummarizerState
+    power::Int
+    acc::Compensated{A}
+end
+
+fresh(st::CompensatedSumPowerState{C,N,A}) where {C,N,A} =
+    CompensatedSumPowerState{C,N,A}(st.power, compzero(A))
+# The term is formed in the accumulator's type before raising to the power,
+# then classified: NaN^0 and Inf^0 are the finite term 1.0, exactly as they
+# contribute to `sum(x .^ 0)`.
+@inline update!(st::CompensatedSumPowerState{C,N,A}, row) where {C,N,A} =
+    (st.acc = compadd(st.acc, convert(A, getproperty(row, C))^st.power); nothing)
+@inline downdate!(st::CompensatedSumPowerState{C,N,A}, row) where {C,N,A} =
+    (st.acc = compsub(st.acc, convert(A, getproperty(row, C))^st.power); nothing)
+combine!(dest::CompensatedSumPowerState{C,N,A}, a::CompensatedSumPowerState{C,N,A},
+         b::CompensatedSumPowerState{C,N,A}) where {C,N,A} =
+    (dest.acc = compmerge(a.acc, b.acc); nothing)
+value(st::CompensatedSumPowerState{C,N,A}) where {C,N,A} =
+    NamedTuple{(N,),Tuple{A}}((compvalue(st.acc),))
+function widenstate(st::CompensatedSumPowerState{C,N,A},
+                    intypes::NamedTuple) where {C,N,A}
+    A2 = powertype(intypes[C], st.power)
+    A2 === A && return st
+    a = st.acc
+    compensable(A2) && return CompensatedSumPowerState{C,N,A2}(
+        st.power,
+        Compensated{A2}(convert(A2, a.total), convert(A2, a.comp),
+                        a.nans, a.posinf, a.neginf))
+    return SumPowerState{C,N,A2}(st.power, convert(A2, compvalue(a)))
 end
 
 # A monoid but not a group: dividing a row back out fails outright at zero
@@ -373,7 +523,10 @@ column `Symbol(a, :_, b, :_dotproduct)`, e.g. `DotProduct(:x, :y)` produces
 The output column's element type is `Base.sum` applied to the type of `a * b`,
 so it widens the same way [`Sum`](@ref) does. Each term is formed in the
 accumulator's (widened) type, so a per-row product cannot overflow the way
-multiplying in the input columns' own types would.
+multiplying in the input columns' own types would. Floating-point
+accumulators use compensated summation with NaN and ±Inf *terms* (the
+per-row product, so `Inf * 0.0` counts as a NaN term) counted separately, as
+in [`Sum`](@ref).
 """
 struct DotProduct{A,B} <: GroupSummarizer end
 DotProduct(a::Symbol, b::Symbol) = DotProduct{a,b}()
@@ -386,7 +539,9 @@ dotname(a, b) = Symbol(a, :_, b, :_dotproduct)
 emptyvalue(::DotProduct{A,B}) where {A,B} = NamedTuple{(dotname(A, B),)}((0,))
 function fresh(::DotProduct{A,B}, intypes::NamedTuple) where {A,B}
     Acc = dottype(intypes[A], intypes[B])
-    return DotProductState{A,B,dotname(A, B),Acc}(convert(Acc, 0))
+    N = dotname(A, B)
+    compensable(Acc) && return CompensatedDotProductState{A,B,N,Acc}(compzero(Acc))
+    return DotProductState{A,B,N,Acc}(convert(Acc, 0))
 end
 fresh(::DotProductState{A,B,N,Acc}) where {A,B,N,Acc} =
     DotProductState{A,B,N,Acc}(convert(Acc, 0))
@@ -405,7 +560,41 @@ value(st::DotProductState{A,B,N,Acc}) where {A,B,N,Acc} =
 function widenstate(st::DotProductState{A,B,N,Acc}, intypes::NamedTuple) where {A,B,N,Acc}
     Acc2 = dottype(intypes[A], intypes[B])
     Acc2 === Acc && return st
+    compensable(Acc2) && return CompensatedDotProductState{A,B,N,Acc2}(
+        compadd(compzero(Acc2), convert(Acc2, st.total)))
     return DotProductState{A,B,N,Acc2}(convert(Acc2, st.total))
+end
+
+mutable struct CompensatedDotProductState{A,B,N,Acc<:AbstractFloat} <: SummarizerState
+    acc::Compensated{Acc}
+end
+
+fresh(::CompensatedDotProductState{A,B,N,Acc}) where {A,B,N,Acc} =
+    CompensatedDotProductState{A,B,N,Acc}(compzero(Acc))
+# The classified term is the per-row product, so Inf * 0.0 counts as NaN.
+@inline update!(st::CompensatedDotProductState{A,B,N,Acc}, row) where {A,B,N,Acc} =
+    (st.acc = compadd(st.acc, convert(Acc, getproperty(row, A)) *
+                              convert(Acc, getproperty(row, B)));
+     nothing)
+@inline downdate!(st::CompensatedDotProductState{A,B,N,Acc}, row) where {A,B,N,Acc} =
+    (st.acc = compsub(st.acc, convert(Acc, getproperty(row, A)) *
+                              convert(Acc, getproperty(row, B)));
+     nothing)
+combine!(dest::CompensatedDotProductState{A,B,N,Acc},
+         a::CompensatedDotProductState{A,B,N,Acc},
+         b::CompensatedDotProductState{A,B,N,Acc}) where {A,B,N,Acc} =
+    (dest.acc = compmerge(a.acc, b.acc); nothing)
+value(st::CompensatedDotProductState{A,B,N,Acc}) where {A,B,N,Acc} =
+    NamedTuple{(N,),Tuple{Acc}}((compvalue(st.acc),))
+function widenstate(st::CompensatedDotProductState{A,B,N,Acc},
+                    intypes::NamedTuple) where {A,B,N,Acc}
+    Acc2 = dottype(intypes[A], intypes[B])
+    Acc2 === Acc && return st
+    a = st.acc
+    compensable(Acc2) && return CompensatedDotProductState{A,B,N,Acc2}(
+        Compensated{Acc2}(convert(Acc2, a.total), convert(Acc2, a.comp),
+                          a.nans, a.posinf, a.neginf))
+    return DotProductState{A,B,N,Acc2}(convert(Acc2, compvalue(a)))
 end
 
 """
