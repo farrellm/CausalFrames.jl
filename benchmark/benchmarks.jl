@@ -32,6 +32,25 @@ open(CSVPATH, "w") do io
     end
 end
 
+# A structure-hiding wrapper: delegates the interface to the wrapped
+# summarizer but subtypes plain Summarizer, so addrollingcolumns takes its
+# re-fold fallback — the baseline the fast paths are measured against.
+struct RefoldWrap{S<:CausalFrames.Summarizer} <: CausalFrames.Summarizer
+    inner::S
+end
+
+CausalFrames.emptyvalue(o::RefoldWrap) = CausalFrames.emptyvalue(o.inner)
+CausalFrames.fresh(o::RefoldWrap, intypes::NamedTuple) =
+    CausalFrames.fresh(o.inner, intypes)
+CausalFrames.dependencies(o::RefoldWrap) =
+    map(RefoldWrap, CausalFrames.dependencies(o.inner))
+
+# A smaller source for the rolling benchmarks: the refold baseline is
+# O(window) per row, so a million-row input would dominate the suite.
+const RN = 100_000
+const RCTX = Context(0, RN)
+const RSRC = tradesource(RN)
+
 const SUITE = BenchmarkGroup()
 
 SUITE["sources"] = BenchmarkGroup()
@@ -57,10 +76,24 @@ SUITE["summarize"]["cycles"] = @benchmarkable load(CTX,
 SUITE["summarize"]["running"] = @benchmarkable load(CTX,
     SRC |> addsummarycolumns([Sum(:qty), Last(:qty)]))
 
+# One group per window algorithm: all-group summarizers slide running
+# states, all-monoid sets fold from a segment tree, and an unstructured
+# summarizer forces the re-fold baseline (see src/rolling.jl).
+SUITE["rolling"] = BenchmarkGroup()
+SUITE["rolling"]["running"] = @benchmarkable load(RCTX,
+    RSRC |> addrollingcolumns((; w25 = 25), [Sum(:qty), Mean(:qty)]))
+SUITE["rolling"]["running-keyed"] = @benchmarkable load(RCTX,
+    RSRC |> addrollingcolumns((; w25 = 25), [Sum(:qty), Mean(:qty)];
+                              key = :sym))
+SUITE["rolling"]["tree"] = @benchmarkable load(RCTX,
+    RSRC |> addrollingcolumns((; w25 = 25), [Min(:qty), Max(:qty)]))
+SUITE["rolling"]["refold"] = @benchmarkable load(RCTX,
+    RSRC |> addrollingcolumns((; w25 = 25), [RefoldWrap(Sum(:qty))]))
+
 if abspath(PROGRAM_FILE) == @__FILE__
     tune!(SUITE)
     results = run(SUITE; verbose = true)
-    for (path, trial) in leaves(results)
+    for (path, trial) in BenchmarkTools.leaves(results)
         t = BenchmarkTools.prettytime(time(median(trial)))
         m = BenchmarkTools.prettymemory(memory(trial))
         println(rpad(join(path, "/"), 28), lpad(t, 12), lpad(m, 12),
