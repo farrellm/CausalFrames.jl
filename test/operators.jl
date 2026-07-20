@@ -7,7 +7,7 @@
     @test DataFrame(frame).time == [0, 3, 6]
 
     frame = load(Context(DateTime(2026, 1, 1), DateTime(2026, 1, 1, 1)),
-                 clock(Minute(15)))
+        clock(Minute(15)))
     @test nrow(frame) == 4
     @test DataFrame(frame).time[end] == DateTime(2026, 1, 1, 0, 45)
 
@@ -18,13 +18,16 @@ end
 
 @testset "readcsv" begin
     path = joinpath(mktempdir(), "ticks.csv")
-    write(path, """
-        time,bid,ask
-        1,10.0,11.0
-        3,10.5,11.5
-        5,9.0,10.0
-        7,9.5,10.5
-        """)
+    write(
+        path,
+        """
+time,bid,ask
+1,10.0,11.0
+3,10.5,11.5
+5,9.0,10.0
+7,9.5,10.5
+""",
+    )
 
     frame = load(Context(0, 100), readcsv(path))
     @test nrow(frame) == 4
@@ -49,15 +52,19 @@ end
 
 @testset "filterrows and addcolumns" begin
     path = joinpath(mktempdir(), "ticks.csv")
-    write(path, """
-        time,bid,ask
-        1,10.0,11.0
-        3,10.5,11.5
-        5,9.0,10.0
-        7,9.5,10.5
-        """)
+    write(
+        path,
+        """
+time,bid,ask
+1,10.0,11.0
+3,10.5,11.5
+5,9.0,10.0
+7,9.5,10.5
+""",
+    )
 
-    p = readcsv(path) |>
+    p =
+        readcsv(path) |>
         filterrows(r -> r.bid >= 9.5) |>
         addcolumns(r -> (; mid = (r.bid + r.ask) / 2))
     df = DataFrame(load(Context(0, 100), p))
@@ -81,10 +88,11 @@ end
 
     # the uncurried, pipeline-first forms are equivalent to the |> chain
     src = readcsv(path)
-    curried = src |> filterrows(r -> r.bid >= 9.5) |>
+    curried =
+        src |> filterrows(r -> r.bid >= 9.5) |>
         addcolumns(r -> (; mid = (r.bid + r.ask) / 2))
     uncurried = addcolumns(filterrows(src, r -> r.bid >= 9.5),
-                           r -> (; mid = (r.bid + r.ask) / 2))
+        r -> (; mid = (r.bid + r.ask) / 2))
     @test DataFrame(load(Context(0, 100), curried)) ==
           DataFrame(load(Context(0, 100), uncurried))
 end

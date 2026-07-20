@@ -12,7 +12,7 @@
         sts = map(CausalFrames.fresh, stateprotos)
         foreach(r -> foreach(st -> CausalFrames.update!(st, r), sts), rows)
         CausalFrames.summaryvalues(sts, Val((:x_sum, :x_min, :x_last,
-                                             :x_product)))
+            :x_product)))
     end
     queryvals(tr, lo, hi) =
         CausalFrames.summaryvalues(
@@ -22,7 +22,7 @@
     # pseudo-random pushes cross-checked against a naive re-fold, across
     # several capacity-doubling rebuilds; products of ±1/±2 stay exact
     steps = lcgsequence(7, 100, 3)      # deliberate ties (zero steps)
-    xs = map(v -> (-2, -1, 1, 2)[v + 1], lcgsequence(11, 100, 4))
+    xs = map(v -> (-2, -1, 1, 2)[v+1], lcgsequence(11, 100, 4))
     picks = lcgsequence(13, 200, 2^30)
     tr = CausalFrames.newsegtree(stateprotos, R, Int64)
     rows = R[]
@@ -32,14 +32,14 @@
         row = (time = t, x = xs[i])
         push!(rows, row)
         CausalFrames.treepush!(tr, stateprotos, row)
-        lo = 1 + picks[2i - 1] % i
+        lo = 1 + picks[2i-1] % i
         hi = lo + picks[2i] % (i - lo + 1)
         @test queryvals(tr, lo, hi) == naive(rows[lo:hi])
         @test queryvals(tr, i, i) == naive(rows[i:i])
         @test queryvals(tr, 1, i) == naive(rows)
     end
     @test @inferred(CausalFrames.treequery(tr, stateprotos, 1,
-                                           length(rows))) isa Tuple
+        length(rows))) isa Tuple
 
     # advancing head drops the expired prefix at the next full-capacity
     # rebuild, and queries over the live suffix still agree
@@ -56,7 +56,7 @@
     CausalFrames.treepush!(tr, stateprotos, row)   # triggers rebuild!
     dropped = length(rows) - length(tr.rows)
     @test tr.head == 1 && dropped == 59
-    @test queryvals(tr, 1, length(tr.rows)) == naive(rows[(dropped + 1):end])
+    @test queryvals(tr, 1, length(tr.rows)) == naive(rows[(dropped+1):end])
 
     # windowstart uses the kernel's exact membership predicate
     times = [1, 2, 2, 3, 5]

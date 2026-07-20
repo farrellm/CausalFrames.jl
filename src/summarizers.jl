@@ -296,7 +296,7 @@ end
     t, c = neumaier(a.total, a.comp, b.total)
     t, c = neumaier(t, c, b.comp)
     return Compensated{A}(t, c, a.nans + b.nans, a.posinf + b.posinf,
-                          a.neginf + b.neginf)
+        a.neginf + b.neginf)
 end
 
 @inline function compvalue(a::Compensated{A}) where {A}
@@ -365,7 +365,7 @@ fresh(st::AccumState{N,A,T}) where {N,A,T} =
 @inline downdate!(st::AccumState{N,A}, row) where {N,A} =
     (st.total -= termvalue(st.term, A, row); nothing)
 combine!(dest::AccumState{N,A,T}, a::AccumState{N,A,T},
-         b::AccumState{N,A,T}) where {N,A,T} =
+    b::AccumState{N,A,T}) where {N,A,T} =
     (dest.total = a.total + b.total; nothing)
 isinvertible(::AccumState{N,A}) where {N,A} = !(Missing <: A)
 value(st::AccumState{N,A}) where {N,A} = NamedTuple{(N,),Tuple{A}}((st.total,))
@@ -384,18 +384,19 @@ fresh(st::CompensatedAccumState{N,A,T}) where {N,A,T} =
 @inline downdate!(st::CompensatedAccumState{N,A}, row) where {N,A} =
     (st.acc = compsub(st.acc, termvalue(st.term, A, row)); nothing)
 combine!(dest::CompensatedAccumState{N,A,T}, a::CompensatedAccumState{N,A,T},
-         b::CompensatedAccumState{N,A,T}) where {N,A,T} =
+    b::CompensatedAccumState{N,A,T}) where {N,A,T} =
     (dest.acc = compmerge(a.acc, b.acc); nothing)
 value(st::CompensatedAccumState{N,A}) where {N,A} =
     NamedTuple{(N,),Tuple{A}}((compvalue(st.acc),))
 function widenstate(st::CompensatedAccumState{N,A,T},
-                    intypes::NamedTuple) where {N,A,T}
+    intypes::NamedTuple) where {N,A,T}
     A2 = acctype(st.term, intypes)
     A2 === A && return st
     a = st.acc
     compensable(A2) && return CompensatedAccumState{N,A2,T}(
-        st.term, Compensated{A2}(convert(A2, a.total), convert(A2, a.comp),
-                                 a.nans, a.posinf, a.neginf))
+        st.term,
+        Compensated{A2}(convert(A2, a.total), convert(A2, a.comp),
+            a.nans, a.posinf, a.neginf))
     return AccumState{N,A2,T}(st.term, convert(A2, compvalue(a)))
 end
 
@@ -470,7 +471,7 @@ emptyvalue(s::SumPower{C}) where {C} =
 # exactly as they contribute to `sum(x .^ 0)`.
 fresh(s::SumPower{C}, intypes::NamedTuple) where {C} =
     accumfresh(PowerTerm{C}(s.power), Symbol(C, :_sumpower_, s.power),
-               powertype(intypes[C], s.power))
+        powertype(intypes[C], s.power))
 
 # A monoid but not a group: dividing a row back out fails outright at zero
 # (the total is 0 no matter what else was folded) and truncates for integers.
@@ -501,7 +502,7 @@ fresh(::ProductState{C,N,A}) where {C,N,A} = ProductState{C,N,A}(convert(A, 1))
 @inline update!(st::ProductState{C}, row) where {C} =
     (st.total *= getproperty(row, C); nothing)
 combine!(dest::ProductState{C,N,A}, a::ProductState{C,N,A},
-         b::ProductState{C,N,A}) where {C,N,A} =
+    b::ProductState{C,N,A}) where {C,N,A} =
     (dest.total = a.total * b.total; nothing)
 value(st::ProductState{C,N,A}) where {C,N,A} = NamedTuple{(N,),Tuple{A}}((st.total,))
 function widenstate(st::ProductState{C,N,A}, intypes::NamedTuple) where {C,N,A}
@@ -533,7 +534,7 @@ emptyvalue(::DotProduct{A,B}) where {A,B} = NamedTuple{(dotname(A, B),)}((0,))
 # The classified term is the per-row product, so Inf * 0.0 counts as NaN.
 fresh(::DotProduct{A,B}, intypes::NamedTuple) where {A,B} =
     accumfresh(PairProductTerm{A,B}(), dotname(A, B),
-               dottype(intypes[A], intypes[B]))
+        dottype(intypes[A], intypes[B]))
 
 """
     Moment(column, n) -> Summarizer
@@ -564,7 +565,7 @@ emptyvalue(m::Moment{C}) where {C} =
     NamedTuple{(Symbol(C, :_moment_, m.order),)}((missing,))
 fresh(m::Moment{C}, ::NamedTuple) where {C} =
     MomentState{C,Symbol(C, :_moment_, m.order),
-                Symbol(C, :_sumpower_, m.order)}()
+        Symbol(C, :_sumpower_, m.order)}()
 fresh(st::MomentState) = st
 @inline update!(::MomentState, row) = nothing
 # The value type comes from the dependencies' declared field types, not from
@@ -572,7 +573,7 @@ fresh(st::MomentState) = st
 # otherwise collapse the output column's Union{Missing,...} eltype to Missing.
 @inline function value(::MomentState{C,N,D}, vals::NamedTuple) where {C,N,D}
     V = Base.promote_op(/, fieldtype(typeof(vals), D),
-                        fieldtype(typeof(vals), :count))
+        fieldtype(typeof(vals), :count))
     return NamedTuple{(N,),Tuple{V}}((vals[D] / vals.count,))
 end
 
@@ -636,15 +637,16 @@ struct VarianceState{C,N,S,Q,R} <: SummarizerState end
 # `(q - sa * sb / n) / (n - corrected)`, from the dependencies' declared
 # field types (a runtime `typeof` would let one missing collapse the type).
 _covtype(::Type{Q}, ::Type{Sa}, ::Type{Sb}) where {Q,Sa,Sb} =
-    Base.promote_op(/, Base.promote_op(-, Q,
-        Base.promote_op(/, Base.promote_op(*, Sa, Sb), Int)), Int)
+    Base.promote_op(/,
+        Base.promote_op(-, Q,
+            Base.promote_op(/, Base.promote_op(*, Sa, Sb), Int)), Int)
 
 dependencies(::Variance{C}) where {C} = (Count(), Sum(C), SumPower(C, 2))
 emptyvalue(::Variance{C}) where {C} =
     NamedTuple{(Symbol(C, :_variance),)}((missing,))
 fresh(v::Variance{C}, ::NamedTuple) where {C} =
     VarianceState{C,Symbol(C, :_variance),Symbol(C, :_sum),
-                  Symbol(C, :_sumpower_, 2),v.corrected}()
+        Symbol(C, :_sumpower_, 2),v.corrected}()
 fresh(st::VarianceState) = st
 @inline update!(::VarianceState, row) = nothing
 @inline function value(::VarianceState{C,N,S,Q,R}, vals::NamedTuple) where {C,N,S,Q,R}
@@ -723,11 +725,11 @@ emptyvalue(::Covariance{A,B}) where {A,B} =
     NamedTuple{(covname(A, B),)}((missing,))
 fresh(c::Covariance{A,B}, ::NamedTuple) where {A,B} =
     CovarianceState{A,B,covname(A, B),dotname(A, B),Symbol(A, :_sum),
-                    Symbol(B, :_sum),c.corrected}()
+        Symbol(B, :_sum),c.corrected}()
 fresh(st::CovarianceState) = st
 @inline update!(::CovarianceState, row) = nothing
 @inline function value(::CovarianceState{A,B,N,D,SA,SB,R},
-                       vals::NamedTuple) where {A,B,N,D,SA,SB,R}
+    vals::NamedTuple) where {A,B,N,D,SA,SB,R}
     Df = fieldtype(typeof(vals), D)
     Saf = fieldtype(typeof(vals), SA)
     Sbf = fieldtype(typeof(vals), SB)
@@ -771,11 +773,11 @@ emptyvalue(::Correlation{A,B}) where {A,B} =
     NamedTuple{(corname(A, B),)}((missing,))
 fresh(::Correlation{A,B}, ::NamedTuple) where {A,B} =
     CorrelationState{A,B,corname(A, B),covname(A, B),Symbol(A, :_std),
-                     Symbol(B, :_std)}()
+        Symbol(B, :_std)}()
 fresh(st::CorrelationState) = st
 @inline update!(::CorrelationState, row) = nothing
 @inline function value(::CorrelationState{A,B,N,CV,SA,SB},
-                       vals::NamedTuple) where {A,B,N,CV,SA,SB}
+    vals::NamedTuple) where {A,B,N,CV,SA,SB}
     Cvf = fieldtype(typeof(vals), CV)
     Saf = fieldtype(typeof(vals), SA)
     Sbf = fieldtype(typeof(vals), SB)
@@ -788,7 +790,7 @@ end
 # a no-op; their group structure is exactly that of their (transitively all
 # group) dependencies, which the transforms fold alongside them.
 const DerivedState = Union{MomentState,MeanState,VarianceState,StdState,
-                           CovarianceState,CorrelationState}
+    CovarianceState,CorrelationState}
 combine!(::DerivedState, ::DerivedState, ::DerivedState) = nothing
 @inline downdate!(::DerivedState, row) = nothing
 
@@ -827,7 +829,7 @@ end
 # Reads both inputs before writing, so it tolerates dest aliasing a or b; the
 # ordered-ranges law is what makes keepfirst/keeplast correct here.
 function combine!(dest::TrackState{C,N,T,F}, a::TrackState{C,N,T,F},
-                  b::TrackState{C,N,T,F}) where {C,N,T,F}
+    b::TrackState{C,N,T,F}) where {C,N,T,F}
     if a.seen && b.seen
         v = F.instance(a.val, b.val)
         dest.val = v
@@ -848,7 +850,7 @@ function widenstate(st::TrackState{C,N,T,F}, intypes::NamedTuple) where {C,N,T,F
     T2 = intypes[C]
     T2 === T && return st
     return st.seen ? TrackState{C,N,T2,F}(true, convert(T2, st.val)) :
-        TrackState{C,N,T2,F}()
+           TrackState{C,N,T2,F}()
 end
 
 """

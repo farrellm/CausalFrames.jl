@@ -40,24 +40,28 @@ The curried form composes with `|>`; the uncurried form applies directly, so
 `asofjoin(left, right; ...)` is equivalent to `left |> asofjoin(right; ...)`.
 """
 function asofjoin(right::CausalPipeline; key = nothing, tolerance = nothing,
-                  strict::Bool = false, leftprefix = nothing,
-                  rightprefix = nothing,
-                  righttime::Union{Nothing,Symbol} = nothing)
+    strict::Bool = false, leftprefix = nothing,
+    rightprefix = nothing,
+    righttime::Union{Nothing,Symbol} = nothing)
     keycols = tokeycolumns(key)
     allunique(keycols) ||
         throw(ArgumentError("asofjoin key columns must be unique"))
     :time in keycols && throw(ArgumentError(
         "time is the as-of dimension and may not be an asofjoin key"))
-    righttime === :time && throw(ArgumentError(
-        "asofjoin righttime may not be time; it would collide with the left time column"))
-    righttime !== nothing && righttime in keycols && throw(ArgumentError(
-        "asofjoin righttime $righttime collides with a key column"))
+    righttime === :time && throw(
+        ArgumentError(
+            "asofjoin righttime may not be time; it would collide with the left time column",
+        ),
+    )
+    righttime !== nothing && righttime in keycols &&
+        throw(ArgumentError(
+            "asofjoin righttime $righttime collides with a key column"))
     lp = normprefix(leftprefix)
     rp = normprefix(rightprefix)
     return function (left::CausalPipeline)
         return CausalPipeline() do ctx::Context
             cfg = AsofJoinConfig(keycols, Val(Tuple(keycols)), tolerance,
-                                 strict ? (<) : (<=), lp, rp, righttime)
+                strict ? (<) : (<=), lp, rp, righttime)
             js = AsofJoinState(right.run(rightcontext(ctx, tolerance)))
             return chunkmap(c -> joinchunk!(js, cfg, c), left.run(ctx))
         end
@@ -110,8 +114,8 @@ mutable struct AsofJoinState
     leftchecked::Bool  # key validation against the left schema done
     checked::Bool      # output-name duplicate validation done
     AsofJoinState(rchunks) = new(rchunks, nothing, false, false, nothing, 1,
-                                 nothing, nothing, nothing, nothing, false,
-                                 false, false)
+        nothing, nothing, nothing, nothing, false,
+        false, false)
 end
 
 # The concrete row and key NamedTuple types for the store, from the promoted
@@ -146,7 +150,7 @@ function pullright!(js::AsofJoinState, cfg::AsofJoinConfig)
     if js.rvaluenames === nothing
         checkkeys(cfg.keycols, chunk, "right")
         js.rvaluenames = Symbol[n for n in propertynames(chunk)
-                                if n !== :time && !(n in cfg.keycols)]
+                     if n !== :time && !(n in cfg.keycols)]
     end
     types = promotetypes(js.rtypes, chunktypes(chunk))
     widened = js.rtypes !== nothing && types != js.rtypes
@@ -184,9 +188,9 @@ function joinchunk!(js::AsofJoinState, cfg::AsofJoinConfig, c::DataFrame)
     i = 1
     while true
         i, js.rpos, needpull = joinsegment!(js.matches, js.store, nt, i,
-                                            js.rnt, js.rpos, js.rdone,
-                                            cfg.keynames, cfg.before,
-                                            cfg.tolerance)
+            js.rnt, js.rpos, js.rdone,
+            cfg.keynames, cfg.before,
+            cfg.tolerance)
         needpull || break
         pullright!(js, cfg)
     end
@@ -202,9 +206,9 @@ end
 # hold rows admissible for left row i — the driver must pull the next right
 # chunk before row i can be matched.
 function joinsegment!(matches::Vector{Union{Missing,V}}, store::Dict{K,V},
-                      lnt::NamedTuple, i::Int, rnt::NamedTuple, rpos::Int,
-                      rdone::Bool, keynames::Val{KN}, before::B,
-                      tolerance) where {K,V,KN,B}
+    lnt::NamedTuple, i::Int, rnt::NamedTuple, rpos::Int,
+    rdone::Bool, keynames::Val{KN}, before::B,
+    tolerance) where {K,V,KN,B}
     n = length(lnt.time)
     rlen = length(rnt.time)
     while i <= n
@@ -251,8 +255,11 @@ end
 function checknames(cfg::AsofJoinConfig, c::DataFrame, rvaluenames)
     seen = Set{Symbol}()
     function check(n)
-        n in seen && throw(ArgumentError(
-            "asofjoin output column $n appears more than once; use leftprefix/rightprefix to disambiguate"))
+        n in seen && throw(
+            ArgumentError(
+                "asofjoin output column $n appears more than once; use leftprefix/rightprefix to disambiguate",
+            ),
+        )
         push!(seen, n)
         return nothing
     end

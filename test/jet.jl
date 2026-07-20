@@ -53,5 +53,5 @@ end
     lnt = (time = [1],)
     rnt = (time = [0], y = [2.0])
     JET.@test_opt CausalFrames.joinsegment!(matches, store, lnt, 1, rnt, 1,
-                                            true, Val(()), <=, nothing)
+        true, Val(()), <=, nothing)
 end

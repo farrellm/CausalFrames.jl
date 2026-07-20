@@ -42,7 +42,7 @@ function treepush!(tr::SegTree{S,R}, stateprotos::S, row::R) where {S<:Tuple,R}
     updateall!(@inbounds(tr.nodes[i]), row)
     i >>>= 1
     while i >= 1
-        @inbounds combinenodes!(tr.nodes[i], tr.nodes[2i], tr.nodes[2i + 1])
+        @inbounds combinenodes!(tr.nodes[i], tr.nodes[2i], tr.nodes[2i+1])
         i >>>= 1
     end
     return nothing
@@ -54,7 +54,7 @@ end
 # right-edge nodes right to left — because First/Last combine correctly only
 # over stream-ordered ranges.
 function treequery(tr::SegTree{S}, stateprotos::S, lo::Int,
-                   hi::Int) where {S<:Tuple}
+    hi::Int) where {S<:Tuple}
     accl = map(fresh, stateprotos)
     accr = map(fresh, stateprotos)
     l = tr.cap + lo - 1
@@ -102,12 +102,12 @@ function rebuild!(tr::SegTree{S}, stateprotos::S) where {S<:Tuple}
     times = tr.times[tr.head:end]
     live = length(rows)
     cap = max(4, nextpow(2, 2 * (live + 1)))
-    nodes = [map(fresh, stateprotos) for _ in 1:(2 * cap)]
+    nodes = [map(fresh, stateprotos) for _ in 1:(2*cap)]
     for (j, row) in enumerate(rows)
-        updateall!(@inbounds(nodes[cap + j - 1]), row)
+        updateall!(@inbounds(nodes[cap+j-1]), row)
     end
-    for i in (cap - 1):-1:1
-        @inbounds combinenodes!(nodes[i], nodes[2i], nodes[2i + 1])
+    for i in (cap-1):-1:1
+        @inbounds combinenodes!(nodes[i], nodes[2i], nodes[2i+1])
     end
     tr.rows = rows
     tr.times = times

@@ -3,7 +3,7 @@ using DataFrames
 using Documenter
 
 DocMeta.setdocmeta!(CausalFrames, :DocTestSetup, :(using CausalFrames);
-                    recursive = true)
+    recursive = true)
 
 makedocs(;
     modules = [CausalFrames],

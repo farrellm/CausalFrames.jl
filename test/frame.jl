@@ -24,7 +24,8 @@ end
 end
 
 @testset "chunk concatenation property" begin
-    p = clock(2) |>
+    p =
+        clock(2) |>
         filterrows(r -> r.time % 4 == 0) |>
         addcolumns(r -> (; double = 2 * r.time))
 
@@ -54,7 +55,7 @@ end
 @testset "Tables.schema promotes across chunks" begin
     ctx = Context(0, 10)
     frame = CausalFrame(ctx, [DataFrame(time = [1], x = [1]),
-                              DataFrame(time = [2], x = [2.5])])
+        DataFrame(time = [2], x = [2.5])])
     sch = Tables.schema(frame)
     @test sch.names == (:time, :x)
     @test sch.types == (Int, Float64)

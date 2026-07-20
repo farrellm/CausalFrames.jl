@@ -39,8 +39,10 @@ function load(ctx::Context{T}, p::CausalPipeline) where {T}
         # their own input; transforms preserve order), so the public
         # constructor's O(n) scans are skipped.
         isempty(chunks) || last(last(chunks).time) <= first(c.time) ||
-            throw(ArgumentError(
-                "chunk times must be non-decreasing across chunk boundaries"))
+            throw(
+                ArgumentError(
+                    "chunk times must be non-decreasing across chunk boundaries"),
+            )
         first(c.time) >= ctx.start && last(c.time) <= ctx.stop ||
             throw(ArgumentError(
                 "chunk times must lie in [$(ctx.start), $(ctx.stop)]"))
@@ -94,8 +96,10 @@ function emitframe(fs::FrameStream{T}, chunk, substart, ustate) where {T}
         "chunk times must lie in [$(fs.ctx.start), $(fs.ctx.stop)]"))
     next = iterate(fs.chunks, ustate)
     if next === nothing
-        last(chunk.time) <= fs.ctx.stop || throw(ArgumentError(
-            "chunk times must lie in [$(fs.ctx.start), $(fs.ctx.stop)]"))
+        last(chunk.time) <= fs.ctx.stop || throw(
+            ArgumentError(
+                "chunk times must lie in [$(fs.ctx.start), $(fs.ctx.stop)]"),
+        )
         return (trustedframe(Context{T}(substart, fs.ctx.stop), chunk), nothing)
     end
     nextchunk, nustate = next

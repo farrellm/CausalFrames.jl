@@ -34,8 +34,11 @@ struct CausalFrame{T}
         for c in kept
             "time" in names(c) ||
                 throw(ArgumentError("every chunk must have a :time column"))
-            eltype(c.time) <: T || throw(ArgumentError(
-                "chunk :time column has element type $(eltype(c.time)), expected <: $T"))
+            eltype(c.time) <: T || throw(
+                ArgumentError(
+                    "chunk :time column has element type $(eltype(c.time)), expected <: $T",
+                ),
+            )
             issorted(c.time) ||
                 throw(ArgumentError("chunk :time column is not non-decreasing"))
             names(c) == schema ||
@@ -45,7 +48,7 @@ struct CausalFrame{T}
                     "chunk times must lie in [$(ctx.start), $(ctx.stop)]"))
         end
         for i in 2:length(kept)
-            last(kept[i - 1].time) <= first(kept[i].time) ||
+            last(kept[i-1].time) <= first(kept[i].time) ||
                 throw(ArgumentError("chunks must be non-decreasing across boundaries"))
         end
         return new{T}(ctx, kept)

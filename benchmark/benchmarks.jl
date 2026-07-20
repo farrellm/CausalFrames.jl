@@ -13,10 +13,12 @@ using DataFrames
 # Duplicate times (4 rows per timestamp) exercise summarizecycles.
 function tradesource(n; chunkrows = 100_000, nkeys = 100)
     return CausalPipeline() do ctx
-        return (DataFrame(time = collect(r) .÷ 4,
-                          sym = ["s" * string(i % nkeys) for i in r],
-                          qty = [1.0 + (i % 7) for i in r])
-                for r in Iterators.partition(0:(n - 1), chunkrows))
+        return (
+            DataFrame(time = collect(r) .÷ 4,
+                sym = ["s" * string(i % nkeys) for i in r],
+                qty = [1.0 + (i % 7) for i in r])
+            for r in Iterators.partition(0:(n-1), chunkrows)
+        )
     end
 end
 
@@ -63,8 +65,11 @@ SUITE["rowwise"]["filterrows"] =
     @benchmarkable load(CTX, SRC |> filterrows(r -> r.qty > 3.0))
 SUITE["rowwise"]["addcolumns"] = @benchmarkable load(CTX,
     SRC |> addcolumns(r -> (; v = r.qty * 2.0, w = r.qty + 1.0)))
-SUITE["rowwise"]["pipeline"] = @benchmarkable load(CTX, clock(1) |>
-    filterrows(r -> r.time % 3 != 0) |> addcolumns(r -> (; x = 0.5 * r.time)))
+SUITE["rowwise"]["pipeline"] = @benchmarkable load(
+    CTX,
+    clock(1) |>
+    filterrows(r -> r.time % 3 != 0) |> addcolumns(r -> (; x = 0.5 * r.time)),
+)
 
 SUITE["summarize"] = BenchmarkGroup()
 SUITE["summarize"]["keyless"] = @benchmarkable load(CTX,
@@ -84,7 +89,7 @@ SUITE["rolling"]["running"] = @benchmarkable load(RCTX,
     RSRC |> addrollingcolumns((; w25 = 25), [Sum(:qty), Mean(:qty)]))
 SUITE["rolling"]["running-keyed"] = @benchmarkable load(RCTX,
     RSRC |> addrollingcolumns((; w25 = 25), [Sum(:qty), Mean(:qty)];
-                              key = :sym))
+        key = :sym))
 SUITE["rolling"]["tree"] = @benchmarkable load(RCTX,
     RSRC |> addrollingcolumns((; w25 = 25), [Min(:qty), Max(:qty)]))
 SUITE["rolling"]["refold"] = @benchmarkable load(RCTX,
@@ -97,6 +102,6 @@ if abspath(PROGRAM_FILE) == @__FILE__
         t = BenchmarkTools.prettytime(time(median(trial)))
         m = BenchmarkTools.prettymemory(memory(trial))
         println(rpad(join(path, "/"), 28), lpad(t, 12), lpad(m, 12),
-                lpad(allocs(trial), 12), " allocs")
+            lpad(allocs(trial), 12), " allocs")
     end
 end
