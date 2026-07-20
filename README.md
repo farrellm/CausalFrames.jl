@@ -10,8 +10,9 @@ Time-series tables for Julia: DataFrames with a monotonically non-decreasing
 ```julia
 using CausalFrames, Dates
 
-p = readcsv("ticks.csv") |>
-    filterrows(r -> r.price > 0) |>
+p = readcsv("ticks.csv";
+        types = Dict(:time => DateTime, :bid => Float64, :ask => Float64)) |>
+    filterrows(r -> r.bid > 0) |>
     addcolumns(r -> (; mid = (r.bid + r.ask) / 2))
 
 frame = load(Context(DateTime(2026, 1, 1), DateTime(2026, 2, 1)), p)
@@ -36,7 +37,7 @@ frame = load(Context(DateTime(2026, 1, 1), DateTime(2026, 2, 1)), p)
 |---|---|---|
 | `emptyframe()` | source | zero rows, just a `:time` column |
 | `clock(interval)` | source | one row per `interval` in `[start, stop)` |
-| `readcsv(path)` | source | sorted CSV with a `time` column, clipped to `[start, stop)`, read incrementally |
+| `readcsv(path; types, time, rename, delim)` | source | CSV read as `String` columns (`types` opts columns into concrete types); `time` picks the time column by name or a per-row function; clipped to `[start, stop)`, read incrementally |
 | `filterrows(pred)` | transform | keep rows where `pred(row)` |
 | `addcolumns(f)` | transform | `f(row)::NamedTuple` of new column values |
 | `summarize(ss; key)` | transform | summarize the whole window into rows at time `stop` |
@@ -63,7 +64,8 @@ summary per unique key value. Output columns are named by suffix:
 `SumPower(:mid, 2)` produces `:mid_sumpower_2`.
 
 ```julia
-p = readcsv("ticks.csv") |>
+p = readcsv("ticks.csv";
+        types = Dict(:time => Int, :bid => Float64, :ask => Float64)) |>
     addcolumns(r -> (; mid = (r.bid + r.ask) / 2)) |>
     addsummarycolumns([Count(), Sum(:mid), Min(:mid), Max(:mid)]; key = :symbol)
 ```

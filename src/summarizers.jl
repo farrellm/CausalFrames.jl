@@ -142,10 +142,10 @@ value(st::SummarizerState, ::NamedTuple) = value(st)
     widenstate(st::SummarizerState, intypes::NamedTuple) -> SummarizerState
 
 A state equivalent to `st` but typed for input columns of the element types in
-`intypes`, carrying the accumulated value over. A source may infer a column's
-element type per chunk (`readcsv` does), so a column can be `Int` in one chunk
-and `Float64` in the next; the transforms promote the types they have seen and
-call `widenstate` when that promotion changes something.
+`intypes`, carrying the accumulated value over. A source may hand a column a
+different element type from one chunk to the next, so a column can be `Int` in
+one chunk and `Float64` in the next; the transforms promote the types they have
+seen and call `widenstate` when that promotion changes something.
 
 Defaults to returning `st` unchanged, which is correct for any state whose
 type does not depend on the input, and which lets a summarizer opt out.

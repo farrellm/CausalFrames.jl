@@ -57,8 +57,8 @@ const SUITE = BenchmarkGroup()
 
 SUITE["sources"] = BenchmarkGroup()
 SUITE["sources"]["clock"] = @benchmarkable load(CTX, clock(1))
-SUITE["sources"]["readcsv"] =
-    @benchmarkable load(Context(0, 300_000), readcsv(CSVPATH))
+SUITE["sources"]["readcsv"] = @benchmarkable load(Context(0, 300_000),
+    readcsv(CSVPATH; types = Dict(:time => Int, :qty => Float64)))
 
 SUITE["rowwise"] = BenchmarkGroup()
 SUITE["rowwise"]["filterrows"] =

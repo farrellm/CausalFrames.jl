@@ -28,26 +28,96 @@ time,bid,ask
 7,9.5,10.5
 """,
     )
+    tt = Dict(:time => Int, :bid => Float64, :ask => Float64)
 
-    frame = load(Context(0, 100), readcsv(path))
+    frame = load(Context(0, 100), readcsv(path; types = tt))
     @test nrow(frame) == 4
     @test names(frame) == ["time", "bid", "ask"]
 
     # clipped to [start, stop)
-    frame = load(Context(3, 7), readcsv(path))
+    frame = load(Context(3, 7), readcsv(path; types = tt))
     @test DataFrame(frame).time == [3, 5]
 
     # time column converted to the context's time type
-    frame = load(Context(0.0, 100.0), readcsv(path))
+    frame = load(Context(0.0, 100.0), readcsv(path; types = tt))
     @test eltype(DataFrame(frame).time) == Float64
+
+    # untyped columns stay String (no type inference)
+    df = DataFrame(load(Context(0, 100), readcsv(path; types = Dict(:time => Int))))
+    @test eltype(df.bid) == String
+    @test df.bid == ["10.0", "10.5", "9.0", "9.5"]
 
     unsorted = joinpath(mktempdir(), "unsorted.csv")
     write(unsorted, "time,x\n3,1\n1,2\n")
-    @test_throws ArgumentError load(Context(0, 100), readcsv(unsorted))
+    @test_throws ArgumentError load(
+        Context(0, 100), readcsv(unsorted; types = Dict(:time => Int)))
 
     notime = joinpath(mktempdir(), "notime.csv")
     write(notime, "t,x\n1,2\n")
-    @test_throws ArgumentError load(Context(0, 100), readcsv(notime))
+    @test_throws ArgumentError load(
+        Context(0, 100), readcsv(notime; types = Dict(:time => Int)))
+
+    # the time column must be typed (or produced by a function), else error
+    @test_throws ArgumentError readcsv(path)                       # eager
+    @test_throws ArgumentError readcsv(path; types = Dict(:bid => Float64))
+    # a positional `types` that misses the time column: caught on first chunk
+    @test_throws ArgumentError load(
+        Context(0, 100), readcsv(path; types = [String, Float64, Float64]))
+end
+
+@testset "readcsv time selection, rename, delim" begin
+    dir = mktempdir()
+
+    # time as a Symbol: name the time column, typed via `types`
+    path = joinpath(dir, "ts.csv")
+    write(path, "ts,x\n1,a\n2,b\n3,c\n")
+    frame = load(Context(0, 100), readcsv(path; time = :ts,
+        types = Dict(:ts => Int)))
+    @test names(frame) == ["time", "x"]   # ts renamed to time
+    df = DataFrame(frame)
+    @test df.time == [1, 2, 3]
+    @test df.x == ["a", "b", "c"]
+
+    # a Symbol time column still needs a type, else error
+    @test_throws ArgumentError readcsv(path; time = :ts)
+
+    # time as a per-row function: produces the :time column from strings
+    path2 = joinpath(dir, "func.csv")
+    write(path2, "stamp,x\n001,a\n002,b\n003,c\n")
+    frame = load(Context(0, 100),
+        readcsv(path2; time = row -> parse(Int, row.stamp)))
+    df = DataFrame(frame)
+    @test eltype(df.time) == Int
+    @test df.time == [1, 2, 3]
+
+    # rename (map), applied before the time name is resolved. `types` names
+    # the original column `:t` (typing happens before the rename).
+    path3 = joinpath(dir, "rename.csv")
+    write(path3, "t,v\n1,a\n2,b\n")
+    frame = load(
+        Context(0, 100),
+        readcsv(path3; rename = Dict("t" => "time"), types = Dict(:t => Int)),
+    )
+    @test DataFrame(frame).time == [1, 2]
+
+    # rename (function), applied before the time function reads renamed names
+    frame = load(
+        Context(0, 100),
+        readcsv(path3;
+            rename = n -> uppercase(String(n)), time = row -> parse(Int, row.T)),
+    )
+    df = DataFrame(frame)
+    @test names(df) == ["T", "V", "time"]
+    @test df.time == [1, 2]
+
+    # delim
+    path4 = joinpath(dir, "semi.csv")
+    write(path4, "time;x\n1;a\n2;b\n")
+    frame = load(Context(0, 100), readcsv(path4; delim = ';',
+        types = Dict(:time => Int)))
+    df = DataFrame(frame)
+    @test df.time == [1, 2]
+    @test df.x == ["a", "b"]
 end
 
 @testset "filterrows and addcolumns" begin
@@ -62,9 +132,10 @@ time,bid,ask
 7,9.5,10.5
 """,
     )
+    tt = Dict(:time => Int, :bid => Float64, :ask => Float64)
 
     p =
-        readcsv(path) |>
+        readcsv(path; types = tt) |>
         filterrows(r -> r.bid >= 9.5) |>
         addcolumns(r -> (; mid = (r.bid + r.ask) / 2))
     df = DataFrame(load(Context(0, 100), p))
@@ -73,13 +144,13 @@ time,bid,ask
     @test names(df) == ["time", "bid", "ask", "mid"]
 
     # row access by symbol and access to :time
-    p = readcsv(path) |> filterrows(r -> r[:time] > 3)
+    p = readcsv(path; types = tt) |> filterrows(r -> r[:time] > 3)
     @test DataFrame(load(Context(0, 100), p)).time == [5, 7]
 
     # addcolumns may not touch time, and must return a NamedTuple
-    bad = readcsv(path) |> addcolumns(r -> (; time = r.time))
+    bad = readcsv(path; types = tt) |> addcolumns(r -> (; time = r.time))
     @test_throws ArgumentError load(Context(0, 100), bad)
-    notuple = readcsv(path) |> addcolumns(r -> r.bid)
+    notuple = readcsv(path; types = tt) |> addcolumns(r -> r.bid)
     @test_throws ArgumentError load(Context(0, 100), notuple)
 
     # transforms on an empty frame are no-ops
@@ -87,7 +158,7 @@ time,bid,ask
     @test nrow(load(Context(0, 100), p)) == 0
 
     # the uncurried, pipeline-first forms are equivalent to the |> chain
-    src = readcsv(path)
+    src = readcsv(path; types = tt)
     curried =
         src |> filterrows(r -> r.bid >= 9.5) |>
         addcolumns(r -> (; mid = (r.bid + r.ask) / 2))
@@ -107,12 +178,14 @@ end
         end
     end
 
+    it = Dict(:time => Int)
+
     # small chunks stream as several frames but load identically
-    p = readcsv(path; chunkbytes = 64)
+    p = readcsv(path; types = it, chunkbytes = 64)
     frames = collect(stream(Context(0, 100), p))
     @test length(frames) > 1
     @test DataFrame(load(Context(0, 100), p)) ==
-          DataFrame(load(Context(0, 100), readcsv(path)))
+          DataFrame(load(Context(0, 100), readcsv(path; types = it)))
     @test DataFrame(load(Context(0, 100), p)).time == 1:50
 
     # clipping to [start, stop) works across chunk boundaries
@@ -128,10 +201,10 @@ end
         println(io, "7,0")   # unsorted, far past stop below
     end
     @test DataFrame(load(Context(0, 10),
-        readcsv(badtail; chunkbytes = 64))).time == 1:9
+        readcsv(badtail; types = it, chunkbytes = 64))).time == 1:9
     # ... but reading through it throws
     @test_throws ArgumentError load(Context(0, 1000),
-        readcsv(badtail; chunkbytes = 64))
+        readcsv(badtail; types = it, chunkbytes = 64))
 
-    @test_throws ArgumentError readcsv(path; chunkbytes = 0)
+    @test_throws ArgumentError readcsv(path; types = it, chunkbytes = 0)
 end

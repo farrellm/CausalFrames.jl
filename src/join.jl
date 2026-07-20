@@ -135,9 +135,10 @@ function checkkeys(keycols::Vector{Symbol}, c::DataFrame, side::String)
 end
 
 # Pull the next right chunk (type-unstable, once per right chunk): create or
-# widen the store when the promoted right schema moves — readcsv infers
-# column types per chunk. The matches vector may be half-filled mid-left-chunk
-# when this runs, so it is converted along with the store.
+# widen the store when the promoted right schema moves — a source may hand a
+# column a different element type from one chunk to the next. The matches
+# vector may be half-filled mid-left-chunk when this runs, so it is converted
+# along with the store.
 function pullright!(js::AsofJoinState, cfg::AsofJoinConfig)
     next = js.rstarted ? iterate(js.rchunks, js.rstate) : iterate(js.rchunks)
     js.rstarted = true
