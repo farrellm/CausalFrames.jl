@@ -8,7 +8,10 @@ with any API or semantics change.**
 
 ## Commands
 
-- Run tests: `julia --project -e 'using Pkg; Pkg.test()'`
+- Run tests: `julia --project -e 'using Pkg; Pkg.test()'` (includes Aqua
+  and, on released Julia versions, targeted JET checks in `test/jet.jl`)
+- Format: `julia -e 'using JuliaFormatter; format(".")'` (config in
+  `.JuliaFormatter.toml`)
 - Add a dependency: `julia --project -e 'using Pkg; Pkg.add("Name")'`
   (never hand-edit UUIDs; test-only deps also need an `[extras]` entry)
 - CI tests Julia 1.10 (minimum supported), 1.12, and pre-release — don't
@@ -19,8 +22,11 @@ with any API or semantics change.**
 
 - `src/context.jl` — `Context{T}`: time window, generic ordered time type
 - `src/frame.jl` — `CausalFrame{T}`: opaque, backed by a vector of
-  time-disjoint DataFrame chunks; invariants checked in the inner
-  constructor; Tables.jl interface; `DataFrame(frame)` is the copy point
+  time-disjoint DataFrame chunks; invariants checked in the public inner
+  constructor, while `load`/`stream` build through a `Trusted`-token
+  constructor (O(n) scans skipped; O(1) cross-chunk/bounds guards kept);
+  column-access Tables.jl interface with a cheap `Tables.schema`;
+  `DataFrame(frame)` is the copy point
 - `src/chunks.jl` — internal chunk protocol: `ChunkSource` and `chunkmap`,
   single-pass lazy iterators of non-empty DataFrame chunks
 - `src/pipeline.jl` — `CausalPipeline{F}` (lazy `Context -> iterator of
@@ -43,9 +49,12 @@ with any API or semantics change.**
   type, parameterized by the combiner — monoids only, as is `Product`;
   the accumulators and all dependent summarizers are groups; `Moment` is
   the dependent-summarizer example, reading its dependencies' values
-  through the two-argument `value(st, vals)`; float sum accumulators use
-  the shared `Compensated` pair — Neumaier summation over finite terms,
-  NaN/±Inf counted separately, IEEE result reconstructed in `value`)
+  through the two-argument `value(st, vals)`; the sum family
+  `Sum`/`SumPower`/`DotProduct` shares one plain and one compensated
+  state over a term functor — `ColumnTerm`/`PowerTerm`/`PairProductTerm`,
+  terms formed at accumulator width — with the `Compensated` pair doing
+  Neumaier summation over finite terms, NaN/±Inf counted separately, the
+  IEEE result reconstructed in `value`)
 - `src/summarize.jl` — the folding kernels and the transforms `summarize`,
   `summarizecycles`, `addsummarycolumns`; `prototypes` expands dependencies
   topologically and returns the requested output names, which ride through

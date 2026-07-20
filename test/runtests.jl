@@ -21,4 +21,10 @@ include("fixtures.jl")
     include("rolling.jl")
     include("summarize.jl")
     include("summarizers.jl")
+
+    # JET can lag pre-release Julia; the checks are the same on every
+    # released version, so skipping them there loses nothing.
+    if isempty(VERSION.prerelease)
+        include("jet.jl")
+    end
 end
