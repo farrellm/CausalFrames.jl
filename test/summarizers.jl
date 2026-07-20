@@ -384,11 +384,12 @@ end
     # float accumulators get the compensated state; missing-permitting and
     # BigFloat accumulators keep the plain one
     @test CausalFrames.fresh(Sum(:x), ftypes) isa
-        CausalFrames.CompensatedSumState{:x,:x_sum,Float64}
+        CausalFrames.CompensatedAccumState{:x_sum,Float64,
+                                           CausalFrames.ColumnTerm{:x}}
     @test CausalFrames.fresh(Sum(:x), (time = Int64, x = Union{Missing,Float64})) isa
-        CausalFrames.SumState
+        CausalFrames.AccumState
     @test CausalFrames.fresh(Sum(:x), (time = Int64, x = BigFloat)) isa
-        CausalFrames.SumState
+        CausalFrames.AccumState
 
     # value is concretely typed and declared at the same element type as the
     # plain state, so nothing downstream can tell the states apart
@@ -465,14 +466,16 @@ end
     ist = CausalFrames.fresh(Sum(:x), (time = Int64, x = Int64))
     CausalFrames.update!(ist, (; x = 5))
     wst = CausalFrames.widenstate(ist, (time = Int64, x = Float64))
-    @test wst isa CausalFrames.CompensatedSumState{:x,:x_sum,Float64}
+    @test wst isa CausalFrames.CompensatedAccumState{:x_sum,Float64,
+                                                     CausalFrames.ColumnTerm{:x}}
     @test CausalFrames.value(wst) === (x_sum = 5.0,)
 
     f32 = CausalFrames.fresh(Sum(:x), (time = Int64, x = Float32))
     foreach(x -> CausalFrames.update!(f32, (; x)),
             Float32[1.0f10, 1.0f0, NaN32, Inf32])
     f64 = CausalFrames.widenstate(f32, (time = Int64, x = Float64))
-    @test f64 isa CausalFrames.CompensatedSumState{:x,:x_sum,Float64}
+    @test f64 isa CausalFrames.CompensatedAccumState{:x_sum,Float64,
+                                                     CausalFrames.ColumnTerm{:x}}
     @test f64.acc.comp == Float64(f32.acc.comp) && f64.acc.comp != 0.0
     @test f64.acc.nans == 1 && f64.acc.posinf == 1
     CausalFrames.downdate!(f64, (; x = NaN))
@@ -481,7 +484,8 @@ end
 
     nst = fold(Sum(:x), [1.0, NaN])
     mst = CausalFrames.widenstate(nst, (time = Int64, x = Union{Missing,Float64}))
-    @test mst isa CausalFrames.SumState{:x,:x_sum,Union{Missing,Float64}}
+    @test mst isa CausalFrames.AccumState{:x_sum,Union{Missing,Float64},
+                                          CausalFrames.ColumnTerm{:x}}
     @test isnan(CausalFrames.value(mst).x_sum)
     @test !CausalFrames.isinvertible(mst)
     @test CausalFrames.isinvertible(nst)

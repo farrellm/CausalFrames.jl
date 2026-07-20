@@ -349,9 +349,18 @@ and unsigned integers widen (`Int32` sums to `Int64`, `Bool` to `Int64`,
 `UInt8` to `UInt64`), everything else keeps its type (`Float32` sums to
 `Float32`). Their accumulator is built at that width up front, so the fold is
 a plain `+` that cannot overflow the way accumulating in the input's own type
-would. `Product` is the same story with `Base.prod`'s widening and a `*` fold,
-and `DotProduct(a, b)` sums the products `a * b`, forming each term in that
-widened accumulator type so a per-row product cannot overflow either.
+would. `Product` is the same story with `Base.prod`'s widening and a `*` fold.
+
+The whole sum family (`Sum`, `SumPower`, `DotProduct`) is backed by one
+shared plain state and one shared compensated state, parameterized by a
+*term functor* — the same idiom as the `Min`/`Max`/`First`/`Last` state, but
+for the folded quantity: the functor's type names the family and its input
+columns (`ColumnTerm{:x}`, `PowerTerm{:x}`, `PairProductTerm{:a,:b}`), its
+fields carry runtime config (`SumPower`'s exponent), and `update!` inlines
+it statically. Every term is formed *in the accumulator's widened type* —
+`SumPower` raises the widened value to the power, `DotProduct(a, b)`
+multiplies widened values — so a per-row power or product cannot overflow
+the way computing it in the input columns' own types would.
 
 When the realized accumulator type is a fixed-precision float (a non-BigFloat
 `AbstractFloat`; `Union{Missing,...}` keeps the plain state), the sum
