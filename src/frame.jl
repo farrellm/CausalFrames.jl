@@ -1,3 +1,9 @@
+# Internal token: the caller vouches for the chunk-protocol invariants
+# (non-empty chunks, shared schema, ordered in-window times), so the trusted
+# constructor may skip the O(n) validation. Only load and stream qualify —
+# they consume iterators that already guarantee the protocol.
+struct Trusted end
+
 """
     CausalFrame(ctx::Context, chunks)
     CausalFrame(ctx::Context, df::DataFrame)
@@ -44,6 +50,9 @@ struct CausalFrame{T}
         end
         return new{T}(ctx, kept)
     end
+
+    CausalFrame{T}(::Trusted, ctx::Context{T}, chunks::Vector{DataFrame}) where {T} =
+        new{T}(ctx, chunks)
 end
 
 CausalFrame(ctx::Context{T}, chunks::Vector{DataFrame}) where {T} =

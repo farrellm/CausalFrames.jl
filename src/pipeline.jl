@@ -30,12 +30,14 @@ window into a frame. This is the only operation that forces the full window
 into memory; the frame wraps the streamed chunks as-is, without copying.
 An empty result yields a zero-row frame with only a `:time` column.
 """
-function load(ctx::Context, p::CausalPipeline)
+function load(ctx::Context{T}, p::CausalPipeline) where {T}
     chunks = DataFrame[]
     for c in p.run(ctx)
         push!(chunks, c)
     end
-    return CausalFrame(ctx, chunks)
+    # The chunk protocol already guarantees the frame invariants, so the
+    # O(n) re-validation of the public constructor is skipped.
+    return CausalFrame{T}(Trusted(), ctx, chunks)
 end
 
 """
@@ -77,11 +79,17 @@ Base.iterate(fs::FrameStream, st::Tuple) = emitframe(fs, st...)
 # `chunk` is the last one.
 function emitframe(fs::FrameStream{T}, chunk, substart, ustate) where {T}
     next = iterate(fs.chunks, ustate)
-    next === nothing &&
-        return (CausalFrame(Context{T}(substart, fs.ctx.stop), chunk), nothing)
+    next === nothing && return (trustedframe(Context{T}(substart, fs.ctx.stop),
+                                             chunk), nothing)
     nextchunk, nustate = next
     b = first(nextchunk.time)
     last(chunk.time) <= b || throw(ArgumentError(
         "chunk times must be non-decreasing across chunk boundaries"))
-    return (CausalFrame(Context{T}(substart, b), chunk), (nextchunk, b, nustate))
+    return (trustedframe(Context{T}(substart, b), chunk), (nextchunk, b, nustate))
 end
+
+# The chunk protocol guarantees the invariants within each yielded chunk, and
+# emitframe's boundary check above covers the cross-chunk order, so streamed
+# frames skip the public constructor's O(n) validation.
+trustedframe(ctx::Context{T}, chunk::DataFrame) where {T} =
+    CausalFrame{T}(Trusted(), ctx, [chunk])

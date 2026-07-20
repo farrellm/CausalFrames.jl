@@ -41,6 +41,14 @@ Invariants, checked at construction:
 - all times lie in the **closed** interval `[start, stop]` of the frame's
   context (see "Interval semantics" below).
 
+The public constructors validate all of this — including an O(n) sortedness
+scan — because they accept arbitrary user DataFrames. `load` and `stream`
+instead construct through an internal trusted inner constructor (the
+`Trusted` token) that skips the checks: the chunk protocol they consume
+already guarantees every invariant, and re-scanning each streamed chunk
+would tax the hot path for nothing. Any other construction site must use
+the validating path.
+
 Public access is through:
 
 - the Tables.jl interface — row iteration over all chunks in time order, so
