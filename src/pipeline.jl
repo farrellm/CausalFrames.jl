@@ -33,10 +33,19 @@ An empty result yields a zero-row frame with only a `:time` column.
 function load(ctx::Context{T}, p::CausalPipeline) where {T}
     chunks = DataFrame[]
     for c in p.run(ctx)
+        # O(1)-per-chunk guards against a misbehaving hand-rolled source:
+        # cross-chunk order and window bounds. Within-chunk order and schema
+        # equality are the chunk protocol's responsibility (sources validate
+        # their own input; transforms preserve order), so the public
+        # constructor's O(n) scans are skipped.
+        isempty(chunks) || last(last(chunks).time) <= first(c.time) ||
+            throw(ArgumentError(
+                "chunk times must be non-decreasing across chunk boundaries"))
+        first(c.time) >= ctx.start && last(c.time) <= ctx.stop ||
+            throw(ArgumentError(
+                "chunk times must lie in [$(ctx.start), $(ctx.stop)]"))
         push!(chunks, c)
     end
-    # The chunk protocol already guarantees the frame invariants, so the
-    # O(n) re-validation of the public constructor is skipped.
     return CausalFrame{T}(Trusted(), ctx, chunks)
 end
 
@@ -78,9 +87,17 @@ Base.iterate(fs::FrameStream, st::Tuple) = emitframe(fs, st...)
 # next chunk (checking cross-chunk order), or over [substart, ctx.stop] when
 # `chunk` is the last one.
 function emitframe(fs::FrameStream{T}, chunk, substart, ustate) where {T}
+    # The same O(1) guards as load: window bounds here, cross-chunk order at
+    # the lookahead below (substart is the chunk's own first time except for
+    # the very first chunk, where it is ctx.start).
+    first(chunk.time) >= substart || throw(ArgumentError(
+        "chunk times must lie in [$(fs.ctx.start), $(fs.ctx.stop)]"))
     next = iterate(fs.chunks, ustate)
-    next === nothing && return (trustedframe(Context{T}(substart, fs.ctx.stop),
-                                             chunk), nothing)
+    if next === nothing
+        last(chunk.time) <= fs.ctx.stop || throw(ArgumentError(
+            "chunk times must lie in [$(fs.ctx.start), $(fs.ctx.stop)]"))
+        return (trustedframe(Context{T}(substart, fs.ctx.stop), chunk), nothing)
+    end
     nextchunk, nustate = next
     b = first(nextchunk.time)
     last(chunk.time) <= b || throw(ArgumentError(
@@ -88,8 +105,8 @@ function emitframe(fs::FrameStream{T}, chunk, substart, ustate) where {T}
     return (trustedframe(Context{T}(substart, b), chunk), (nextchunk, b, nustate))
 end
 
-# The chunk protocol guarantees the invariants within each yielded chunk, and
-# emitframe's boundary check above covers the cross-chunk order, so streamed
-# frames skip the public constructor's O(n) validation.
+# Within-chunk order and schema equality are trusted to the chunk protocol
+# (the O(n) part of the public constructor's validation); the cheap boundary
+# and bounds guards above still run per chunk.
 trustedframe(ctx::Context{T}, chunk::DataFrame) where {T} =
     CausalFrame{T}(Trusted(), ctx, [chunk])
