@@ -26,8 +26,15 @@ end
 newsegtree(stateprotos::S, ::Type{R}, ::Type{T}) where {S<:Tuple,R,T} =
     SegTree{S,R,T}(R[], T[], [map(fresh, stateprotos) for _ in 1:8], 4, 1)
 
-@inline combinenodes!(dest::S, a::S, b::S) where {S<:Tuple} =
-    (foreach(combine!, dest, a, b); nothing)
+# Peeled explicitly rather than through `foreach`/`map`: the three-argument
+# `foreach` folds over a `zip` and does not unroll for tuples, which costs a
+# runtime dispatch per node on this hot path, and `map` would build a
+# throwaway NTuple{n,Nothing}.
+@inline combinenodes!(::Tuple{}, ::Tuple{}, ::Tuple{}) = nothing
+@inline function combinenodes!(dest::S, a::S, b::S) where {S<:Tuple}
+    combine!(first(dest), first(a), first(b))
+    return combinenodes!(Base.tail(dest), Base.tail(a), Base.tail(b))
+end
 
 # Append one row: fold it into the identity states already waiting in its
 # leaf slot, then recombine the ancestors up to the root — O(log cap), no
