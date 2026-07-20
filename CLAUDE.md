@@ -54,7 +54,10 @@ with any API or semantics change.**
   state over a term functor — `ColumnTerm`/`PowerTerm`/`PairProductTerm`,
   terms formed at accumulator width — with the `Compensated` pair doing
   Neumaier summation over finite terms, NaN/±Inf counted separately, the
-  IEEE result reconstructed in `value`)
+  IEEE result reconstructed in `value`; a `Missing`-admitting column gets
+  the flat `Optional*` counting states over the non-missing type, counting
+  `missing` terms the same way so the accumulator stays invertible — no
+  `Union{Missing,_}` accumulation field, only `value`'s return)
 - `src/summarize.jl` — the folding kernels and the transforms `summarize`,
   `summarizecycles`, `addsummarycolumns`; `prototypes` expands dependencies
   topologically and returns the requested output names, which ride through

@@ -324,6 +324,12 @@ end
     )
     intdata = mkdata(xs)
     floatdata = mkdata(Float64.(xs) ./ 4)
+    # same streams with missing sprinkled through the summarized column, so the
+    # sum accumulators go through their counting states on the running path
+    xsm = [i % 5 == 0 ? missing : xs[i] for i in 1:nrows]
+    missingintdata = mkdata(convert(Vector{Union{Missing,Int}}, xsm))
+    missingfloatdata = mkdata(
+        convert(Vector{Union{Missing,Float64}}, map(v -> ismissing(v) ? v : v / 4, xsm)))
 
     windows = (w0 = 0, w3 = 3, w20 = 20)
     rolled(p, ss; kwargs...) = DataFrame(load(Context(0, 1000),
@@ -338,6 +344,17 @@ end
         for p in (intdata, floatdata), ss in (groupset, monoidset, mixedset,
                 plainset)
 
+            agrees(rolled(p, ss), rolled(p, map(Opaque, ss)))
+            agrees(rolled(p, ss; key = :k),
+                rolled(p, map(Opaque, ss); key = :k))
+        end
+    end
+
+    @testset "differential over missing inputs" begin
+        # the running path (groups) must equal the re-fold oracle even with
+        # missing in the summarized column — the counting states keep it on the
+        # running path rather than demoting to the tree
+        for p in (missingintdata, missingfloatdata), ss in (groupset, mixedset)
             agrees(rolled(p, ss), rolled(p, map(Opaque, ss)))
             agrees(rolled(p, ss; key = :k),
                 rolled(p, map(Opaque, ss); key = :k))
@@ -370,11 +387,12 @@ end
         @test eltype(df.w2_y_mean) == Union{Missing,Float64}
     end
 
-    @testset "missing widens away the running inverse" begin
-        # chunk two lets missing into the sum accumulator, demoting the
-        # running mode to the tree mid-stream: the poisoned row damages its
-        # own windows but recovers once it expires, because a tree query
-        # never combines an expired leaf
+    @testset "missing rows recover in running mode" begin
+        # chunk two widens the sum accumulator to admit missing; because the
+        # accumulator counts missing terms instead of folding them in (like
+        # NaN/±Inf), the running path stays running — the missing row reports
+        # missing over its own windows but recovers exactly once it expires,
+        # with no demotion to the tree
         p = onechunk(time = [1, 2, 3, 10], x = [0, 0, 0, 0])
         src = CausalPipeline(
             ctx ->
