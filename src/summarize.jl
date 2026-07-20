@@ -68,7 +68,7 @@ end
 
 # Input column element types, mirroring the row access in update!.
 chunktypes(c::DataFrame) =
-    NamedTuple{Tuple(Symbol.(names(c)))}(Tuple(eltype(col) for col in eachcol(c)))
+    NamedTuple{Tuple(propertynames(c))}(Tuple(eltype(col) for col in eachcol(c)))
 
 # A source may infer a column's element type per chunk, so the state types
 # track the promotion of every input type seen so far rather than trusting the
@@ -185,7 +185,7 @@ end
 
 function foldall!(states::Tuple, nt::NamedTuple)
     for row in Tables.rows(nt)
-        foreach(st -> update!(st, row), states)
+        updateall!(states, row)
     end
     return nothing
 end
@@ -194,7 +194,7 @@ function foldgroups!(groups::Dict{K,S}, stateprotos::S, nt::NamedTuple,
                      ::Val{KN}) where {K,S,KN}
     for row in Tables.rows(nt)
         states = get!(() -> map(fresh, stateprotos), groups, keyvalues(row, Val(KN)))
-        foreach(st -> update!(st, row), states)
+        updateall!(states, row)
     end
     return nothing
 end
@@ -212,7 +212,7 @@ function foldcycles!(states::S, stateprotos::S, nt::NamedTuple,
             cycletime = t
             states = map(fresh, stateprotos)
         end
-        foreach(st -> update!(st, row), states)
+        updateall!(states, row)
     end
     return rows, states, cycletime
 end
@@ -228,7 +228,7 @@ function foldcyclesgrouped!(groups::Dict{K,S}, stateprotos::S, nt::NamedTuple,
             cycletime = t
         end
         states = get!(() -> map(fresh, stateprotos), groups, keyvalues(row, Val(KN)))
-        foreach(st -> update!(st, row), states)
+        updateall!(states, row)
     end
     return rows, cycletime
 end
@@ -246,7 +246,7 @@ function foldrunning!(states::S, nt::NamedTuple, n::Int,
     vals = Vector{valuetype(S, r)}(undef, n)
     i = 0
     for row in Tables.rows(nt)
-        foreach(st -> update!(st, row), states)
+        updateall!(states, row)
         vals[i += 1] = summaryvalues(states, r)
     end
     return vals
@@ -258,7 +258,7 @@ function foldrunninggrouped!(groups::Dict{K,S}, stateprotos::S, nt::NamedTuple,
     i = 0
     for row in Tables.rows(nt)
         states = get!(() -> map(fresh, stateprotos), groups, keyvalues(row, Val(KN)))
-        foreach(st -> update!(st, row), states)
+        updateall!(states, row)
         vals[i += 1] = summaryvalues(states, r)
     end
     return vals

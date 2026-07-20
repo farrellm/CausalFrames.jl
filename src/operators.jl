@@ -11,7 +11,7 @@
 A source that always produces zero rows (loading it yields a frame with only
 a `:time` column).
 """
-emptyframe() = CausalPipeline(ctx -> DataFrame[])
+emptyframe() = CausalPipeline(ctx -> ChunkSource(() -> nothing))
 
 """
     clock(interval; batchsize = 1024) -> CausalPipeline
@@ -112,7 +112,10 @@ function (p::CSVProducer{T})() where {T}
     p.chunks === nothing && (p.chunks = csvchunks(p.path, p.chunkbytes))
     while true
         next = p.started ? iterate(p.chunks, p.state) : iterate(p.chunks)
-        next === nothing && (p.done = true; return nothing)
+        if next === nothing
+            p.done = true
+            return nothing
+        end
         filechunk, p.state = next
         p.started = true
         # CSV.Chunks infers column types per chunk; a column's eltype may

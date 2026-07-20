@@ -281,7 +281,7 @@ function replaygroups!(d::Dict{K,RunningGroup{S}}, buffer::Vector, head::Int,
         row = @inbounds buffer[j]
         g = get!(() -> RunningGroup(map(fresh, stateprotos), 0), d,
                  keyvalues(row, keynames))
-        foreach(st -> update!(st, row), g.states)
+        updateall!(g.states, row)
         g.live += 1
     end
     return d
@@ -381,7 +381,7 @@ newvals(::Type{V}, emptyrow, n::Int) where {V} =
 # Dead rows accumulate at the front of the buffer as the head advances;
 # dropping them only when they dominate keeps the cost amortized O(1) per
 # admitted row.
-function compact!(buffer::Vector, head::Int)
+function compact!(buffer::Vector{R}, head::Int) where {R}
     dead = head - 1
     if dead >= 64 && 2 * dead >= length(buffer)
         deleteat!(buffer, 1:dead)
@@ -392,7 +392,7 @@ end
 
 # The running-mode analogue: a row is dead once the laggiest window's head
 # has passed it, and the per-window heads shift down with the drop.
-function compactrunning!(buffer::Vector, winheads::Vector{Int})
+function compactrunning!(buffer::Vector{R}, winheads::Vector{Int}) where {R}
     dead = minimum(winheads) - 1
     if dead >= 64 && 2 * dead >= length(buffer)
         deleteat!(buffer, 1:dead)
@@ -459,7 +459,7 @@ end
         s = @inbounds buffer[j]
         t - s.time <= lb || continue
         isequal(keyvalues(s, keynames), k) || continue
-        foreach(st -> update!(st, s), states)
+        updateall!(states, s)
         seen = true
     end
     v = first(vals)
@@ -516,7 +516,7 @@ end
     for w in 1:length(rgroups)
         g = get!(() -> RunningGroup(map(fresh, stateprotos), 0), rgroups[w],
                  keyvalues(row, keynames))
-        foreach(st -> update!(st, row), g.states)
+        updateall!(g.states, row)
         g.live += 1
     end
     return nothing
@@ -537,7 +537,7 @@ end
         row = @inbounds buffer[head]
         k = keyvalues(row, keynames)
         g = d[k]
-        foreach(st -> downdate!(st, row), g.states)
+        downdateall!(g.states, row)
         g.live -= 1
         g.live == 0 && delete!(d, k)
         head += 1

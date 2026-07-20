@@ -145,7 +145,7 @@ function pullright!(js::AsofJoinState, cfg::AsofJoinConfig)
     chunk, js.rstate = next
     if js.rvaluenames === nothing
         checkkeys(cfg.keycols, chunk, "right")
-        js.rvaluenames = Symbol[n for n in Symbol.(names(chunk))
+        js.rvaluenames = Symbol[n for n in propertynames(chunk)
                                 if n !== :time && !(n in cfg.keycols)]
     end
     types = promotetypes(js.rtypes, chunktypes(chunk))
@@ -239,7 +239,7 @@ end
 
 function prefixleft!(cfg::AsofJoinConfig, c::DataFrame)
     cfg.leftprefix === nothing && return c
-    for n in Symbol.(names(c))
+    for n in propertynames(c)
         (n === :time || n in cfg.keycols) && continue
         rename!(c, n => prefixed(cfg.leftprefix, n))
     end
@@ -250,12 +250,15 @@ end
 # before the first chunk is emitted.
 function checknames(cfg::AsofJoinConfig, c::DataFrame, rvaluenames)
     seen = Set{Symbol}()
-    check(n) = n in seen ? throw(ArgumentError(
-        "asofjoin output column $n appears more than once; use leftprefix/rightprefix to disambiguate")) :
+    function check(n)
+        n in seen && throw(ArgumentError(
+            "asofjoin output column $n appears more than once; use leftprefix/rightprefix to disambiguate"))
         push!(seen, n)
+        return nothing
+    end
     check(:time)
     foreach(check, cfg.keycols)
-    for n in Symbol.(names(c))
+    for n in propertynames(c)
         (n === :time || n in cfg.keycols) && continue
         check(prefixed(cfg.leftprefix, n))
     end

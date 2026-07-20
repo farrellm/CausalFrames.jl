@@ -206,6 +206,13 @@ when choosing the running-state window algorithm.
 """
 isinvertible(::SummarizerState) = true
 
+# Fold one row into — or, for group states, back out of — every state in a
+# tuple. Over a concrete state tuple the foreach unrolls and each update!
+# dispatches statically, so the shared spelling costs nothing.
+@inline updateall!(states::Tuple, row) = foreach(st -> update!(st, row), states)
+@inline downdateall!(states::Tuple, row) =
+    foreach(st -> downdate!(st, row), states)
+
 # The element type Base.sum produces over a column of eltype T: small signed
 # and unsigned integers widen to Int/UInt, everything else keeps its type. The
 # accumulator is built at this width up front, so the folding loop is a plain
@@ -694,6 +701,13 @@ Variance(column::Symbol; corrected::Bool = true) = Variance{column}(corrected)
 # stays fieldless and inferrable; the divisor is `n - Int(R)`.
 struct VarianceState{C,N,S,Q,R} <: SummarizerState end
 
+# The compile-time value type of the shared (co)variance identity
+# `(q - sa * sb / n) / (n - corrected)`, from the dependencies' declared
+# field types (a runtime `typeof` would let one missing collapse the type).
+_covtype(::Type{Q}, ::Type{Sa}, ::Type{Sb}) where {Q,Sa,Sb} =
+    Base.promote_op(/, Base.promote_op(-, Q,
+        Base.promote_op(/, Base.promote_op(*, Sa, Sb), Int)), Int)
+
 dependencies(::Variance{C}) where {C} = (Count(), Sum(C), SumPower(C, 2))
 emptyvalue(::Variance{C}) where {C} =
     NamedTuple{(Symbol(C, :_variance),)}((missing,))
@@ -705,8 +719,7 @@ fresh(st::VarianceState) = st
 @inline function value(::VarianceState{C,N,S,Q,R}, vals::NamedTuple) where {C,N,S,Q,R}
     Sf = fieldtype(typeof(vals), S)
     Qf = fieldtype(typeof(vals), Q)
-    V = Base.promote_op(/, Base.promote_op(-, Qf,
-            Base.promote_op(/, Base.promote_op(*, Sf, Sf), Int)), Int)
+    V = _covtype(Qf, Sf, Sf)
     s = vals[S]
     q = vals[Q]
     n = vals.count
@@ -787,8 +800,7 @@ fresh(st::CovarianceState) = st
     Df = fieldtype(typeof(vals), D)
     Saf = fieldtype(typeof(vals), SA)
     Sbf = fieldtype(typeof(vals), SB)
-    V = Base.promote_op(/, Base.promote_op(-, Df,
-            Base.promote_op(/, Base.promote_op(*, Saf, Sbf), Int)), Int)
+    V = _covtype(Df, Saf, Sbf)
     d = vals[D]
     sa = vals[SA]
     sb = vals[SB]
