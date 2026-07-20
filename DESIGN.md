@@ -44,17 +44,26 @@ Invariants, checked at construction:
 The public constructors validate all of this — including an O(n) sortedness
 scan — because they accept arbitrary user DataFrames. `load` and `stream`
 instead construct through an internal trusted inner constructor (the
-`Trusted` token) that skips the checks: the chunk protocol they consume
-already guarantees every invariant, and re-scanning each streamed chunk
-would tax the hot path for nothing. Any other construction site must use
-the validating path.
+`Trusted` token): the chunk protocol they consume already guarantees the
+invariants, and re-scanning each streamed chunk would tax the hot path for
+nothing. They keep O(1)-per-chunk guards — cross-chunk time order and
+window bounds — so a misbehaving hand-rolled `CausalPipeline` source is
+still caught; within-chunk sortedness and schema equality are trusted to
+the protocol (sources validate their own input, e.g. `readcsv` checks the
+file's order; transforms preserve order). Any other construction site must
+use the validating path.
 
 Public access is through:
 
-- the Tables.jl interface — row iteration over all chunks in time order, so
-  a `CausalFrame` works anywhere a Tables.jl source is accepted;
-  `Tables.partitions(cf)` yields one partition per backing chunk (as copies,
-  keeping the backing opaque) for partition-aware sinks;
+- the Tables.jl interface — a **column-access** table (`Tables.columns`
+  materializes once, as a copy; row iteration is served through Tables.jl's
+  row-view fallback over those columns, so consumers touching both pay one
+  materialization, not two). `Tables.schema(cf)` is cheap — names from the
+  first chunk, eltypes promoted across chunks without a row scan — and
+  matches what `DataFrame(cf)` produces. `Tables.partitions(cf)` yields one
+  partition per backing chunk (as copies, keeping the backing opaque) for
+  partition-aware sinks; an empty frame yields the single zero-row frame
+  `DataFrame(cf)` would, so both views agree;
 - `DataFrame(cf)` — concatenates chunks into a plain DataFrame (an explicit
   exit from the causal world, and the point where the data is copied);
 - `context(cf)`, `nrow(cf)`, `names(cf)`.
