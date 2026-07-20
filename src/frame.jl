@@ -1,3 +1,9 @@
+# Internal token: the caller vouches for the chunk-protocol invariants
+# (non-empty chunks, shared schema, ordered in-window times), so the trusted
+# constructor may skip the O(n) validation. Only load and stream qualify —
+# they consume iterators that already guarantee the protocol.
+struct Trusted end
+
 """
     CausalFrame(ctx::Context, chunks)
     CausalFrame(ctx::Context, df::DataFrame)
@@ -28,8 +34,11 @@ struct CausalFrame{T}
         for c in kept
             "time" in names(c) ||
                 throw(ArgumentError("every chunk must have a :time column"))
-            eltype(c.time) <: T || throw(ArgumentError(
-                "chunk :time column has element type $(eltype(c.time)), expected <: $T"))
+            eltype(c.time) <: T || throw(
+                ArgumentError(
+                    "chunk :time column has element type $(eltype(c.time)), expected <: $T",
+                ),
+            )
             issorted(c.time) ||
                 throw(ArgumentError("chunk :time column is not non-decreasing"))
             names(c) == schema ||
@@ -39,11 +48,14 @@ struct CausalFrame{T}
                     "chunk times must lie in [$(ctx.start), $(ctx.stop)]"))
         end
         for i in 2:length(kept)
-            last(kept[i - 1].time) <= first(kept[i].time) ||
+            last(kept[i-1].time) <= first(kept[i].time) ||
                 throw(ArgumentError("chunks must be non-decreasing across boundaries"))
         end
         return new{T}(ctx, kept)
     end
+
+    CausalFrame{T}(::Trusted, ctx::Context{T}, chunks::Vector{DataFrame}) where {T} =
+        new{T}(ctx, chunks)
 end
 
 CausalFrame(ctx::Context{T}, chunks::Vector{DataFrame}) where {T} =
@@ -77,13 +89,31 @@ function DataFrames.DataFrame(frame::CausalFrame{T}) where {T}
     return reduce(vcat, frame.chunks)
 end
 
+# Column access only: rows are served through Tables.jl's row-view fallback
+# over the columns, so consumers touching both pay one materialization, not
+# two. The copy in Tables.columns keeps the backing opaque.
 Tables.istable(::Type{<:CausalFrame}) = true
-Tables.rowaccess(::Type{<:CausalFrame}) = true
-Tables.rows(frame::CausalFrame) = Tables.rows(DataFrame(frame))
 Tables.columnaccess(::Type{<:CausalFrame}) = true
 Tables.columns(frame::CausalFrame) = Tables.columns(DataFrame(frame))
-# One partition per backing chunk; the copies keep the backing opaque.
-Tables.partitions(frame::CausalFrame) = (copy(c) for c in frame.chunks)
+
+# The names are known without materializing, and the eltypes are the
+# promotion of each column's per-chunk eltypes — what `DataFrame(frame)`
+# produces on concatenation — so the schema costs O(chunks * columns), never
+# a row scan.
+function Tables.schema(frame::CausalFrame{T}) where {T}
+    isempty(frame.chunks) && return Tables.Schema((:time,), (T,))
+    ns = propertynames(first(frame.chunks))
+    types = [mapreduce(c -> eltype(c[!, n]), promote_type, frame.chunks)
+             for n in ns]
+    return Tables.Schema(ns, types)
+end
+
+# One partition per backing chunk; the copies keep the backing opaque. An
+# empty frame yields the single zero-row frame `DataFrame(frame)` would, so
+# partition-aware sinks see the same table as whole-table consumers.
+Tables.partitions(frame::CausalFrame{T}) where {T} =
+    (copy(c) for c in (isempty(frame.chunks) ? [DataFrame(time = T[])] :
+                       frame.chunks))
 
 function Base.show(io::IO, mime::MIME"text/plain", frame::CausalFrame{T}) where {T}
     ctx = frame.context

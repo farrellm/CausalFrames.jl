@@ -51,7 +51,7 @@ so `addrollingcolumns(p, w, ss; ...)` is equivalent to
 `p |> addrollingcolumns(w, ss; ...)`.
 """
 function addrollingcolumns(windows, summarizers; key = nothing,
-                           from::Union{Nothing,CausalPipeline} = nothing)
+    from::Union{Nothing,CausalPipeline} = nothing)
     windownames, lookbacks = towindows(windows)
     isempty(windownames) &&
         throw(ArgumentError("at least one window is required"))
@@ -60,22 +60,26 @@ function addrollingcolumns(windows, summarizers; key = nothing,
     keycols = tokeycolumns(key)
     allunique(keycols) ||
         throw(ArgumentError("addrollingcolumns key columns must be unique"))
-    :time in keycols && throw(ArgumentError(
-        "time is the window dimension and may not be an addrollingcolumns key"))
+    :time in keycols && throw(
+        ArgumentError(
+            "time is the window dimension and may not be an addrollingcolumns key"),
+    )
     protos, requested = prototypes(tosummarizers(summarizers), Symbol[])
     prefixednames = Symbol[]
     for w in windownames, n in requested
         pn = Symbol(w, '_', n)
-        pn in prefixednames && throw(ArgumentError(
-            "addrollingcolumns output column $pn appears more than once"))
+        pn in prefixednames && throw(
+            ArgumentError(
+                "addrollingcolumns output column $pn appears more than once"),
+        )
         push!(prefixednames, pn)
     end
     return function (p::CausalPipeline)
         return CausalPipeline() do ctx::Context
             source = from === nothing ? p : from
             cfg = RollingConfig(windownames, lookbacks, keycols,
-                                Val(Tuple(keycols)), protos, Val(requested),
-                                prefixednames, candidatemode(protos))
+                Val(Tuple(keycols)), protos, Val(requested),
+                prefixednames, candidatemode(protos))
             rs = RollingState(source.run(rollingcontext(ctx, lookbacks)))
             return chunkmap(c -> rollchunk!(rs, cfg, c), p.run(ctx))
         end
@@ -91,8 +95,10 @@ towindows(w::NamedTuple) = (keys(w), values(w))
 towindows(w::Pair) = ((Symbol(first(w)),), (last(w),))
 function towindows(w)
     ps = collect(w)
-    all(p -> p isa Pair, ps) || throw(ArgumentError(
-        "addrollingcolumns windows must be a NamedTuple or name => lookback pairs"))
+    all(p -> p isa Pair, ps) || throw(
+        ArgumentError(
+            "addrollingcolumns windows must be a NamedTuple or name => lookback pairs"),
+    )
     return (Tuple(Symbol(first(p)) for p in ps), Tuple(last(p) for p in ps))
 end
 
@@ -164,9 +170,9 @@ mutable struct RollingState
     passthrough::Bool  # the summarized stream produced no chunks at all
     checked::Bool      # augmented-side name/key validation done
     RollingState(schunks) = new(schunks, nothing, false, false, nothing, 1,
-                                nothing, nothing, nothing, 1, nothing, nothing,
-                                nothing, RefoldMode(), nothing, nothing,
-                                nothing, false, false)
+        nothing, nothing, nothing, 1, nothing, nothing,
+        nothing, RefoldMode(), nothing, nothing,
+        nothing, false, false)
 end
 
 # One key's running window state: the states with every in-window row folded
@@ -194,8 +200,11 @@ function pullsummarized!(rs::RollingState, cfg::RollingConfig)
     chunk, rs.sstate = next
     if rs.stypes === nothing
         for k in cfg.keycols
-            String(k) in names(chunk) || throw(ArgumentError(
-                "addrollingcolumns key column $k not found in the summarized input"))
+            String(k) in names(chunk) || throw(
+                ArgumentError(
+                    "addrollingcolumns key column $k not found in the summarized input",
+                ),
+            )
         end
     end
     types = promotetypes(rs.stypes, chunktypes(chunk))
@@ -226,11 +235,11 @@ function setupmode!(rs::RollingState, cfg::RollingConfig, types::NamedTuple)
     if rs.mode isa RunningMode
         rs.winheads = ones(Int, length(cfg.lookbacks))
         rs.rgroups = newrgroups(rs.stateprotos,
-                                storekeytype(types, cfg.keynames),
-                                length(cfg.lookbacks))
+            storekeytype(types, cfg.keynames),
+            length(cfg.lookbacks))
     elseif rs.mode isa TreeMode
         rs.trees = newtrees(rs.stateprotos, storekeytype(types, cfg.keynames),
-                            storerowtype(types), types.time)
+            storerowtype(types), types.time)
     end
     return nothing
 end
@@ -245,27 +254,27 @@ newtrees(stateprotos::S, ::Type{K}, ::Type{R}, ::Type{T}) where {S<:Tuple,K,R,T}
 # transition — including the running -> tree demotion when the widening let
 # missing into an accumulator, after which the buffer goes unused.
 function widenmode!(rs::RollingState, cfg::RollingConfig, types::NamedTuple,
-                    oldmode::RollMode)
+    oldmode::RollMode)
     rs.mode = effectivemode(cfg.mode, rs.stateprotos)
     K = storekeytype(types, cfg.keynames)
     if rs.mode isa RunningMode
         rs.rgroups = ntuple(length(cfg.lookbacks)) do w
             replaygroups!(Dict{K,RunningGroup{typeof(rs.stateprotos)}}(),
-                          rs.buffer, rs.winheads[w], rs.stateprotos,
-                          cfg.keynames)
+                rs.buffer, rs.winheads[w], rs.stateprotos,
+                cfg.keynames)
         end
     elseif rs.mode isa TreeMode
         trees = newtrees(rs.stateprotos, K, storerowtype(types), types.time)
         if oldmode isa RunningMode
             replaytrees!(trees, rs.buffer, minimum(rs.winheads),
-                         rs.stateprotos, cfg.keynames)
+                rs.stateprotos, cfg.keynames)
             empty!(rs.buffer)
             rs.rgroups = nothing
             rs.winheads = nothing
         else
             for (_, old) in rs.trees
                 replaytrees!(trees, old.rows, old.head, rs.stateprotos,
-                             cfg.keynames)
+                    cfg.keynames)
             end
         end
         rs.trees = trees
@@ -276,12 +285,12 @@ end
 # Fold the live rows (from head on) back into fresh per-key running groups;
 # a function barrier so the per-row work is concretely typed.
 function replaygroups!(d::Dict{K,RunningGroup{S}}, buffer::Vector, head::Int,
-                       stateprotos::S, keynames::Val{KN}) where {K,S<:Tuple,KN}
+    stateprotos::S, keynames::Val{KN}) where {K,S<:Tuple,KN}
     for j in head:length(buffer)
         row = @inbounds buffer[j]
         g = get!(() -> RunningGroup(map(fresh, stateprotos), 0), d,
-                 keyvalues(row, keynames))
-        foreach(st -> update!(st, row), g.states)
+            keyvalues(row, keynames))
+        updateall!(g.states, row)
         g.live += 1
     end
     return d
@@ -290,12 +299,12 @@ end
 # Push the live rows (from head on) into per-key trees, converting each to
 # the trees' row type; a function barrier like replaygroups!.
 function replaytrees!(trees::Dict{K,SegTree{S,R,T}}, rows::Vector, head::Int,
-                      stateprotos::S,
-                      keynames::Val{KN}) where {K,S<:Tuple,R,T,KN}
+    stateprotos::S,
+    keynames::Val{KN}) where {K,S<:Tuple,R,T,KN}
     for j in head:length(rows)
         row = convert(R, @inbounds rows[j])
         tr = get!(() -> newsegtree(stateprotos, R, T), trees,
-                  keyvalues(row, keynames))
+            keyvalues(row, keynames))
         treepush!(tr, stateprotos, row)
     end
     return trees
@@ -311,9 +320,11 @@ function setvaltype!(rs::RollingState, cfg::RollingConfig)
     E = typeof(e)
     V = if VT <: NamedTuple && isconcretetype(VT) && fieldnames(VT) == keys(e)
         NamedTuple{keys(e),
-                   Tuple{ntuple(i -> promote_type(fieldtype(VT, i),
-                                                  fieldtype(E, i)),
-                                fieldcount(E))...}}
+            Tuple{
+                ntuple(i -> promote_type(fieldtype(VT, i),
+                        fieldtype(E, i)),
+                    fieldcount(E))...,
+            }}
     else
         Union{VT,E}
     end
@@ -327,12 +338,16 @@ end
 function rollchunk!(rs::RollingState, cfg::RollingConfig, c::DataFrame)
     if !rs.checked
         for k in cfg.keycols
-            String(k) in names(c) || throw(ArgumentError(
-                "addrollingcolumns key column $k not found in the augmented input"))
+            String(k) in names(c) || throw(
+                ArgumentError(
+                    "addrollingcolumns key column $k not found in the augmented input"),
+            )
         end
         for pn in cfg.prefixednames
-            String(pn) in names(c) && throw(ArgumentError(
-                "rolling summary column $pn collides with an existing column"))
+            String(pn) in names(c) && throw(
+                ArgumentError(
+                    "rolling summary column $pn collides with an existing column"),
+            )
         end
         rs.checked = true
     end
@@ -342,7 +357,7 @@ function rollchunk!(rs::RollingState, cfg::RollingConfig, c::DataFrame)
     # Pre-filled with the empty row so a mid-chunk widen never converts an
     # undef slot.
     rs.vals = map(_ -> newvals(rs.valtype, rs.emptyrow, nrow(c)),
-                  cfg.lookbacks)
+        cfg.lookbacks)
     i = 1
     # The mode is re-read each pass: a widening inside pullsummarized! can
     # demote running to tree mid-chunk.
@@ -350,19 +365,19 @@ function rollchunk!(rs::RollingState, cfg::RollingConfig, c::DataFrame)
         if rs.mode isa RunningMode
             i, rs.spos, needpull =
                 rollsegmentrunning!(rs.vals, rs.buffer, rs.winheads, lnt, i,
-                                    rs.snt, rs.spos, rs.sdone, cfg.lookbacks,
-                                    cfg.keynames, rs.stateprotos, rs.rgroups,
-                                    cfg.outs, rs.emptyrow)
+                    rs.snt, rs.spos, rs.sdone, cfg.lookbacks,
+                    cfg.keynames, rs.stateprotos, rs.rgroups,
+                    cfg.outs, rs.emptyrow)
         elseif rs.mode isa TreeMode
             i, rs.spos, needpull =
                 rollsegmenttree!(rs.vals, rs.trees, lnt, i, rs.snt, rs.spos,
-                                 rs.sdone, cfg.lookbacks, cfg.keynames,
-                                 rs.stateprotos, cfg.outs, rs.emptyrow)
+                    rs.sdone, cfg.lookbacks, cfg.keynames,
+                    rs.stateprotos, cfg.outs, rs.emptyrow)
         else
             i, rs.spos, rs.bufhead, needpull =
                 rollsegment!(rs.vals, rs.buffer, rs.bufhead, lnt, i, rs.snt,
-                             rs.spos, rs.sdone, cfg.lookbacks, cfg.keynames,
-                             rs.stateprotos, cfg.outs, rs.emptyrow)
+                    rs.spos, rs.sdone, cfg.lookbacks, cfg.keynames,
+                    rs.stateprotos, cfg.outs, rs.emptyrow)
         end
         needpull || break
         pullsummarized!(rs, cfg)
@@ -381,7 +396,7 @@ newvals(::Type{V}, emptyrow, n::Int) where {V} =
 # Dead rows accumulate at the front of the buffer as the head advances;
 # dropping them only when they dominate keeps the cost amortized O(1) per
 # admitted row.
-function compact!(buffer::Vector, head::Int)
+function compact!(buffer::Vector{R}, head::Int) where {R}
     dead = head - 1
     if dead >= 64 && 2 * dead >= length(buffer)
         deleteat!(buffer, 1:dead)
@@ -392,7 +407,7 @@ end
 
 # The running-mode analogue: a row is dead once the laggiest window's head
 # has passed it, and the per-window heads shift down with the drop.
-function compactrunning!(buffer::Vector, winheads::Vector{Int})
+function compactrunning!(buffer::Vector{R}, winheads::Vector{Int}) where {R}
     dead = minimum(winheads) - 1
     if dead >= 64 && 2 * dead >= length(buffer)
         deleteat!(buffer, 1:dead)
@@ -410,10 +425,10 @@ end
 # consumed but the stream may still hold rows with time <= row i's time —
 # the driver must pull the next summarized chunk before row i can be folded.
 function rollsegment!(vals::Tuple, buffer::Vector{R}, head::Int,
-                      lnt::NamedTuple, i::Int, snt::NamedTuple, spos::Int,
-                      sdone::Bool, lookbacks::Tuple, keynames::Val{KN},
-                      stateprotos::S, outs::Val,
-                      emptyrow) where {R,KN,S<:Tuple}
+    lnt::NamedTuple, i::Int, snt::NamedTuple, spos::Int,
+    sdone::Bool, lookbacks::Tuple, keynames::Val{KN},
+    stateprotos::S, outs::Val,
+    emptyrow) where {R,KN,S<:Tuple}
     n = length(lnt.time)
     slen = length(snt.time)
     while i <= n
@@ -428,11 +443,11 @@ function rollsegment!(vals::Tuple, buffer::Vector{R}, head::Int,
         # Times are non-decreasing, so a row outside every window now is
         # outside forever.
         while head <= length(buffer) &&
-                outsideall(t - @inbounds(buffer[head]).time, lookbacks...)
+              outsideall(t - @inbounds(buffer[head]).time, lookbacks...)
             head += 1
         end
         foldwindows!(vals, i, t, buffer, head, keyat(lnt, i, keynames),
-                     keynames, stateprotos, outs, emptyrow, lookbacks...)
+            keynames, stateprotos, outs, emptyrow, lookbacks...)
         i += 1
     end
     return (i, spos, head, false)
@@ -448,24 +463,24 @@ end
 # correct baseline. `seen` guards value: Min/Max/First/Last leave their
 # value field undefined until a row is folded in.
 @inline foldwindows!(::Tuple{}, i, t, buffer, head, k, keynames, stateprotos,
-                     outs, emptyrow) = nothing
+    outs, emptyrow) = nothing
 @inline function foldwindows!(vals::Tuple, i::Int, t, buffer::Vector,
-                              head::Int, k::NamedTuple, keynames::Val,
-                              stateprotos::Tuple, outs::Val, emptyrow,
-                              lb, rest...)
+    head::Int, k::NamedTuple, keynames::Val,
+    stateprotos::Tuple, outs::Val, emptyrow,
+    lb, rest...)
     states = map(fresh, stateprotos)
     seen = false
     for j in head:length(buffer)
         s = @inbounds buffer[j]
         t - s.time <= lb || continue
         isequal(keyvalues(s, keynames), k) || continue
-        foreach(st -> update!(st, s), states)
+        updateall!(states, s)
         seen = true
     end
     v = first(vals)
     @inbounds v[i] = seen ? summaryvalues(states, outs) : emptyrow
     return foldwindows!(Base.tail(vals), i, t, buffer, head, k, keynames,
-                        stateprotos, outs, emptyrow, rest...)
+        stateprotos, outs, emptyrow, rest...)
 end
 
 # --- running (group) kernel ------------------------------------------------
@@ -478,11 +493,11 @@ end
 # heterogeneous look-backs peel vararg-style, carrying the window index w
 # alongside.
 function rollsegmentrunning!(vals::Tuple, buffer::Vector{R},
-                             winheads::Vector{Int}, lnt::NamedTuple, i::Int,
-                             snt::NamedTuple, spos::Int, sdone::Bool,
-                             lookbacks::Tuple, keynames::Val{KN},
-                             stateprotos::S, rgroups::G, outs::Val,
-                             emptyrow) where {R,KN,S<:Tuple,G<:Tuple}
+    winheads::Vector{Int}, lnt::NamedTuple, i::Int,
+    snt::NamedTuple, spos::Int, sdone::Bool,
+    lookbacks::Tuple, keynames::Val{KN},
+    stateprotos::S, rgroups::G, outs::Val,
+    emptyrow) where {R,KN,S<:Tuple,G<:Tuple}
     n = length(lnt.time)
     slen = length(snt.time)
     while i <= n
@@ -504,7 +519,7 @@ function rollsegmentrunning!(vals::Tuple, buffer::Vector{R},
             g = get(rgroups[w], k, nothing)
             v = vals[w]
             @inbounds v[i] = g === nothing ? emptyrow :
-                summaryvalues(g.states, outs)
+                             summaryvalues(g.states, outs)
         end
         i += 1
     end
@@ -512,11 +527,11 @@ function rollsegmentrunning!(vals::Tuple, buffer::Vector{R},
 end
 
 @inline function admitrunning!(row, keynames::Val, stateprotos::Tuple,
-                               rgroups::Tuple)
+    rgroups::Tuple)
     for w in 1:length(rgroups)
         g = get!(() -> RunningGroup(map(fresh, stateprotos), 0), rgroups[w],
-                 keyvalues(row, keynames))
-        foreach(st -> update!(st, row), g.states)
+            keyvalues(row, keynames))
+        updateall!(g.states, row)
         g.live += 1
     end
     return nothing
@@ -527,24 +542,24 @@ end
 # bounded by the keys currently in some window, and makes "absent key" mean
 # "empty window" for the emission above.
 @inline evictrunning!(t, buffer::Vector, winheads::Vector{Int}, keynames::Val,
-                      rgroups::Tuple, w::Int) = nothing
+    rgroups::Tuple, w::Int) = nothing
 @inline function evictrunning!(t, buffer::Vector, winheads::Vector{Int},
-                               keynames::Val, rgroups::Tuple, w::Int, lb,
-                               rest...)
+    keynames::Val, rgroups::Tuple, w::Int, lb,
+    rest...)
     d = rgroups[w]
     head = @inbounds winheads[w]
     while head <= length(buffer) && t - @inbounds(buffer[head]).time > lb
         row = @inbounds buffer[head]
         k = keyvalues(row, keynames)
         g = d[k]
-        foreach(st -> downdate!(st, row), g.states)
+        downdateall!(g.states, row)
         g.live -= 1
         g.live == 0 && delete!(d, k)
         head += 1
     end
     @inbounds winheads[w] = head
     return evictrunning!(t, buffer, winheads, keynames, rgroups, w + 1,
-                         rest...)
+        rest...)
 end
 
 # --- tree (monoid) kernel --------------------------------------------------
@@ -557,10 +572,10 @@ end
 # so a row older than every window is expired for good, and the tree drops
 # the prefix at its next rebuild.
 function rollsegmenttree!(vals::Tuple, trees::Dict{K,SegTree{S,R,T}},
-                          lnt::NamedTuple, i::Int, snt::NamedTuple, spos::Int,
-                          sdone::Bool, lookbacks::Tuple, keynames::Val{KN},
-                          stateprotos::S, outs::Val,
-                          emptyrow) where {K,S<:Tuple,R,T,KN}
+    lnt::NamedTuple, i::Int, snt::NamedTuple, spos::Int,
+    sdone::Bool, lookbacks::Tuple, keynames::Val{KN},
+    stateprotos::S, outs::Val,
+    emptyrow) where {K,S<:Tuple,R,T,KN}
     n = length(lnt.time)
     slen = length(snt.time)
     while i <= n
@@ -568,7 +583,7 @@ function rollsegmenttree!(vals::Tuple, trees::Dict{K,SegTree{S,R,T}},
         while spos <= slen && @inbounds(snt.time[spos]) <= t
             row = rowat(R, snt, spos)
             tr = get!(() -> newsegtree(stateprotos, R, T), trees,
-                      keyvalues(row, keynames))
+                keyvalues(row, keynames))
             treepush!(tr, stateprotos, row)
             spos += 1
         end
@@ -582,7 +597,7 @@ function rollsegmenttree!(vals::Tuple, trees::Dict{K,SegTree{S,R,T}},
             end
         else
             minlo = emittree!(vals, i, t, tr, stateprotos, outs, emptyrow,
-                              length(tr.rows) + 1, 1, lookbacks...)
+                length(tr.rows) + 1, 1, lookbacks...)
             tr.head = max(tr.head, minlo)
         end
         i += 1
@@ -591,17 +606,18 @@ function rollsegmenttree!(vals::Tuple, trees::Dict{K,SegTree{S,R,T}},
 end
 
 @inline emittree!(vals::Tuple, i::Int, t, tr::SegTree, stateprotos::Tuple,
-                  outs::Val, emptyrow, minlo::Int, w::Int) = minlo
+    outs::Val, emptyrow, minlo::Int, w::Int) = minlo
 @inline function emittree!(vals::Tuple, i::Int, t, tr::SegTree,
-                           stateprotos::Tuple, outs::Val, emptyrow,
-                           minlo::Int, w::Int, lb, rest...)
+    stateprotos::Tuple, outs::Val, emptyrow,
+    minlo::Int, w::Int, lb, rest...)
     lo = windowstart(tr.times, tr.head, t, lb)
     hi = length(tr.rows)
     v = vals[w]
-    @inbounds v[i] = lo > hi ? emptyrow :
+    @inbounds v[i] =
+        lo > hi ? emptyrow :
         summaryvalues(treequery(tr, stateprotos, lo, hi), outs)
     return emittree!(vals, i, t, tr, stateprotos, outs, emptyrow,
-                     min(minlo, lo), w + 1, rest...)
+        min(minlo, lo), w + 1, rest...)
 end
 
 # --- output assembly -------------------------------------------------------

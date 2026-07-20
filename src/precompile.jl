@@ -8,15 +8,21 @@
     write(csv, "time,sym,qty\n1,a,1.0\n2,b,2.0\n2,a,3.0\n3,a,4.0\n")
     @compile_workload begin
         ctx = Context(0, 10)
-        p = readcsv(csv) |>
+        p =
+            readcsv(csv) |>
             filterrows(r -> r.qty > 0) |>
             addcolumns(r -> (; v = 2.0 * r.qty))
-        DataFrame(load(ctx, p |> summarize([Count(), Sum(:v), SumPower(:v, 2),
-                                            Moment(:v, 2), Min(:v), Max(:v),
-                                            Product(:v), Mean(:v), Variance(:v),
-                                            Std(:v), DotProduct(:v, :qty),
-                                            Covariance(:v, :qty),
-                                            Correlation(:v, :qty)])))
+        DataFrame(
+            load(
+                ctx,
+                p |> summarize([Count(), Sum(:v), SumPower(:v, 2),
+                    Moment(:v, 2), Min(:v), Max(:v),
+                    Product(:v), Mean(:v), Variance(:v),
+                    Std(:v), DotProduct(:v, :qty),
+                    Covariance(:v, :qty),
+                    Correlation(:v, :qty)]),
+            ),
+        )
         DataFrame(load(ctx, p |> summarize([Count(), Sum(:v)]; key = :sym)))
         DataFrame(load(ctx, p |> summarizecycles(Sum(:v); key = :sym)))
         DataFrame(load(ctx, p |> addsummarycolumns([First(:v), Last(:v)])))
@@ -24,18 +30,34 @@
         # group/monoid set the tree mode; the re-fold mode is reachable
         # only through user summarizers without the structure, so it
         # specializes at first call like any custom summarizer
-        DataFrame(load(ctx, p |> addrollingcolumns((w2 = 2,),
-                                                   [Sum(:v), Mean(:v)];
-                                                   key = :sym)))
-        DataFrame(load(ctx, clock(1) |> addrollingcolumns(
-            (w1 = 1, w3 = 3), [Count(), Min(:qty)]; from = readcsv(csv))))
-        DataFrame(load(ctx, p |> addrollingcolumns((w2 = 2,),
-                                                   [Min(:v), Last(:v)];
-                                                   key = :sym)))
-        DataFrame(load(ctx, p |> asofjoin(readcsv(csv); key = :sym,
-                                          rightprefix = "r", righttime = :rt)))
-        DataFrame(load(ctx, clock(1) |> asofjoin(readcsv(csv); tolerance = 2,
-                                                 rightprefix = "r")))
+        DataFrame(
+            load(ctx, p |> addrollingcolumns((w2 = 2,),
+                [Sum(:v), Mean(:v)];
+                key = :sym)),
+        )
+        DataFrame(
+            load(
+                ctx,
+                clock(1) |> addrollingcolumns(
+                    (w1 = 1, w3 = 3), [Count(), Min(:qty)]; from = readcsv(csv)),
+            ),
+        )
+        DataFrame(
+            load(ctx, p |> addrollingcolumns((w2 = 2,),
+                [Min(:v), Last(:v)];
+                key = :sym)),
+        )
+        DataFrame(
+            load(
+                ctx,
+                p |> asofjoin(readcsv(csv); key = :sym,
+                    rightprefix = "r", righttime = :rt),
+            ),
+        )
+        DataFrame(
+            load(ctx, clock(1) |> asofjoin(readcsv(csv); tolerance = 2,
+                rightprefix = "r")),
+        )
         foreach(DataFrame, stream(ctx, clock(1) |> summarize(Count())))
         DataFrame(load(ctx, emptyframe()))
     end

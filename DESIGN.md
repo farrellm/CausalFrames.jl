@@ -41,12 +41,29 @@ Invariants, checked at construction:
 - all times lie in the **closed** interval `[start, stop]` of the frame's
   context (see "Interval semantics" below).
 
+The public constructors validate all of this — including an O(n) sortedness
+scan — because they accept arbitrary user DataFrames. `load` and `stream`
+instead construct through an internal trusted inner constructor (the
+`Trusted` token): the chunk protocol they consume already guarantees the
+invariants, and re-scanning each streamed chunk would tax the hot path for
+nothing. They keep O(1)-per-chunk guards — cross-chunk time order and
+window bounds — so a misbehaving hand-rolled `CausalPipeline` source is
+still caught; within-chunk sortedness and schema equality are trusted to
+the protocol (sources validate their own input, e.g. `readcsv` checks the
+file's order; transforms preserve order). Any other construction site must
+use the validating path.
+
 Public access is through:
 
-- the Tables.jl interface — row iteration over all chunks in time order, so
-  a `CausalFrame` works anywhere a Tables.jl source is accepted;
-  `Tables.partitions(cf)` yields one partition per backing chunk (as copies,
-  keeping the backing opaque) for partition-aware sinks;
+- the Tables.jl interface — a **column-access** table (`Tables.columns`
+  materializes once, as a copy; row iteration is served through Tables.jl's
+  row-view fallback over those columns, so consumers touching both pay one
+  materialization, not two). `Tables.schema(cf)` is cheap — names from the
+  first chunk, eltypes promoted across chunks without a row scan — and
+  matches what `DataFrame(cf)` produces. `Tables.partitions(cf)` yields one
+  partition per backing chunk (as copies, keeping the backing opaque) for
+  partition-aware sinks; an empty frame yields the single zero-row frame
+  `DataFrame(cf)` would, so both views agree;
 - `DataFrame(cf)` — concatenates chunks into a plain DataFrame (an explicit
   exit from the causal world, and the point where the data is copied);
 - `context(cf)`, `nrow(cf)`, `names(cf)`.
@@ -332,9 +349,18 @@ and unsigned integers widen (`Int32` sums to `Int64`, `Bool` to `Int64`,
 `UInt8` to `UInt64`), everything else keeps its type (`Float32` sums to
 `Float32`). Their accumulator is built at that width up front, so the fold is
 a plain `+` that cannot overflow the way accumulating in the input's own type
-would. `Product` is the same story with `Base.prod`'s widening and a `*` fold,
-and `DotProduct(a, b)` sums the products `a * b`, forming each term in that
-widened accumulator type so a per-row product cannot overflow either.
+would. `Product` is the same story with `Base.prod`'s widening and a `*` fold.
+
+The whole sum family (`Sum`, `SumPower`, `DotProduct`) is backed by one
+shared plain state and one shared compensated state, parameterized by a
+*term functor* — the same idiom as the `Min`/`Max`/`First`/`Last` state, but
+for the folded quantity: the functor's type names the family and its input
+columns (`ColumnTerm{:x}`, `PowerTerm{:x}`, `PairProductTerm{:a,:b}`), its
+fields carry runtime config (`SumPower`'s exponent), and `update!` inlines
+it statically. Every term is formed *in the accumulator's widened type* —
+`SumPower` raises the widened value to the power, `DotProduct(a, b)`
+multiplies widened values — so a per-row power or product cannot overflow
+the way computing it in the input columns' own types would.
 
 When the realized accumulator type is a fixed-precision float (a non-BigFloat
 `AbstractFloat`; `Union{Missing,...}` keeps the plain state), the sum

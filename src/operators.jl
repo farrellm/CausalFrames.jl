@@ -11,7 +11,7 @@
 A source that always produces zero rows (loading it yields a frame with only
 a `:time` column).
 """
-emptyframe() = CausalPipeline(ctx -> DataFrame[])
+emptyframe() = CausalPipeline(ctx -> ChunkSource(() -> nothing))
 
 """
     clock(interval; batchsize = 1024) -> CausalPipeline
@@ -71,8 +71,10 @@ function readcsv(path::AbstractString; chunkbytes::Integer = 4 * 1024 * 1024)
     chunkbytes > 0 ||
         throw(ArgumentError("readcsv chunkbytes must be positive, got $chunkbytes"))
     return CausalPipeline() do ctx::Context
-        return ChunkSource(CSVProducer{timetype(ctx)}(String(path), Int(chunkbytes),
-                                                      ctx.start, ctx.stop))
+        return ChunkSource(
+            CSVProducer{timetype(ctx)}(String(path), Int(chunkbytes),
+                ctx.start, ctx.stop),
+        )
     end
 end
 
@@ -92,7 +94,7 @@ mutable struct CSVProducer{T}
     done::Bool
     CSVProducer{T}(path, chunkbytes, start, stop) where {T} =
         new{T}(path, chunkbytes, start, stop, nothing, nothing, false, nothing,
-               false)
+            false)
 end
 
 # CSV.Chunks refuses files it cannot split (ntasks == 1, or too few rows to
@@ -112,7 +114,10 @@ function (p::CSVProducer{T})() where {T}
     p.chunks === nothing && (p.chunks = csvchunks(p.path, p.chunkbytes))
     while true
         next = p.started ? iterate(p.chunks, p.state) : iterate(p.chunks)
-        next === nothing && (p.done = true; return nothing)
+        if next === nothing
+            p.done = true
+            return nothing
+        end
         filechunk, p.state = next
         p.started = true
         # CSV.Chunks infers column types per chunk; a column's eltype may
@@ -197,8 +202,10 @@ addcolumns(p::CausalPipeline, f) = addcolumns(f)(p)
 
 function addchunk(f, c::DataFrame)
     vals = rowvalues(f, Tables.columntable(c))
-    first(vals) isa NamedTuple || throw(ArgumentError(
-        "addcolumns function must return a NamedTuple, got $(typeof(first(vals)))"))
+    first(vals) isa NamedTuple || throw(
+        ArgumentError(
+            "addcolumns function must return a NamedTuple, got $(typeof(first(vals)))"),
+    )
     :time in keys(first(vals)) && throw(ArgumentError(
         "addcolumns function may not return a time column"))
     # The chunk is owned, so its columns can be adopted rather than copied.

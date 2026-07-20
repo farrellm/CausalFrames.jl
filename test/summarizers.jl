@@ -3,10 +3,12 @@
     # column: Min/Max/First/Last verbatim, Sum/SumPower via Base.sum's own
     # widening rule.
     chunks(cs...) = CausalPipeline(ctx -> collect(cs))
-    summarizeall(col) = DataFrame(load(Context(0, 9),
-        chunks(DataFrame(time = [1, 2, 3], x = col)) |>
+    summarizeall(col) = DataFrame(
+        load(Context(0, 9),
+            chunks(DataFrame(time = [1, 2, 3], x = col)) |>
             summarize([Count(), Sum(:x), SumPower(:x, 2), Moment(:x, 2),
-                       Min(:x), Max(:x), First(:x), Last(:x)])))
+                Min(:x), Max(:x), First(:x), Last(:x)])),
+    )
 
     # small ints widen the way Base.sum widens, extrema do not; a moment is
     # its power sum divided by the count
@@ -27,9 +29,11 @@
 
     # nothing to widen: Float32 sums as Float32, and divides to Float32
     df = summarizeall(Float32[3, 1, 2])
-    @test all(eltype(df[!, c]) == Float32
-              for c in [:x_sum, :x_sumpower_2, :x_moment_2,
-                        :x_min, :x_max, :x_first, :x_last])
+    @test all(
+        eltype(df[!, c]) == Float32
+        for c in [:x_sum, :x_sumpower_2, :x_moment_2,
+            :x_min, :x_max, :x_first, :x_last]
+    )
 
     df = summarizeall(Bool[true, true, false])
     @test eltype(df.x_sum) == Int64 && only(df.x_sum) == 2
@@ -38,8 +42,10 @@
     # a missing-permitting column stays missing-permitting throughout,
     # whether or not the summarized value is itself missing
     df = summarizeall(Union{Missing,Int}[1, missing, 3])
-    @test all(eltype(df[!, c]) == Union{Missing,Int64}
-              for c in [:x_sum, :x_min, :x_max, :x_first, :x_last])
+    @test all(
+        eltype(df[!, c]) == Union{Missing,Int64}
+        for c in [:x_sum, :x_min, :x_max, :x_first, :x_last]
+    )
     @test eltype(df.x_moment_2) == Union{Missing,Float64}
     @test ismissing(only(df.x_min))     # min poisons
     @test ismissing(only(df.x_moment_2))    # via its poisoned power sum
@@ -47,10 +53,12 @@
 
     # a source may infer a column's type per chunk, so the state widens
     # across the boundary rather than forcing the first chunk's type
-    df = DataFrame(load(Context(0, 9),
-        chunks(DataFrame(time = [1, 2], qty = Int[1, 2]),
-               DataFrame(time = [3, 4], qty = Float64[2.5, 3.5])) |>
-            summarize([Sum(:qty), Min(:qty), Moment(:qty, 1)])))
+    df = DataFrame(
+        load(Context(0, 9),
+            chunks(DataFrame(time = [1, 2], qty = Int[1, 2]),
+                DataFrame(time = [3, 4], qty = Float64[2.5, 3.5])) |>
+            summarize([Sum(:qty), Min(:qty), Moment(:qty, 1)])),
+    )
     @test eltype(df.qty_sum) == Float64 && only(df.qty_sum) == 9.0
     @test eltype(df.qty_min) == Float64 && only(df.qty_min) == 1.0
     @test eltype(df.qty_moment_1) == Float64 && only(df.qty_moment_1) == 2.25
@@ -58,10 +66,12 @@
     # the same, with a key group table and an open cycle in flight over the
     # widening boundary
     mixed = chunks(DataFrame(time = [1, 1], sym = ["a", "b"], qty = Int[1, 2]),
-                   DataFrame(time = [1, 2], sym = ["a", "b"],
-                             qty = Float64[2.5, 3.5]))
-    df = DataFrame(load(Context(0, 9),
-        mixed |> summarize([Sum(:qty), Min(:qty)]; key = :sym)))
+        DataFrame(time = [1, 2], sym = ["a", "b"],
+            qty = Float64[2.5, 3.5]))
+    df = DataFrame(
+        load(Context(0, 9),
+            mixed |> summarize([Sum(:qty), Min(:qty)]; key = :sym)),
+    )
     @test df.sym == ["a", "b"]
     @test eltype(df.qty_sum) == Float64 && df.qty_sum == [3.5, 5.5]
     @test eltype(df.qty_min) == Float64 && df.qty_min == [1.0, 2.0]
@@ -76,20 +86,22 @@
 
     # the other two transforms type their columns the same way
     typed = chunks(DataFrame(time = [1, 1, 2], sym = ["a", "b", "a"],
-                             x = Int32[5, 7, 9]))
+        x = Int32[5, 7, 9]))
     for q in [summarize([Sum(:x), Min(:x)]; key = :sym),
-              summarizecycles([Sum(:x), Min(:x)]),
-              addsummarycolumns([Sum(:x), Min(:x)])]
+        summarizecycles([Sum(:x), Min(:x)]),
+        addsummarycolumns([Sum(:x), Min(:x)])]
         df = DataFrame(load(Context(0, 9), typed |> q))
         @test eltype(df.x_sum) == Int64
         @test eltype(df.x_min) == Int32
     end
 
     # per-frame types, which load's vcat would otherwise mask by promoting
-    frames = collect(stream(Context(0, 9),
-        chunks(DataFrame(time = [1], x = Int32[1]),
-               DataFrame(time = [2], x = Int32[2])) |>
-            addsummarycolumns(Sum(:x))))
+    frames = collect(
+        stream(Context(0, 9),
+            chunks(DataFrame(time = [1], x = Int32[1]),
+                DataFrame(time = [2], x = Int32[2])) |>
+            addsummarycolumns(Sum(:x))),
+    )
     @test all(eltype(DataFrame(f).x_sum) == Int64 for f in frames)
 
     # the property the typing rests on: a state's value is concretely
@@ -106,12 +118,12 @@
     # does the accumulate-then-project fold over an expanded prototype set
     st = CausalFrames.fresh(Moment(:x, 2), (time = Int64, x = Int32))
     @test @inferred(CausalFrames.value(st, (count = 2, x_sumpower_2 = Int64(8)))) ===
-        (x_moment_2 = 4.0,)
+          (x_moment_2 = 4.0,)
     protos, requested = CausalFrames.prototypes(Summarizer[Moment(:x, 2)], Symbol[])
     states = map(s -> CausalFrames.fresh(s, (time = Int64, x = Int64)), protos)
     foreach(s -> CausalFrames.update!(s, (time = 1, x = 2)), states)
     @test @inferred(CausalFrames.summaryvalues(states, Val(requested))) ===
-        (x_moment_2 = 4.0,)
+          (x_moment_2 = 4.0,)
 end
 
 @testset "statistical summarizers" begin
@@ -125,8 +137,8 @@ end
 
     # values, checked against the hand-computed references
     df = stats(Int32[3, 1, 2], Int32[2, 5, 4],
-               [Product(:x), DotProduct(:x, :y), Mean(:x), Variance(:x),
-                Std(:x), Covariance(:x, :y)])
+        [Product(:x), DotProduct(:x, :y), Mean(:x), Variance(:x),
+            Std(:x), Covariance(:x, :y)])
     @test only(df.x_product) == 6
     @test only(df.x_y_dotproduct) == 19
     @test only(df.x_mean) == 2.0
@@ -142,33 +154,39 @@ end
     # dependents divide integers to Float64
     @test eltype(df.x_x_covariance) == Float64
     df = stats(Int32[3, 1, 2], Int32[2, 5, 4],
-               [Product(:x), DotProduct(:x, :y), Mean(:x), Variance(:x),
-                Std(:x), Covariance(:x, :y)])
+        [Product(:x), DotProduct(:x, :y), Mean(:x), Variance(:x),
+            Std(:x), Covariance(:x, :y)])
     @test eltype(df.x_product) == Int64
     @test eltype(df.x_y_dotproduct) == Int64
-    @test all(eltype(df[!, c]) == Float64
-              for c in [:x_mean, :x_variance, :x_std, :x_y_covariance])
+    @test all(
+        eltype(df[!, c]) == Float64
+        for c in [:x_mean, :x_variance, :x_std, :x_y_covariance]
+    )
 
     # Float32 stays Float32 throughout
     df = stats(Float32[3, 1, 2], Float32[2, 5, 4],
-               [Product(:x), DotProduct(:x, :y), Mean(:x), Variance(:x),
-                Std(:x), Covariance(:x, :y)])
-    @test all(eltype(df[!, c]) == Float32
-              for c in [:x_product, :x_y_dotproduct, :x_mean, :x_variance,
-                        :x_std, :x_y_covariance])
+        [Product(:x), DotProduct(:x, :y), Mean(:x), Variance(:x),
+            Std(:x), Covariance(:x, :y)])
+    @test all(
+        eltype(df[!, c]) == Float32
+        for c in [:x_product, :x_y_dotproduct, :x_mean, :x_variance,
+            :x_std, :x_y_covariance]
+    )
 
     # corrected = false follows Statistics: divide by n rather than n - 1
     df = stats(Int32[3, 1, 2], Int32[2, 5, 4],
-               [Variance(:x; corrected = false), Std(:x; corrected = false),
-                Covariance(:x, :y; corrected = false)])
+        [Variance(:x; corrected = false), Std(:x; corrected = false),
+            Covariance(:x, :y; corrected = false)])
     @test only(df.x_variance) ≈ 2 / 3
     @test only(df.x_std) ≈ sqrt(2 / 3)
     @test only(df.x_y_covariance) == -1.0
 
     # a single corrected sample is NaN (0/0), never a DivideError; uncorrected
     # is 0
-    single(ss) = DataFrame(load(Context(0, 9),
-        chunks(DataFrame(time = [1], x = Int[5])) |> summarize(ss)))
+    single(ss) = DataFrame(
+        load(Context(0, 9),
+            chunks(DataFrame(time = [1], x = Int[5])) |> summarize(ss)),
+    )
     df = single([Variance(:x), Std(:x)])
     @test isnan(only(df.x_variance)) && isnan(only(df.x_std))
     df = single([Variance(:x; corrected = false)])
@@ -177,28 +195,34 @@ end
     # the accumulators widen up front, so per-row products cannot overflow the
     # way multiplying in the input's own type would
     df = stats(Int8[100, 100, 100], Int8[100, 100, 100],
-               [Product(:x), DotProduct(:x, :y)])
+        [Product(:x), DotProduct(:x, :y)])
     @test eltype(df.x_product) == Int64 && only(df.x_product) == 1_000_000
     @test eltype(df.x_y_dotproduct) == Int64 && only(df.x_y_dotproduct) == 30_000
 
     # missing-permitting input stays missing-permitting and poisons the value
     df = stats(Union{Missing,Int}[1, missing, 3], Int[2, 5, 4],
-               [Product(:x), DotProduct(:x, :y), Mean(:x), Variance(:x),
-                Std(:x), Covariance(:x, :y)])
-    @test all(eltype(df[!, c]) == Union{Missing,Float64}
-              for c in [:x_mean, :x_variance, :x_std, :x_y_covariance])
+        [Product(:x), DotProduct(:x, :y), Mean(:x), Variance(:x),
+            Std(:x), Covariance(:x, :y)])
+    @test all(
+        eltype(df[!, c]) == Union{Missing,Float64}
+        for c in [:x_mean, :x_variance, :x_std, :x_y_covariance]
+    )
     @test eltype(df.x_product) == Union{Missing,Int64}
     @test eltype(df.x_y_dotproduct) == Union{Missing,Int64}
-    @test all(ismissing(only(df[!, c]))
-              for c in [:x_product, :x_y_dotproduct, :x_mean, :x_variance,
-                        :x_std, :x_y_covariance])
+    @test all(
+        ismissing(only(df[!, c]))
+        for c in [:x_product, :x_y_dotproduct, :x_mean, :x_variance,
+            :x_std, :x_y_covariance]
+    )
 
     # a column's type may widen across chunks, so the two-column accumulator
     # states widen too, carrying their accumulated total over
-    df = DataFrame(load(Context(0, 9),
-        chunks(DataFrame(time = [1, 2], x = Int[2, 3], y = Int[1, 2]),
-               DataFrame(time = [3], x = Float64[4.0], y = Float64[0.5])) |>
-            summarize([Product(:x), DotProduct(:x, :y)])))
+    df = DataFrame(
+        load(Context(0, 9),
+            chunks(DataFrame(time = [1, 2], x = Int[2, 3], y = Int[1, 2]),
+                DataFrame(time = [3], x = Float64[4.0], y = Float64[0.5])) |>
+            summarize([Product(:x), DotProduct(:x, :y)])),
+    )
     @test eltype(df.x_product) == Float64 && only(df.x_product) == 24.0
     @test eltype(df.x_y_dotproduct) == Float64 && only(df.x_y_dotproduct) == 10.0
 
@@ -207,17 +231,21 @@ end
     # baked into the state type
     st = CausalFrames.fresh(Mean(:x), (time = Int64, x = Int32))
     @test @inferred(CausalFrames.value(st, (count = 3, x_sum = Int64(6)))) ===
-        (x_mean = 2.0,)
+          (x_mean = 2.0,)
     st = CausalFrames.fresh(Variance(:x), (time = Int64, x = Int32))
-    @test @inferred(CausalFrames.value(st,
-        (count = 3, x_sum = Int64(6), x_sumpower_2 = Int64(14)))) ===
-        (x_variance = 1.0,)
+    @test @inferred(
+        CausalFrames.value(st,
+            (count = 3, x_sum = Int64(6), x_sumpower_2 = Int64(14)))
+    ) ===
+          (x_variance = 1.0,)
     st = CausalFrames.fresh(Std(:x), (time = Int64, x = Int32))
     @test @inferred(CausalFrames.value(st, (x_variance = 4.0,))) === (x_std = 2.0,)
     st = CausalFrames.fresh(Covariance(:x, :y), (time = Int64, x = Int32, y = Int32))
-    @test @inferred(CausalFrames.value(st,
-        (count = 3, x_sum = Int64(6), y_sum = Int64(11),
-         x_y_dotproduct = Int64(19)))) === (x_y_covariance = -1.5,)
+    @test @inferred(
+        CausalFrames.value(st,
+            (count = 3, x_sum = Int64(6), y_sum = Int64(11),
+                x_y_dotproduct = Int64(19)))
+    ) === (x_y_covariance = -1.5,)
 
     # nested dependency expansion (Std -> Variance -> raw sums) stays inferrable
     # through the accumulate-then-project fold, and hidden dependencies are
@@ -226,12 +254,12 @@ end
         CausalFrames.prototypes(Summarizer[Std(:x), Covariance(:x, :y)], Symbol[])
     @test requested === (:x_std, :x_y_covariance)
     states = map(s -> CausalFrames.fresh(s, (time = Int64, x = Int64, y = Int64)),
-                 protos)
+        protos)
     for (t, xv, yv) in [(1, 3, 2), (2, 1, 5)]
         foreach(s -> CausalFrames.update!(s, (time = t, x = xv, y = yv)), states)
     end
     @test @inferred(CausalFrames.summaryvalues(states, Val(requested))) ===
-        (x_std = sqrt(2.0), x_y_covariance = -3.0)
+          (x_std = sqrt(2.0), x_y_covariance = -3.0)
 
     # Correlation: cov / (std * std), clamped to [-1, 1], following
     # Statistics.cor — no corrected keyword (the factor cancels)
@@ -253,22 +281,24 @@ end
 
     # missing-permitting input stays missing-permitting and poisons the value
     df = stats(Union{Missing,Int}[1, missing, 3], Int[2, 5, 4],
-               [Correlation(:x, :y)])
+        [Correlation(:x, :y)])
     @test eltype(df.x_y_correlation) == Union{Missing,Float64}
     @test ismissing(only(df.x_y_correlation))
 
     # the dependent value infers, with the dependency names baked into the
     # state type
     st = CausalFrames.fresh(Correlation(:x, :y), (time = Int64, x = Int32, y = Int32))
-    @test @inferred(CausalFrames.value(st,
-        (x_y_covariance = -1.5, x_std = 1.0, y_std = 2.0))) ===
-        (x_y_correlation = -0.75,)
+    @test @inferred(
+        CausalFrames.value(st,
+            (x_y_covariance = -1.5, x_std = 1.0, y_std = 2.0))
+    ) ===
+          (x_y_correlation = -0.75,)
 end
 
 @testset "monoid and group structure" begin
     intypes = (time = Int64, x = Int64, y = Int64)
     rows = [(time = 1, x = 3, y = 2), (time = 2, x = 1, y = 7),
-            (time = 3, x = 4, y = 1), (time = 4, x = 1, y = 8)]
+        (time = 3, x = 4, y = 1), (time = 4, x = 1, y = 8)]
     function fold(s, rs)
         st = CausalFrames.fresh(s, intypes)
         foreach(r -> CausalFrames.update!(st, r), rs)
@@ -279,15 +309,15 @@ end
     # groups; Product and the trackers are monoids only; a plain Summarizer
     # is neither
     @test all(s -> s isa GroupSummarizer,
-              [Count(), Sum(:x), SumPower(:x, 2), DotProduct(:x, :y),
-               Moment(:x, 2), Mean(:x), Variance(:x), Std(:x),
-               Covariance(:x, :y), Correlation(:x, :y)])
+        [Count(), Sum(:x), SumPower(:x, 2), DotProduct(:x, :y),
+            Moment(:x, 2), Mean(:x), Variance(:x), Std(:x),
+            Covariance(:x, :y), Correlation(:x, :y)])
     @test all(s -> s isa MonoidSummarizer && !(s isa GroupSummarizer),
-              [Product(:x), Min(:x), Max(:x), First(:x), Last(:x), MinMax(:x)])
+        [Product(:x), Min(:x), Max(:x), First(:x), Last(:x), MinMax(:x)])
     @test !(Opaque(Sum(:x)) isa MonoidSummarizer)
 
     monoids = [Count(), Sum(:x), SumPower(:x, 2), DotProduct(:x, :y),
-               Product(:x), Min(:x), Max(:x), First(:x), Last(:x), MinMax(:x)]
+        Product(:x), Min(:x), Max(:x), First(:x), Last(:x), MinMax(:x)]
 
     # combine!(dest, a, b) equals folding a's rows then b's rows, for every
     # split — including an empty (fresh, identity) side — and tolerates dest
@@ -296,7 +326,7 @@ end
         whole = CausalFrames.value(fold(s, rows))
         for k in 0:length(rows)
             a = fold(s, rows[1:k])
-            b = fold(s, rows[(k + 1):end])
+            b = fold(s, rows[(k+1):end])
             dest = CausalFrames.fresh(a)
             @test @inferred(CausalFrames.combine!(dest, a, b)) === nothing
             @test CausalFrames.value(dest) == whole
@@ -384,11 +414,12 @@ end
     # float accumulators get the compensated state; missing-permitting and
     # BigFloat accumulators keep the plain one
     @test CausalFrames.fresh(Sum(:x), ftypes) isa
-        CausalFrames.CompensatedSumState{:x,:x_sum,Float64}
+          CausalFrames.CompensatedAccumState{:x_sum,Float64,
+        CausalFrames.ColumnTerm{:x}}
     @test CausalFrames.fresh(Sum(:x), (time = Int64, x = Union{Missing,Float64})) isa
-        CausalFrames.SumState
+          CausalFrames.AccumState
     @test CausalFrames.fresh(Sum(:x), (time = Int64, x = BigFloat)) isa
-        CausalFrames.SumState
+          CausalFrames.AccumState
 
     # value is concretely typed and declared at the same element type as the
     # plain state, so nothing downstream can tell the states apart
@@ -398,8 +429,10 @@ end
     # error-correcting summation: naive folding gives 0.0 here
     cancel = [1.0, 1e100, 1.0, -1e100]
     @test CausalFrames.value(fold(Sum(:x), cancel)) === (x_sum = 2.0,)
-    df = DataFrame(load(Context(0, 9),
-        chunks(DataFrame(time = 1:4, x = cancel)) |> summarize(Sum(:x))))
+    df = DataFrame(
+        load(Context(0, 9),
+            chunks(DataFrame(time = 1:4, x = cancel)) |> summarize(Sum(:x))),
+    )
     @test eltype(df.x_sum) == Float64 && only(df.x_sum) == 2.0
 
     # a NaN reports NaN (Base.sum semantics) but is counted, not folded in,
@@ -424,7 +457,7 @@ end
     # (NaN^0 == Inf^0 == 1.0 are finite terms), the per-row product for
     # DotProduct (Inf * 0.0 is a NaN term)
     @test CausalFrames.value(fold(SumPower(:x, 0), [NaN, Inf])) ===
-        (x_sumpower_0 = 2.0,)
+          (x_sumpower_0 = 2.0,)
     st = fold(SumPower(:x, 2), [3.0, NaN])
     @test isnan(CausalFrames.value(st).x_sumpower_2)
     CausalFrames.downdate!(st, (; x = NaN))
@@ -442,7 +475,7 @@ end
     whole = CausalFrames.value(fold(Sum(:x), cancel))
     for k in 0:length(cancel)
         a = fold(Sum(:x), cancel[1:k])
-        b = fold(Sum(:x), cancel[(k + 1):end])
+        b = fold(Sum(:x), cancel[(k+1):end])
         dest = CausalFrames.fresh(a)
         CausalFrames.combine!(dest, a, b)
         @test CausalFrames.value(dest) === whole
@@ -465,14 +498,16 @@ end
     ist = CausalFrames.fresh(Sum(:x), (time = Int64, x = Int64))
     CausalFrames.update!(ist, (; x = 5))
     wst = CausalFrames.widenstate(ist, (time = Int64, x = Float64))
-    @test wst isa CausalFrames.CompensatedSumState{:x,:x_sum,Float64}
+    @test wst isa CausalFrames.CompensatedAccumState{:x_sum,Float64,
+        CausalFrames.ColumnTerm{:x}}
     @test CausalFrames.value(wst) === (x_sum = 5.0,)
 
     f32 = CausalFrames.fresh(Sum(:x), (time = Int64, x = Float32))
     foreach(x -> CausalFrames.update!(f32, (; x)),
-            Float32[1.0f10, 1.0f0, NaN32, Inf32])
+        Float32[1.0f10, 1.0f0, NaN32, Inf32])
     f64 = CausalFrames.widenstate(f32, (time = Int64, x = Float64))
-    @test f64 isa CausalFrames.CompensatedSumState{:x,:x_sum,Float64}
+    @test f64 isa CausalFrames.CompensatedAccumState{:x_sum,Float64,
+        CausalFrames.ColumnTerm{:x}}
     @test f64.acc.comp == Float64(f32.acc.comp) && f64.acc.comp != 0.0
     @test f64.acc.nans == 1 && f64.acc.posinf == 1
     CausalFrames.downdate!(f64, (; x = NaN))
@@ -481,7 +516,8 @@ end
 
     nst = fold(Sum(:x), [1.0, NaN])
     mst = CausalFrames.widenstate(nst, (time = Int64, x = Union{Missing,Float64}))
-    @test mst isa CausalFrames.SumState{:x,:x_sum,Union{Missing,Float64}}
+    @test mst isa CausalFrames.AccumState{:x_sum,Union{Missing,Float64},
+        CausalFrames.ColumnTerm{:x}}
     @test isnan(CausalFrames.value(mst).x_sum)
     @test !CausalFrames.isinvertible(mst)
     @test CausalFrames.isinvertible(nst)

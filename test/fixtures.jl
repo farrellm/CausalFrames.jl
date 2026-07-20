@@ -28,8 +28,8 @@ end
 CausalFrames.value(st::MinMaxState{C,L,H,T}) where {C,L,H,T} =
     NamedTuple{(L, H),Tuple{T,T}}((st.lo, st.hi))
 function CausalFrames.combine!(dest::MinMaxState{C,L,H,T},
-                               a::MinMaxState{C,L,H,T},
-                               b::MinMaxState{C,L,H,T}) where {C,L,H,T}
+    a::MinMaxState{C,L,H,T},
+    b::MinMaxState{C,L,H,T}) where {C,L,H,T}
     if a.seen && b.seen
         lo = min(a.lo, b.lo)
         hi = max(a.hi, b.hi)
@@ -82,13 +82,13 @@ CausalFrames.emptyvalue(::TestVar{C}) where {C} =
     NamedTuple{(Symbol(C, :_var),)}((missing,))
 CausalFrames.fresh(::TestVar{C}, ::NamedTuple) where {C} =
     TestVarState{C,Symbol(C, :_var),Symbol(C, :_moment_1),
-                 Symbol(C, :_moment_2)}()
+        Symbol(C, :_moment_2)}()
 CausalFrames.fresh(st::TestVarState) = st
 CausalFrames.update!(::TestVarState, row) = nothing
 function CausalFrames.value(::TestVarState{C,N,M1,M2},
-                            vals::NamedTuple) where {C,N,M1,M2}
+    vals::NamedTuple) where {C,N,M1,M2}
     V = Base.promote_op((m2, m1) -> m2 - m1^2, fieldtype(typeof(vals), M2),
-                        fieldtype(typeof(vals), M1))
+        fieldtype(typeof(vals), M1))
     return NamedTuple{(N,),Tuple{V}}((vals[M2] - vals[M1]^2,))
 end
 

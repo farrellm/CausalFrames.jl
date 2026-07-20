@@ -26,8 +26,15 @@ end
 newsegtree(stateprotos::S, ::Type{R}, ::Type{T}) where {S<:Tuple,R,T} =
     SegTree{S,R,T}(R[], T[], [map(fresh, stateprotos) for _ in 1:8], 4, 1)
 
-@inline combinenodes!(dest::S, a::S, b::S) where {S<:Tuple} =
-    (map(combine!, dest, a, b); nothing)
+# Peeled explicitly rather than through `foreach`/`map`: the three-argument
+# `foreach` folds over a `zip` and does not unroll for tuples, which costs a
+# runtime dispatch per node on this hot path, and `map` would build a
+# throwaway NTuple{n,Nothing}.
+@inline combinenodes!(::Tuple{}, ::Tuple{}, ::Tuple{}) = nothing
+@inline function combinenodes!(dest::S, a::S, b::S) where {S<:Tuple}
+    combine!(first(dest), first(a), first(b))
+    return combinenodes!(Base.tail(dest), Base.tail(a), Base.tail(b))
+end
 
 # Append one row: fold it into the identity states already waiting in its
 # leaf slot, then recombine the ancestors up to the root — O(log cap), no
@@ -39,10 +46,10 @@ function treepush!(tr::SegTree{S,R}, stateprotos::S, row::R) where {S<:Tuple,R}
     push!(tr.rows, row)
     push!(tr.times, row.time)
     i = tr.cap + length(tr.rows) - 1
-    foreach(st -> update!(st, row), @inbounds tr.nodes[i])
+    updateall!(@inbounds(tr.nodes[i]), row)
     i >>>= 1
     while i >= 1
-        @inbounds combinenodes!(tr.nodes[i], tr.nodes[2i], tr.nodes[2i + 1])
+        @inbounds combinenodes!(tr.nodes[i], tr.nodes[2i], tr.nodes[2i+1])
         i >>>= 1
     end
     return nothing
@@ -54,7 +61,7 @@ end
 # right-edge nodes right to left — because First/Last combine correctly only
 # over stream-ordered ranges.
 function treequery(tr::SegTree{S}, stateprotos::S, lo::Int,
-                   hi::Int) where {S<:Tuple}
+    hi::Int) where {S<:Tuple}
     accl = map(fresh, stateprotos)
     accr = map(fresh, stateprotos)
     l = tr.cap + lo - 1
@@ -81,7 +88,7 @@ end
 # verbatim — never rearranged to times[m] >= t - lb, which could disagree at
 # the last ulp for floating-point times — and it is monotone in m because
 # times are non-decreasing, so the search is a plain binary chop.
-function windowstart(times::Vector, head::Int, t, lb)
+function windowstart(times::Vector{T}, head::Int, t, lb) where {T}
     lo, hi = head, length(times) + 1
     while lo < hi
         m = (lo + hi) >>> 1
@@ -102,12 +109,12 @@ function rebuild!(tr::SegTree{S}, stateprotos::S) where {S<:Tuple}
     times = tr.times[tr.head:end]
     live = length(rows)
     cap = max(4, nextpow(2, 2 * (live + 1)))
-    nodes = [map(fresh, stateprotos) for _ in 1:(2 * cap)]
+    nodes = [map(fresh, stateprotos) for _ in 1:(2*cap)]
     for (j, row) in enumerate(rows)
-        foreach(st -> update!(st, row), @inbounds nodes[cap + j - 1])
+        updateall!(@inbounds(nodes[cap+j-1]), row)
     end
-    for i in (cap - 1):-1:1
-        @inbounds combinenodes!(nodes[i], nodes[2i], nodes[2i + 1])
+    for i in (cap-1):-1:1
+        @inbounds combinenodes!(nodes[i], nodes[2i], nodes[2i+1])
     end
     tr.rows = rows
     tr.times = times

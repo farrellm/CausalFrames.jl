@@ -41,8 +41,10 @@ function prototypes(ss::Vector{Summarizer}, keycols::Vector{Symbol})
         foreach(expand, dependencies(s))
         delete!(visiting, outnames)
         for n in outnames
-            n in used && throw(ArgumentError(
-                "output column $n is produced by more than one summarizer"))
+            n in used && throw(
+                ArgumentError(
+                    "output column $n is produced by more than one summarizer"),
+            )
             push!(used, n)
         end
         push!(seen, outnames)
@@ -55,8 +57,10 @@ function prototypes(ss::Vector{Summarizer}, keycols::Vector{Symbol})
         for n in outnames
             n === :time && throw(ArgumentError(
                 "summarizer output column may not be named time"))
-            n in keycols && throw(ArgumentError(
-                "summarizer output column $n collides with a key column"))
+            n in keycols && throw(
+                ArgumentError(
+                    "summarizer output column $n collides with a key column"),
+            )
         end
         expand(s)
         for n in outnames
@@ -68,15 +72,17 @@ end
 
 # Input column element types, mirroring the row access in update!.
 chunktypes(c::DataFrame) =
-    NamedTuple{Tuple(Symbol.(names(c)))}(Tuple(eltype(col) for col in eachcol(c)))
+    NamedTuple{Tuple(propertynames(c))}(Tuple(eltype(col) for col in eachcol(c)))
 
 # A source may infer a column's element type per chunk, so the state types
 # track the promotion of every input type seen so far rather than trusting the
 # first chunk.
 promotetypes(::Nothing, b::NamedTuple) = b
 promotetypes(a::NamedTuple, b::NamedTuple) =
-    NamedTuple{keys(b)}(Tuple(haskey(a, k) ? promote_type(a[k], b[k]) : b[k]
-                              for k in keys(b)))
+    NamedTuple{keys(b)}(
+        Tuple(haskey(a, k) ? promote_type(a[k], b[k]) : b[k]
+              for k in keys(b)),
+    )
 
 newstates(protos::Tuple, intypes::NamedTuple) = map(s -> fresh(s, intypes), protos)
 widenstates(states::Tuple, intypes::NamedTuple) =
@@ -85,7 +91,7 @@ widenstates(states::Tuple, intypes::NamedTuple) =
 # `stateprotos` must already be widened: it is what fixes the rebuilt table's
 # value type, which a comprehension over an empty `groups` could not.
 function widengroups(groups::Dict{K}, stateprotos::S,
-                     intypes::NamedTuple) where {K,S}
+    intypes::NamedTuple) where {K,S}
     widened = Dict{K,S}()
     for (k, gs) in groups
         widened[k] = widenstates(gs, intypes)
@@ -154,13 +160,13 @@ mutable struct SummaryFold
     checked::Bool          # addsummarycolumns: collision check done
 end
 SummaryFold() = SummaryFold(nothing, false, nothing, nothing, nothing, nothing,
-                            false)
+    false)
 
 # Per-chunk setup shared by the transforms: promote the schema, then build the
 # states on the first chunk or widen them when the promotion has moved.
 # Returns the chunk as a column table for the kernels.
 function preparechunk!(fold::SummaryFold, protos::Tuple, keyed::Bool,
-                       keynames::Val, c::DataFrame)
+    keynames::Val, c::DataFrame)
     types = promotetypes(fold.types, chunktypes(c))
     fold.widened = fold.types !== nothing && types != fold.types
     fold.types = types
@@ -168,11 +174,11 @@ function preparechunk!(fold::SummaryFold, protos::Tuple, keyed::Bool,
     if fold.stateprotos === nothing
         fold.stateprotos = newstates(protos, types)
         keyed ? (fold.groups = newgroups(fold.stateprotos, nt, keynames)) :
-            (fold.states = map(fresh, fold.stateprotos))
+        (fold.states = map(fresh, fold.stateprotos))
     elseif fold.widened
         fold.stateprotos = widenstates(fold.stateprotos, types)
         keyed ? (fold.groups = widengroups(fold.groups, fold.stateprotos, types)) :
-            (fold.states = widenstates(fold.states, types))
+        (fold.states = widenstates(fold.states, types))
     end
     return nt
 end
@@ -185,16 +191,16 @@ end
 
 function foldall!(states::Tuple, nt::NamedTuple)
     for row in Tables.rows(nt)
-        foreach(st -> update!(st, row), states)
+        updateall!(states, row)
     end
     return nothing
 end
 
 function foldgroups!(groups::Dict{K,S}, stateprotos::S, nt::NamedTuple,
-                     ::Val{KN}) where {K,S,KN}
+    ::Val{KN}) where {K,S,KN}
     for row in Tables.rows(nt)
         states = get!(() -> map(fresh, stateprotos), groups, keyvalues(row, Val(KN)))
-        foreach(st -> update!(st, row), states)
+        updateall!(states, row)
     end
     return nothing
 end
@@ -202,7 +208,7 @@ end
 # A cycle closes when a row with a later time arrives (causal), so the open
 # cycle's state is carried across chunk boundaries and only closed by flush.
 function foldcycles!(states::S, stateprotos::S, nt::NamedTuple,
-                     cycletime, r::Val) where {S<:Tuple}
+    cycletime, r::Val) where {S<:Tuple}
     rows = rowtype(eltype(nt.time), S, r)[]
     for row in Tables.rows(nt)
         t = row.time
@@ -212,13 +218,13 @@ function foldcycles!(states::S, stateprotos::S, nt::NamedTuple,
             cycletime = t
             states = map(fresh, stateprotos)
         end
-        foreach(st -> update!(st, row), states)
+        updateall!(states, row)
     end
     return rows, states, cycletime
 end
 
 function foldcyclesgrouped!(groups::Dict{K,S}, stateprotos::S, nt::NamedTuple,
-                            cycletime, ::Val{KN}, r::Val) where {K,S,KN}
+    cycletime, ::Val{KN}, r::Val) where {K,S,KN}
     rows = rowtype(eltype(nt.time), K, S, r)[]
     for row in Tables.rows(nt)
         t = row.time
@@ -228,7 +234,7 @@ function foldcyclesgrouped!(groups::Dict{K,S}, stateprotos::S, nt::NamedTuple,
             cycletime = t
         end
         states = get!(() -> map(fresh, stateprotos), groups, keyvalues(row, Val(KN)))
-        foreach(st -> update!(st, row), states)
+        updateall!(states, row)
     end
     return rows, cycletime
 end
@@ -242,24 +248,24 @@ function closecycle!(rows, groups, t, r::Val)
 end
 
 function foldrunning!(states::S, nt::NamedTuple, n::Int,
-                      r::Val) where {S<:Tuple}
+    r::Val) where {S<:Tuple}
     vals = Vector{valuetype(S, r)}(undef, n)
     i = 0
     for row in Tables.rows(nt)
-        foreach(st -> update!(st, row), states)
-        vals[i += 1] = summaryvalues(states, r)
+        updateall!(states, row)
+        vals[i+=1] = summaryvalues(states, r)
     end
     return vals
 end
 
 function foldrunninggrouped!(groups::Dict{K,S}, stateprotos::S, nt::NamedTuple,
-                             n::Int, ::Val{KN}, r::Val) where {K,S,KN}
+    n::Int, ::Val{KN}, r::Val) where {K,S,KN}
     vals = Vector{valuetype(S, r)}(undef, n)
     i = 0
     for row in Tables.rows(nt)
         states = get!(() -> map(fresh, stateprotos), groups, keyvalues(row, Val(KN)))
-        foreach(st -> update!(st, row), states)
-        vals[i += 1] = summaryvalues(states, r)
+        updateall!(states, row)
+        vals[i+=1] = summaryvalues(states, r)
     end
     return vals
 end
@@ -296,18 +302,21 @@ function summarize(summarizers; key = nothing)
             step = function (c)
                 nt = preparechunk!(fold, protos, keyed, keynames, c)
                 keyed ? foldgroups!(fold.groups, fold.stateprotos, nt, keynames) :
-                    foldall!(fold.states, nt)
+                foldall!(fold.states, nt)
                 return nothing
             end
             flush = function ()
                 if !keyed
-                    vals = fold.states === nothing ? emptyvalues(protos, outs) :
+                    vals =
+                        fold.states === nothing ? emptyvalues(protos, outs) :
                         summaryvalues(fold.states, outs)
                     return DataFrame([merge((; time = ctx.stop), vals)])
                 end
                 fold.groups === nothing && return nothing
-                rows = [summaryrow(ctx.stop, k, gs, outs)
-                        for (k, gs) in sortedgroups(fold.groups)]
+                rows = [
+                    summaryrow(ctx.stop, k, gs, outs)
+                    for (k, gs) in sortedgroups(fold.groups)
+                ]
                 return isempty(rows) ? nothing : DataFrame(rows)
             end
             return chunkmap(step, p.run(ctx); flush = flush)
@@ -356,9 +365,11 @@ function summarizecycles(summarizers; key = nothing)
             end
             flush = function ()
                 fold.cycletime === nothing && return nothing
-                rows = keyed ? closecycle!(
+                rows =
+                    keyed ?
+                    closecycle!(
                         rowtype(typeof(fold.cycletime), keytype(fold.groups),
-                                valtype(fold.groups), outs)[], fold.groups,
+                            valtype(fold.groups), outs)[], fold.groups,
                         fold.cycletime, outs) :
                     [summaryrow(fold.cycletime, fold.states, outs)]
                 return isempty(rows) ? nothing : DataFrame(rows)
@@ -397,14 +408,19 @@ function addsummarycolumns(summarizers; key = nothing)
             step = function (c)
                 if !fold.checked   # needs the schema: first chunk only
                     for n in requested   # hidden dependencies are never added
-                        String(n) in names(c) && throw(ArgumentError(
-                            "summary column $n collides with an existing column"))
+                        String(n) in names(c) && throw(
+                            ArgumentError(
+                                "summary column $n collides with an existing column",
+                            ),
+                        )
                     end
                     fold.checked = true
                 end
                 nt = preparechunk!(fold, protos, keyed, keynames, c)
-                vals = keyed ? foldrunninggrouped!(fold.groups, fold.stateprotos,
-                                                   nt, nrow(c), keynames, outs) :
+                vals =
+                    keyed ?
+                    foldrunninggrouped!(fold.groups, fold.stateprotos,
+                        nt, nrow(c), keynames, outs) :
                     foldrunning!(fold.states, nt, nrow(c), outs)
                 return hcat(c, DataFrame(vals); copycols = false)
             end

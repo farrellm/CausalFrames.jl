@@ -206,6 +206,13 @@ when choosing the running-state window algorithm.
 """
 isinvertible(::SummarizerState) = true
 
+# Fold one row into — or, for group states, back out of — every state in a
+# tuple. Over a concrete state tuple the foreach unrolls and each update!
+# dispatches statically, so the shared spelling costs nothing.
+@inline updateall!(states::Tuple, row) = foreach(st -> update!(st, row), states)
+@inline downdateall!(states::Tuple, row) =
+    foreach(st -> downdate!(st, row), states)
+
 # The element type Base.sum produces over a column of eltype T: small signed
 # and unsigned integers widen to Int/UInt, everything else keeps its type. The
 # accumulator is built at this width up front, so the folding loop is a plain
@@ -289,7 +296,7 @@ end
     t, c = neumaier(a.total, a.comp, b.total)
     t, c = neumaier(t, c, b.comp)
     return Compensated{A}(t, c, a.nans + b.nans, a.posinf + b.posinf,
-                          a.neginf + b.neginf)
+        a.neginf + b.neginf)
 end
 
 @inline function compvalue(a::Compensated{A}) where {A}
@@ -297,6 +304,100 @@ end
     a.posinf > 0 && return a.neginf > 0 ? convert(A, NaN) : convert(A, Inf)
     a.neginf > 0 && return convert(A, -Inf)
     return a.total + a.comp
+end
+
+# The sum family (Sum, SumPower, DotProduct) shares one plain and one
+# compensated accumulator state over a *term functor* — the TrackState
+# combiner-in-type-parameter idiom applied to the folded quantity. The
+# functor's type identifies the family and its input columns; its fields
+# carry runtime config (SumPower's exponent). Terms are formed in the
+# accumulator's type A, so a per-row power or product cannot overflow the
+# way computing it in the input columns' own types would; for the
+# compensated (float) states the input column already is A, so the
+# conversion is exact either way.
+
+struct ColumnTerm{C} end
+struct PowerTerm{C}
+    power::Int
+end
+struct PairProductTerm{A,B} end
+
+@inline termvalue(::ColumnTerm{C}, ::Type{A}, row) where {C,A} =
+    convert(A, getproperty(row, C))
+@inline termvalue(t::PowerTerm{C}, ::Type{A}, row) where {C,A} =
+    convert(A, getproperty(row, C))^t.power
+@inline termvalue(::PairProductTerm{Ca,Cb}, ::Type{A}, row) where {Ca,Cb,A} =
+    convert(A, getproperty(row, Ca)) * convert(A, getproperty(row, Cb))
+
+# The accumulator type a term folds into, from the (promoted) input column
+# types — recomputed by widenstate whenever the schema promotion moves.
+acctype(::ColumnTerm{C}, intypes::NamedTuple) where {C} = sumtype(intypes[C])
+acctype(t::PowerTerm{C}, intypes::NamedTuple) where {C} =
+    powertype(intypes[C], t.power)
+acctype(::PairProductTerm{Ca,Cb}, intypes::NamedTuple) where {Ca,Cb} =
+    dottype(intypes[Ca], intypes[Cb])
+
+# N names the output column and A is the realized accumulator type, as on
+# every other state; T is the term functor's type, so update! inlines the
+# term computation statically.
+mutable struct AccumState{N,A,T} <: SummarizerState
+    term::T
+    total::A
+end
+
+mutable struct CompensatedAccumState{N,A<:AbstractFloat,T} <: SummarizerState
+    term::T
+    acc::Compensated{A}
+end
+
+# Shared constructor behind the sum family's fresh methods: compensable
+# accumulator types get the Neumaier state.
+function accumfresh(term, N::Symbol, ::Type{A}) where {A}
+    compensable(A) &&
+        return CompensatedAccumState{N,A,typeof(term)}(term, compzero(A))
+    return AccumState{N,A,typeof(term)}(term, convert(A, 0))
+end
+
+fresh(st::AccumState{N,A,T}) where {N,A,T} =
+    AccumState{N,A,T}(st.term, convert(A, 0))
+@inline update!(st::AccumState{N,A}, row) where {N,A} =
+    (st.total += termvalue(st.term, A, row); nothing)
+@inline downdate!(st::AccumState{N,A}, row) where {N,A} =
+    (st.total -= termvalue(st.term, A, row); nothing)
+combine!(dest::AccumState{N,A,T}, a::AccumState{N,A,T},
+    b::AccumState{N,A,T}) where {N,A,T} =
+    (dest.total = a.total + b.total; nothing)
+isinvertible(::AccumState{N,A}) where {N,A} = !(Missing <: A)
+value(st::AccumState{N,A}) where {N,A} = NamedTuple{(N,),Tuple{A}}((st.total,))
+function widenstate(st::AccumState{N,A,T}, intypes::NamedTuple) where {N,A,T}
+    A2 = acctype(st.term, intypes)
+    A2 === A && return st
+    compensable(A2) && return CompensatedAccumState{N,A2,T}(
+        st.term, compadd(compzero(A2), convert(A2, st.total)))
+    return AccumState{N,A2,T}(st.term, convert(A2, st.total))
+end
+
+fresh(st::CompensatedAccumState{N,A,T}) where {N,A,T} =
+    CompensatedAccumState{N,A,T}(st.term, compzero(A))
+@inline update!(st::CompensatedAccumState{N,A}, row) where {N,A} =
+    (st.acc = compadd(st.acc, termvalue(st.term, A, row)); nothing)
+@inline downdate!(st::CompensatedAccumState{N,A}, row) where {N,A} =
+    (st.acc = compsub(st.acc, termvalue(st.term, A, row)); nothing)
+combine!(dest::CompensatedAccumState{N,A,T}, a::CompensatedAccumState{N,A,T},
+    b::CompensatedAccumState{N,A,T}) where {N,A,T} =
+    (dest.acc = compmerge(a.acc, b.acc); nothing)
+value(st::CompensatedAccumState{N,A}) where {N,A} =
+    NamedTuple{(N,),Tuple{A}}((compvalue(st.acc),))
+function widenstate(st::CompensatedAccumState{N,A,T},
+    intypes::NamedTuple) where {N,A,T}
+    A2 = acctype(st.term, intypes)
+    A2 === A && return st
+    a = st.acc
+    compensable(A2) && return CompensatedAccumState{N,A2,T}(
+        st.term,
+        Compensated{A2}(convert(A2, a.total), convert(A2, a.comp),
+            a.nans, a.posinf, a.neginf))
+    return AccumState{N,A2,T}(st.term, convert(A2, compvalue(a)))
 end
 
 """
@@ -336,59 +437,9 @@ window recovers exactly once a nonfinite row leaves the window.
 struct Sum{C} <: GroupSummarizer end
 Sum(column::Symbol) = Sum{column}()
 
-mutable struct SumState{C,N,A} <: SummarizerState
-    total::A
-end
-
 emptyvalue(::Sum{C}) where {C} = NamedTuple{(Symbol(C, :_sum),)}((0,))
-function fresh(::Sum{C}, intypes::NamedTuple) where {C}
-    A = sumtype(intypes[C])
-    N = Symbol(C, :_sum)
-    compensable(A) && return CompensatedSumState{C,N,A}(compzero(A))
-    return SumState{C,N,A}(convert(A, 0))
-end
-fresh(::SumState{C,N,A}) where {C,N,A} = SumState{C,N,A}(convert(A, 0))
-@inline update!(st::SumState{C}, row) where {C} =
-    (st.total += getproperty(row, C); nothing)
-@inline downdate!(st::SumState{C}, row) where {C} =
-    (st.total -= getproperty(row, C); nothing)
-combine!(dest::SumState{C,N,A}, a::SumState{C,N,A},
-         b::SumState{C,N,A}) where {C,N,A} =
-    (dest.total = a.total + b.total; nothing)
-isinvertible(::SumState{C,N,A}) where {C,N,A} = !(Missing <: A)
-value(st::SumState{C,N,A}) where {C,N,A} = NamedTuple{(N,),Tuple{A}}((st.total,))
-function widenstate(st::SumState{C,N,A}, intypes::NamedTuple) where {C,N,A}
-    A2 = sumtype(intypes[C])
-    A2 === A && return st
-    compensable(A2) && return CompensatedSumState{C,N,A2}(
-        compadd(compzero(A2), convert(A2, st.total)))
-    return SumState{C,N,A2}(convert(A2, st.total))
-end
-
-mutable struct CompensatedSumState{C,N,A<:AbstractFloat} <: SummarizerState
-    acc::Compensated{A}
-end
-
-fresh(::CompensatedSumState{C,N,A}) where {C,N,A} =
-    CompensatedSumState{C,N,A}(compzero(A))
-@inline update!(st::CompensatedSumState{C,N,A}, row) where {C,N,A} =
-    (st.acc = compadd(st.acc, convert(A, getproperty(row, C))); nothing)
-@inline downdate!(st::CompensatedSumState{C,N,A}, row) where {C,N,A} =
-    (st.acc = compsub(st.acc, convert(A, getproperty(row, C))); nothing)
-combine!(dest::CompensatedSumState{C,N,A}, a::CompensatedSumState{C,N,A},
-         b::CompensatedSumState{C,N,A}) where {C,N,A} =
-    (dest.acc = compmerge(a.acc, b.acc); nothing)
-value(st::CompensatedSumState{C,N,A}) where {C,N,A} =
-    NamedTuple{(N,),Tuple{A}}((compvalue(st.acc),))
-function widenstate(st::CompensatedSumState{C,N,A},
-                    intypes::NamedTuple) where {C,N,A}
-    A2 = sumtype(intypes[C])
-    A2 === A && return st
-    a = st.acc
-    compensable(A2) && return CompensatedSumState{C,N,A2}(Compensated{A2}(
-        convert(A2, a.total), convert(A2, a.comp), a.nans, a.posinf, a.neginf))
-    return SumState{C,N,A2}(convert(A2, compvalue(a)))
-end
+fresh(::Sum{C}, intypes::NamedTuple) where {C} =
+    accumfresh(ColumnTerm{C}(), Symbol(C, :_sum), sumtype(intypes[C]))
 
 """
     SumPower(column, n) -> Summarizer
@@ -397,9 +448,11 @@ Sums `column` raised to the power `n`. Produces the output column
 `Symbol(column, :_sumpower_, n)`, e.g. `SumPower(:x, 2)` produces
 `:x_sumpower_2`. The sum of no rows is `0`. The output column's element type
 follows the same rule as [`Sum`](@ref), applied to the type of `column ^ n`.
-Floating-point accumulators use compensated summation with NaN and ±Inf
-*terms* (the value after raising to the power) counted separately, as in
-[`Sum`](@ref).
+Each term is formed in the accumulator's (widened) type before raising to
+the power, so a per-row power cannot overflow the way raising in the input
+column's own type would. Floating-point accumulators use compensated
+summation with NaN and ±Inf *terms* (the value after raising to the power)
+counted separately, as in [`Sum`](@ref).
 
 `SumPower(column, 1)` produces `:x_sumpower_1`, a distinct column from
 `Sum(:x)`'s `:x_sum`.
@@ -409,71 +462,16 @@ struct SumPower{C} <: GroupSummarizer
 end
 SumPower(column::Symbol, power::Integer) = SumPower{column}(Int(power))
 
-mutable struct SumPowerState{C,N,A} <: SummarizerState
-    power::Int
-    total::A
-end
-
 powertype(::Type{T}, ::Int) where {T} = sumtype(Base.promote_op(^, T, Int))
 
 emptyvalue(s::SumPower{C}) where {C} =
     NamedTuple{(Symbol(C, :_sumpower_, s.power),)}((0,))
-function fresh(s::SumPower{C}, intypes::NamedTuple) where {C}
-    A = powertype(intypes[C], s.power)
-    N = Symbol(C, :_sumpower_, s.power)
-    compensable(A) && return CompensatedSumPowerState{C,N,A}(s.power, compzero(A))
-    return SumPowerState{C,N,A}(s.power, convert(A, 0))
-end
-fresh(st::SumPowerState{C,N,A}) where {C,N,A} =
-    SumPowerState{C,N,A}(st.power, convert(A, 0))
-@inline update!(st::SumPowerState{C}, row) where {C} =
-    (st.total += getproperty(row, C)^st.power; nothing)
-@inline downdate!(st::SumPowerState{C}, row) where {C} =
-    (st.total -= getproperty(row, C)^st.power; nothing)
-combine!(dest::SumPowerState{C,N,A}, a::SumPowerState{C,N,A},
-         b::SumPowerState{C,N,A}) where {C,N,A} =
-    (dest.total = a.total + b.total; nothing)
-isinvertible(::SumPowerState{C,N,A}) where {C,N,A} = !(Missing <: A)
-value(st::SumPowerState{C,N,A}) where {C,N,A} =
-    NamedTuple{(N,),Tuple{A}}((st.total,))
-function widenstate(st::SumPowerState{C,N,A}, intypes::NamedTuple) where {C,N,A}
-    A2 = powertype(intypes[C], st.power)
-    A2 === A && return st
-    compensable(A2) && return CompensatedSumPowerState{C,N,A2}(
-        st.power, compadd(compzero(A2), convert(A2, st.total)))
-    return SumPowerState{C,N,A2}(st.power, convert(A2, st.total))
-end
-
-mutable struct CompensatedSumPowerState{C,N,A<:AbstractFloat} <: SummarizerState
-    power::Int
-    acc::Compensated{A}
-end
-
-fresh(st::CompensatedSumPowerState{C,N,A}) where {C,N,A} =
-    CompensatedSumPowerState{C,N,A}(st.power, compzero(A))
-# The term is formed in the accumulator's type before raising to the power,
-# then classified: NaN^0 and Inf^0 are the finite term 1.0, exactly as they
-# contribute to `sum(x .^ 0)`.
-@inline update!(st::CompensatedSumPowerState{C,N,A}, row) where {C,N,A} =
-    (st.acc = compadd(st.acc, convert(A, getproperty(row, C))^st.power); nothing)
-@inline downdate!(st::CompensatedSumPowerState{C,N,A}, row) where {C,N,A} =
-    (st.acc = compsub(st.acc, convert(A, getproperty(row, C))^st.power); nothing)
-combine!(dest::CompensatedSumPowerState{C,N,A}, a::CompensatedSumPowerState{C,N,A},
-         b::CompensatedSumPowerState{C,N,A}) where {C,N,A} =
-    (dest.acc = compmerge(a.acc, b.acc); nothing)
-value(st::CompensatedSumPowerState{C,N,A}) where {C,N,A} =
-    NamedTuple{(N,),Tuple{A}}((compvalue(st.acc),))
-function widenstate(st::CompensatedSumPowerState{C,N,A},
-                    intypes::NamedTuple) where {C,N,A}
-    A2 = powertype(intypes[C], st.power)
-    A2 === A && return st
-    a = st.acc
-    compensable(A2) && return CompensatedSumPowerState{C,N,A2}(
-        st.power,
-        Compensated{A2}(convert(A2, a.total), convert(A2, a.comp),
-                        a.nans, a.posinf, a.neginf))
-    return SumPowerState{C,N,A2}(st.power, convert(A2, compvalue(a)))
-end
+# The term is formed in the accumulator's type before raising to the power
+# (see termvalue), then classified: NaN^0 and Inf^0 are the finite term 1.0,
+# exactly as they contribute to `sum(x .^ 0)`.
+fresh(s::SumPower{C}, intypes::NamedTuple) where {C} =
+    accumfresh(PowerTerm{C}(s.power), Symbol(C, :_sumpower_, s.power),
+        powertype(intypes[C], s.power))
 
 # A monoid but not a group: dividing a row back out fails outright at zero
 # (the total is 0 no matter what else was folded) and truncates for integers.
@@ -504,7 +502,7 @@ fresh(::ProductState{C,N,A}) where {C,N,A} = ProductState{C,N,A}(convert(A, 1))
 @inline update!(st::ProductState{C}, row) where {C} =
     (st.total *= getproperty(row, C); nothing)
 combine!(dest::ProductState{C,N,A}, a::ProductState{C,N,A},
-         b::ProductState{C,N,A}) where {C,N,A} =
+    b::ProductState{C,N,A}) where {C,N,A} =
     (dest.total = a.total * b.total; nothing)
 value(st::ProductState{C,N,A}) where {C,N,A} = NamedTuple{(N,),Tuple{A}}((st.total,))
 function widenstate(st::ProductState{C,N,A}, intypes::NamedTuple) where {C,N,A}
@@ -531,71 +529,12 @@ in [`Sum`](@ref).
 struct DotProduct{A,B} <: GroupSummarizer end
 DotProduct(a::Symbol, b::Symbol) = DotProduct{a,b}()
 
-mutable struct DotProductState{A,B,N,Acc} <: SummarizerState
-    total::Acc
-end
-
 dotname(a, b) = Symbol(a, :_, b, :_dotproduct)
 emptyvalue(::DotProduct{A,B}) where {A,B} = NamedTuple{(dotname(A, B),)}((0,))
-function fresh(::DotProduct{A,B}, intypes::NamedTuple) where {A,B}
-    Acc = dottype(intypes[A], intypes[B])
-    N = dotname(A, B)
-    compensable(Acc) && return CompensatedDotProductState{A,B,N,Acc}(compzero(Acc))
-    return DotProductState{A,B,N,Acc}(convert(Acc, 0))
-end
-fresh(::DotProductState{A,B,N,Acc}) where {A,B,N,Acc} =
-    DotProductState{A,B,N,Acc}(convert(Acc, 0))
-@inline update!(st::DotProductState{A,B,N,Acc}, row) where {A,B,N,Acc} =
-    (st.total += convert(Acc, getproperty(row, A)) * convert(Acc, getproperty(row, B));
-     nothing)
-@inline downdate!(st::DotProductState{A,B,N,Acc}, row) where {A,B,N,Acc} =
-    (st.total -= convert(Acc, getproperty(row, A)) * convert(Acc, getproperty(row, B));
-     nothing)
-combine!(dest::DotProductState{A,B,N,Acc}, a::DotProductState{A,B,N,Acc},
-         b::DotProductState{A,B,N,Acc}) where {A,B,N,Acc} =
-    (dest.total = a.total + b.total; nothing)
-isinvertible(::DotProductState{A,B,N,Acc}) where {A,B,N,Acc} = !(Missing <: Acc)
-value(st::DotProductState{A,B,N,Acc}) where {A,B,N,Acc} =
-    NamedTuple{(N,),Tuple{Acc}}((st.total,))
-function widenstate(st::DotProductState{A,B,N,Acc}, intypes::NamedTuple) where {A,B,N,Acc}
-    Acc2 = dottype(intypes[A], intypes[B])
-    Acc2 === Acc && return st
-    compensable(Acc2) && return CompensatedDotProductState{A,B,N,Acc2}(
-        compadd(compzero(Acc2), convert(Acc2, st.total)))
-    return DotProductState{A,B,N,Acc2}(convert(Acc2, st.total))
-end
-
-mutable struct CompensatedDotProductState{A,B,N,Acc<:AbstractFloat} <: SummarizerState
-    acc::Compensated{Acc}
-end
-
-fresh(::CompensatedDotProductState{A,B,N,Acc}) where {A,B,N,Acc} =
-    CompensatedDotProductState{A,B,N,Acc}(compzero(Acc))
 # The classified term is the per-row product, so Inf * 0.0 counts as NaN.
-@inline update!(st::CompensatedDotProductState{A,B,N,Acc}, row) where {A,B,N,Acc} =
-    (st.acc = compadd(st.acc, convert(Acc, getproperty(row, A)) *
-                              convert(Acc, getproperty(row, B)));
-     nothing)
-@inline downdate!(st::CompensatedDotProductState{A,B,N,Acc}, row) where {A,B,N,Acc} =
-    (st.acc = compsub(st.acc, convert(Acc, getproperty(row, A)) *
-                              convert(Acc, getproperty(row, B)));
-     nothing)
-combine!(dest::CompensatedDotProductState{A,B,N,Acc},
-         a::CompensatedDotProductState{A,B,N,Acc},
-         b::CompensatedDotProductState{A,B,N,Acc}) where {A,B,N,Acc} =
-    (dest.acc = compmerge(a.acc, b.acc); nothing)
-value(st::CompensatedDotProductState{A,B,N,Acc}) where {A,B,N,Acc} =
-    NamedTuple{(N,),Tuple{Acc}}((compvalue(st.acc),))
-function widenstate(st::CompensatedDotProductState{A,B,N,Acc},
-                    intypes::NamedTuple) where {A,B,N,Acc}
-    Acc2 = dottype(intypes[A], intypes[B])
-    Acc2 === Acc && return st
-    a = st.acc
-    compensable(Acc2) && return CompensatedDotProductState{A,B,N,Acc2}(
-        Compensated{Acc2}(convert(Acc2, a.total), convert(Acc2, a.comp),
-                          a.nans, a.posinf, a.neginf))
-    return DotProductState{A,B,N,Acc2}(convert(Acc2, compvalue(a)))
-end
+fresh(::DotProduct{A,B}, intypes::NamedTuple) where {A,B} =
+    accumfresh(PairProductTerm{A,B}(), dotname(A, B),
+        dottype(intypes[A], intypes[B]))
 
 """
     Moment(column, n) -> Summarizer
@@ -626,7 +565,7 @@ emptyvalue(m::Moment{C}) where {C} =
     NamedTuple{(Symbol(C, :_moment_, m.order),)}((missing,))
 fresh(m::Moment{C}, ::NamedTuple) where {C} =
     MomentState{C,Symbol(C, :_moment_, m.order),
-                Symbol(C, :_sumpower_, m.order)}()
+        Symbol(C, :_sumpower_, m.order)}()
 fresh(st::MomentState) = st
 @inline update!(::MomentState, row) = nothing
 # The value type comes from the dependencies' declared field types, not from
@@ -634,7 +573,7 @@ fresh(st::MomentState) = st
 # otherwise collapse the output column's Union{Missing,...} eltype to Missing.
 @inline function value(::MomentState{C,N,D}, vals::NamedTuple) where {C,N,D}
     V = Base.promote_op(/, fieldtype(typeof(vals), D),
-                        fieldtype(typeof(vals), :count))
+        fieldtype(typeof(vals), :count))
     return NamedTuple{(N,),Tuple{V}}((vals[D] / vals.count,))
 end
 
@@ -694,19 +633,26 @@ Variance(column::Symbol; corrected::Bool = true) = Variance{column}(corrected)
 # stays fieldless and inferrable; the divisor is `n - Int(R)`.
 struct VarianceState{C,N,S,Q,R} <: SummarizerState end
 
+# The compile-time value type of the shared (co)variance identity
+# `(q - sa * sb / n) / (n - corrected)`, from the dependencies' declared
+# field types (a runtime `typeof` would let one missing collapse the type).
+_covtype(::Type{Q}, ::Type{Sa}, ::Type{Sb}) where {Q,Sa,Sb} =
+    Base.promote_op(/,
+        Base.promote_op(-, Q,
+            Base.promote_op(/, Base.promote_op(*, Sa, Sb), Int)), Int)
+
 dependencies(::Variance{C}) where {C} = (Count(), Sum(C), SumPower(C, 2))
 emptyvalue(::Variance{C}) where {C} =
     NamedTuple{(Symbol(C, :_variance),)}((missing,))
 fresh(v::Variance{C}, ::NamedTuple) where {C} =
     VarianceState{C,Symbol(C, :_variance),Symbol(C, :_sum),
-                  Symbol(C, :_sumpower_, 2),v.corrected}()
+        Symbol(C, :_sumpower_, 2),v.corrected}()
 fresh(st::VarianceState) = st
 @inline update!(::VarianceState, row) = nothing
 @inline function value(::VarianceState{C,N,S,Q,R}, vals::NamedTuple) where {C,N,S,Q,R}
     Sf = fieldtype(typeof(vals), S)
     Qf = fieldtype(typeof(vals), Q)
-    V = Base.promote_op(/, Base.promote_op(-, Qf,
-            Base.promote_op(/, Base.promote_op(*, Sf, Sf), Int)), Int)
+    V = _covtype(Qf, Sf, Sf)
     s = vals[S]
     q = vals[Q]
     n = vals.count
@@ -779,16 +725,15 @@ emptyvalue(::Covariance{A,B}) where {A,B} =
     NamedTuple{(covname(A, B),)}((missing,))
 fresh(c::Covariance{A,B}, ::NamedTuple) where {A,B} =
     CovarianceState{A,B,covname(A, B),dotname(A, B),Symbol(A, :_sum),
-                    Symbol(B, :_sum),c.corrected}()
+        Symbol(B, :_sum),c.corrected}()
 fresh(st::CovarianceState) = st
 @inline update!(::CovarianceState, row) = nothing
 @inline function value(::CovarianceState{A,B,N,D,SA,SB,R},
-                       vals::NamedTuple) where {A,B,N,D,SA,SB,R}
+    vals::NamedTuple) where {A,B,N,D,SA,SB,R}
     Df = fieldtype(typeof(vals), D)
     Saf = fieldtype(typeof(vals), SA)
     Sbf = fieldtype(typeof(vals), SB)
-    V = Base.promote_op(/, Base.promote_op(-, Df,
-            Base.promote_op(/, Base.promote_op(*, Saf, Sbf), Int)), Int)
+    V = _covtype(Df, Saf, Sbf)
     d = vals[D]
     sa = vals[SA]
     sb = vals[SB]
@@ -828,11 +773,11 @@ emptyvalue(::Correlation{A,B}) where {A,B} =
     NamedTuple{(corname(A, B),)}((missing,))
 fresh(::Correlation{A,B}, ::NamedTuple) where {A,B} =
     CorrelationState{A,B,corname(A, B),covname(A, B),Symbol(A, :_std),
-                     Symbol(B, :_std)}()
+        Symbol(B, :_std)}()
 fresh(st::CorrelationState) = st
 @inline update!(::CorrelationState, row) = nothing
 @inline function value(::CorrelationState{A,B,N,CV,SA,SB},
-                       vals::NamedTuple) where {A,B,N,CV,SA,SB}
+    vals::NamedTuple) where {A,B,N,CV,SA,SB}
     Cvf = fieldtype(typeof(vals), CV)
     Saf = fieldtype(typeof(vals), SA)
     Sbf = fieldtype(typeof(vals), SB)
@@ -845,7 +790,7 @@ end
 # a no-op; their group structure is exactly that of their (transitively all
 # group) dependencies, which the transforms fold alongside them.
 const DerivedState = Union{MomentState,MeanState,VarianceState,StdState,
-                           CovarianceState,CorrelationState}
+    CovarianceState,CorrelationState}
 combine!(::DerivedState, ::DerivedState, ::DerivedState) = nothing
 @inline downdate!(::DerivedState, row) = nothing
 
@@ -884,7 +829,7 @@ end
 # Reads both inputs before writing, so it tolerates dest aliasing a or b; the
 # ordered-ranges law is what makes keepfirst/keeplast correct here.
 function combine!(dest::TrackState{C,N,T,F}, a::TrackState{C,N,T,F},
-                  b::TrackState{C,N,T,F}) where {C,N,T,F}
+    b::TrackState{C,N,T,F}) where {C,N,T,F}
     if a.seen && b.seen
         v = F.instance(a.val, b.val)
         dest.val = v
@@ -905,7 +850,7 @@ function widenstate(st::TrackState{C,N,T,F}, intypes::NamedTuple) where {C,N,T,F
     T2 = intypes[C]
     T2 === T && return st
     return st.seen ? TrackState{C,N,T2,F}(true, convert(T2, st.val)) :
-        TrackState{C,N,T2,F}()
+           TrackState{C,N,T2,F}()
 end
 
 """

@@ -11,11 +11,13 @@
     # lookahead; the failing third chunk is only reached on demand
     pulled = Ref(0)
     lazyfail = CausalPipeline() do ctx
-        (begin
-             pulled[] += 1
-             pulled[] <= 2 || throw(ArgumentError("chunk 3 pulled"))
-             DataFrame(time = [i])
-         end for i in 1:3)
+        (
+            begin
+                pulled[] += 1
+                pulled[] <= 2 || throw(ArgumentError("chunk 3 pulled"))
+                DataFrame(time = [i])
+            end for i in 1:3
+        )
     end
     it = stream(Context(0, 10), lazyfail)
     @test pulled[] == 0
@@ -66,14 +68,18 @@
     @test DataFrame(only(frames)).time == [9]
     @test DataFrame(only(frames)).count == [9]
     # keyed summarize of an empty input streams no frames
-    @test isempty(collect(stream(Context(0, 9),
-        emptyframe() |> summarize(Count(); key = :sym))))
+    @test isempty(
+        collect(stream(Context(0, 9),
+            emptyframe() |> summarize(Count(); key = :sym))),
+    )
 
     # summarizecycles closes a cycle once a later time arrives; the open
     # cycle is buffered across the chunk boundary and flushed at the end
-    twochunks = CausalPipeline(ctx ->
-        [DataFrame(time = [1, 2, 2], qty = [1, 2, 3]),
-         DataFrame(time = [2, 3], qty = [4, 5])])
+    twochunks = CausalPipeline(
+        ctx ->
+            [DataFrame(time = [1, 2, 2], qty = [1, 2, 3]),
+                DataFrame(time = [2, 3], qty = [4, 5])],
+    )
     frames = collect(stream(Context(0, 9),
         twochunks |> summarizecycles([Count(), Sum(:qty)])))
     @test [DataFrame(f).time for f in frames] == [[1], [2], [3]]

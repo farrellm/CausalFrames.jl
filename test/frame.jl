@@ -24,7 +24,8 @@ end
 end
 
 @testset "chunk concatenation property" begin
-    p = clock(2) |>
+    p =
+        clock(2) |>
         filterrows(r -> r.time % 4 == 0) |>
         addcolumns(r -> (; double = 2 * r.time))
 
@@ -41,10 +42,35 @@ end
 
 @testset "Tables.jl interface" begin
     frame = load(Context(0, 6), clock(2) |> addcolumns(r -> (; sq = r.time^2)))
+    # rows are served through the column-access fallback
     rows = collect(Tables.rows(frame))
     @test length(rows) == 3
     @test [r.sq for r in rows] == [0, 4, 16]
     @test Tables.columntable(frame).time == [0, 2, 4]
+    sch = Tables.schema(frame)
+    @test sch.names == (:time, :sq)
+    @test sch.types == (Int, Int)
+end
+
+@testset "Tables.schema promotes across chunks" begin
+    ctx = Context(0, 10)
+    frame = CausalFrame(ctx, [DataFrame(time = [1], x = [1]),
+        DataFrame(time = [2], x = [2.5])])
+    sch = Tables.schema(frame)
+    @test sch.names == (:time, :x)
+    @test sch.types == (Int, Float64)
+    @test eltype(DataFrame(frame).x) == Float64
+end
+
+@testset "empty frame Tables behavior" begin
+    frame = load(Context(1, 10), emptyframe())
+    sch = Tables.schema(frame)
+    @test sch.names == (:time,)
+    @test sch.types == (Int,)
+    # partitions agree with DataFrame(frame): one zero-row time-only frame
+    parts = collect(Tables.partitions(frame))
+    @test length(parts) == 1
+    @test parts[1] == DataFrame(frame)
 end
 
 @testset "show" begin
