@@ -101,7 +101,7 @@ Two kinds, both compatible with the chaining operator `|>`:
 |---|---|---|
 | `emptyframe()` | source | zero rows, just a `:time` column |
 | `clock(interval; batchsize)` | source | rows at `start, start + interval, …` while `< stop`; no other columns; generated lazily in chunks of `batchsize` rows |
-| `readcsv(path; chunkbytes)` | source | CSV file with a sorted `time` column; rows clipped to `[start, stop)`; read incrementally in chunks of roughly `chunkbytes` bytes — never all at once — stopping as soon as a time `>= stop` is seen |
+| `readcsv(path; types, time, rename, delim, chunkbytes)` | source | CSV file, every column read as `String` unless `types` opts it into a concrete type; the time column (named `:time`, or chosen by `time` as a column name or a per-row function) must be typed and sorted; `rename` maps column names first; rows clipped to `[start, stop)`; read incrementally in chunks of roughly `chunkbytes` bytes — never all at once — stopping as soon as a time `>= stop` is seen |
 | `filterrows(pred)` | transform | keep rows where `pred(row)` is `true` |
 | `addcolumns(f)` | transform | `f(row)` returns a `NamedTuple` of new column values for that row; may **not** contain a `time` key (this preserves the time invariant without re-validation) |
 | `summarize(ss; key)` | transform | summarize the whole context into rows at time `stop`; drops input columns |
@@ -409,8 +409,9 @@ two never collapse under the name-keyed deduplication described below.
 
 ### Element types across chunks
 
-A source may infer a column's element type per chunk — `readcsv` does — so a
-column can be `Int` in one chunk and `Float64` in the next. The summarization
+A source may hand a column a different element type from one chunk to the
+next, so a column can be `Int` in one chunk and `Float64` in the next. The
+summarization
 transforms therefore track the promotion of every input type seen so far and
 call `widenstate` when that promotion moves, rebuilding a state for the wider
 type and carrying its accumulated value over. Summaries emitted before the

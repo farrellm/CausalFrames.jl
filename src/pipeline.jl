@@ -10,8 +10,9 @@ consumed; [`load`](@ref) drains it into a [`CausalFrame`](@ref) and
 transforms with `|>`:
 
 ```julia
-p = readcsv("ticks.csv") |>
-    filterrows(r -> r.price > 0) |>
+p = readcsv("ticks.csv";
+        types = Dict(:time => Int, :bid => Float64, :ask => Float64)) |>
+    filterrows(r -> r.bid > 0) |>
     addcolumns(r -> (; mid = (r.bid + r.ask) / 2))
 ```
 

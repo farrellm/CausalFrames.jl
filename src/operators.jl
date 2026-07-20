@@ -55,25 +55,69 @@ function Base.iterate(it::ClockChunks{T}, t) where {T}
 end
 
 """
-    readcsv(path; chunkbytes = 4 * 1024 * 1024) -> CausalPipeline
+    readcsv(path; types = nothing, time = nothing, rename = nothing,
+            delim = nothing, chunkbytes = 4 * 1024 * 1024) -> CausalPipeline
 
-A source that reads the CSV file at `path`, which must contain a `time`
-column sorted in non-decreasing order, and clips it to the context's
-half-open interval `[start, stop)`. The `time` column is converted to the
-context's time type.
+A source that reads the CSV file at `path` and clips it to the context's
+half-open interval `[start, stop)`. Every column is read as `String` — types
+are **not** inferred — unless `types` opts a column into a concrete type.
 
-The file is read incrementally in chunks of roughly `chunkbytes` bytes —
-never all at once — and reading stops as soon as a time `>= stop` is seen.
-Consequently a sortedness violation is only detected when the offending
-chunk is actually read.
+The resulting time column, whatever its source, is materialized as `:time`,
+must be sorted in non-decreasing order, and is converted to the context's
+time type. It is chosen by `time`:
+
+- `time = nothing` (default): the column already named `:time`.
+- `time = :name` (a `Symbol`): the column named `:name` (after `rename`),
+  renamed to `:time`.
+- `time = f` (a function): `f(row)` is called per row to compute the time
+  value, producing the `:time` column (any existing `:time` is overwritten).
+
+Since a `String` time column cannot be ordered against the numeric window,
+the time column must be typed unless produced by a function: it is an
+`ArgumentError` if `time` is not a function and `types` gives no concrete
+type for the time column.
+
+Keyword arguments:
+
+- `types`: which columns to give a concrete type (everything else stays
+  `String`), as a `Dict`/`Vector`/function over the file's *original* column
+  names or indices — it is applied while parsing, so it is keyed by the names
+  in the file, before any `rename`.
+- `rename`: an `AbstractDict`/map (over original names) or a `name -> name`
+  function applied to the column names **after** typing but **before** `time`
+  is resolved.
+- `delim`: the field delimiter, passed through to `CSV.Chunks` (a `Char` or
+  `String`); defaults to CSV.jl's own detection.
+- `chunkbytes`: the file is read incrementally in chunks of roughly this many
+  bytes — never all at once — and reading stops as soon as a time `>= stop`
+  is seen. Consequently a sortedness violation is only detected when the
+  offending chunk is actually read.
 """
-function readcsv(path::AbstractString; chunkbytes::Integer = 4 * 1024 * 1024)
+function readcsv(path::AbstractString; types = nothing, time = nothing,
+    rename = nothing, delim = nothing, chunkbytes::Integer = 4 * 1024 * 1024)
     chunkbytes > 0 ||
         throw(ArgumentError("readcsv chunkbytes must be positive, got $chunkbytes"))
+    # Eager error where the time column is provably untyped: no `types` at all,
+    # or a name-keyed `types` dict that has no entry for the time column. Other
+    # `types` forms (positional vectors, index-keyed dicts, functions) can only
+    # be judged once the columns are realized, so they defer to the first-chunk
+    # check in `resolvetime!`. `types` names the *original* CSV columns, so a
+    # `rename` breaks the name correspondence too — defer that case as well.
+    if !(time isa Function) && rename === nothing
+        timename = time isa Symbol ? time : :time
+        namekeyed = types isa AbstractDict && keytype(types) <: Union{Symbol,
+            AbstractString}
+        typedbydict =
+            namekeyed &&
+            (haskey(types, timename) || haskey(types, String(timename)))
+        (types === nothing || (namekeyed && !typedbydict)) &&
+            throw(ArgumentError("readcsv time column $(repr(timename)) needs a \
+                concrete type via `types`, or a `time` function to produce it"))
+    end
     return CausalPipeline() do ctx::Context
         return ChunkSource(
             CSVProducer{timetype(ctx)}(String(path), Int(chunkbytes),
-                ctx.start, ctx.stop),
+                ctx.start, ctx.stop, types, time, rename, delim),
         )
     end
 end
@@ -81,37 +125,69 @@ end
 # The stateful producer behind readcsv's ChunkSource. The pull-to-pull state
 # lives in fields rather than captured locals (captured variables that are
 # reassigned get boxed). The dynamically typed fields are per-chunk setup
-# state, not per-row state.
+# state, not per-row state — the per-row `time` function runs behind a
+# function barrier (`maptime`).
 mutable struct CSVProducer{T}
     const path::String
     const chunkbytes::Int
     const start::T
     const stop::T
-    chunks::Any        # file-chunk iterator, created on first pull
-    state::Any         # its iteration state
+    const types::Any    # CSV.Chunks `types` argument, or nothing
+    const time::Any     # Nothing | Symbol (column name) | Function (row -> time)
+    const rename::Any   # Nothing | AbstractDict/map | Function (name -> name)
+    const delim::Any    # CSV.Chunks `delim` argument, or nothing
+    chunks::Any         # file-chunk iterator, created on first pull
+    state::Any          # its iteration state
     started::Bool
-    prevtime::Any      # last raw time seen, for cross-chunk sortedness
+    prevtime::Any       # last raw time seen, for cross-chunk sortedness
     done::Bool
-    CSVProducer{T}(path, chunkbytes, start, stop) where {T} =
-        new{T}(path, chunkbytes, start, stop, nothing, nothing, false, nothing,
-            false)
+    CSVProducer{T}(path, chunkbytes, start, stop, types, time, rename,
+        delim) where {T} =
+        new{T}(path, chunkbytes, start, stop, types, time, rename, delim,
+            nothing, nothing, false, nothing, false)
 end
 
-# CSV.Chunks refuses files it cannot split (ntasks == 1, or too few rows to
-# justify it); such a file fits in one chunk, so read it whole.
-function csvchunks(path::String, chunkbytes::Int)
-    ntasks = max(1, Int(cld(filesize(path), chunkbytes)))
-    ntasks == 1 && return [CSV.read(path, DataFrame)]
-    try
-        return CSV.Chunks(path; ntasks = ntasks)
-    catch e
-        e isa ArgumentError ? [CSV.read(path, DataFrame)] : rethrow()
+# The user's `types` (or nothing) as a CSV.jl per-column `types` function that
+# defaults every unspecified column to `String` — so nothing is ever inferred.
+# CSV calls it with a 1-based column index and a `Symbol` name.
+typesfunction(::Nothing) = (i, name) -> String
+typesfunction(t::Type) = (i, name) -> t
+typesfunction(v::AbstractVector) =
+    (i, name) -> (1 <= i <= length(v) && v[i] !== nothing) ? v[i] : String
+typesfunction(f) = (i, name) -> something(f(i, name), String)  # user function
+function typesfunction(d::AbstractDict)
+    return function (i, name)
+        haskey(d, name) && return d[name]
+        haskey(d, String(name)) && return d[String(name)]
+        haskey(d, i) && return d[i]
+        return String
     end
 end
 
+# CSV.Chunks refuses files it cannot split (ntasks == 1, or too few rows to
+# justify it); such a file fits in one chunk, so read it whole. Columns are
+# read as plain `String` (`stringtype`) unless `types` overrides them.
+function csvchunks(path::String, chunkbytes::Int, types, delim)
+    # CSV.jl's own default for `delim` is `nothing`, so passing it through
+    # unchanged is a no-op.
+    opts = (; types = typesfunction(types), stringtype = String, delim = delim)
+    ntasks = max(1, Int(cld(filesize(path), chunkbytes)))
+    ntasks == 1 && return [CSV.read(path, DataFrame; opts...)]
+    try
+        return CSV.Chunks(path; ntasks = ntasks, opts...)
+    catch e
+        e isa ArgumentError ? [CSV.read(path, DataFrame; opts...)] : rethrow()
+    end
+end
+
+# Function barrier: computes the time column by applying `f` to the concretely
+# typed rows of the column table, so `f` specializes and the eltype is inferred.
+maptime(f, nt::NamedTuple) = map(f, Tables.rows(nt))
+
 function (p::CSVProducer{T})() where {T}
     p.done && return nothing
-    p.chunks === nothing && (p.chunks = csvchunks(p.path, p.chunkbytes))
+    p.chunks === nothing &&
+        (p.chunks = csvchunks(p.path, p.chunkbytes, p.types, p.delim))
     while true
         next = p.started ? iterate(p.chunks, p.state) : iterate(p.chunks)
         if next === nothing
@@ -120,11 +196,9 @@ function (p::CSVProducer{T})() where {T}
         end
         filechunk, p.state = next
         p.started = true
-        # CSV.Chunks infers column types per chunk; a column's eltype may
-        # differ between chunks, which load's vcat promotes.
         df = filechunk isa DataFrame ? filechunk : DataFrame(filechunk)
-        "time" in names(df) ||
-            throw(ArgumentError("CSV file $(p.path) has no time column"))
+        renamecolumns!(df, p.rename)
+        resolvetime!(df, p.time, p.path)
         issorted(df.time) ||
             throw(ArgumentError("time column in $(p.path) is not non-decreasing"))
         if nrow(df) > 0
@@ -143,6 +217,43 @@ function (p::CSVProducer{T})() where {T}
         nrow(clipped) > 0 && return clipped
         p.done && return nothing
     end
+end
+
+# Rename columns before the time column is resolved. A map renames only the
+# columns it names; a function is applied to every column name.
+renamecolumns!(::DataFrame, ::Nothing) = nothing
+renamecolumns!(df::DataFrame, f) = (rename!(f, df); nothing)
+function renamecolumns!(df::DataFrame, m::AbstractDict)
+    pairs = [k => m[k] for k in names(df) if haskey(m, k)]
+    append!(
+        pairs,
+        [
+            Symbol(k) => m[Symbol(k)] for k in names(df)
+            if !haskey(m, k) && haskey(m, Symbol(k))
+        ],
+    )
+    isempty(pairs) || rename!(df, pairs)
+    return nothing
+end
+
+# Materialize the `:time` column and check it is usable (non-String) unless it
+# was produced by a function.
+function resolvetime!(df::DataFrame, time, path::String)
+    if time isa Function
+        df[!, :time] = maptime(time, Tables.columntable(df))
+    else
+        if time isa Symbol
+            String(time) in names(df) ||
+                throw(ArgumentError("CSV file $path has no column $(repr(time))"))
+            time === :time || rename!(df, time => :time)
+        end
+        "time" in names(df) ||
+            throw(ArgumentError("CSV file $path has no time column"))
+        eltype(df.time) <: AbstractString &&
+            throw(ArgumentError("time column in $path needs a concrete type \
+                via `types`, or a `time` function to produce it"))
+    end
+    return nothing
 end
 
 """

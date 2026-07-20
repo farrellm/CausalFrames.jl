@@ -6,10 +6,11 @@
     dir = mktempdir()
     csv = joinpath(dir, "precompile.csv")
     write(csv, "time,sym,qty\n1,a,1.0\n2,b,2.0\n2,a,3.0\n3,a,4.0\n")
+    csvtypes = Dict(:time => Int, :qty => Float64)
     @compile_workload begin
         ctx = Context(0, 10)
         p =
-            readcsv(csv) |>
+            readcsv(csv; types = csvtypes) |>
             filterrows(r -> r.qty > 0) |>
             addcolumns(r -> (; v = 2.0 * r.qty))
         DataFrame(
@@ -39,7 +40,8 @@
             load(
                 ctx,
                 clock(1) |> addrollingcolumns(
-                    (w1 = 1, w3 = 3), [Count(), Min(:qty)]; from = readcsv(csv)),
+                    (w1 = 1, w3 = 3), [Count(), Min(:qty)];
+                    from = readcsv(csv; types = csvtypes)),
             ),
         )
         DataFrame(
@@ -50,13 +52,16 @@
         DataFrame(
             load(
                 ctx,
-                p |> asofjoin(readcsv(csv); key = :sym,
+                p |> asofjoin(readcsv(csv; types = csvtypes); key = :sym,
                     rightprefix = "r", righttime = :rt),
             ),
         )
         DataFrame(
-            load(ctx, clock(1) |> asofjoin(readcsv(csv); tolerance = 2,
-                rightprefix = "r")),
+            load(
+                ctx,
+                clock(1) |> asofjoin(readcsv(csv; types = csvtypes); tolerance = 2,
+                    rightprefix = "r"),
+            ),
         )
         foreach(DataFrame, stream(ctx, clock(1) |> summarize(Count())))
         DataFrame(load(ctx, emptyframe()))
