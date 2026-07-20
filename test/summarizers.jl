@@ -392,13 +392,14 @@ end
         @test CausalFrames.downdate!(st, rows[1]) === nothing
     end
 
-    # invertibility is a property of the realized accumulator type: a
-    # missing-permitting accumulator absorbs and cannot be downdated
+    # invertibility is a property of the realized accumulator type: the sum
+    # family counts missing terms rather than folding them in (see below), so
+    # even a missing-permitting accumulator stays invertible
     @test CausalFrames.isinvertible(CausalFrames.fresh(Sum(:x), intypes))
     @test CausalFrames.isinvertible(CausalFrames.fresh(Count(), intypes))
     mintypes = (time = Int64, x = Union{Missing,Int}, y = Union{Missing,Int})
     for s in [Sum(:x), SumPower(:x, 2), DotProduct(:x, :y)]
-        @test !CausalFrames.isinvertible(CausalFrames.fresh(s, mintypes))
+        @test CausalFrames.isinvertible(CausalFrames.fresh(s, mintypes))
     end
 end
 
@@ -411,13 +412,17 @@ end
         return st
     end
 
-    # float accumulators get the compensated state; missing-permitting and
-    # BigFloat accumulators keep the plain one
+    # float accumulators get the compensated state; a missing-permitting float
+    # gets the compensated *counting* state over the non-missing type; BigFloat
+    # keeps the plain one
     @test CausalFrames.fresh(Sum(:x), ftypes) isa
           CausalFrames.CompensatedAccumState{:x_sum,Float64,
         CausalFrames.ColumnTerm{:x}}
     @test CausalFrames.fresh(Sum(:x), (time = Int64, x = Union{Missing,Float64})) isa
-          CausalFrames.AccumState
+          CausalFrames.OptionalCompensatedAccumState{:x_sum,Float64,
+        CausalFrames.ColumnTerm{:x}}
+    @test CausalFrames.fresh(Sum(:x), (time = Int64, x = Union{Missing,Int})) isa
+          CausalFrames.OptionalAccumState{:x_sum,Int,CausalFrames.ColumnTerm{:x}}
     @test CausalFrames.fresh(Sum(:x), (time = Int64, x = BigFloat)) isa
           CausalFrames.AccumState
 
@@ -493,8 +498,8 @@ end
     # widening carries the state across representation changes: plain Int
     # promotes into the compensated state, a compensated Float32 promotes to
     # a compensated Float64 keeping its compensation and counts, and a
-    # missing-permitting promotion falls back to the plain (absorbing) state
-    # holding the reconstructed value
+    # missing-permitting promotion moves into the compensated *counting* state
+    # (still invertible) keeping its compensation and nonfinite counts
     ist = CausalFrames.fresh(Sum(:x), (time = Int64, x = Int64))
     CausalFrames.update!(ist, (; x = 5))
     wst = CausalFrames.widenstate(ist, (time = Int64, x = Float64))
@@ -516,9 +521,93 @@ end
 
     nst = fold(Sum(:x), [1.0, NaN])
     mst = CausalFrames.widenstate(nst, (time = Int64, x = Union{Missing,Float64}))
-    @test mst isa CausalFrames.AccumState{:x_sum,Union{Missing,Float64},
+    @test mst isa CausalFrames.OptionalCompensatedAccumState{:x_sum,Float64,
         CausalFrames.ColumnTerm{:x}}
+    @test mst.acc.nans == 1 && mst.missings == 0
     @test isnan(CausalFrames.value(mst).x_sum)
-    @test !CausalFrames.isinvertible(mst)
+    @test CausalFrames.value(mst) isa NamedTuple{(:x_sum,),Tuple{Union{Missing,Float64}}}
+    @test CausalFrames.isinvertible(mst)
     @test CausalFrames.isinvertible(nst)
+end
+
+@testset "missing counting summation" begin
+    # A missing input term is counted, not folded in — the same trick the
+    # compensated state uses for NaN/±Inf — so the accumulator stays invertible
+    # and a rolling window recovers once a missing row leaves it. The
+    # accumulation lives at the non-missing type; only value's return is
+    # Union{Missing,_}.
+    mint = (time = Int64, x = Union{Missing,Int}, y = Union{Missing,Int})
+    mflt = (time = Int64, x = Union{Missing,Float64})
+
+    function foldm(s, types, xs)
+        st = CausalFrames.fresh(s, types)
+        foreach(x -> CausalFrames.update!(st, (; x)), xs)
+        return st
+    end
+
+    # value is missing iff a missing term is live, at the static Union type
+    # (so it compares by isequal, not ===, against a concrete-typed literal)
+    st = foldm(Sum(:x), mint, [1, missing, 3])
+    @test CausalFrames.value(st) isa NamedTuple{(:x_sum,),Tuple{Union{Missing,Int}}}
+    @test isequal(CausalFrames.value(st), (x_sum = missing,))
+    CausalFrames.downdate!(st, (; x = missing))
+    @test isequal(CausalFrames.value(st), (x_sum = 4,))     # recovered exactly
+    @test CausalFrames.value(st).x_sum === 4
+
+    # the count balances across several missing terms
+    st = foldm(Sum(:x), mint, [1, missing, missing, 4])
+    @test st.missings == 2 && st.total == 5
+    @test isequal(CausalFrames.value(st), (x_sum = missing,))
+    CausalFrames.downdate!(st, (; x = missing))
+    @test isequal(CausalFrames.value(st), (x_sum = missing,))   # one still live
+    CausalFrames.downdate!(st, (; x = missing))
+    @test isequal(CausalFrames.value(st), (x_sum = 5,))
+
+    # missing dominates NaN in the counting float state, and both counts
+    # subtract away independently
+    st = foldm(Sum(:x), mflt, [1.0, NaN, missing, 4.0])
+    @test st.acc.nans == 1 && st.missings == 1
+    @test isequal(CausalFrames.value(st), (x_sum = missing,))
+    CausalFrames.downdate!(st, (; x = missing))
+    @test isnan(CausalFrames.value(st).x_sum)                   # NaN still live
+    CausalFrames.downdate!(st, (; x = NaN))
+    @test isequal(CausalFrames.value(st), (x_sum = 5.0,))
+
+    # combine! adds the counts and reads before writing, so dest may alias and
+    # a fresh state is the identity (this is what the tree mode relies on)
+    a = foldm(Sum(:x), mint, [1, missing])
+    b = foldm(Sum(:x), mint, [missing, 4])
+    dest = CausalFrames.fresh(a)
+    CausalFrames.combine!(dest, a, b)
+    @test dest.missings == 2 && dest.total == 5
+    @test isequal(CausalFrames.value(dest), (x_sum = missing,))
+    CausalFrames.combine!(a, a, foldm(Sum(:x), mint, [10]))     # dest aliases a
+    @test a.missings == 1 && a.total == 11
+
+    # DotProduct counts a term missing when either operand is
+    st = CausalFrames.fresh(DotProduct(:x, :y), mint)
+    CausalFrames.update!(st, (x = 2, y = 3))
+    CausalFrames.update!(st, (x = missing, y = 5))
+    @test st.missings == 1
+    @test isequal(CausalFrames.value(st), (x_y_dotproduct = missing,))
+    CausalFrames.downdate!(st, (x = missing, y = 5))
+    @test isequal(CausalFrames.value(st), (x_y_dotproduct = 6,))
+
+    # dependent summarizers inherit missing through the shared value NamedTuple,
+    # and keep a Union{Missing,_} eltype rather than collapsing to Missing
+    p = CausalPipeline(ctx -> [DataFrame(time = [1, 2, 3], x = [2, missing, 4])])
+    df = DataFrame(load(Context(0, 9), p |> summarize([Mean(:x), Variance(:x)])))
+    @test eltype(df.x_mean) == Union{Missing,Float64}
+    @test eltype(df.x_variance) == Union{Missing,Float64}
+    @test ismissing(only(df.x_mean)) && ismissing(only(df.x_variance))
+
+    # update!/downdate! on the counting states allocate nothing on the hot path
+    # (measured behind a function barrier, as the folding kernels always run)
+    function updalloc(st, row)
+        CausalFrames.update!(st, row)                # warm up this specialization
+        return @allocated CausalFrames.update!(st, row)
+    end
+    st = foldm(Sum(:x), mint, Int[])
+    @test updalloc(st, (x = 3,)) == 0
+    @test updalloc(st, (x = missing,)) == 0
 end

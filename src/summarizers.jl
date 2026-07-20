@@ -58,8 +58,8 @@ A monoid summarizer whose updates can also be undone: [`downdate!`](@ref)
 removes a previously folded row. `addrollingcolumns` exploits this to slide
 each window in O(1) amortized per row, subtracting the exiting rows from a
 running state — unless [`isinvertible`](@ref) reports that the realized
-accumulator type defeats the inverse (a `missing` absorbs), in which case it
-falls back to the monoid tree.
+accumulator type defeats the inverse (an absorbing value folded past
+recovery), in which case it falls back to the monoid tree.
 """
 abstract type GroupSummarizer <: MonoidSummarizer end
 
@@ -189,9 +189,10 @@ Remove one previously folded row from the state — the inverse of
 inverse is exact when the accumulator arithmetic is (integer sums); the
 floating-point sum accumulators use compensated summation with NaN and ±Inf
 terms counted separately, so nonfinite rows subtract away exactly and finite
-ones leave only the small compensated round-off. An absorbing `missing`
-accumulated value cannot be subtracted away at all — [`isinvertible`](@ref)
-reports the statically detectable case.
+ones leave only the small compensated round-off. `missing` terms are likewise
+counted rather than folded in (see the Optional* accumulator states), so a
+missing row also subtracts away exactly — the count balances — leaving the
+accumulator invertible.
 """
 function downdate! end
 
@@ -199,10 +200,11 @@ function downdate! end
     isinvertible(st::SummarizerState) -> Bool
 
 Whether [`downdate!`](@ref) actually inverts [`update!`](@ref) for this
-state's realized accumulator type. Defaults to `true`; states whose
-accumulator admits `missing` return `false`, since one `missing` row would
-poison the running total beyond recovery. `addrollingcolumns` consults this
-when choosing the running-state window algorithm.
+state's realized accumulator type. Defaults to `true`. The sum-family
+accumulators keep NaN, ±Inf, and `missing` terms out of the running total and
+count them instead, so they stay invertible; a state that folds an absorbing
+value into an unrecoverable running total returns `false`. `addrollingcolumns`
+consults this when choosing the running-state window algorithm.
 """
 isinvertible(::SummarizerState) = true
 
@@ -236,10 +238,11 @@ dottype(::Type{Ta}, ::Type{Tb}) where {Ta,Tb} =
 # infinity sign -> that infinity). Keeping nonfinites out of the running pair
 # is what lets `downdate!` invert exactly once such a row leaves a rolling
 # window — folded in naively, NaN absorbs and an evicted infinity leaves
-# Inf - Inf = NaN behind. `Union{Missing,...}` accumulators keep the plain
-# states (`missing` still absorbs; `isinvertible` reports it), and BigFloat is
-# excluded because compensation buys nothing at arbitrary precision and a
-# non-isbits Compensated{BigFloat} would heap-allocate on every row.
+# Inf - Inf = NaN behind. `Missing`-admitting columns count their missing terms
+# the same way (the Optional* states, over the non-missing type), so they too
+# stay invertible. BigFloat is excluded because compensation buys nothing at
+# arbitrary precision and a non-isbits Compensated{BigFloat} would heap-allocate
+# on every row.
 compensable(::Type{T}) where {T} = T <: AbstractFloat && T !== BigFloat
 
 struct Compensated{A<:AbstractFloat}
@@ -329,6 +332,15 @@ struct PairProductTerm{A,B} end
 @inline termvalue(::PairProductTerm{Ca,Cb}, ::Type{A}, row) where {Ca,Cb,A} =
     convert(A, getproperty(row, Ca)) * convert(A, getproperty(row, Cb))
 
+# Whether a term is `missing` for this row — a missing input column, or (for a
+# pair) either operand missing. Only instantiated for the Optional* states,
+# i.e. when a source column admits Missing; over a non-missing column the
+# `ismissing` folds to a compile-time `false`.
+@inline termmissing(::ColumnTerm{C}, row) where {C} = ismissing(getproperty(row, C))
+@inline termmissing(::PowerTerm{C}, row) where {C} = ismissing(getproperty(row, C))
+@inline termmissing(::PairProductTerm{Ca,Cb}, row) where {Ca,Cb} =
+    ismissing(getproperty(row, Ca)) || ismissing(getproperty(row, Cb))
+
 # The accumulator type a term folds into, from the (promoted) input column
 # types — recomputed by widenstate whenever the schema promotion moves.
 acctype(::ColumnTerm{C}, intypes::NamedTuple) where {C} = sumtype(intypes[C])
@@ -350,12 +362,46 @@ mutable struct CompensatedAccumState{N,A<:AbstractFloat,T} <: SummarizerState
     acc::Compensated{A}
 end
 
-# Shared constructor behind the sum family's fresh methods: compensable
-# accumulator types get the Neumaier state.
+# A `missing` input term absorbs a running sum and cannot be subtracted back
+# out, which would force a rolling window off the O(1) running path onto the
+# tree. So, exactly as the compensated state counts nonfinite floats, these two
+# states count the missing terms instead of folding them in: the accumulation
+# lives at the *non-missing* type A (`total`/`acc`, flat — no Union in the hot
+# field), only finite/present terms enter it, `missings` tracks the rest, and
+# `value` reports `missing` whenever that count is positive. The count balances
+# under `downdate!`, so the accumulator stays invertible and a missing row
+# recovers once it leaves the window. Used only when a source column admits
+# Missing; `OptionalCompensatedAccumState` also keeps the compensated state's
+# nonfinite counters.
+mutable struct OptionalAccumState{N,A,T} <: SummarizerState
+    term::T
+    total::A
+    missings::Int
+end
+
+mutable struct OptionalCompensatedAccumState{N,A<:AbstractFloat,T} <: SummarizerState
+    term::T
+    acc::Compensated{A}
+    missings::Int
+end
+
+# Shared constructor behind the sum family's fresh methods: a Missing-admitting
+# accumulator type folds into the counting Optional* states over the
+# non-missing type; otherwise compensable types get the Neumaier state. (The
+# `Union{}` guard keeps a pathological all-Missing column on the old path.)
 function accumfresh(term, N::Symbol, ::Type{A}) where {A}
+    Missing <: A && nonmissingtype(A) !== Union{} &&
+        return optionalfresh(term, N, nonmissingtype(A))
     compensable(A) &&
         return CompensatedAccumState{N,A,typeof(term)}(term, compzero(A))
     return AccumState{N,A,typeof(term)}(term, convert(A, 0))
+end
+
+# Fresh Optional* state over the non-missing accumulator type A.
+function optionalfresh(term, N::Symbol, ::Type{A}) where {A}
+    compensable(A) && return OptionalCompensatedAccumState{N,A,typeof(term)}(
+        term, compzero(A), 0)
+    return OptionalAccumState{N,A,typeof(term)}(term, convert(A, 0), 0)
 end
 
 fresh(st::AccumState{N,A,T}) where {N,A,T} =
@@ -367,11 +413,15 @@ fresh(st::AccumState{N,A,T}) where {N,A,T} =
 combine!(dest::AccumState{N,A,T}, a::AccumState{N,A,T},
     b::AccumState{N,A,T}) where {N,A,T} =
     (dest.total = a.total + b.total; nothing)
-isinvertible(::AccumState{N,A}) where {N,A} = !(Missing <: A)
 value(st::AccumState{N,A}) where {N,A} = NamedTuple{(N,),Tuple{A}}((st.total,))
+# A later chunk can widen a non-missing accumulator into a Missing-admitting
+# type; that promotes it to the counting Optional* state (no missing folded in
+# yet, so missings = 0) rather than a poisoned plain state.
 function widenstate(st::AccumState{N,A,T}, intypes::NamedTuple) where {N,A,T}
     A2 = acctype(st.term, intypes)
     A2 === A && return st
+    Missing <: A2 && nonmissingtype(A2) !== Union{} &&
+        return optionalfrom(st.term, Val(N), nonmissingtype(A2), st.total, 0)
     compensable(A2) && return CompensatedAccumState{N,A2,T}(
         st.term, compadd(compzero(A2), convert(A2, st.total)))
     return AccumState{N,A2,T}(st.term, convert(A2, st.total))
@@ -393,11 +443,92 @@ function widenstate(st::CompensatedAccumState{N,A,T},
     A2 = acctype(st.term, intypes)
     A2 === A && return st
     a = st.acc
+    if Missing <: A2 && nonmissingtype(A2) !== Union{}
+        Ann = nonmissingtype(A2)
+        return compensable(Ann) ?
+               OptionalCompensatedAccumState{N,Ann,T}(st.term,
+            widencomp(Ann, a), 0) :
+               OptionalAccumState{N,Ann,T}(st.term, convert(Ann, compvalue(a)), 0)
+    end
     compensable(A2) && return CompensatedAccumState{N,A2,T}(
-        st.term,
-        Compensated{A2}(convert(A2, a.total), convert(A2, a.comp),
-            a.nans, a.posinf, a.neginf))
+        st.term, widencomp(A2, a))
     return AccumState{N,A2,T}(st.term, convert(A2, compvalue(a)))
+end
+
+# Reinterpret a Compensated at a wider float type, carrying its running pair
+# and its nonfinite counters unchanged.
+widencomp(::Type{A2}, a::Compensated) where {A2} =
+    Compensated{A2}(convert(A2, a.total), convert(A2, a.comp),
+        a.nans, a.posinf, a.neginf)
+
+# Build an Optional* state from a scalar total (used when promoting a plain,
+# uncompensated accumulator that carries no compensation/nonfinite state).
+function optionalfrom(term, ::Val{N}, ::Type{A2}, total, missings::Int) where {N,A2}
+    T = typeof(term)
+    compensable(A2) && return OptionalCompensatedAccumState{N,A2,T}(
+        term, compadd(compzero(A2), convert(A2, total)), missings)
+    return OptionalAccumState{N,A2,T}(term, convert(A2, total), missings)
+end
+
+# The Optional* interface: fold only present terms into the accumulation and
+# count the missing ones; `value` is `missing` while any missing term is live.
+# The value's field type is the static Union{Missing,A} — a runtime `typeof`
+# would let a missing window collapse a dependent summarizer's output type.
+fresh(st::OptionalAccumState{N,A,T}) where {N,A,T} =
+    OptionalAccumState{N,A,T}(st.term, convert(A, 0), 0)
+@inline update!(st::OptionalAccumState{N,A}, row) where {N,A} =
+    (
+        termmissing(st.term, row) ? (st.missings += 1) :
+        (st.total += termvalue(st.term, A, row)); nothing)
+@inline downdate!(st::OptionalAccumState{N,A}, row) where {N,A} =
+    (
+        termmissing(st.term, row) ? (st.missings -= 1) :
+        (st.total -= termvalue(st.term, A, row)); nothing)
+function combine!(dest::OptionalAccumState{N,A,T}, a::OptionalAccumState{N,A,T},
+    b::OptionalAccumState{N,A,T}) where {N,A,T}
+    dest.total = a.total + b.total
+    dest.missings = a.missings + b.missings
+    return nothing
+end
+value(st::OptionalAccumState{N,A}) where {N,A} =
+    NamedTuple{(N,),Tuple{Union{Missing,A}}}((st.missings > 0 ? missing : st.total,))
+function widenstate(st::OptionalAccumState{N,A,T}, intypes::NamedTuple) where {N,A,T}
+    A2 = nonmissingtype(acctype(st.term, intypes))
+    A2 === A && return st
+    return optionalfrom(st.term, Val(N), A2, st.total, st.missings)
+end
+
+fresh(st::OptionalCompensatedAccumState{N,A,T}) where {N,A,T} =
+    OptionalCompensatedAccumState{N,A,T}(st.term, compzero(A), 0)
+@inline update!(st::OptionalCompensatedAccumState{N,A}, row) where {N,A} =
+    (
+        termmissing(st.term, row) ? (st.missings += 1) :
+        (st.acc = compadd(st.acc, termvalue(st.term, A, row))); nothing)
+@inline downdate!(st::OptionalCompensatedAccumState{N,A}, row) where {N,A} =
+    (
+        termmissing(st.term, row) ? (st.missings -= 1) :
+        (st.acc = compsub(st.acc, termvalue(st.term, A, row))); nothing)
+function combine!(dest::OptionalCompensatedAccumState{N,A,T},
+    a::OptionalCompensatedAccumState{N,A,T},
+    b::OptionalCompensatedAccumState{N,A,T}) where {N,A,T}
+    dest.acc = compmerge(a.acc, b.acc)
+    dest.missings = a.missings + b.missings
+    return nothing
+end
+value(st::OptionalCompensatedAccumState{N,A}) where {N,A} =
+    NamedTuple{(N,),Tuple{Union{Missing,A}}}((
+        st.missings > 0 ? missing :
+        compvalue(st.acc),
+    ))
+function widenstate(st::OptionalCompensatedAccumState{N,A,T},
+    intypes::NamedTuple) where {N,A,T}
+    A2 = nonmissingtype(acctype(st.term, intypes))
+    A2 === A && return st
+    return compensable(A2) ?
+           OptionalCompensatedAccumState{N,A2,T}(st.term, widencomp(A2, st.acc),
+        st.missings) :
+           OptionalAccumState{N,A2,T}(st.term, convert(A2, compvalue(st.acc)),
+        st.missings)
 end
 
 """

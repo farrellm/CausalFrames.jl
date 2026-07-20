@@ -8,7 +8,9 @@
 # fresh states over a buffer of the window rows, O(window) per row. The
 # running mode additionally demotes to the tree when the realized
 # accumulator types defeat downdate! (isinvertible) — a widening can
-# introduce that mid-stream. Per the summarize.jl conventions, the
+# introduce that mid-stream (rarely: the sum family counts NaN, ±Inf, and
+# missing terms rather than folding them in, so those stay on the running
+# path and recover on expiry). Per the summarize.jl conventions, the
 # type-unstable setup happens once per chunk and the folding kernels take
 # concretely typed arguments behind function barriers.
 
@@ -117,10 +119,12 @@ end
 # Window-algorithm selection. The candidate mode is classified over the
 # expanded prototype tuple at construction time; the effective mode is
 # re-derived from the realized states whenever they are built or widened,
-# because a Missing-widened accumulator absorbs and so defeats downdate! —
-# the running mode then demotes to the tree, whose queries never combine an
-# expired (possibly poisoned) leaf. Widening only ever promotes, so the
-# effective mode can demote but never return.
+# because some widenings produce an accumulator that defeats downdate!
+# (isinvertible) — the running mode then demotes to the tree, whose queries
+# never combine an expired (possibly poisoned) leaf. (The sum family counts
+# NaN, ±Inf, and missing terms rather than folding them in, so those widenings
+# do not demote.) Widening only ever promotes, so the effective mode can demote
+# but never return.
 abstract type RollMode end
 struct RefoldMode <: RollMode end
 struct RunningMode <: RollMode end
@@ -251,8 +255,8 @@ newtrees(stateprotos::S, ::Type{K}, ::Type{R}, ::Type{T}) where {S<:Tuple,K,R,T}
 
 # Rebuild the incremental structures after a widening (type-unstable, rare):
 # always from the live rows, the simple choice that is correct for every
-# transition — including the running -> tree demotion when the widening let
-# missing into an accumulator, after which the buffer goes unused.
+# transition — including a running -> tree demotion (when a widening produces a
+# non-invertible accumulator), after which the buffer goes unused.
 function widenmode!(rs::RollingState, cfg::RollingConfig, types::NamedTuple,
     oldmode::RollMode)
     rs.mode = effectivemode(cfg.mode, rs.stateprotos)

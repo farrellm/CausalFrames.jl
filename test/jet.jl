@@ -34,6 +34,17 @@ end
     JET.@test_opt CausalFrames.value(st)
 end
 
+@testset "missing-counting accumulators" begin
+    # the counting states over a Union{Missing,_} column must stay dispatch-free
+    for T in (Union{Missing,Int}, Union{Missing,Float64})
+        st = CausalFrames.fresh(Sum(:x), (time = Int, x = T))
+        row = (time = 1, x = one(nonmissingtype(T)))
+        JET.@test_opt CausalFrames.update!(st, row)
+        JET.@test_opt CausalFrames.downdate!(st, row)
+        JET.@test_opt CausalFrames.value(st)
+    end
+end
+
 @testset "segment tree" begin
     protos, _ = CausalFrames.prototypes(
         CausalFrames.tosummarizers([Min(:x), Max(:x)]), Symbol[])

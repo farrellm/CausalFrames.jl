@@ -251,11 +251,13 @@ prototype tuple at construction time:
   and the oracle the fast paths are differentially tested against.
 
 The candidate mode is re-checked against the realized states whenever they
-are built or widened: an accumulator widened to admit `missing` absorbs and
-defeats `downdate!` (`isinvertible`), demoting running to tree mid-stream —
-the tree recovers a poisoned window once the missing row expires, where a
-running state never could. Widening only promotes, so a mode can demote but
-never return. A schema widening rebuilds the incremental structures from
+are built or widened: a widening that produces an accumulator defeating
+`downdate!` (`isinvertible`) demotes running to tree mid-stream — the tree
+recovers a poisoned window once the offending row expires, where such a
+running state never could. The sum family, though, counts `NaN`, `±Inf`, and
+`missing` terms rather than folding them in (see Summarizers), so those
+widenings stay on the running path and recover on expiry there. Widening only
+promotes, so a mode can demote but never return. A schema widening rebuilds the incremental structures from
 the live rows — rare, O(live), and correct for every transition. In every
 mode the type-unstable setup happens once per chunk and the per-row work
 sits behind concretely-typed function barriers; only the (possibly
@@ -312,8 +314,9 @@ The interface, extended by concrete subtypes (unexported — extend
   previously folded row, the inverse of `update!`;
 - `isinvertible(st) -> Bool` — optional (defaults to `true`): whether
   `downdate!` actually inverts `update!` for the state's realized
-  accumulator type; a `Missing`-admitting accumulator returns `false`,
-  since one `missing` row would poison the running total beyond recovery.
+  accumulator type. The sum family keeps `NaN`, `±Inf`, and `missing` terms
+  out of the running total and counts them, so they stay invertible; a state
+  that folds an absorbing value past recovery returns `false`.
 
 Output column names are deterministic, formed by suffixing the column name:
 `Sum(:x)` produces `:x_sum`, `Min(:x)` produces `:x_min`, and `SumPower(:x, 2)`
@@ -363,26 +366,35 @@ multiplies widened values — so a per-row power or product cannot overflow
 the way computing it in the input columns' own types would.
 
 When the realized accumulator type is a fixed-precision float (a non-BigFloat
-`AbstractFloat`; `Union{Missing,...}` keeps the plain state), the sum
-accumulators (`Sum`, `SumPower`, `DotProduct`) switch to a compensated state:
-Kahan-Babuška-Neumaier summation over the finite terms only, with `NaN`, `+Inf`,
-and `-Inf` terms counted in separate `Int` fields rather than folded in. The
-classified term is the folded one — the value after `SumPower`'s power, the
-per-row product for `DotProduct` (so `Inf * 0.0` counts as a `NaN` term).
-`value` reconstructs the IEEE result `Base.sum` would produce (any `NaN`, or
-infinities of both signs, gives `NaN`; one infinity sign gives that infinity;
-otherwise the compensated total), at the same declared element type as the
-plain state, so nothing downstream can tell the representations apart.
-Keeping nonfinites out of the running pair is what makes `downdate!` a clean
-inverse for rolling windows: subtracted naively, a `NaN` absorbs and an
-evicted infinity leaves `Inf - Inf = NaN` behind. BigFloat is excluded
-because compensation buys nothing at arbitrary precision and a non-isbits
-compensated pair would allocate on every row; `missing`-admitting
-accumulators keep the plain absorbing state that `isinvertible` reports.
-`widenstate` carries the whole representation across schema promotions —
-including plain→compensated (an `Int` column promoted to float) and
-compensated→plain (`missing` appearing, at which point the reconstructed
-value is carried).
+`AbstractFloat`), the sum accumulators (`Sum`, `SumPower`, `DotProduct`) switch
+to a compensated state: Kahan-Babuška-Neumaier summation over the finite terms
+only, with `NaN`, `+Inf`, and `-Inf` terms counted in separate `Int` fields
+rather than folded in. The classified term is the folded one — the value after
+`SumPower`'s power, the per-row product for `DotProduct` (so `Inf * 0.0` counts
+as a `NaN` term). `value` reconstructs the IEEE result `Base.sum` would produce
+(any `NaN`, or infinities of both signs, gives `NaN`; one infinity sign gives
+that infinity; otherwise the compensated total), at the same declared element
+type as the plain state, so nothing downstream can tell the representations
+apart. Keeping nonfinites out of the running pair is what makes `downdate!` a
+clean inverse for rolling windows: subtracted naively, a `NaN` absorbs and an
+evicted infinity leaves `Inf - Inf = NaN` behind. BigFloat is excluded because
+compensation buys nothing at arbitrary precision and a non-isbits compensated
+pair would allocate on every row.
+
+A `Missing`-admitting column gets the same treatment for `missing` that the
+compensated state gives nonfinites: two flat `Optional*` states (one mirroring
+the plain state, one the compensated) hold the accumulation at the *non-missing*
+type and count the `missing` terms in an `Int`, folding only present terms in.
+`value` returns `missing` while that count is positive and the ordinary
+reconstructed total otherwise, at the declared element type `Union{Missing, A}`
+— identical results to the old absorbing behaviour, but the count subtracts
+away under `downdate!`, so the accumulator stays invertible and a rolling window
+recovers on the running path once the missing row expires (no tree demotion).
+The accumulation field is never itself `Union{Missing, …}`; only the `value`
+return is. `widenstate` carries the whole representation across schema
+promotions — plain→compensated (an `Int` column promoted to float), and, when
+`missing` first appears, plain/compensated→`Optional*` (missings start at zero,
+the existing total carried) and widening within the `Optional*` family.
 
 `Sum`, `SumPower`, `Product`, and `DotProduct` have an identity element, so
 they summarize no rows as `0` (`Product` as `1`). The others do not, and yield
@@ -506,7 +518,8 @@ declaring what a summarizer's states support beyond folding:
 - **Groups**: `Count`, `Sum`, `SumPower`, `DotProduct` — subtraction is the
   exact inverse of addition for integer accumulators; float accumulators
   use the compensated, nonfinite-counting states (see above), leaving only
-  the compensated round-off. The dependent summarizers (`Moment` through
+  the compensated round-off; and a `Missing`-admitting column counts its
+  `missing` terms the same way, so it stays invertible rather than absorbing. The dependent summarizers (`Moment` through
   `Correlation`) are groups too: their states are fieldless, so `combine!`
   and `downdate!` are no-ops, and their effective structure is that of
   their transitive dependencies — all of which are the group accumulators
