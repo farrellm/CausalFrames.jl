@@ -24,6 +24,7 @@
                     Correlation(:v, :qty)]),
             ),
         )
+        DataFrame(load(ctx, p |> selectcolumns(:sym, r"^q") |> dropcolumns(:sym)))
         DataFrame(load(ctx, p |> summarize([Count(), Sum(:v)]; key = :sym)))
         DataFrame(load(ctx, p |> summarizecycles(Sum(:v); key = :sym)))
         DataFrame(load(ctx, p |> addsummarycolumns([First(:v), Last(:v)])))

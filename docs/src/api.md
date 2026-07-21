@@ -31,6 +31,8 @@ readcsv
 ```@docs
 filterrows
 addcolumns
+selectcolumns
+dropcolumns
 ```
 
 ## Joins

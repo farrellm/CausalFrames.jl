@@ -104,6 +104,8 @@ Two kinds, both compatible with the chaining operator `|>`:
 | `readcsv(path; types, time, rename, delim, chunkbytes)` | source | CSV file, every column read as `String` unless `types` opts it into a concrete type; the time column (named `:time`, or chosen by `time` as a column name or a per-row function) must be typed and sorted; `rename` maps column names first; rows clipped to `[start, stop)`; read incrementally in chunks of roughly `chunkbytes` bytes — never all at once — stopping as soon as a time `>= stop` is seen |
 | `filterrows(pred)` | transform | keep rows where `pred(row)` is `true` |
 | `addcolumns(f)` | transform | `f(row)` returns a `NamedTuple` of new column values for that row; may **not** contain a `time` key (this preserves the time invariant without re-validation) |
+| `selectcolumns(selectors...)` | transform | keep only the matching columns, in the input's own order (see "Column selectors") |
+| `dropcolumns(selectors...)` | transform | keep only the non-matching columns, in the input's own order (see "Column selectors") |
 | `summarize(ss; key)` | transform | summarize the whole context into rows at time `stop`; drops input columns |
 | `summarizecycles(ss; key)` | transform | summarize each cycle (maximal run of rows sharing a timestamp) independently; drops input columns |
 | `addsummarycolumns(ss; key)` | transform | keep input columns, append the running summary value after each row |
@@ -120,6 +122,42 @@ field access, exactly like a summarizer's `update!`.
 Naming follows Julia convention: lowercase, no camelCase, and no shadowing
 of `Base.filter` / `Base.empty` / `Base.count` / `Base.sum` /
 `Base.join`.
+
+## Column selectors
+
+`selectcolumns` and `dropcolumns` project a stream onto a subset of its
+columns. Both are variadic, and each selector is one of:
+
+- a column name — a `Symbol` or an `AbstractString`;
+- a `Regex`, matched against the column name with `occursin`;
+- a predicate, called with the column name as a `String` (the DataFrames
+  `Cols(f)` convention, and what makes `startswith("px_")` work directly);
+- recursively, any collection of those.
+
+A column matches when *any* selector matches it; `selectcolumns` keeps the
+matches and `dropcolumns` keeps the rest, both in the **input's own column
+order**, never the selectors'. Selecting nothing is legal (the result is a
+`:time`-only stream); a projection that keeps every column passes its chunks
+through untouched.
+
+- **`:time` is implicit.** It is always kept, whatever the selectors say, and
+  a `Regex` or predicate matching `"time"` is ignored rather than obeyed.
+  Naming it outright in `dropcolumns` is an `ArgumentError`, raised eagerly
+  at construction — the `addcolumns` rule that a row function may not return
+  a `time` key, from the other direction.
+- **A named column absent from the data is an `ArgumentError`**, so a typo
+  fails rather than silently selecting nothing. A `Regex` or predicate
+  matching nothing is not an error. Requesting zero selectors, or a selector
+  that is neither a name, a pattern, a predicate, nor a collection, is an
+  `ArgumentError` at construction.
+
+The work is per column, not per row: a chunk is projected with `df[!, keep]`,
+which shares the selected column vectors rather than copying them (the chunk
+is owned, as in `addcolumns`). Resolving the selectors is memoized per run
+against the column names it was resolved from, so a stream whose schema never
+moves — the norm — runs the selectors and the validation once, on its first
+chunk, while a schema that does move is re-resolved and re-validated rather
+than projected through a stale column list.
 
 ## As-of join
 
@@ -608,7 +646,7 @@ still does not hold for them.
 
 Exports: `Context`, `CausalFrame`, `CausalPipeline`, `load`, `stream`,
 `context`, `timetype`, `emptyframe`, `clock`, `readcsv`, `filterrows`,
-`addcolumns`, `Summarizer`, `MonoidSummarizer`, `GroupSummarizer`,
+`addcolumns`, `selectcolumns`, `dropcolumns`, `Summarizer`, `MonoidSummarizer`, `GroupSummarizer`,
 `SummarizerState`, `Count`, `Sum`, `SumPower`,
 `Moment`, `Product`, `DotProduct`, `Mean`, `Variance`, `Std`, `Covariance`,
 `Correlation`, `Min`, `Max`, `First`, `Last`, `summarize`,

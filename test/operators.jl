@@ -168,6 +168,97 @@ time,bid,ask
           DataFrame(load(Context(0, 100), uncurried))
 end
 
+@testset "selectcolumns and dropcolumns" begin
+    ctx = Context(0, 100)
+    src = clock(1) |> addcolumns(
+        r -> (; bid = 1.0 * r.time, ask = 2.0 * r.time, sym = "a"))
+
+    # every selector form, on both operators
+    @test names(load(ctx, src |> selectcolumns(:bid))) == ["time", "bid"]
+    @test names(load(ctx, src |> selectcolumns("bid"))) == ["time", "bid"]
+    @test names(load(ctx, src |> selectcolumns(r"^.s"))) == ["time", "ask"]
+    @test names(load(ctx, src |> selectcolumns(startswith("b")))) ==
+          ["time", "bid"]
+    @test names(load(ctx, src |> dropcolumns(:sym))) == ["time", "bid", "ask"]
+    @test names(load(ctx, src |> dropcolumns(endswith("id")))) ==
+          ["time", "ask", "sym"]
+
+    # varargs, and collections nested arbitrarily deep
+    @test names(load(ctx, src |> selectcolumns(:bid, r"sym"))) ==
+          ["time", "bid", "sym"]
+    @test names(load(ctx, src |> selectcolumns([[:bid], (r"sym",)]))) ==
+          ["time", "bid", "sym"]
+    @test names(load(ctx, src |> dropcolumns([:bid, "ask"]))) == ["time", "sym"]
+
+    # output keeps the input's column order, not the selectors'
+    @test names(load(ctx, src |> selectcolumns(:sym, :bid))) ==
+          ["time", "bid", "sym"]
+
+    # values ride along untouched
+    df = DataFrame(load(Context(0, 4), src |> selectcolumns(:ask)))
+    @test df.time == 0:3
+    @test df.ask == [0.0, 2.0, 4.0, 6.0]
+
+    # :time survives everything, and is never matched by a pattern
+    @test names(load(ctx, src |> dropcolumns(r""))) == ["time"]
+    @test names(load(ctx, src |> dropcolumns(_ -> true))) == ["time"]
+    @test names(load(ctx, src |> selectcolumns(:time))) == ["time"]
+    @test_throws ArgumentError dropcolumns(:time)          # eager
+    @test_throws ArgumentError dropcolumns([:bid, "time"])  # eager, nested
+
+    # naming a column the data does not have
+    @test_throws ArgumentError load(ctx, src |> selectcolumns(:nope))
+    @test_throws ArgumentError load(ctx, src |> dropcolumns(:nope))
+
+    # at least one selector is required, in either form
+    @test_throws ArgumentError selectcolumns()
+    @test_throws ArgumentError dropcolumns()
+    @test_throws ArgumentError selectcolumns(src)
+    @test_throws ArgumentError dropcolumns(src)
+
+    # an unusable selector
+    @test_throws ArgumentError load(ctx, src |> selectcolumns(1.5))
+
+    # selecting everything passes the chunk through unchanged
+    @test DataFrame(load(ctx, src |> selectcolumns(r""))) ==
+          DataFrame(load(ctx, src))
+    @test DataFrame(load(ctx, src |> dropcolumns(r"zzz"))) ==
+          DataFrame(load(ctx, src))
+
+    # the uncurried, pipeline-first forms are equivalent to the |> chain
+    @test DataFrame(load(ctx, selectcolumns(src, :bid, :ask))) ==
+          DataFrame(load(ctx, src |> selectcolumns(:bid, :ask)))
+    @test DataFrame(load(ctx, dropcolumns(src, :sym))) ==
+          DataFrame(load(ctx, src |> dropcolumns(:sym)))
+
+    # a no-op on an empty frame
+    @test nrow(load(ctx, emptyframe() |> selectcolumns(r"x"))) == 0
+end
+
+@testset "selectcolumns over several chunks" begin
+    path = joinpath(mktempdir(), "long.csv")
+    open(path, "w") do io
+        println(io, "time,x,y")
+        for t in 1:50
+            println(io, "$t,$(2t),$(3t)")
+        end
+    end
+    types = Dict(:time => Int, :x => Int, :y => Int)
+    ctx = Context(0, 100)
+
+    chunked = readcsv(path; types = types, chunkbytes = 64)
+    @test length(collect(stream(ctx, chunked))) > 1
+
+    # the resolution is cached per run, so it must hold across chunk
+    # boundaries and be rebuilt for the next run of the same pipeline
+    p = chunked |> dropcolumns(:x)
+    df = DataFrame(load(ctx, p))
+    @test names(df) == ["time", "y"]
+    @test df.y == 3 .* (1:50)
+    @test DataFrame(load(ctx, p)) == df
+    @test reduce(vcat, DataFrame.(stream(ctx, p))) == df
+end
+
 @testset "readcsv chunked" begin
     dir = mktempdir()
     path = joinpath(dir, "long.csv")

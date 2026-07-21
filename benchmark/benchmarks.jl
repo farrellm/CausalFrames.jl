@@ -65,6 +65,10 @@ SUITE["rowwise"]["filterrows"] =
     @benchmarkable load(CTX, SRC |> filterrows(r -> r.qty > 3.0))
 SUITE["rowwise"]["addcolumns"] = @benchmarkable load(CTX,
     SRC |> addcolumns(r -> (; v = r.qty * 2.0, w = r.qty + 1.0)))
+SUITE["rowwise"]["selectcolumns"] =
+    @benchmarkable load(CTX, SRC |> selectcolumns(:qty))
+SUITE["rowwise"]["dropcolumns"] =
+    @benchmarkable load(CTX, SRC |> dropcolumns(startswith("s")))
 SUITE["rowwise"]["pipeline"] = @benchmarkable load(
     CTX,
     clock(1) |>
