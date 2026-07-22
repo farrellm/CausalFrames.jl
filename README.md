@@ -41,8 +41,8 @@ frame = load(Context(DateTime(2026, 1, 1), DateTime(2026, 2, 1)), p)
 | `clock(interval)` | source | one row per `interval` in `[start, stop)` |
 | `readcsv(path; types, time, rename, delim)` | source | CSV read as `String` columns (`types` opts columns into concrete types); `time` picks the time column by name or a per-row function; clipped to `[start, stop)`, read incrementally |
 | `writecsv(path; queue, ...)` | transform | pass-through sink: writes each chunk to `path` as it flows by, on a background task, and yields it downstream unchanged |
-| `readparquet(path; time, rename)` | source | parquet file (needs `using DuckDB`); types come from the file; the context window is pushed into the reader, so row groups outside it are never decoded; `time` and `rename` as for `readcsv` |
-| `writeparquet(path; queue, rowgroupsize, ...)` | transform | pass-through sink (needs `using Parquet2`): writes row groups of `rowgroupsize` rows as the stream flows by; the file is valid only once the stream is exhausted |
+| `readparquet(path; time, rename, backend)` | source | parquet file (needs `using DuckDB` or `using Parquet2`); types come from the file; the context window skips row groups that cannot be in it; `time` and `rename` as for `readcsv` |
+| `writeparquet(path; queue, rowgroupsize, backend, ...)` | transform | pass-through sink (needs `using Parquet2` or `using DuckDB`): writes row groups of `rowgroupsize` rows as the stream flows by; the file is valid only once the stream is exhausted |
 | `filterrows(pred)` | transform | keep rows where `pred(row)` |
 | `addcolumns(f)` | transform | `f(row)::NamedTuple` of new column values |
 | `selectcolumns(sel...)` | transform | keep the columns matching a name, `Regex`, name predicate, or collection of those (`:time` always kept) |
@@ -63,9 +63,10 @@ Row functions receive a map-like row object: `row.time`, `row.price`,
 `writecsv` streams a pipeline to disk without materializing it, and `scan`
 drives the pipeline for its side effects alone:
 
-Parquet support is optional and split by direction: `readparquet` needs the
-DuckDB backend (`using DuckDB`), `writeparquet` the Parquet2 backend (`using
-Parquet2`). Each operator says so if its backend is missing.
+Parquet support is optional, through two backends: either `using DuckDB` or
+`using Parquet2` enables both operators. Reading prefers DuckDB (it pushes the
+window into the reader) and writing prefers Parquet2 (it streams row groups
+out); `backend = :duckdb` / `:parquet2` forces the choice.
 
 `load`, `stream` and `scan` also take a curried, context-only form, so a
 chain can end in its own evaluation:

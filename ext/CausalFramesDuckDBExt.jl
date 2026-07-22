@@ -1,7 +1,10 @@
-# The DuckDB backend behind `readparquet`: the only code in the package that
-# names DuckDB. A read is one streaming query per pipeline run, pulled one
-# result chunk at a time; the context window rides along as a WHERE clause so
-# DuckDB skips the row groups and pages outside it.
+# The DuckDB backend: the only code in the package that names DuckDB. Reading
+# (the preferred backend) is one streaming query per pipeline run, pulled one
+# result chunk at a time, with the context window riding along as a WHERE clause
+# so DuckDB skips the row groups and pages outside it. Writing (the fallback,
+# used when Parquet2 is not loaded) stages the stream in a temporary table and
+# writes the file with a single COPY, since DuckDB cannot append row groups to
+# a parquet file.
 module CausalFramesDuckDBExt
 
 using CausalFrames
@@ -9,7 +12,7 @@ using DataFrames
 using DuckDB
 using Tables
 
-using CausalFrames: Context, clipchunk!, timesourcename, timetype
+using CausalFrames: ChunkSink, Context, clipchunk!, timesourcename, timetype
 
 CausalFrames.backendloaded(::Val{:duckdb}) = true
 
@@ -50,7 +53,8 @@ mutable struct ParquetProducer{T}
             false, nothing, false)
 end
 
-CausalFrames.parquetproducer(ctx::Context, path::AbstractString, time, rename) =
+CausalFrames.parquetproducer(::Val{:duckdb}, ctx::Context, path::AbstractString,
+    time, rename) =
     ParquetProducer{timetype(ctx)}(String(path), ctx.start, ctx.stop, time, rename)
 
 function (p::ParquetProducer{T})() where {T}
@@ -106,5 +110,65 @@ function columnnames(con, path::String)
         Any[path])
     return String[String(n) for n in Tables.schema(res).names]
 end
+
+# The write fallback. DuckDB cannot append row groups to a parquet file, so the
+# stream is staged in a temporary table — DuckDB spills it to disk under memory
+# pressure — and written by one COPY when the stream ends.
+function CausalFrames.parquetsink(::Val{:duckdb}, path::AbstractString,
+    queue::Int, rowgroupsize::Int, opts::NamedTuple)
+    # Translated here, on the pipeline's own task, so an unsupported option is
+    # reported when the run starts rather than inside the writer task.
+    compression = copyoptions(opts)
+    return ChunkSink(
+        chan -> writeloop(chan, String(path), rowgroupsize, compression),
+        queue, "writeparquet")
+end
+
+# The COPY options this backend can express. Everything else is Parquet2's own,
+# and silently dropping it would hide a request the user made deliberately.
+function copyoptions(opts::NamedTuple)
+    extra = filter(!=(:compression_codec), keys(opts))
+    isempty(extra) || throw(ArgumentError("writeparquet: the DuckDB backend \
+        does not support $(join(map(repr, extra), ", ")); those options belong \
+        to the Parquet2 backend (run `using Parquet2`, or pass only \
+        `compression_codec`)"))
+    haskey(opts, :compression_codec) || return ""
+    codec = uppercase(String(opts.compression_codec))
+    return ", COMPRESSION $codec"
+end
+
+function writeloop(chan::Channel{DataFrame}, path::String, rowgroupsize::Int,
+    compression::String)
+    con = connection()
+    staged = false
+    try
+        for c in chan
+            DuckDB.register_table(con, c, "chunk")
+            try
+                DBInterface.execute(
+                    con,
+                    staged ?
+                    "INSERT INTO staged SELECT * FROM chunk" :
+                    "CREATE TEMP TABLE staged AS SELECT * FROM chunk",
+                )
+            finally
+                DuckDB.unregister_table(con, "chunk")
+            end
+            staged = true
+        end
+        # A stream with no rows still leaves a valid, readable file.
+        source = staged ? "staged" : "(SELECT NULL::BIGINT AS time WHERE FALSE)"
+        DBInterface.execute(
+            con,
+            "COPY $source TO '$(quotepath(path))' \
+(FORMAT parquet, ROW_GROUP_SIZE $rowgroupsize$compression)",
+        )
+    finally
+        staged && DBInterface.execute(con, "DROP TABLE IF EXISTS staged")
+    end
+    return nothing
+end
+
+quotepath(path::String) = replace(path, "'" => "''")
 
 end

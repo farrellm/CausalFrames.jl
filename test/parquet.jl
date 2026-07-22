@@ -129,6 +129,198 @@ end
     @test fewchunks < allchunks
 end
 
+@testset "readparquet backends agree" begin
+    dir = mktempdir()
+    rows = DataFrame(time = 1:100, ints = 1:100, floats = float.(1:100),
+        strs = string.(1:100),
+        opt = [iseven(i) ? missing : Float64(i) for i in 1:100])
+
+    # ten row groups, so the fallback has something to skip
+    function inrowgroups(path, df; stats = ["time"])
+        open(path, "w") do io
+            fw = Parquet2.FileWriter(io, path; compute_statistics = stats)
+            for k in 0:9
+                Parquet2.writetable!(fw, df[(k*10+1):(k*10+10), :])
+            end
+            Parquet2.finalize!(fw)
+        end
+        return path
+    end
+    path = inrowgroups(joinpath(dir, "rg.parquet"), rows)
+
+    # every window must read the same rows through either backend (isequal, not
+    # ==, because `opt` carries missings)
+    for ctx in (Context(0, 200), Context(1, 2), Context(25, 76), Context(95, 200),
+        Context(200, 300), Context(0.0, 50.5))
+        d = DataFrame(load(ctx, readparquet(path; backend = :duckdb)))
+        p = DataFrame(load(ctx, readparquet(path; backend = :parquet2)))
+        @test isequal(d, p)
+        # :auto prefers DuckDB
+        @test isequal(DataFrame(load(ctx, readparquet(path))), d)
+    end
+
+    # as must every way of naming the time column
+    ctx = Context(25, 76)
+    variants = (
+        (; time = row -> row.time * 2),
+        (; rename = Dict("time" => "t"), time = :t),
+        (; rename = n -> uppercase(String(n)), time = :TIME),
+    )
+    for kw in variants
+        d = DataFrame(load(ctx, readparquet(path; backend = :duckdb, kw...)))
+        p = DataFrame(load(ctx, readparquet(path; backend = :parquet2, kw...)))
+        @test isequal(d, p)
+    end
+
+    # a DateTime time column, named by `time`, through both backends
+    stamps = DateTime(2026, 1, 1) .+ Hour.(0:99)
+    dtpath = inrowgroups(joinpath(dir, "dt.parquet"),
+        DataFrame(ts = stamps, x = 1:100); stats = ["ts"])
+    dtctx = Context(DateTime(2026, 1, 1, 20), DateTime(2026, 1, 2, 4))
+    d = DataFrame(load(dtctx, readparquet(dtpath; backend = :duckdb, time = :ts)))
+    p = DataFrame(load(dtctx, readparquet(dtpath; backend = :parquet2, time = :ts)))
+    @test d == p
+    @test nrow(d) == 8
+    # the window falls inside one row group, so the fallback yields one chunk
+    @test length(
+        collect(stream(dtctx,
+            readparquet(dtpath; backend = :parquet2, time = :ts))),
+    ) == 1
+
+    # missing-permitting columns survive both readers
+    @test eltype(
+        DataFrame(load(Context(0, 200),
+            readparquet(path; backend = :parquet2))).opt,
+    ) == Union{Missing,Float64}
+
+    # the fallback's row-group skipping is invisible in the rows it yields: a
+    # file without statistics reads exactly the same window, only more of the
+    # file to get there
+    plain = inrowgroups(joinpath(dir, "plain.parquet"), rows; stats = String[])
+    @test isequal(DataFrame(load(ctx, readparquet(plain; backend = :parquet2))),
+        DataFrame(load(ctx, readparquet(path; backend = :parquet2))))
+    # groups that clip to nothing yield no chunk either way, so chunk counts
+    # cannot tell skipping from clipping; what only skipping can do is leave an
+    # out-of-window group undecoded, and therefore unchecked for sortedness
+    scrambled = copy(rows)
+    scrambled[1:10, :time] = 10:-1:1          # group 1: unsorted, all < 25
+    withstats = inrowgroups(joinpath(dir, "scrambled.parquet"), scrambled)
+    nostats = inrowgroups(joinpath(dir, "scrambled-plain.parquet"), scrambled;
+        stats = String[])
+    @test nrow(load(ctx, readparquet(withstats; backend = :parquet2))) == 51
+    @test_throws ArgumentError load(ctx,
+        readparquet(nostats; backend = :parquet2))
+    # an opaque time function is unskippable too, so it sees the bad group
+    @test_throws ArgumentError load(ctx,
+        readparquet(withstats; backend = :parquet2, time = row -> row.time))
+
+    # the error paths of the reader are the fallback's too
+    unsorted = writeparquetfile(joinpath(dir, "unsorted.parquet"),
+        DataFrame(time = [3, 1], x = [1, 2]))
+    @test_throws ArgumentError load(Context(0, 100),
+        readparquet(unsorted; backend = :parquet2))
+    notime = writeparquetfile(joinpath(dir, "notime.parquet"),
+        DataFrame(t = [1, 2], x = [1, 2]))
+    @test_throws ArgumentError load(Context(0, 100),
+        readparquet(notime; backend = :parquet2))
+end
+
+@testset "writeparquet backends agree" begin
+    dir = mktempdir()
+    src = writeparquetfile(joinpath(dir, "src.parquet"),
+        DataFrame(time = 1:5000, bid = float.(1:5000), sym = string.(1:5000)))
+    ctx = Context(0, 6000)
+    p = readparquet(src) |> addcolumns(r -> (; twice = r.bid * 2))
+    expected = DataFrame(load(ctx, p))
+
+    duck = joinpath(dir, "duck.parquet")
+    pq2 = joinpath(dir, "pq2.parquet")
+    scan(ctx, p |> writeparquet(duck; backend = :duckdb))
+    scan(ctx, p |> writeparquet(pq2; backend = :parquet2))
+
+    # same rows, whichever backend wrote and whichever reads them back
+    for file in (duck, pq2), backend in (:duckdb, :parquet2)
+        @test DataFrame(load(ctx, readparquet(file; backend = backend))) == expected
+    end
+    @test DataFrame(load(ctx, readparquet(duck))) ==
+          DataFrame(load(ctx, readparquet(pq2)))
+
+    # pass-through and the ownership contract hold for the DuckDB sink too
+    mid = joinpath(dir, "mid.parquet")
+    frame = load(
+        ctx,
+        readparquet(src) |> writeparquet(mid; backend = :duckdb) |>
+        asofjoin(readparquet(src); leftprefix = "l", rightprefix = "r"),
+    )
+    @test names(frame) == ["time", "l_bid", "l_sym", "r_bid", "r_sym"]
+    @test names(DataFrame(load(ctx, readparquet(mid)))) == ["time", "bid", "sym"]
+    @test DataFrame(load(ctx, readparquet(mid))) ==
+          DataFrame(load(ctx, readparquet(src)))
+
+    # scan, load and a fully drained stream agree through the DuckDB sink
+    viaload = joinpath(dir, "viaload.parquet")
+    load(ctx, p |> writeparquet(viaload; backend = :duckdb))
+    viastream = joinpath(dir, "viastream.parquet")
+    foreach(DataFrame,
+        stream(ctx, p |> writeparquet(viastream; backend = :duckdb)))
+    @test DataFrame(load(ctx, readparquet(viaload))) == expected
+    @test DataFrame(load(ctx, readparquet(viastream))) == expected
+
+    # re-running truncates rather than appending
+    scan(ctx, p |> writeparquet(duck; backend = :duckdb))
+    @test DataFrame(load(ctx, readparquet(duck))) == expected
+
+    # rowgroupsize under Parquet2: chunks are merged until the target is met and
+    # never split, so every group but the last holds at least that many rows
+    small = joinpath(dir, "small.parquet")
+    scan(ctx, p |> writeparquet(small; backend = :parquet2, rowgroupsize = 1000))
+    smallds = Parquet2.Dataset(small)
+    groups = [nrow(DataFrame(rg)) for rg in smallds]
+    @test length(groups) > 1
+    @test all(>=(1000), groups[1:(end-1)])
+    @test sum(groups) == nrow(expected)
+
+    # under DuckDB it is a hint: it rounds up to its own 2048-row vector size
+    ducksmall = joinpath(dir, "ducksmall.parquet")
+    scan(ctx, p |> writeparquet(ducksmall; backend = :duckdb, rowgroupsize = 2048))
+    @test Parquet2.nrowgroups(Parquet2.Dataset(ducksmall)) > 1
+
+    # a stream with no rows still leaves a valid, empty file
+    none = joinpath(dir, "none.parquet")
+    scan(ctx, emptyframe() |> writeparquet(none; backend = :duckdb))
+    @test isfile(none)
+    @test nrow(DataFrame(Parquet2.Dataset(none))) == 0
+
+    # DuckDB takes compression_codec and rejects the Parquet2-only options
+    zstd = joinpath(dir, "zstd.parquet")
+    scan(ctx, p |> writeparquet(zstd; backend = :duckdb, compression_codec = :zstd))
+    @test DataFrame(load(ctx, readparquet(zstd))) == expected
+    @test_throws ArgumentError scan(ctx,
+        p |> writeparquet(joinpath(dir, "bad.parquet"); backend = :duckdb,
+            npages = 3))
+
+    # files written by either backend carry the time statistics the Parquet2
+    # reader skips by, so a narrow window reads only part of them
+    narrow = Context(2000, 2500)
+    @test length(collect(stream(narrow, readparquet(ducksmall;
+        backend = :parquet2)))) <
+          Parquet2.nrowgroups(Parquet2.Dataset(ducksmall))
+end
+
+@testset "parquet backend selection" begin
+    dir = mktempdir()
+    path = writeparquetfile(joinpath(dir, "t.parquet"),
+        DataFrame(time = 1:10, x = float.(1:10)))
+
+    @test_throws ArgumentError readparquet(path; backend = :nope)
+    @test_throws ArgumentError writeparquet(joinpath(dir, "o.parquet");
+        backend = :nope)
+    # both backends are loaded here, so either may be named outright
+    for backend in (:auto, :duckdb, :parquet2)
+        @test nrow(load(Context(0, 100), readparquet(path; backend = backend))) == 10
+    end
+end
+
 @testset "writeparquet" begin
     dir = mktempdir()
     src = writeparquetfile(joinpath(dir, "ticks.parquet"),
@@ -254,29 +446,62 @@ end
           DataFrame(load(ctx, readcsv(csvpath; types = tt)))
 end
 
-@testset "parquet operators without their backends" begin
-    # Loading CausalFrames alone must not pull in the backends, and each
-    # operator must say which package to load. Checked in a subprocess, since
-    # this process has both loaded. Run serially: concurrent Julia processes
-    # race the precompile cache.
-    script = """
+# Runs `script` in a fresh Julia, which is the only way to see the package with
+# a backend *missing* — this process has both loaded. Serial by construction:
+# concurrent Julia processes race the precompile cache.
+function insubprocess(script::String)
+    return read(
+        `$(Base.julia_cmd()) --startup-file=no --project=$(Base.active_project()) -e $script`,
+        String)
+end
+
+@testset "parquet operators without a backend" begin
+    # Loading CausalFrames alone must not pull in either backend, and both
+    # operators must name both packages.
+    @test insubprocess("""
     using CausalFrames
     @assert Base.get_extension(CausalFrames, :CausalFramesDuckDBExt) === nothing
     @assert Base.get_extension(CausalFrames, :CausalFramesParquet2Ext) === nothing
-    for (f, hint) in ((() -> readparquet("x.parquet"), "using DuckDB"),
-        (() -> writeparquet("x.parquet"), "using Parquet2"))
+    for f in (() -> readparquet("x.parquet"), () -> writeparquet("x.parquet"))
         try
             f()
             error("expected an ArgumentError")
         catch e
             e isa ArgumentError || rethrow()
-            occursin(hint, e.msg) || error("message lacks \\\$hint: \\\$(e.msg)")
+            for hint in ("using DuckDB", "using Parquet2")
+                occursin(hint, e.msg) ||
+                    error("message lacks \\\$hint: \\\$(e.msg)")
+            end
         end
     end
+    # naming an unloaded backend says so outright
+    try
+        readparquet("x.parquet"; backend = :duckdb)
+        error("expected an ArgumentError")
+    catch e
+        e isa ArgumentError || rethrow()
+        occursin("not loaded", e.msg) || error("unexpected message: \\\$(e.msg)")
+    end
+    print("ok")
+    """) == "ok"
+end
+
+@testset "parquet with only one backend loaded" begin
+    # With just one package loaded, both directions must still work through it.
+    roundtrip = """
+    using CausalFrames, DataFrames
+    dir = mktempdir()
+    src = joinpath(dir, "src.parquet")
+    scan(Context(0, 100), clock(1) |> addcolumns(r -> (; x = r.time * 1.5)) |>
+                          writeparquet(src))
+    df = DataFrame(load(Context(10, 20), readparquet(src)))
+    @assert nrow(df) == 10 "got \\\$(nrow(df)) rows"
+    @assert df.time == 10:19
+    @assert df.x == 15.0:1.5:28.5
     print("ok")
     """
-    out = read(
-        `$(Base.julia_cmd()) --startup-file=no --project=$(Base.active_project()) -e $script`,
-        String)
-    @test out == "ok"
+    # only Parquet2: its own writer, and its row-group reader as the fallback
+    @test insubprocess("using Parquet2\n" * roundtrip) == "ok"
+    # only DuckDB: its streaming reader, and its staged writer as the fallback
+    @test insubprocess("using DuckDB\n" * roundtrip) == "ok"
 end

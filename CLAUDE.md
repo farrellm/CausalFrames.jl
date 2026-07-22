@@ -41,13 +41,17 @@ with any API or semantics change.**
   `clipchunk!` (rename, resolve `:time`, sortedness, clip, convert) and the
   `ChunkSink` background writer are shared with the parquet operators
 - `src/parquet.jl` — `readparquet`/`writeparquet`: the API, the docstrings
-  and the backend hooks (`parquetproducer`, `parquetsink`, `backendloaded`),
-  none of which name a backend. Both backends are **weak** deps behind
-  package extensions — `ext/CausalFramesDuckDBExt.jl` streams a filtered
-  DuckDB query (the context window is pushed down; results are clipped
-  again on arrival, so correctness never depends on it) and
-  `ext/CausalFramesParquet2Ext.jl` writes row groups incrementally. Working
-  on parquet means loading `DuckDB`/`Parquet2` in the session first
+  and backend selection (`resolvebackend`, `parquetproducer`, `parquetsink`,
+  `backendloaded`), none of which name a backend. DuckDB and Parquet2 are
+  **weak** deps behind package extensions and **either one serves both
+  directions**: reading prefers DuckDB (filtered streaming query) and falls
+  back to Parquet2 (row groups skipped by their own statistics); writing
+  prefers Parquet2 (row groups written as the stream flows by) and falls
+  back to DuckDB (stream staged in a temp table, one `COPY` at the end).
+  Skipping is always an optimization — chunks are clipped again on arrival,
+  so results never depend on it. `backend = :duckdb`/`:parquet2` forces the
+  choice, which is how the tests cover all four combinations in one process;
+  working on parquet means loading `DuckDB`/`Parquet2` in the session first
 - `src/summarizers.jl` — `Summarizer` (immutable config, column name in a
   type parameter) and `SummarizerState` (running state, typed from the input
   schema) plus their interface (`emptyvalue`, `fresh`, `update!`, `value`,
