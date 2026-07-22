@@ -118,6 +118,8 @@ Two kinds, both compatible with the chaining operator `|>`:
 | `clock(interval; batchsize)` | source | rows at `start, start + interval, …` while `< stop`; no other columns; generated lazily in chunks of `batchsize` rows |
 | `readcsv(path; types, time, rename, delim, chunkbytes)` | source | CSV file, every column read as `String` unless `types` opts it into a concrete type; the time column (named `:time`, or chosen by `time` as a column name or a per-row function) must be typed and sorted; `rename` maps column names first; rows clipped to `[start, stop)`; read incrementally in chunks of roughly `chunkbytes` bytes — never all at once — stopping as soon as a time `>= stop` is seen |
 | `writecsv(path; queue, ...)` | transform | transparent pass-through sink: writes each chunk to `path` as it flows by and yields it downstream unchanged (see "CSV output") |
+| `readparquet(path; time, rename, backend)` | source | parquet file, read through DuckDB or Parquet2 (either backend suffices; DuckDB preferred); column types come from the file itself; the time column (named `:time`, or chosen by `time` as a column name or a per-row function) must be sorted; `rename` maps column names first; rows clipped to `[start, stop)`; read one chunk at a time — a DuckDB result chunk, or a Parquet2 row group — with the window used to skip what cannot be in it (see "Parquet I/O") |
+| `writeparquet(path; queue, rowgroupsize, backend, ...)` | transform | transparent pass-through sink through Parquet2 or DuckDB (either suffices; Parquet2 preferred): buffers chunks until `rowgroupsize` rows are pending and writes them as one row group, yielding every chunk downstream unchanged; the file is valid only once finalized (see "Parquet I/O") |
 | `filterrows(pred)` | transform | keep rows where `pred(row)` is `true` |
 | `addcolumns(f)` | transform | `f(row)` returns a `NamedTuple` of new column values for that row; may **not** contain a `time` key (this preserves the time invariant without re-validation) |
 | `selectcolumns(selectors...)` | transform | keep only the matching columns, in the input's own order (see "Column selectors") |
@@ -174,6 +176,77 @@ point to use when the file is the only thing wanted. A stream with no rows
 yields an empty file, never a stale one. Keyword arguments pass through to
 `CSV.write`, except `append`/`header`/`writeheader`/`partition`/`compress`,
 which the transform controls itself and rejects eagerly.
+
+## Parquet I/O
+
+Parquet support is **optional**: DuckDB and Parquet2 are weak dependencies
+behind package extensions, so a CSV-only user pays nothing for them, and CSV
+itself stays a hard dependency, being both the flagship source and the backbone
+of the precompile workload. **Either backend alone is enough** — each serves
+both directions — but each direction has a preference, and `backend`
+(`:auto`, `:duckdb`, `:parquet2`) forces the choice:
+
+| Operator | Preferred | Fallback |
+|---|---|---|
+| `readparquet` | DuckDB: a filtered streaming query, one result chunk (≤ 2048 rows) at a time | Parquet2: one row group per chunk, skipped by its own statistics |
+| `writeparquet` | Parquet2: one row group per `rowgroupsize` buffered rows, written as the stream flows by | DuckDB: chunks staged in a temp table, written by one `COPY` at the end |
+
+The preferences follow what each library does well. Reading wants a *filtered*
+scan: the context window becomes a `WHERE` clause on the time column, and
+DuckDB skips the row groups **and pages** whose statistics put them outside it
+(`DBInterface.prepare(con, sql, DuckDB.StreamResult)` plus
+`Tables.partitions`). The Parquet2 reader gets the coarser half of that itself,
+comparing each row group's recorded time min/max against the window
+(`ColumnStatistics`) and skipping the group undecoded, or ending the scan once a
+group starts at or past `stop`. Writing wants the opposite — an incremental
+*writer* — which Parquet2 has and DuckDB does not: DuckDB cannot append row
+groups to a parquet file, so its sink stages the stream in a temporary table
+(spilled to its temp directory under memory pressure) and writes the file with
+one `COPY`. That fallback therefore gives up the bounded-memory property the
+Parquet2 sink shares with `writecsv`; `rowgroupsize` also becomes a hint there,
+since DuckDB rounds it up to its 2048-row vector size.
+
+Skipping never changes results, whichever reader does it. Rows are clipped
+again on arrival by the same `clipchunk!` the CSV source uses, so a file whose
+writer recorded no statistics, or one whose time column cannot be identified,
+simply reads more of itself. Two cases fall back to a full scan by
+construction: a `time` function, which is opaque to both readers (they still
+stop at the first time `>= stop`), and a `rename` that leaves no unique file
+column mapping to `:time` — `timesourcename` returns `nothing` rather than
+guess. As with `readcsv`, sortedness is only checked in the chunks actually
+read, so a violation inside a skipped row group goes unreported.
+
+Backend selection resolves twice: eagerly at construction, so a missing backend
+is reported where the operator was typed, and again inside `run(ctx)`, so a
+backend loaded after the pipeline was built still counts. The run-time
+resolution dispatches on a runtime symbol — one dynamic call per pipeline run,
+not per chunk — and hands a `Val` to `parquetproducer` / `parquetsink`, whose
+per-backend methods live in the extensions.
+
+One in-memory DuckDB database is created lazily per process and a connection
+opened per `run(ctx)` — a connection is single-consumer, and a pipeline may be
+run more than once (a self-join reads its file twice).
+
+Both sinks reuse the CSV sink's machinery whole: the shared `ChunkSink` (bounded
+`Channel{DataFrame}`, background task, `bind`ed so a writer failure surfaces at
+the next `put!`, the first-chunk column check, and the
+`DataFrame(c; copycols = false)` hand-off that keeps the writer's chunk private
+from downstream index mutation). Only the write loop differs. Holding chunks —
+to fill a row group, or to stage the whole output — is safe under the same
+contract: column *vectors* are never mutated in place anywhere, only replaced
+wholesale. Chunks are only ever merged, never split, so `rowgroupsize = 1`
+writes one row group per incoming chunk.
+
+The one semantic difference from `writecsv`: **a parquet file is only valid
+once finalized**. The footer (or, for DuckDB, the whole file) is written when
+the stream is exhausted, so there is no usable prefix on disk mid-run and
+abandoning a `stream` part-way leaves an unusable file — `scan` is the entry
+point when the file is the point. A stream with no rows yields a valid, empty
+file. Keyword arguments pass through to `Parquet2.FileWriter`, where
+`compute_statistics` defaults to `["time"]` so that files written here carry the
+statistics the readers skip by; the DuckDB sink understands `compression_codec`
+(mapped onto `COPY`'s `COMPRESSION`, and it records statistics of its own) and
+rejects the other, Parquet2-specific options rather than silently dropping them.
 
 ## Column selectors
 
@@ -689,6 +762,9 @@ still does not hold for them.
 | `src/chunks.jl` | internal chunk-iterator machinery (`ChunkSource`, `chunkmap`) |
 | `src/pipeline.jl` | `CausalPipeline{F}`, `load`, `stream` |
 | `src/operators.jl` | sources, the CSV sink, and row-wise transforms |
+| `src/parquet.jl` | the parquet operators, their docstrings, and backend selection |
+| `ext/CausalFramesDuckDBExt.jl` | the DuckDB backend: the preferred reader, the fallback writer |
+| `ext/CausalFramesParquet2Ext.jl` | the Parquet2 backend: the preferred writer, the fallback reader |
 | `src/summarizers.jl` | `Summarizer`/`SummarizerState` interface and the concrete summarizers |
 | `src/summarize.jl` | folding kernels and the summarization transforms |
 | `src/join.jl` | the as-of join transform (`asofjoin`) |
@@ -697,15 +773,17 @@ still does not hold for them.
 | `src/precompile.jl` | PrecompileTools workload covering the main pipeline paths |
 
 Exports: `Context`, `CausalFrame`, `CausalPipeline`, `load`, `stream`,
-`scan`, `context`, `timetype`, `emptyframe`, `clock`, `readcsv`, `writecsv`,
-`filterrows`,
+`scan`, `context`, `timetype`, `emptyframe`, `clock`, `readcsv`, `writecsv`, `readparquet`,
+`writeparquet`, `filterrows`,
 `addcolumns`, `selectcolumns`, `dropcolumns`, `Summarizer`, `MonoidSummarizer`, `GroupSummarizer`,
 `SummarizerState`, `Count`, `Sum`, `SumPower`,
 `Moment`, `Product`, `DotProduct`, `Mean`, `Variance`, `Std`, `Covariance`,
 `Correlation`, `Min`, `Max`, `First`, `Last`, `summarize`,
 `summarizecycles`, `addsummarycolumns`, `addrollingcolumns`, `asofjoin`.
 
-Dependencies: DataFrames, CSV, Tables, PrecompileTools.
+Dependencies: DataFrames, CSV, Tables, PrecompileTools; weak
+dependencies DuckDB and Parquet2, each behind a package extension
+(see "Parquet I/O").
 
 Package infrastructure: `test/` runs the unit tests plus an Aqua.jl quality
 testset; `benchmark/benchmarks.jl` is a PkgBenchmark-compatible suite over
