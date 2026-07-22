@@ -22,6 +22,7 @@ include("fixtures.jl")
     include("join.jl")
     include("segtree.jl")
     include("rolling.jl")
+    include("intervalize.jl")
     include("summarize.jl")
     include("summarizers.jl")
 

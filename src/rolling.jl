@@ -314,26 +314,14 @@ function replaytrees!(trees::Dict{K,SegTree{S,R,T}}, rows::Vector, head::Int,
     return trees
 end
 
-# The output value type: the summary values' NamedTuple type promoted
-# field-wise with the empty values' (an empty window emits the latter), so
-# e.g. Min over an Int column gives Union{Missing, Int}. promote_op can in
-# principle fail to concretize, hence the Union fallback.
+# The output value type (summary values promoted field-wise with the empty
+# values an empty window emits) is the shared `promotedvaluetype`; caching it
+# with the converted empty row and re-typing any half-filled value vectors is
+# rolling-specific.
 function setvaltype!(rs::RollingState, cfg::RollingConfig)
-    VT = valuetype(typeof(rs.stateprotos), cfg.outs)
-    e = emptyvalues(cfg.protos, cfg.outs)
-    E = typeof(e)
-    V = if VT <: NamedTuple && isconcretetype(VT) && fieldnames(VT) == keys(e)
-        NamedTuple{keys(e),
-            Tuple{
-                ntuple(i -> promote_type(fieldtype(VT, i),
-                        fieldtype(E, i)),
-                    fieldcount(E))...,
-            }}
-    else
-        Union{VT,E}
-    end
+    V = promotedvaluetype(typeof(rs.stateprotos), cfg.protos, cfg.outs)
     rs.valtype = V
-    rs.emptyrow = convert(V, e)
+    rs.emptyrow = convert(V, emptyvalues(cfg.protos, cfg.outs))
     rs.vals === nothing ||
         (rs.vals = map(v -> convert(Vector{V}, v), rs.vals))
     return nothing

@@ -57,6 +57,29 @@ end
     JET.@test_opt CausalFrames.windowstart(tr.times, tr.head, 1, 0)
 end
 
+@testset "intervalize kernels" begin
+    protos, requested = CausalFrames.prototypes(
+        CausalFrames.tosummarizers([Count(), Sum(:x), Mean(:x)]), Symbol[])
+    outs = Val(requested)
+    intypes = (time = Int, k = Int, x = Float64)
+    states = CausalFrames.newstates(protos, intypes)
+    nt = (time = [1, 3, 6], k = [1, 2, 1], x = [1.0, 2.0, 3.0])
+    bounds = [0, 5, 10]
+
+    JET.@test_opt CausalFrames.foldintervals!(states, states, protos, nt,
+        bounds, 2, false, true, outs)
+    JET.@test_opt CausalFrames.flushintervals!(states, states, protos, bounds,
+        2, false, 10, true, outs)
+
+    keynames = Val((:k,))
+    groups = CausalFrames.newgroups(states, nt, keynames)
+    JET.@test_opt CausalFrames.foldintervalsgrouped!(groups, states, nt, bounds,
+        2, keynames, true, outs)
+    RT = CausalFrames.rowtype(Int, keytype(groups), valtype(groups), outs)
+    JET.@test_opt CausalFrames.flushintervalsgrouped!(groups, bounds, 2, RT, 10,
+        true, outs)
+end
+
 @testset "asofjoin kernel" begin
     V = typeof((time = 1, y = 1.0))
     store = Dict{NamedTuple{(),Tuple{}},V}()

@@ -27,6 +27,15 @@
         DataFrame(load(ctx, p |> selectcolumns(:sym, r"^q") |> dropcolumns(:sym)))
         DataFrame(load(ctx, p |> summarize([Count(), Sum(:v)]; key = :sym)))
         DataFrame(load(ctx, p |> summarizecycles(Sum(:v); key = :sym)))
+        DataFrame(
+            load(
+                ctx,
+                p |> intervalize(clock(2), [Count(), Sum(:v),
+                        Mean(:v)]; closelast = true),
+            ),
+        )
+        DataFrame(load(ctx, p |> intervalize(clock(2), [Count(), Sum(:v)];
+            key = :sym)))
         DataFrame(load(ctx, p |> addsummarycolumns([First(:v), Last(:v)])))
         # all-group summarizers take the running window mode, the mixed
         # group/monoid set the tree mode; the re-fold mode is reachable
