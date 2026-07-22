@@ -40,6 +40,8 @@ frame = load(Context(DateTime(2026, 1, 1), DateTime(2026, 2, 1)), p)
 | `readcsv(path; types, time, rename, delim)` | source | CSV read as `String` columns (`types` opts columns into concrete types); `time` picks the time column by name or a per-row function; clipped to `[start, stop)`, read incrementally |
 | `filterrows(pred)` | transform | keep rows where `pred(row)` |
 | `addcolumns(f)` | transform | `f(row)::NamedTuple` of new column values |
+| `selectcolumns(sel...)` | transform | keep the columns matching a name, `Regex`, name predicate, or collection of those (`:time` always kept) |
+| `dropcolumns(sel...)` | transform | drop the columns matching the same selector forms (`:time` never dropped) |
 | `summarize(ss; key)` | transform | summarize the whole window into rows at time `stop` |
 | `summarizecycles(ss; key)` | transform | summarize each unique timestamp independently |
 | `addsummarycolumns(ss; key)` | transform | append running summary values after each row |

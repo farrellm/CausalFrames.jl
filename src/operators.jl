@@ -327,3 +327,164 @@ end
 # the collected values have a concrete NamedTuple eltype and DataFrame builds
 # typed columns from them directly.
 rowvalues(f, nt::NamedTuple) = [f(row) for row in Tables.rows(nt)]
+
+"""
+    selectcolumns(selectors...) -> (CausalPipeline -> CausalPipeline)
+    selectcolumns(p::CausalPipeline, selectors...) -> CausalPipeline
+
+A transform keeping only the selected columns, in the input's own column
+order. Each selector is a column name (a `Symbol` or `AbstractString`), a
+`Regex` matched against the column name, a predicate called with the column
+name as a `String`, or — recursively — any collection of those; a column is
+kept when it matches any of them.
+
+`:time` is always kept, whether or not it is selected. Naming a column that
+the data does not have is an `ArgumentError`; a `Regex` or predicate matching
+nothing is not.
+
+The curried form composes with `|>`; the uncurried form applies directly, so
+`selectcolumns(p, sel)` is equivalent to `p |> selectcolumns(sel)`.
+
+```julia
+p |> selectcolumns(:bid, :ask)
+p |> selectcolumns(r"^px_", startswith("qty"))
+```
+"""
+function selectcolumns(selectors...)
+    checkselectors(selectors, "selectcolumns", false)
+    return columnprojection(selectors, true, "selectcolumns")
+end
+selectcolumns(p::CausalPipeline, selectors...) = selectcolumns(selectors...)(p)
+
+"""
+    dropcolumns(selectors...) -> (CausalPipeline -> CausalPipeline)
+    dropcolumns(p::CausalPipeline, selectors...) -> CausalPipeline
+
+A transform dropping the selected columns and keeping the rest, in the
+input's own column order. Selectors take the same forms as for
+[`selectcolumns`](@ref), and a column is dropped when it matches any of them.
+
+`:time` is never dropped — a `Regex` or predicate matching it is ignored, and
+naming it outright is an `ArgumentError`, since every frame must have a time
+column. Naming a column that the data does not have is an `ArgumentError`
+too.
+
+The curried form composes with `|>`; the uncurried form applies directly, so
+`dropcolumns(p, sel)` is equivalent to `p |> dropcolumns(sel)`.
+"""
+function dropcolumns(selectors...)
+    checkselectors(selectors, "dropcolumns", true)
+    return columnprojection(selectors, false, "dropcolumns")
+end
+dropcolumns(p::CausalPipeline, selectors...) = dropcolumns(selectors...)(p)
+
+# Both transforms are the same chunkmap over a per-run resolution cache; they
+# differ only in which side of the match survives.
+function columnprojection(selectors::Tuple, selecting::Bool, opname::String)
+    return function (p::CausalPipeline)
+        return CausalPipeline() do ctx::Context
+            selection = ColumnSelection()
+            return chunkmap(
+                c -> projectchunk(selection, selectors, c, selecting, opname),
+                p.run(ctx),
+            )
+        end
+    end
+end
+
+# The resolved column list, cached against the schema it was resolved from:
+# `keep === nothing` means every column survives and the chunk passes through
+# untouched. Per-run mutable state lives here rather than in reassigned
+# closure captures (which get boxed).
+mutable struct ColumnSelection
+    lastnames::Union{Nothing,Vector{String}}
+    keep::Union{Nothing,Vector{Symbol}}
+end
+ColumnSelection() = ColumnSelection(nothing, nothing)
+
+function projectchunk(selection::ColumnSelection, selectors::Tuple,
+    c::DataFrame, selecting::Bool, opname::String)
+    keep = resolvecolumns!(selection, selectors, c, selecting, opname)
+    # The chunk is owned, so the projection can share its columns.
+    return keep === nothing ? c : c[!, keep]
+end
+
+# Running the selectors over every column of every chunk is wasted work when
+# the schema never moves — which is the norm — so the resolution is memoized
+# against the names it was derived from. Re-resolving when they differ keeps
+# the validation per-chunk-strict rather than first-chunk-only, since the
+# trusted load/stream path does not itself re-check schema equality.
+function resolvecolumns!(selection::ColumnSelection, selectors::Tuple,
+    c::DataFrame, selecting::Bool, opname::String)
+    cols = names(c)
+    selection.lastnames == cols && return selection.keep
+    selection.keep = keptcolumns(selectors, cols, selecting, opname)
+    selection.lastnames = cols
+    return selection.keep
+end
+
+# The names to keep, in the chunk's own column order, or `nothing` when every
+# column survives.
+function keptcolumns(selectors::Tuple, cols::Vector{String}, selecting::Bool,
+    opname::String)
+    foreachliteral(selectors) do n
+        n in cols || throw(
+            ArgumentError("$opname: no column named $(repr(Symbol(n)))"))
+    end
+    keep = Symbol[]
+    for n in cols
+        (n == "time" || matchescolumn(selectors, n) == selecting) &&
+            push!(keep, Symbol(n))
+    end
+    return length(keep) == length(cols) ? nothing : keep
+end
+
+# Numbers and Chars iterate as scalars in Base, so they would recurse forever
+# through the collection fallback below rather than being rejected by it.
+const ScalarSelector = Union{Number,Char}
+
+selectorerror(x) = throw(
+    ArgumentError("invalid column selector of type $(typeof(x)): expected a \
+        name, a Regex, a predicate, or a collection of those"))
+
+checkselector(selectors) =
+    applicable(iterate, selectors) || selectorerror(selectors)
+
+# Does a selector spec match this column name? The leaf methods come first so
+# a predicate (callable) and a collection (iterable) can never be confused;
+# anything else must be iterable, and is matched recursively.
+matchescolumn(s::Symbol, name::AbstractString) = String(s) == name
+matchescolumn(s::AbstractString, name::AbstractString) = String(s) == name
+matchescolumn(r::Regex, name::AbstractString) = occursin(r, name)
+matchescolumn(f::Function, name::AbstractString) = f(name)::Bool
+matchescolumn(x::ScalarSelector, ::AbstractString) = selectorerror(x)
+function matchescolumn(selectors, name::AbstractString)
+    checkselector(selectors)
+    return any(s -> matchescolumn(s, name), selectors)
+end
+
+# Walk the name leaves of a selector spec, ignoring regex and predicate ones.
+foreachliteral(f, s::Symbol) = (f(String(s)); nothing)
+foreachliteral(f, s::AbstractString) = (f(String(s)); nothing)
+foreachliteral(::Any, ::Regex) = nothing
+foreachliteral(::Any, ::Function) = nothing
+foreachliteral(::Any, x::ScalarSelector) = selectorerror(x)
+function foreachliteral(f, selectors)
+    checkselector(selectors)
+    for s in selectors
+        foreachliteral(f, s)
+    end
+    return nothing
+end
+
+# Eager validation: at least one selector, every leaf usable, and — for
+# dropcolumns — no attempt to drop the time column every frame must have.
+function checkselectors(selectors::Tuple, opname::String, dropping::Bool)
+    isempty(selectors) &&
+        throw(ArgumentError("$opname requires at least one column selector"))
+    foreachliteral(selectors) do n
+        dropping && n == "time" &&
+            throw(ArgumentError("$opname may not drop the time column"))
+    end
+    return nothing
+end
