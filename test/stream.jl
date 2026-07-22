@@ -113,3 +113,26 @@ end
     outofbounds = CausalPipeline(ctx -> [DataFrame(time = [20])])
     @test_throws ArgumentError scan(Context(0, 9), outofbounds)
 end
+
+@testset "curried load, stream and scan" begin
+    # a chain can end in its own evaluation
+    p = clock(2) |> filterrows(r -> r.time != 4)
+    @test DataFrame(p |> load(Context(0, 10))) == DataFrame(load(Context(0, 10), p))
+    @test DataFrame(p |> load(Context(0, 10))).time == [0, 2, 6, 8]
+
+    q = clock(2; batchsize = 2)
+    @test [DataFrame(f).time for f in q |> stream(Context(0, 10))] ==
+          [DataFrame(f).time for f in stream(Context(0, 10), q)]
+
+    seen = Ref(0)
+    @test (clock(1) |> filterrows(r -> (seen[] += 1; true)) |>
+           scan(Context(0, 5))) === nothing
+    @test seen[] == 5
+
+    # the curried forms are the same evaluation, guards included
+    disorder = CausalPipeline(ctx ->
+        [DataFrame(time = [4, 5]), DataFrame(time = [3])])
+    @test_throws ArgumentError disorder |> load(Context(0, 9))
+    @test_throws ArgumentError disorder |> scan(Context(0, 9))
+    @test_throws ArgumentError collect(disorder |> stream(Context(0, 9)))
+end

@@ -53,11 +53,14 @@ Row functions receive a map-like row object: `row.time`, `row.price`,
 `writecsv` streams a pipeline to disk without materializing it, and `scan`
 drives the pipeline for its side effects alone:
 
+`load`, `stream` and `scan` also take a curried, context-only form, so a
+chain can end in its own evaluation:
+
 ```julia
-scan(Context(0, 10^6),
-    readcsv("ticks.csv"; types = Dict(:time => Int, :bid => Float64)) |>
+readcsv("ticks.csv"; types = Dict(:time => Int, :bid => Float64)) |>
     filterrows(r -> r.bid > 0) |>
-    writecsv("clean.csv"))
+    writecsv("clean.csv") |>
+    scan(Context(0, 10^6))
 ```
 
 ## Summarizers

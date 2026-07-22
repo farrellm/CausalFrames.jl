@@ -87,9 +87,17 @@ pipeline:
   chunk. Nothing is materialized: this runs a pipeline for its side effects
   (`writecsv`) without paying for a frame that would be thrown away.
 
-All three apply the same O(1)-per-chunk guards (cross-chunk order, window
-bounds) via the shared `checkchunk`; the O(n) within-chunk scans of the
-public `CausalFrame` constructor stay the chunk protocol's responsibility.
+All three also have curried, context-only forms — `load(ctx)`, `stream(ctx)`
+and `scan(ctx)` return a function of the pipeline — so a chain can end in its
+own evaluation: `source |> transform(args) |> load(ctx)`. As with the
+transforms, the two-argument form is primary and the curried one is a thin
+wrapper.
+
+`load` and `scan` apply the same O(1)-per-chunk guards (cross-chunk order,
+window bounds) via the shared `checkchunk`, and `stream` applies the
+equivalent ones as it places sub-context boundaries; the O(n) within-chunk
+scans of the public `CausalFrame` constructor stay the chunk protocol's
+responsibility.
 
 ## Operators
 
