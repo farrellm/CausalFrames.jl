@@ -120,6 +120,111 @@ end
     @test df.x == ["a", "b"]
 end
 
+@testset "writecsv" begin
+    dir = mktempdir()
+    src = joinpath(dir, "ticks.csv")
+    write(
+        src,
+        """
+time,bid,ask
+1,10.0,11.0
+3,10.5,11.5
+5,9.0,10.0
+7,9.5,10.5
+""",
+    )
+    tt = Dict(:time => Int, :bid => Float64, :ask => Float64)
+    ctx = Context(0, 100)
+    p = readcsv(src; types = tt) |> addcolumns(r -> (; mid = (r.bid + r.ask) / 2))
+
+    # pass-through: the frame is unchanged, and the file round-trips back
+    out = joinpath(dir, "out.csv")
+    @test DataFrame(load(ctx, p |> writecsv(out))) == DataFrame(load(ctx, p))
+    back = Dict(:time => Int, :bid => Float64, :ask => Float64, :mid => Float64)
+    @test DataFrame(load(ctx, readcsv(out; types = back))) == DataFrame(load(ctx, p))
+
+    # uncurried form
+    out2 = joinpath(dir, "out2.csv")
+    scan(ctx, writecsv(p, out2))
+    @test read(out2, String) == read(out, String)
+
+    # multi-chunk: the header is written exactly once, order preserved
+    many = joinpath(dir, "many.csv")
+    scan(Context(0, 10), clock(1; batchsize = 2) |> writecsv(many))
+    lines = readlines(many)
+    @test lines[1] == "time"
+    @test count(==("time"), lines) == 1
+    @test parse.(Int, lines[2:end]) == 0:9
+
+    # scan and load write identical files
+    manyload = joinpath(dir, "manyload.csv")
+    load(Context(0, 10), clock(1; batchsize = 2) |> writecsv(manyload))
+    @test read(manyload, String) == read(many, String)
+
+    # a fully drained stream writes the same file too
+    manystream = joinpath(dir, "manystream.csv")
+    foreach(
+        DataFrame,
+        stream(Context(0, 10), clock(1; batchsize = 2) |>
+                               writecsv(manystream)),
+    )
+    @test read(manystream, String) == read(many, String)
+
+    # re-running truncates rather than appending
+    scan(Context(0, 10), clock(1; batchsize = 2) |> writecsv(many))
+    @test readlines(many) == lines
+
+    # a stream with no rows yields an empty file
+    none = joinpath(dir, "none.csv")
+    scan(ctx, emptyframe() |> writecsv(none))
+    @test isfile(none) && isempty(read(none, String))
+
+    # ownership: the writer reads its chunk on another task while downstream
+    # ops mutate their own chunk's column index in place (asofjoin's
+    # leftprefix), so the file must hold the unprefixed columns
+    mid = joinpath(dir, "mid.csv")
+    frame = load(
+        ctx,
+        readcsv(src; types = tt) |> writecsv(mid) |>
+        asofjoin(readcsv(src; types = tt); leftprefix = "l", rightprefix = "r"),
+    )
+    @test names(frame) == ["time", "l_bid", "l_ask", "r_bid", "r_ask"]
+    @test readlines(mid)[1] == "time,bid,ask"
+    @test DataFrame(load(ctx, readcsv(mid; types = tt))) ==
+          DataFrame(load(ctx, readcsv(src; types = tt)))
+
+    # the same, against addrollingcolumns' empty-window assembly, which adds
+    # columns to the incoming chunk in place
+    roll = joinpath(dir, "roll.csv")
+    frame = load(
+        Context(0, 10),
+        clock(1; batchsize = 2) |> writecsv(roll) |>
+        addrollingcolumns((w2 = 2,), Count(); from = emptyframe()),
+    )
+    @test names(frame) == ["time", "w2_count"]
+    @test readlines(roll) == vcat("time", string.(0:9))
+
+    # forwarded CSV.write keywords
+    tabbed = joinpath(dir, "tabbed.csv")
+    scan(ctx, p |> writecsv(tabbed; delim = '\t'))
+    @test readlines(tabbed)[1] == "time\tbid\task\tmid"
+
+    # queue = 0 (rendezvous hand-off) writes the same file
+    rendez = joinpath(dir, "rendez.csv")
+    scan(ctx, p |> writecsv(rendez; queue = 0))
+    @test read(rendez, String) == read(out, String)
+
+    # the keywords writecsv controls itself are rejected eagerly
+    for k in (:append, :header, :writeheader, :partition, :compress)
+        @test_throws ArgumentError writecsv(out; (k => true,)...)
+    end
+    @test_throws ArgumentError writecsv(out; queue = -1)
+
+    # a writer failure propagates to the consumer
+    bad = joinpath(dir, "nosuchdir", "out.csv")
+    @test_throws Exception scan(ctx, p |> writecsv(bad))
+end
+
 @testset "filterrows and addcolumns" begin
     path = joinpath(mktempdir(), "ticks.csv")
     write(

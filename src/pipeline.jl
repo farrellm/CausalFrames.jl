@@ -33,23 +33,45 @@ An empty result yields a zero-row frame with only a `:time` column.
 """
 function load(ctx::Context{T}, p::CausalPipeline) where {T}
     chunks = DataFrame[]
+    prev = nothing
     for c in p.run(ctx)
-        # O(1)-per-chunk guards against a misbehaving hand-rolled source:
-        # cross-chunk order and window bounds. Within-chunk order and schema
-        # equality are the chunk protocol's responsibility (sources validate
-        # their own input; transforms preserve order), so the public
-        # constructor's O(n) scans are skipped.
-        isempty(chunks) || last(last(chunks).time) <= first(c.time) ||
-            throw(
-                ArgumentError(
-                    "chunk times must be non-decreasing across chunk boundaries"),
-            )
-        first(c.time) >= ctx.start && last(c.time) <= ctx.stop ||
-            throw(ArgumentError(
-                "chunk times must lie in [$(ctx.start), $(ctx.stop)]"))
+        prev = checkchunk(ctx, c, prev)
         push!(chunks, c)
     end
     return CausalFrame{T}(Trusted(), ctx, chunks)
+end
+
+"""
+    scan(ctx::Context, p::CausalPipeline) -> Nothing
+
+Evaluate the pipeline over `ctx`, discarding every chunk as it is produced.
+Nothing is materialized — this is how to run a pipeline for its side effects
+(see [`writecsv`](@ref)) without paying for a frame that would be thrown
+away. Chunks are validated exactly as [`load`](@ref) validates them.
+"""
+function scan(ctx::Context, p::CausalPipeline)
+    prev = nothing
+    for c in p.run(ctx)
+        prev = checkchunk(ctx, c, prev)
+    end
+    return nothing
+end
+
+# O(1)-per-chunk guards against a misbehaving hand-rolled source: cross-chunk
+# order and window bounds. Within-chunk order and schema equality are the
+# chunk protocol's responsibility (sources validate their own input;
+# transforms preserve order), so the public constructor's O(n) scans are
+# skipped. Returns the chunk's last time, to be passed back as `prev`.
+function checkchunk(ctx::Context, c::DataFrame, prev)
+    prev === nothing || prev <= first(c.time) ||
+        throw(
+            ArgumentError(
+                "chunk times must be non-decreasing across chunk boundaries"),
+        )
+    first(c.time) >= ctx.start && last(c.time) <= ctx.stop ||
+        throw(ArgumentError(
+            "chunk times must lie in [$(ctx.start), $(ctx.stop)]"))
+    return last(c.time)
 end
 
 """

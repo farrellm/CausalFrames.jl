@@ -86,3 +86,30 @@
     @test [only(DataFrame(f).count) for f in frames] == [1, 3, 1]
     @test [only(DataFrame(f).qty_sum) for f in frames] == [1, 9, 5]
 end
+
+@testset "scan" begin
+    @test scan(Context(0, 10), clock(2)) === nothing
+    @test scan(Context(0, 10), emptyframe()) === nothing
+
+    # the pipeline runs to exhaustion: every chunk is pulled, and the row
+    # functions along the way see every row
+    pulled = Ref(0)
+    seen = Ref(0)
+    counting = CausalPipeline(ctx -> (
+        begin
+            pulled[] += 1
+            DataFrame(time = [i])
+        end for i in 1:3
+    ))
+    @test scan(Context(0, 10), counting |> filterrows(r -> (seen[] += 1; true))) ===
+          nothing
+    @test pulled[] == 3
+    @test seen[] == 3
+
+    # scan applies the same chunk guards as load
+    disorder = CausalPipeline(ctx ->
+        [DataFrame(time = [4, 5]), DataFrame(time = [3])])
+    @test_throws ArgumentError scan(Context(0, 9), disorder)
+    outofbounds = CausalPipeline(ctx -> [DataFrame(time = [20])])
+    @test_throws ArgumentError scan(Context(0, 9), outofbounds)
+end

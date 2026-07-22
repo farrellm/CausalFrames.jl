@@ -16,6 +16,7 @@ DataFrames.DataFrame(::CausalFrame)
 CausalPipeline
 load
 stream
+scan
 ```
 
 ## Sources
@@ -24,6 +25,12 @@ stream
 emptyframe
 clock
 readcsv
+```
+
+## Sinks
+
+```@docs
+writecsv
 ```
 
 ## Row-wise transforms

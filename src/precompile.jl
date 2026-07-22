@@ -65,6 +65,7 @@
             ),
         )
         foreach(DataFrame, stream(ctx, clock(1) |> summarize(Count())))
+        scan(ctx, p |> writecsv(joinpath(dir, "precompile-out.csv")))
         DataFrame(load(ctx, emptyframe()))
     end
 end
