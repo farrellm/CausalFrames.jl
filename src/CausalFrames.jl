@@ -5,9 +5,10 @@ using DataFrames
 using PrecompileTools: @setup_workload, @compile_workload
 using Tables
 
-export Context, CausalFrame, CausalPipeline, load, stream, context, timetype,
-    emptyframe, clock, readcsv, filterrows, addcolumns, selectcolumns,
-    dropcolumns,
+export Context, CausalFrame, CausalPipeline, load, stream, scan, context,
+    timetype,
+    emptyframe, clock, readcsv, writecsv, filterrows, addcolumns,
+    selectcolumns, dropcolumns,
     Summarizer, MonoidSummarizer, GroupSummarizer, SummarizerState,
     Count, Sum, SumPower, Moment, Product,
     DotProduct, Mean, Variance, Std, Covariance, Correlation, Min, Max,

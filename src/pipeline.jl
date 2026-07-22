@@ -25,35 +25,68 @@ end
 
 """
     load(ctx::Context, p::CausalPipeline) -> CausalFrame
+    load(ctx::Context) -> (CausalPipeline -> CausalFrame)
 
 Evaluate the pipeline over the time window `ctx`, materializing the whole
 window into a frame. This is the only operation that forces the full window
 into memory; the frame wraps the streamed chunks as-is, without copying.
 An empty result yields a zero-row frame with only a `:time` column.
+
+The curried form composes with `|>`, so a chain can end in its own
+evaluation: `p |> load(ctx)` is equivalent to `load(ctx, p)`.
 """
 function load(ctx::Context{T}, p::CausalPipeline) where {T}
     chunks = DataFrame[]
+    prev = nothing
     for c in p.run(ctx)
-        # O(1)-per-chunk guards against a misbehaving hand-rolled source:
-        # cross-chunk order and window bounds. Within-chunk order and schema
-        # equality are the chunk protocol's responsibility (sources validate
-        # their own input; transforms preserve order), so the public
-        # constructor's O(n) scans are skipped.
-        isempty(chunks) || last(last(chunks).time) <= first(c.time) ||
-            throw(
-                ArgumentError(
-                    "chunk times must be non-decreasing across chunk boundaries"),
-            )
-        first(c.time) >= ctx.start && last(c.time) <= ctx.stop ||
-            throw(ArgumentError(
-                "chunk times must lie in [$(ctx.start), $(ctx.stop)]"))
+        prev = checkchunk(ctx, c, prev)
         push!(chunks, c)
     end
     return CausalFrame{T}(Trusted(), ctx, chunks)
 end
+load(ctx::Context) = (p::CausalPipeline) -> load(ctx, p)
+
+"""
+    scan(ctx::Context, p::CausalPipeline) -> Nothing
+    scan(ctx::Context) -> (CausalPipeline -> Nothing)
+
+Evaluate the pipeline over `ctx`, discarding every chunk as it is produced.
+Nothing is materialized — this is how to run a pipeline for its side effects
+(see [`writecsv`](@ref)) without paying for a frame that would be thrown
+away. Chunks are validated exactly as [`load`](@ref) validates them.
+
+The curried form composes with `|>`, so a chain can end in its own
+evaluation: `p |> scan(ctx)` is equivalent to `scan(ctx, p)`.
+"""
+function scan(ctx::Context, p::CausalPipeline)
+    prev = nothing
+    for c in p.run(ctx)
+        prev = checkchunk(ctx, c, prev)
+    end
+    return nothing
+end
+scan(ctx::Context) = (p::CausalPipeline) -> scan(ctx, p)
+
+# O(1)-per-chunk guards against a misbehaving hand-rolled source: cross-chunk
+# order and window bounds. Within-chunk order and schema equality are the
+# chunk protocol's responsibility (sources validate their own input;
+# transforms preserve order), so the public constructor's O(n) scans are
+# skipped. Returns the chunk's last time, to be passed back as `prev`.
+function checkchunk(ctx::Context, c::DataFrame, prev)
+    prev === nothing || prev <= first(c.time) ||
+        throw(
+            ArgumentError(
+                "chunk times must be non-decreasing across chunk boundaries"),
+        )
+    first(c.time) >= ctx.start && last(c.time) <= ctx.stop ||
+        throw(ArgumentError(
+            "chunk times must lie in [$(ctx.start), $(ctx.stop)]"))
+    return last(c.time)
+end
 
 """
     stream(ctx::Context, p::CausalPipeline) -> iterator of CausalFrames
+    stream(ctx::Context) -> (CausalPipeline -> iterator of CausalFrames)
 
 Evaluate the pipeline over `ctx` incrementally, yielding one
 [`CausalFrame`](@ref) per chunk without ever materializing the whole window.
@@ -66,8 +99,12 @@ The frames' contexts tile `[ctx.start, ctx.stop)`: frame `i` covers
 `[bᵢ₋₁, bᵢ)` where `b₀ = ctx.start`, `bᵢ` is the first time of chunk
 `i + 1`, and the last frame's context stops at `ctx.stop`. The iterator is
 single-pass and maintains one chunk of lookahead.
+
+The curried form composes with `|>`, so a chain can end in its own
+evaluation: `p |> stream(ctx)` is equivalent to `stream(ctx, p)`.
 """
 stream(ctx::Context, p::CausalPipeline) = FrameStream(ctx, p.run(ctx))
+stream(ctx::Context) = (p::CausalPipeline) -> stream(ctx, p)
 
 struct FrameStream{T,U}
     ctx::Context{T}

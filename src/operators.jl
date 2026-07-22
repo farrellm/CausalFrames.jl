@@ -257,6 +257,120 @@ function resolvetime!(df::DataFrame, time, path::String)
 end
 
 """
+    writecsv(path; queue = 1, kwargs...) -> (CausalPipeline -> CausalPipeline)
+    writecsv(p::CausalPipeline, path; ...) -> CausalPipeline
+
+A transparent pass-through transform that writes the stream to the CSV file
+at `path` as it flows by, yielding every chunk downstream unchanged. Nothing
+is buffered: each chunk is written and flushed as it is produced, so the file
+grows while the pipeline is still running.
+
+Writing happens on a background task fed by a bounded queue, so the pipeline
+does not block on disk I/O — only if the writer falls more than `queue`
+chunks behind, plus once at the end to join it. `queue = 0` makes each
+hand-off a rendezvous.
+
+The file is truncated when the run starts and finalized when the stream is
+*exhausted* — by [`load`](@ref), [`scan`](@ref), or a fully drained
+[`stream`](@ref). Abandoning a `stream` part-way leaves the last chunks
+unwritten; use [`scan`](@ref) when the file is all you want:
+
+```julia
+scan(ctx, readcsv("ticks.csv"; types = tt) |>
+          addcolumns(r -> (; mid = (r.bid + r.ask) / 2)) |>
+          writecsv("mids.csv"))
+```
+
+A stream with no rows at all yields an empty file. Keyword arguments are
+passed through to `CSV.write` (`delim`, `missingstring`, `dateformat`,
+`quotestrings`, `bufsize`, …), except for `append`, `header`, `writeheader`,
+`partition` and `compress`, which this transform controls itself — passing
+one is an `ArgumentError`.
+
+The curried form composes with `|>`; the uncurried form applies directly, so
+`writecsv(p, path)` is equivalent to `p |> writecsv(path)`.
+"""
+function writecsv(path::AbstractString; queue::Integer = 1, kwargs...)
+    queue >= 0 ||
+        throw(ArgumentError("writecsv queue must be non-negative, got $queue"))
+    for k in (:append, :header, :writeheader, :partition, :compress)
+        haskey(kwargs, k) && throw(ArgumentError("writecsv controls the \
+            $(repr(k)) option of CSV.write itself; it may not be passed"))
+    end
+    # Materialized once, so the per-chunk splat into CSV.write is over a
+    # concretely typed NamedTuple rather than the keyword iterator.
+    opts = values(kwargs)
+    return function (p::CausalPipeline)
+        return CausalPipeline() do ctx::Context
+            sink = CSVSink(String(path), Int(queue), opts)
+            return chunkmap(c -> sinkchunk(sink, c), p.run(ctx);
+                flush = () -> finishwrite(sink))
+        end
+    end
+end
+writecsv(p::CausalPipeline, path::AbstractString; kwargs...) =
+    writecsv(path; kwargs...)(p)
+
+# Per-run writer state: the queue feeding the background task, plus the
+# column names of the first chunk, which pin the file's header. Per-run
+# mutable state lives here rather than in reassigned closure captures (which
+# get boxed).
+mutable struct CSVSink
+    const chan::Channel{DataFrame}
+    const task::Task
+    names::Union{Nothing,Vector{String}}
+end
+
+function CSVSink(path::String, queue::Int, opts::NamedTuple)
+    chan = Channel{DataFrame}(queue)
+    task = Threads.@spawn writeloop(chan, path, opts)
+    # A failed writer closes the channel with its exception, so the pipeline
+    # task sees it at the next put! rather than deadlocking on a full queue.
+    bind(chan, task)
+    return CSVSink(chan, task, nothing)
+end
+
+# The background writer. One handle for the whole run, closed deterministically
+# when the channel closes; each chunk is flushed as it lands, so an interrupted
+# run still leaves a complete prefix on disk. `append` is false only for the
+# first chunk, which is what makes CSV.write emit the header exactly once.
+function writeloop(chan::Channel{DataFrame}, path::String, opts::NamedTuple)
+    open(path, "w") do io
+        first = true
+        for c in chan
+            CSV.write(io, c; append = !first, opts...)
+            flush(io)
+            first = false
+        end
+    end
+    return nothing
+end
+
+function sinkchunk(sink::CSVSink, c::DataFrame)
+    cols = names(c)
+    if sink.names === nothing
+        sink.names = cols
+    elseif sink.names != cols
+        throw(ArgumentError("writecsv: chunk columns changed mid-stream, from \
+            $(sink.names) to $(cols)"))
+    end
+    put!(sink.chan, c)
+    # The writer reads `c` concurrently, while downstream transforms may mutate
+    # their chunk's column index in place (they own what they are handed), so
+    # give them a private index over the same column vectors — those are never
+    # mutated in place, only replaced wholesale. O(ncols), nothing per row.
+    return DataFrame(c; copycols = false)
+end
+
+# Called once, when upstream is exhausted: close the queue and join the writer,
+# so the file is complete and closed by the time the stream ends.
+function finishwrite(sink::CSVSink)
+    close(sink.chan)
+    wait(sink.task)
+    return nothing
+end
+
+"""
     filterrows(pred) -> (CausalPipeline -> CausalPipeline)
     filterrows(p::CausalPipeline, pred) -> CausalPipeline
 

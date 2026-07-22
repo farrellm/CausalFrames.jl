@@ -26,7 +26,9 @@ frame = load(Context(DateTime(2026, 1, 1), DateTime(2026, 2, 1)), p)
   conceptually a function from a `Context` to a stream of chunks. Built from
   sources and chained with `|>`. Evaluation is streaming end to end:
   `load(ctx, pipeline)` materializes the whole window (the only operation
-  that does), `stream(ctx, pipeline)` yields frames incrementally.
+  that does), `stream(ctx, pipeline)` yields frames incrementally, and
+  `scan(ctx, pipeline)` runs a pipeline for its side effects, discarding
+  every chunk.
 - **`CausalFrame`** — a materialized table. It hides its backing storage
   (one or more time-disjoint chunks, wrapped without copying) and is
   accessed via the Tables.jl interface or `DataFrame(frame)`.
@@ -38,6 +40,7 @@ frame = load(Context(DateTime(2026, 1, 1), DateTime(2026, 2, 1)), p)
 | `emptyframe()` | source | zero rows, just a `:time` column |
 | `clock(interval)` | source | one row per `interval` in `[start, stop)` |
 | `readcsv(path; types, time, rename, delim)` | source | CSV read as `String` columns (`types` opts columns into concrete types); `time` picks the time column by name or a per-row function; clipped to `[start, stop)`, read incrementally |
+| `writecsv(path; queue, ...)` | transform | pass-through sink: writes each chunk to `path` as it flows by, on a background task, and yields it downstream unchanged |
 | `filterrows(pred)` | transform | keep rows where `pred(row)` |
 | `addcolumns(f)` | transform | `f(row)::NamedTuple` of new column values |
 | `selectcolumns(sel...)` | transform | keep the columns matching a name, `Regex`, name predicate, or collection of those (`:time` always kept) |
@@ -54,6 +57,19 @@ Each transform also has an uncurried, pipeline-first form — `filterrows(p, pre
 
 Row functions receive a map-like row object: `row.time`, `row.price`,
 `row[:price]`.
+
+`writecsv` streams a pipeline to disk without materializing it, and `scan`
+drives the pipeline for its side effects alone:
+
+`load`, `stream` and `scan` also take a curried, context-only form, so a
+chain can end in its own evaluation:
+
+```julia
+readcsv("ticks.csv"; types = Dict(:time => Int, :bid => Float64)) |>
+    filterrows(r -> r.bid > 0) |>
+    writecsv("clean.csv") |>
+    scan(Context(0, 10^6))
+```
 
 ## Summarizers
 

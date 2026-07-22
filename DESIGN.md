@@ -83,6 +83,21 @@ pipeline:
   frame with only a `:time` column.
 - `stream(ctx, pipeline) -> iterator of CausalFrames` — yields one frame per
   chunk (see "Causality and streaming" below).
+- `scan(ctx, pipeline) -> nothing` — drains the iterator, discarding every
+  chunk. Nothing is materialized: this runs a pipeline for its side effects
+  (`writecsv`) without paying for a frame that would be thrown away.
+
+All three also have curried, context-only forms — `load(ctx)`, `stream(ctx)`
+and `scan(ctx)` return a function of the pipeline — so a chain can end in its
+own evaluation: `source |> transform(args) |> load(ctx)`. As with the
+transforms, the two-argument form is primary and the curried one is a thin
+wrapper.
+
+`load` and `scan` apply the same O(1)-per-chunk guards (cross-chunk order,
+window bounds) via the shared `checkchunk`, and `stream` applies the
+equivalent ones as it places sub-context boundaries; the O(n) within-chunk
+scans of the public `CausalFrame` constructor stay the chunk protocol's
+responsibility.
 
 ## Operators
 
@@ -102,6 +117,7 @@ Two kinds, both compatible with the chaining operator `|>`:
 | `emptyframe()` | source | zero rows, just a `:time` column |
 | `clock(interval; batchsize)` | source | rows at `start, start + interval, …` while `< stop`; no other columns; generated lazily in chunks of `batchsize` rows |
 | `readcsv(path; types, time, rename, delim, chunkbytes)` | source | CSV file, every column read as `String` unless `types` opts it into a concrete type; the time column (named `:time`, or chosen by `time` as a column name or a per-row function) must be typed and sorted; `rename` maps column names first; rows clipped to `[start, stop)`; read incrementally in chunks of roughly `chunkbytes` bytes — never all at once — stopping as soon as a time `>= stop` is seen |
+| `writecsv(path; queue, ...)` | transform | transparent pass-through sink: writes each chunk to `path` as it flows by and yields it downstream unchanged (see "CSV output") |
 | `filterrows(pred)` | transform | keep rows where `pred(row)` is `true` |
 | `addcolumns(f)` | transform | `f(row)` returns a `NamedTuple` of new column values for that row; may **not** contain a `time` key (this preserves the time invariant without re-validation) |
 | `selectcolumns(selectors...)` | transform | keep only the matching columns, in the input's own order (see "Column selectors") |
@@ -122,6 +138,42 @@ field access, exactly like a summarizer's `update!`.
 Naming follows Julia convention: lowercase, no camelCase, and no shadowing
 of `Base.filter` / `Base.empty` / `Base.count` / `Base.sum` /
 `Base.join`.
+
+## CSV output
+
+`writecsv(path)` is a *transparent pass-through*: it writes each chunk as it
+flows by and yields it downstream unchanged, so it can sit anywhere in a
+chain, not only at the end. Combined with `scan` it persists a stream
+without ever materializing the window.
+
+Writing must not stall the pipeline on disk I/O, so it happens on a
+background task (`Threads.@spawn`) fed by a bounded `Channel{DataFrame}` of
+depth `queue` (default 1). The pipeline blocks only when the writer falls
+more than `queue` chunks behind, and once at the end to join it. The writer
+holds one file handle for the whole run and flushes after each chunk, so an
+interrupted run still leaves a complete prefix on disk; `append` is false
+only for the first chunk, which is what makes `CSV.write` emit the header
+exactly once. The channel is `bind`ed to the task, so a writer failure
+closes it with the exception and the pipeline task sees it at the next
+`put!` rather than deadlocking on a full queue.
+
+This is the one place chunk ownership is shared, and it needs care. A
+consumer owns the chunk it is handed, and two operators use that licence to
+mutate the chunk's *column index* in place (`asofjoin`'s `prefixleft!`,
+`addrollingcolumns`' `assembleempty`) — which would race the writer reading
+the same DataFrame on another task. Column *vectors*, by contrast, are never
+mutated in place anywhere: every operator builds new ones. So the writer
+keeps the original chunk and downstream gets `DataFrame(c; copycols = false)`
+— a private index over the same vectors, O(ncols) per chunk and nothing per
+row.
+
+The file is truncated when the run starts and finalized when the stream is
+*exhausted*, via `chunkmap`'s once-only `flush`. Abandoning a `stream`
+part-way therefore leaves the last chunks unwritten — `scan` is the entry
+point to use when the file is the only thing wanted. A stream with no rows
+yields an empty file, never a stale one. Keyword arguments pass through to
+`CSV.write`, except `append`/`header`/`writeheader`/`partition`/`compress`,
+which the transform controls itself and rejects eagerly.
 
 ## Column selectors
 
@@ -636,7 +688,7 @@ still does not hold for them.
 | `src/frame.jl` | `CausalFrame{T}`, invariants, Tables.jl interface |
 | `src/chunks.jl` | internal chunk-iterator machinery (`ChunkSource`, `chunkmap`) |
 | `src/pipeline.jl` | `CausalPipeline{F}`, `load`, `stream` |
-| `src/operators.jl` | sources and row-wise transforms |
+| `src/operators.jl` | sources, the CSV sink, and row-wise transforms |
 | `src/summarizers.jl` | `Summarizer`/`SummarizerState` interface and the concrete summarizers |
 | `src/summarize.jl` | folding kernels and the summarization transforms |
 | `src/join.jl` | the as-of join transform (`asofjoin`) |
@@ -645,7 +697,8 @@ still does not hold for them.
 | `src/precompile.jl` | PrecompileTools workload covering the main pipeline paths |
 
 Exports: `Context`, `CausalFrame`, `CausalPipeline`, `load`, `stream`,
-`context`, `timetype`, `emptyframe`, `clock`, `readcsv`, `filterrows`,
+`scan`, `context`, `timetype`, `emptyframe`, `clock`, `readcsv`, `writecsv`,
+`filterrows`,
 `addcolumns`, `selectcolumns`, `dropcolumns`, `Summarizer`, `MonoidSummarizer`, `GroupSummarizer`,
 `SummarizerState`, `Count`, `Sum`, `SumPower`,
 `Moment`, `Product`, `DotProduct`, `Mean`, `Variance`, `Std`, `Covariance`,
