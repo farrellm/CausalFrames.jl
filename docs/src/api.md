@@ -25,12 +25,14 @@ scan
 emptyframe
 clock
 readcsv
+readparquet
 ```
 
 ## Sinks
 
 ```@docs
 writecsv
+writeparquet
 ```
 
 ## Row-wise transforms

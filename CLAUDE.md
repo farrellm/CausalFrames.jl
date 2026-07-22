@@ -37,7 +37,17 @@ with any API or semantics change.**
 - `src/operators.jl` — sources return a `CausalPipeline`; transforms are
   curried (`filterrows(pred)` returns `CausalPipeline -> CausalPipeline`)
   so both chain with `|>`; row functions run over concretely typed column
-  table rows behind a per-chunk function barrier, never `DataFrameRow`s
+  table rows behind a per-chunk function barrier, never `DataFrameRow`s;
+  `clipchunk!` (rename, resolve `:time`, sortedness, clip, convert) and the
+  `ChunkSink` background writer are shared with the parquet operators
+- `src/parquet.jl` — `readparquet`/`writeparquet`: the API, the docstrings
+  and the backend hooks (`parquetproducer`, `parquetsink`, `backendloaded`),
+  none of which name a backend. Both backends are **weak** deps behind
+  package extensions — `ext/CausalFramesDuckDBExt.jl` streams a filtered
+  DuckDB query (the context window is pushed down; results are clipped
+  again on arrival, so correctness never depends on it) and
+  `ext/CausalFramesParquet2Ext.jl` writes row groups incrementally. Working
+  on parquet means loading `DuckDB`/`Parquet2` in the session first
 - `src/summarizers.jl` — `Summarizer` (immutable config, column name in a
   type parameter) and `SummarizerState` (running state, typed from the input
   schema) plus their interface (`emptyvalue`, `fresh`, `update!`, `value`,

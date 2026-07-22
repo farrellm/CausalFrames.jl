@@ -7,7 +7,8 @@ using Tables
 
 export Context, CausalFrame, CausalPipeline, load, stream, scan, context,
     timetype,
-    emptyframe, clock, readcsv, writecsv, filterrows, addcolumns,
+    emptyframe, clock, readcsv, writecsv, readparquet, writeparquet,
+    filterrows, addcolumns,
     selectcolumns, dropcolumns,
     Summarizer, MonoidSummarizer, GroupSummarizer, SummarizerState,
     Count, Sum, SumPower, Moment, Product,
@@ -20,6 +21,7 @@ include("frame.jl")
 include("chunks.jl")
 include("pipeline.jl")
 include("operators.jl")
+include("parquet.jl")
 include("summarizers.jl")
 include("summarize.jl")
 include("join.jl")

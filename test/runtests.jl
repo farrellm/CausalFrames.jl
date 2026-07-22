@@ -2,6 +2,8 @@ using Aqua
 using CausalFrames
 using DataFrames
 using Dates
+using DuckDB
+using Parquet2
 using Tables
 using Test
 
@@ -15,6 +17,7 @@ include("fixtures.jl")
     include("context.jl")
     include("frame.jl")
     include("operators.jl")
+    include("parquet.jl")
     include("stream.jl")
     include("join.jl")
     include("segtree.jl")

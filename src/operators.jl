@@ -197,27 +197,50 @@ function (p::CSVProducer{T})() where {T}
         filechunk, p.state = next
         p.started = true
         df = filechunk isa DataFrame ? filechunk : DataFrame(filechunk)
-        renamecolumns!(df, p.rename)
-        resolvetime!(df, p.time, p.path)
-        issorted(df.time) ||
-            throw(ArgumentError("time column in $(p.path) is not non-decreasing"))
-        if nrow(df) > 0
-            p.prevtime !== nothing && first(df.time) < p.prevtime &&
-                throw(ArgumentError(
-                    "time column in $(p.path) is not non-decreasing"))
-            p.prevtime = last(df.time)
-        end
-        lo = searchsortedfirst(df.time, p.start)
-        hi = searchsortedfirst(df.time, p.stop) - 1
-        hi < nrow(df) && (p.done = true)   # saw a time >= stop
-        # The file chunk is freshly materialized and owned, so a clip that
-        # keeps every row needs no copy.
-        clipped = lo == 1 && hi == nrow(df) ? df : df[lo:hi, :]
-        clipped[!, :time] = convert(Vector{T}, clipped.time)
+        clipped, sawstop, p.prevtime = clipchunk!(df, p.time, p.rename, p.path,
+            "CSV file", p.prevtime, p.start, p.stop)
+        sawstop && (p.done = true)
         nrow(clipped) > 0 && return clipped
         p.done && return nothing
     end
 end
+
+# Shared by readcsv and readparquet: rename the columns, materialize `:time`,
+# check sortedness within the chunk and against the last time of the previous
+# one, clip to [start, stop), and convert `:time` to the context's time type.
+# `what` names the format in error messages. Returns the clipped chunk (which
+# may have no rows), whether a time >= stop was seen (the source is then done),
+# and the last raw time of this chunk, to be carried to the next call.
+function clipchunk!(df::DataFrame, time, rename, path::String, what::String,
+    prevtime, start::T, stop::T) where {T}
+    renamecolumns!(df, rename)
+    resolvetime!(df, time, path, what)
+    issorted(df.time) ||
+        throw(ArgumentError("time column in $path is not non-decreasing"))
+    if nrow(df) > 0
+        prevtime !== nothing && first(df.time) < prevtime &&
+            throw(ArgumentError("time column in $path is not non-decreasing"))
+        prevtime = last(df.time)
+    end
+    lo = searchsortedfirst(df.time, start)
+    hi = searchsortedfirst(df.time, stop) - 1
+    sawstop = hi < nrow(df)   # saw a time >= stop
+    # The chunk is freshly materialized and owned, so a clip that keeps every
+    # row needs no copy.
+    clipped = lo == 1 && hi == nrow(df) ? df : df[lo:hi, :]
+    clipped[!, :time] = convert(Vector{T}, clipped.time)
+    return (clipped, sawstop, prevtime)
+end
+
+# A time column that arrived as text cannot be ordered against the window. Only
+# CSV has a `types` knob to point the user at; parquet carries its own types, so
+# there the only way out is a `time` function.
+textualtime(path::String, what::String) =
+    what == "CSV file" ?
+    "time column in $path needs a concrete type via `types`, or a `time` \
+    function to produce it" :
+    "time column in $path is textual; use a `time` function to produce a \
+    usable time"
 
 # Rename columns before the time column is resolved. A map renames only the
 # columns it names; a function is applied to every column name.
@@ -237,21 +260,21 @@ function renamecolumns!(df::DataFrame, m::AbstractDict)
 end
 
 # Materialize the `:time` column and check it is usable (non-String) unless it
-# was produced by a function.
-function resolvetime!(df::DataFrame, time, path::String)
+# was produced by a function. `what` names the file format for error messages;
+# only CSV has a `types` knob to point the user at.
+function resolvetime!(df::DataFrame, time, path::String, what::String)
     if time isa Function
         df[!, :time] = maptime(time, Tables.columntable(df))
     else
         if time isa Symbol
             String(time) in names(df) ||
-                throw(ArgumentError("CSV file $path has no column $(repr(time))"))
+                throw(ArgumentError("$what $path has no column $(repr(time))"))
             time === :time || rename!(df, time => :time)
         end
         "time" in names(df) ||
-            throw(ArgumentError("CSV file $path has no time column"))
+            throw(ArgumentError("$what $path has no time column"))
         eltype(df.time) <: AbstractString &&
-            throw(ArgumentError("time column in $path needs a concrete type \
-                via `types`, or a `time` function to produce it"))
+            throw(ArgumentError(textualtime(path, what)))
     end
     return nothing
 end
@@ -302,7 +325,8 @@ function writecsv(path::AbstractString; queue::Integer = 1, kwargs...)
     opts = values(kwargs)
     return function (p::CausalPipeline)
         return CausalPipeline() do ctx::Context
-            sink = CSVSink(String(path), Int(queue), opts)
+            sink = ChunkSink(chan -> csvwriteloop(chan, String(path), opts),
+                Int(queue), "writecsv")
             return chunkmap(c -> sinkchunk(sink, c), p.run(ctx);
                 flush = () -> finishwrite(sink))
         end
@@ -311,30 +335,32 @@ end
 writecsv(p::CausalPipeline, path::AbstractString; kwargs...) =
     writecsv(path; kwargs...)(p)
 
-# Per-run writer state: the queue feeding the background task, plus the
-# column names of the first chunk, which pin the file's header. Per-run
-# mutable state lives here rather than in reassigned closure captures (which
-# get boxed).
-mutable struct CSVSink
+# Per-run writer state, shared by every file sink: the queue feeding the
+# background task, plus the column names of the first chunk, which pin the
+# file's columns. Per-run mutable state lives here rather than in reassigned
+# closure captures (which get boxed). `label` names the operator in errors.
+mutable struct ChunkSink
     const chan::Channel{DataFrame}
     const task::Task
+    const label::String
     names::Union{Nothing,Vector{String}}
 end
 
-function CSVSink(path::String, queue::Int, opts::NamedTuple)
+function ChunkSink(writeloop, queue::Int, label::String)
     chan = Channel{DataFrame}(queue)
-    task = Threads.@spawn writeloop(chan, path, opts)
+    task = Threads.@spawn writeloop(chan)
     # A failed writer closes the channel with its exception, so the pipeline
     # task sees it at the next put! rather than deadlocking on a full queue.
     bind(chan, task)
-    return CSVSink(chan, task, nothing)
+    return ChunkSink(chan, task, label, nothing)
 end
 
-# The background writer. One handle for the whole run, closed deterministically
-# when the channel closes; each chunk is flushed as it lands, so an interrupted
-# run still leaves a complete prefix on disk. `append` is false only for the
-# first chunk, which is what makes CSV.write emit the header exactly once.
-function writeloop(chan::Channel{DataFrame}, path::String, opts::NamedTuple)
+# The background CSV writer. One handle for the whole run, closed
+# deterministically when the channel closes; each chunk is flushed as it lands,
+# so an interrupted run still leaves a complete prefix on disk. `append` is
+# false only for the first chunk, which is what makes CSV.write emit the header
+# exactly once.
+function csvwriteloop(chan::Channel{DataFrame}, path::String, opts::NamedTuple)
     open(path, "w") do io
         first = true
         for c in chan
@@ -346,13 +372,13 @@ function writeloop(chan::Channel{DataFrame}, path::String, opts::NamedTuple)
     return nothing
 end
 
-function sinkchunk(sink::CSVSink, c::DataFrame)
+function sinkchunk(sink::ChunkSink, c::DataFrame)
     cols = names(c)
     if sink.names === nothing
         sink.names = cols
     elseif sink.names != cols
-        throw(ArgumentError("writecsv: chunk columns changed mid-stream, from \
-            $(sink.names) to $(cols)"))
+        throw(ArgumentError("$(sink.label): chunk columns changed mid-stream, \
+            from $(sink.names) to $(cols)"))
     end
     put!(sink.chan, c)
     # The writer reads `c` concurrently, while downstream transforms may mutate
@@ -364,7 +390,7 @@ end
 
 # Called once, when upstream is exhausted: close the queue and join the writer,
 # so the file is complete and closed by the time the stream ends.
-function finishwrite(sink::CSVSink)
+function finishwrite(sink::ChunkSink)
     close(sink.chan)
     wait(sink.task)
     return nothing
