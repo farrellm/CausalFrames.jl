@@ -85,6 +85,20 @@ SUITE["summarize"]["cycles"] = @benchmarkable load(CTX,
 SUITE["summarize"]["running"] = @benchmarkable load(CTX,
     SRC |> addsummarycolumns([Sum(:qty), Last(:qty)]))
 
+# intervalize over the same source and summarizers as the summarize group, so
+# the two are directly comparable: the difference is the per-interval state
+# reset, boundary crossing, and grid emission on top of the same per-row fold.
+# The clock carves the window into ~1000 intervals — negligible against the
+# million rows folded — of which the data (times 0..N÷4) fills the first
+# quarter, so the keyless grid also exercises empty-interval emission.
+SUITE["intervalize"] = BenchmarkGroup()
+SUITE["intervalize"]["keyless"] = @benchmarkable load(CTX,
+    SRC |> intervalize(clock(1000), [Count(), Sum(:qty), Min(:qty), Max(:qty)]))
+SUITE["intervalize"]["keyed"] = @benchmarkable load(CTX,
+    SRC |> intervalize(clock(1000), [Count(), Sum(:qty)]; key = :sym))
+SUITE["intervalize"]["closelast"] = @benchmarkable load(CTX,
+    SRC |> intervalize(clock(1000), [Count(), Sum(:qty)]; closelast = true))
+
 # One group per window algorithm: all-group summarizers slide running
 # states, all-monoid sets fold from a segment tree, and an unstructured
 # summarizer forces the re-fold baseline (see src/rolling.jl).
