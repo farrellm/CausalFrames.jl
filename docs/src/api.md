@@ -57,6 +57,20 @@ not re-exported — reach it with `using CausalFrames.Acausal`.
 CausalFrames.Acausal.futurejoin
 ```
 
+## Lead and lag
+
+```@docs
+lag
+```
+
+`lead` shifts forward in time and so is acausal; like `futurejoin` it lives in
+the `CausalFrames.Acausal` submodule and is not re-exported — reach it with
+`using CausalFrames.Acausal`.
+
+```@docs
+CausalFrames.Acausal.lead
+```
+
 ## Summarization
 
 ```@docs

@@ -257,3 +257,48 @@ using CausalFrames.Acausal
         @test isequal(reverse(fut.qty), asof.qty)
     end
 end
+
+@testset "lead" begin
+    ctx = Context(0, 10)
+    # clock clips to the context; carry the (pre-shift) time as a value column
+    src = clock(1) |> addcolumns(r -> (; v = float(r.time)))
+
+    # lead shifts every row -offset in time (acausal): the value seen at time t
+    # is the one the input had at t + offset.
+    df = DataFrame(load(ctx, src |> lead(2)))
+    @test df.time == 0:9
+    @test df.v == collect(2.0:11.0)   # v at output t is (t + 2)
+    @test names(df) == ["time", "v"]
+
+    # the upstream pipeline is run over the window slid forward by the offset
+    seen = Ref{Any}(nothing)
+    recorder = CausalPipeline() do c
+        seen[] = c
+        [DataFrame(time = [c.start], v = [1.0])]
+    end
+    load(ctx, recorder |> lead(3))
+    @test seen[] == Context(3, 13)
+
+    # offset 0 is the identity
+    @test isequal(DataFrame(load(ctx, src |> lead(0))), DataFrame(load(ctx, src)))
+
+    # a negative offset is just a lag; rejected when the pipeline runs
+    @test_throws ArgumentError load(ctx, src |> lead(-1))
+
+    # streaming matches load
+    streamed = reduce(vcat, [DataFrame(f) for f in stream(ctx, src |> lead(2))])
+    @test isequal(streamed, df)
+
+    # lead/lag duality: lead(k) then lag(k) restores the original stream over
+    # the interior [start, stop - k), and lag then lead over [start + k, stop)
+    @test isequal(DataFrame(load(ctx, src |> lead(2) |> lag(2))),
+        DataFrame(load(ctx, src)))
+    @test isequal(DataFrame(load(ctx, src |> lag(2) |> lead(2))),
+        DataFrame(load(ctx, src)))
+
+    # transform on an empty frame is a no-op
+    @test nrow(load(ctx, emptyframe() |> lead(2))) == 0
+
+    # the uncurried, pipeline-first form equals the |> chain
+    @test isequal(DataFrame(load(ctx, lead(src, 2))), df)
+end

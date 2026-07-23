@@ -10,11 +10,11 @@ module Acausal
 
 using DataFrames
 using Tables
-using ..CausalFrames: CausalPipeline, Context, chunkmap, tokeycolumns,
-    chunktypes, promotetypes, normprefix, prefixed,
+using ..CausalFrames: CausalPipeline, Context, chunkmap, shiftchunk!,
+    tokeycolumns, chunktypes, promotetypes, normprefix, prefixed,
     storerowtype, storekeytype, rowat, keyat, matchcolumn
 
-export futurejoin
+export futurejoin, lead
 
 """
     futurejoin(right::CausalPipeline; key = nothing, tolerance = nothing,
@@ -335,6 +335,52 @@ function assemble(cfg::FutureJoinConfig, js::FutureJoinState, c::DataFrame)
         (rdf[!, cfg.righttime] = matchcolumn(js.matches, Val(:time)))
     # The chunk is owned, so its columns can be adopted rather than copied.
     return hcat(c, rdf; copycols = false)
+end
+
+# --- lead: the acausal time shift -----------------------------------------
+
+"""
+    lead(offset) -> (CausalPipeline -> CausalPipeline)
+    lead(p::CausalPipeline, offset) -> CausalPipeline
+
+A transform shifting every row `offset` earlier in time (`time -> time -
+offset`), so that the value observed at time `t` is the one the input carried
+at `t + offset` — the leading, forward-looking view. Only the `:time` column
+changes; all other columns pass through unchanged. This is the mirror of the
+causal [`lag`](@ref CausalFrames.lag).
+
+This operator is **acausal**: a row emitted at time `t` carries data from time
+`t + offset > t`. That is why it lives in the `CausalFrames.Acausal`
+submodule and must be opted into explicitly (`using CausalFrames.Acausal`);
+everything the top-level module exports stays causal.
+
+`offset` must be non-negative (a negative shift is just a `lag`); an
+`ArgumentError` is thrown when the pipeline runs otherwise, and `offset` `== 0`
+is the identity. The time type must support adding and subtracting the offset
+(numbers and `Dates` types do): the upstream pipeline is run over the window
+`[start + offset, stop + offset)` so the shifted output covers `[start, stop)`.
+
+The curried form composes with `|>`; the uncurried form applies directly, so
+`lead(p, offset)` is equivalent to `p |> lead(offset)`.
+"""
+function lead(offset)
+    return function (p::CausalPipeline)
+        return CausalPipeline() do ctx::Context
+            return chunkmap(c -> shiftchunk!(c, -offset), p.run(leadcontext(ctx, offset)))
+        end
+    end
+end
+lead(p::CausalPipeline, offset) = lead(offset)(p)
+
+# The mirror of lag's lagcontext: the whole window slides forward by the offset
+# so the -offset shift lands the output back in [start, stop). The guard rejects
+# a negative offset (which the Context constructor, only start <= stop, would
+# otherwise accept and silently turn into a causal lag).
+function leadcontext(ctx::Context, offset)
+    start = ctx.start + offset
+    start >= ctx.start ||
+        throw(ArgumentError("lead offset must be non-negative, got $offset"))
+    return Context(start, ctx.stop + offset)
 end
 
 end # module Acausal

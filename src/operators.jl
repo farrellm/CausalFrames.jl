@@ -469,6 +469,53 @@ end
 rowvalues(f, nt::NamedTuple) = [f(row) for row in Tables.rows(nt)]
 
 """
+    lag(offset) -> (CausalPipeline -> CausalPipeline)
+    lag(p::CausalPipeline, offset) -> CausalPipeline
+
+A transform shifting every row `offset` later in time (`time -> time +
+offset`), so that the value observed at time `t` is the one the input carried
+at `t - offset` — the lagged, backward-looking view. Only the `:time` column
+changes; all other columns pass through unchanged.
+
+`offset` must be non-negative (a negative shift would look into the future and
+break causality — see [`lead`](@ref CausalFrames.Acausal.lead) for that); an
+`ArgumentError` is thrown when the pipeline runs otherwise, and `offset` `== 0`
+is the identity. The time type must support adding and subtracting the offset
+(numbers and `Dates` types do): the upstream pipeline is run over the window
+`[start - offset, stop - offset)` so the shifted output covers `[start, stop)`.
+
+The curried form composes with `|>`; the uncurried form applies directly, so
+`lag(p, offset)` is equivalent to `p |> lag(offset)`.
+"""
+function lag(offset)
+    return function (p::CausalPipeline)
+        return CausalPipeline() do ctx::Context
+            return chunkmap(c -> shiftchunk!(c, offset), p.run(lagcontext(ctx, offset)))
+        end
+    end
+end
+lag(p::CausalPipeline, offset) = lag(offset)(p)
+
+# A negative offset would shift rows earlier, making lag acausal; reject it at
+# run time the way rightcontext validates tolerance (probe start - offset <=
+# start). This is the mirror of asofjoin's rightcontext: the whole window slides
+# back by the offset so the +offset shift lands the output in [start, stop).
+function lagcontext(ctx::Context, offset)
+    start = ctx.start - offset
+    start <= ctx.start ||
+        throw(ArgumentError("lag offset must be non-negative, got $offset"))
+    return Context(start, ctx.stop - offset)
+end
+
+# Shift the owned chunk's time column by a constant, preserving order (so no
+# re-sort) and column position. Shared with the acausal `lead`. `delta` may be
+# negative (lead subtracts). One allocation per chunk for the new column.
+shiftchunk!(c::DataFrame, delta) = (c[!, :time] = shifttime(c.time, delta); c)
+
+# Function barrier: the broadcast specializes on the concretely typed column.
+shifttime(times::AbstractVector, delta) = times .+ delta
+
+"""
     selectcolumns(selectors...) -> (CausalPipeline -> CausalPipeline)
     selectcolumns(p::CausalPipeline, selectors...) -> CausalPipeline
 
