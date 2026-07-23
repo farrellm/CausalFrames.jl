@@ -39,6 +39,13 @@ jobs:
       - uses: julia-actions/cache@v3
       - uses: julia-actions/julia-buildpkg@v1
       - uses: julia-actions/julia-runtest@v1
+        with:
+          # JET's latest (0.10+) drops Julia 1.10, so on the floor job we let
+          # the resolver pick JET's newest 1.10-compatible version instead of
+          # forcing latest. Dependabot/CompatHelper PRs otherwise force the
+          # newest JET, which is unsatisfiable on 1.10 and fails to resolve.
+          # 1.12/pre keep 'auto', still exercising the newest JET.
+          force_latest_compatible_version: ${{ matrix.version == '1.10' && 'false' || 'auto' }}
   format:
     name: Format check
     runs-on: ubuntu-latest
