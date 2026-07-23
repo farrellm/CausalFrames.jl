@@ -144,6 +144,25 @@ rowtype(::Type{T}, ::Type{K}, ::Type{S}, ::Val{R}) where {T,K,S,R} =
 valuetype(::Type{S}, ::Val{R}) where {S,R} =
     Base.promote_op(summaryvalues, S, Val{R})
 
+# The output value type an empty-tolerant transform emits: the summary values'
+# NamedTuple type (from the realized states `S`) promoted field-wise with the
+# empty values' (an empty window or interval emits the latter), so e.g. `Min`
+# over an `Int` column gives `Union{Missing, Int}`. `promote_op` can in
+# principle fail to concretize, hence the `Union` fallback. Shared by
+# `addrollingcolumns` (rolling.jl) and `intervalize` (intervalize.jl).
+function promotedvaluetype(::Type{S}, protos::Tuple, outs::Val) where {S}
+    VT = valuetype(S, outs)
+    e = emptyvalues(protos, outs)
+    E = typeof(e)
+    (VT <: NamedTuple && isconcretetype(VT) && fieldnames(VT) == keys(e)) ||
+        return Union{VT,E}
+    return NamedTuple{keys(e),
+        Tuple{
+            ntuple(i -> promote_type(fieldtype(VT, i), fieldtype(E, i)),
+                fieldcount(E))...,
+        }}
+end
+
 # Per-run mutable state shared by the three transforms. It lives in fields
 # rather than in the step/flush closures' captured locals because captured
 # variables that are reassigned get boxed. The dynamically typed fields are

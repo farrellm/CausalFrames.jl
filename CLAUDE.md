@@ -95,6 +95,15 @@ with any API or semantics change.**
   accumulator (`isinvertible`); float sums stay running because the
   compensated states evict NaN/±Inf rows cleanly; widening rebuilds
   structures from live rows
+- `src/intervalize.jl` — `intervalize`, the third binary transform: summarize
+  over the intervals a `clock` pipeline defines (`[bₖ, bₖ₊₁)`, timestamped at
+  `bₖ₊₁`). The `summarizecycles` fold with the close trigger driven by clock
+  boundaries; keyless emits a regular grid (empty intervals get `emptyvalue`s,
+  output types promoted via the shared `promotedvaluetype`), keyed is sparse
+  (present keys only, via `closecycle!`). The `chunkmap` over the data stream
+  pulls clock boundaries into a concrete `Vector{T}` per chunk (the pull is the
+  only dynamism; the per-row kernel stays dispatch-free), reusing `SummaryFold`
+  whole; `closelast` closes the trailing partial at `stop`
 - `src/precompile.jl` — PrecompileTools workload over the main paths
 
 ## Invariants and conventions

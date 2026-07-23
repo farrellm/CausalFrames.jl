@@ -126,6 +126,7 @@ Two kinds, both compatible with the chaining operator `|>`:
 | `dropcolumns(selectors...)` | transform | keep only the non-matching columns, in the input's own order (see "Column selectors") |
 | `summarize(ss; key)` | transform | summarize the whole context into rows at time `stop`; drops input columns |
 | `summarizecycles(ss; key)` | transform | summarize each cycle (maximal run of rows sharing a timestamp) independently; drops input columns |
+| `intervalize(clock, ss; key, closelast)` | transform | summarize over the intervals a clock pipeline defines (`[bₖ, bₖ₊₁)`, timestamped at `bₖ₊₁`); keyless is a regular grid, keyed is sparse (see "Interval summarization") |
 | `addsummarycolumns(ss; key)` | transform | keep input columns, append the running summary value after each row |
 | `addrollingcolumns(windows, ss; key, from)` | transform | keep input columns, append each summarizer's value over each named trailing window, prefixed `"{window}_"` (see "Rolling windows") |
 | `asofjoin(right; key, tolerance, strict, leftprefix, rightprefix, righttime)` | transform | left as-of join: append the most recent right row with time `<= time` (`strict`: `<`), per key; `missing` where none qualifies (see "As-of join") |
@@ -426,6 +427,50 @@ mode the type-unstable setup happens once per chunk and the per-row work
 sits behind concretely-typed function barriers; only the (possibly
 heterogeneous) look-backs peel vararg-style, the per-window dicts and value
 vectors being homogeneous and indexable type-stably.
+
+## Interval summarization
+
+`intervalize(clock, ss; key, closelast)` is the third binary operator: a
+**clock** pipeline supplies interval boundaries and the data stream is
+summarized over them, the same summarizer machinery as `summarize`, dropping
+the input columns. Everything after `clock` mirrors `summarize`. It relates to
+`summarizecycles` as a caller-chosen grid relates to the data's own
+timestamps: it is that fold with the close trigger changed from "the timestamp
+changed" to "a clock boundary was crossed".
+
+- **Boundaries.** The clock's `:time` column gives `b₀ < b₁ < … < b_K` (only
+  `:time` is read; other columns are ignored, and clock order is trusted to
+  the chunk protocol). Each complete interval `[bₖ, bₖ₊₁)` — inclusive of
+  begin, exclusive of end, the frame convention flipped from the sources'
+  `[start, stop)` only in which end is open — is summarized and emitted at its
+  **end** `bₖ₊₁`. This is causal: the summary at `bₖ₊₁` folds only rows with
+  time `< bₖ₊₁`. Input rows before `b₀` fall in no interval and are dropped.
+- **Keyless is a regular grid.** Every complete interval emits exactly one
+  row, an empty one included with the summarizers' identity/missing values
+  (`emptyvalue`), so an output column's element type is the field-wise
+  promotion of the summary value type with the empty value's (the
+  `addrollingcolumns` empty-window rule, via the shared `promotedvaluetype`).
+  A data stream producing no chunks still emits the whole empty grid, typed
+  from the configs alone.
+- **Keyed is sparse.** Unseen keys cannot be emitted causally, so each
+  interval emits one row per key present in it, sorted by key (the
+  `summarizecycles` / `closecycle!` convention); an empty interval emits
+  nothing.
+- **The trailing partial** `[b_K, stop)` after the final boundary is emitted
+  only when `closelast` (timestamped at `stop`, which frames tolerate);
+  otherwise its rows are dropped. An empty clock produces no output.
+
+The implementation is a `chunkmap` over the data stream that pulls clock
+boundaries on demand. The type-unstable pull (the clock iterator and its
+DataFrame column accesses are opaque, as `asofjoin`'s right stream is) is
+confined to the driver: before folding a chunk it fills a concrete `Vector{T}`
+of boundaries up to just past the chunk's last time, so the per-row fold
+kernel takes that typed vector and stays dispatch-free (JET-checked). The
+buffer carries the open interval across chunk boundaries and is trimmed to the
+current interval's begin; the `SummaryFold` from the summarize transforms is
+reused whole (schema promotion, state building and widening — a widening
+carries the open interval's accumulated state, exactly as `summarizecycles`
+does across a cycle boundary).
 
 ## Summarizers
 
@@ -770,6 +815,7 @@ still does not hold for them.
 | `src/join.jl` | the as-of join transform (`asofjoin`) |
 | `src/segtree.jl` | the monoid segment tree behind the rolling tree mode |
 | `src/rolling.jl` | the rolling-window summarization transform (`addrollingcolumns`) |
+| `src/intervalize.jl` | the interval-summarization transform (`intervalize`) |
 | `src/precompile.jl` | PrecompileTools workload covering the main pipeline paths |
 
 Exports: `Context`, `CausalFrame`, `CausalPipeline`, `load`, `stream`,
@@ -779,7 +825,8 @@ Exports: `Context`, `CausalFrame`, `CausalPipeline`, `load`, `stream`,
 `SummarizerState`, `Count`, `Sum`, `SumPower`,
 `Moment`, `Product`, `DotProduct`, `Mean`, `Variance`, `Std`, `Covariance`,
 `Correlation`, `Min`, `Max`, `First`, `Last`, `summarize`,
-`summarizecycles`, `addsummarycolumns`, `addrollingcolumns`, `asofjoin`.
+`summarizecycles`, `intervalize`, `addsummarycolumns`, `addrollingcolumns`,
+`asofjoin`.
 
 Dependencies: DataFrames, CSV, Tables, PrecompileTools; weak
 dependencies DuckDB and Parquet2, each behind a package extension

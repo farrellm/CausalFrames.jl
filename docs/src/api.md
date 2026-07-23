@@ -55,6 +55,7 @@ asofjoin
 ```@docs
 summarize
 summarizecycles
+intervalize
 addsummarycolumns
 addrollingcolumns
 Count
