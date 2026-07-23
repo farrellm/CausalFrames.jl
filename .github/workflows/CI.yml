@@ -50,24 +50,16 @@ jobs:
     name: Format check
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    permissions:
+      contents: read
+      pull-requests: write   # let the action post reviewdog suggestions on PRs
     steps:
       - uses: actions/checkout@v7
-      - uses: julia-actions/setup-julia@v3
+      - uses: julia-actions/julia-format@v4
         with:
-          version: '1'
-      - uses: julia-actions/cache@v3
-      - name: Check formatting
-        run: |
-          julia --color=yes -e '
-            using Pkg
-            Pkg.add(PackageSpec(name = "JuliaFormatter"))
-            using JuliaFormatter
-            if format("."; overwrite = false)
-                println("All files are formatted.")
-            else
-                @error "Some files need formatting. Run: julia -e '\''using JuliaFormatter; format(\".\")'\''"
-                exit(1)
-            end'
+          # Track JuliaFormatter v2, matching the previous unpinned `Pkg.add`
+          # (v1 formats differently and would reject the v2-formatted tree).
+          version: '2'
 
   docs:
     name: Documentation
