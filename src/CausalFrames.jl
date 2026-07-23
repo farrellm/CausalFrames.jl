@@ -28,6 +28,7 @@ include("join.jl")
 include("segtree.jl")
 include("rolling.jl")
 include("intervalize.jl")
+include("acausal.jl")
 include("precompile.jl")
 
 end

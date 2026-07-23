@@ -73,6 +73,13 @@
                     rightprefix = "r"),
             ),
         )
+        DataFrame(
+            load(
+                ctx,
+                p |> Acausal.futurejoin(readcsv(csv; types = csvtypes);
+                    key = :sym, rightprefix = "r", righttime = :rt),
+            ),
+        )
         foreach(DataFrame, stream(ctx, clock(1) |> summarize(Count())))
         scan(ctx, p |> writecsv(joinpath(dir, "precompile-out.csv")))
         DataFrame(load(ctx, emptyframe()))
