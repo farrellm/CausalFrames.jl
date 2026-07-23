@@ -57,7 +57,9 @@ jobs:
       - uses: actions/checkout@v7
       - uses: julia-actions/julia-format@v4
         with:
-          version: '1'
+          # Track JuliaFormatter v2, matching the previous unpinned `Pkg.add`
+          # (v1 formats differently and would reject the v2-formatted tree).
+          version: '2'
 
   docs:
     name: Documentation
