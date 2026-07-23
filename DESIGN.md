@@ -335,6 +335,51 @@ in the `summarize.jl` style. `strict` and `tolerance` ride in type
 parameters (`strict` as the comparison function `<` vs `<=`), so neither
 costs a per-row branch.
 
+## Forward join (acausal)
+
+`futurejoin` is the forward-looking mirror of `asofjoin`: it joins each left
+row to the **earliest** right row whose time is not before the left row's time
+(`strict = true`: strictly after), with `missing` where none qualifies. It is
+**acausal** — a row emitted at time `t` looks at right rows with time `>= t` —
+so it is the one operator that deliberately breaks the causal invariant, and
+it lives in the `CausalFrames.Acausal` submodule (`src/acausal.jl`), reached
+only through `using CausalFrames.Acausal` and never re-exported from the top
+level. Everything the top-level module exports stays causal.
+
+It mirrors `asofjoin`'s full API (`key`, `tolerance`, `strict`, `leftprefix`,
+`rightprefix`, `righttime`, curried + uncurried forms) and its streaming
+machinery — a `chunkmap` over the left stream pulling right chunks on demand,
+type-unstable setup once per right chunk, the per-row merge behind a function
+barrier — with three inversions:
+
+- **Match and tie-break.** The comparator `after` (`>` or `>=`) rides in a
+  type parameter, and its negation is the discard test (the reverse of
+  `asofjoin`'s `before`, never reused). Among right rows sharing the earliest
+  qualifying time, the **first** in stream order wins (`asofjoin` keeps the
+  last).
+- **Context widening.** With `tolerance` the match requires
+  `rtime - time <= tolerance` and the right pipeline runs over the widened
+  context `[start, stop + tolerance)` — the only place times are *added*
+  (`futurecontext`, mirror of `rightcontext`'s subtraction; an explicit guard
+  rejects negative tolerance, which the `Context` constructor would accept).
+  Without `tolerance` the right sees only `[start, stop)`, so left rows near
+  `stop` may find no later right row (mirror of `asofjoin` near `start`).
+- **Buffering.** Because the match is the *earliest* qualifying right row,
+  the store is a `Dict{K, KeyBuffer{V}}` of per-key FIFOs (append on pull,
+  logical pop-front by advancing a `head`, amortized compaction — the
+  `segtree.jl` idiom) rather than one row per key. Rows are held until a left
+  row consumes or outruns them, and confirming that a key has no future match
+  drains the right stream, so worst-case memory is O(number of right rows) —
+  the price of looking forward. `matches` stores copied row values, not buffer
+  indices, so compaction never invalidates an emitted match.
+
+The op-agnostic helpers (`normprefix`, `prefixed`, `storerowtype`,
+`storekeytype`, `rowat`, `keyat`, `matchcolumn`, plus `chunkmap`,
+`tokeycolumns`, `chunktypes`, `promotetypes`) are imported from the parent
+module; only the small config/state-typed helpers (`checkkeys`, `checknames`,
+`prefixleft!`, `assemble`) are duplicated, to carry `futurejoin` in their
+error messages.
+
 ## Rolling windows
 
 `addrollingcolumns(windows, ss; key, from)` is the second binary operator:
@@ -762,6 +807,13 @@ Causality gives the *chunk-concatenation property*: for sources and row-wise
 transforms, loading `[a, c)` equals concatenating the results of loading
 `[a, b)` and `[b, c)`. This property is what makes chunked evaluation sound.
 
+The one deliberate exception is `CausalFrames.Acausal.futurejoin` (see
+[Forward join (acausal)](#forward-join-acausal)), whose output at time `t`
+looks at right rows with time `>= t`. It is quarantined in the `Acausal`
+submodule and never re-exported, so opting into acausality is explicit
+(`using CausalFrames.Acausal`) and everything the top-level module exports
+keeps the guarantee above.
+
 Evaluation is streaming end to end: operators pass chunks between each other
 lazily and only `load` materializes the whole window. The incremental entry
 point is
@@ -816,6 +868,7 @@ still does not hold for them.
 | `src/segtree.jl` | the monoid segment tree behind the rolling tree mode |
 | `src/rolling.jl` | the rolling-window summarization transform (`addrollingcolumns`) |
 | `src/intervalize.jl` | the interval-summarization transform (`intervalize`) |
+| `src/acausal.jl` | the `Acausal` submodule: the forward join (`futurejoin`) |
 | `src/precompile.jl` | PrecompileTools workload covering the main pipeline paths |
 
 Exports: `Context`, `CausalFrame`, `CausalPipeline`, `load`, `stream`,
@@ -827,6 +880,10 @@ Exports: `Context`, `CausalFrame`, `CausalPipeline`, `load`, `stream`,
 `Correlation`, `Min`, `Max`, `First`, `Last`, `summarize`,
 `summarizecycles`, `intervalize`, `addsummarycolumns`, `addrollingcolumns`,
 `asofjoin`.
+
+`CausalFrames.Acausal` and its `futurejoin` are deliberately **not** in this
+list: the acausal join is reached only through `using CausalFrames.Acausal`,
+so acausality is always an explicit opt-in.
 
 Dependencies: DataFrames, CSV, Tables, PrecompileTools; weak
 dependencies DuckDB and Parquet2, each behind a package extension

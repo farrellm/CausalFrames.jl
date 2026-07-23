@@ -50,6 +50,13 @@ dropcolumns
 asofjoin
 ```
 
+The forward-looking join lives in the `CausalFrames.Acausal` submodule and is
+not re-exported — reach it with `using CausalFrames.Acausal`.
+
+```@docs
+CausalFrames.Acausal.futurejoin
+```
+
 ## Summarization
 
 ```@docs

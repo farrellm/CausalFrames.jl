@@ -7,6 +7,7 @@
 
 using BenchmarkTools
 using CausalFrames
+using CausalFrames.Acausal: futurejoin
 using DataFrames
 
 # A deterministic keyed trades table served in chunks, like a real source.
@@ -25,6 +26,9 @@ end
 const N = 1_000_000
 const CTX = Context(0, N)
 const SRC = tradesource(N)
+# A second, independent source for the binary joins, so the right side is not
+# a self join (which would need a prefix).
+const SRC2 = tradesource(N)
 
 const CSVPATH = joinpath(mktempdir(), "bench.csv")
 open(CSVPATH, "w") do io
@@ -112,6 +116,19 @@ SUITE["rolling"]["tree"] = @benchmarkable load(RCTX,
     RSRC |> addrollingcolumns((; w25 = 25), [Min(:qty), Max(:qty)]))
 SUITE["rolling"]["refold"] = @benchmarkable load(RCTX,
     RSRC |> addrollingcolumns((; w25 = 25), [RefoldWrap(Sum(:qty))]))
+
+# The causal as-of join against its acausal forward mirror, over the same two
+# sources. futurejoin's per-key row buffers are the cost the comparison
+# exposes, against asofjoin's single-row-per-key store.
+SUITE["join"] = BenchmarkGroup()
+SUITE["join"]["asof"] =
+    @benchmarkable load(CTX, SRC |> asofjoin(SRC2; rightprefix = "r"))
+SUITE["join"]["future"] =
+    @benchmarkable load(CTX, SRC |> futurejoin(SRC2; rightprefix = "r"))
+SUITE["join"]["asof-keyed"] = @benchmarkable load(CTX,
+    SRC |> asofjoin(SRC2; key = :sym, rightprefix = "r"))
+SUITE["join"]["future-keyed"] = @benchmarkable load(CTX,
+    SRC |> futurejoin(SRC2; key = :sym, rightprefix = "r"))
 
 if abspath(PROGRAM_FILE) == @__FILE__
     tune!(SUITE)
