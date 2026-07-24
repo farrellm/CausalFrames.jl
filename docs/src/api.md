@@ -23,6 +23,7 @@ scan
 
 ```@docs
 emptyframe
+concatenate
 clock
 readcsv
 readparquet
