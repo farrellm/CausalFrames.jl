@@ -25,6 +25,7 @@
             ),
         )
         DataFrame(load(ctx, p |> selectcolumns(:sym, r"^q") |> dropcolumns(:sym)))
+        DataFrame(load(ctx, p |> lag(1)))
         DataFrame(load(ctx, p |> summarize([Count(), Sum(:v)]; key = :sym)))
         DataFrame(load(ctx, p |> summarizecycles(Sum(:v); key = :sym)))
         DataFrame(
@@ -80,6 +81,7 @@
                     key = :sym, rightprefix = "r", righttime = :rt),
             ),
         )
+        DataFrame(load(ctx, p |> Acausal.lead(1)))
         foreach(DataFrame, stream(ctx, clock(1) |> summarize(Count())))
         scan(ctx, p |> writecsv(joinpath(dir, "precompile-out.csv")))
         DataFrame(load(ctx, emptyframe()))

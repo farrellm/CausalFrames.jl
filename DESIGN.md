@@ -130,6 +130,7 @@ Two kinds, both compatible with the chaining operator `|>`:
 | `addsummarycolumns(ss; key)` | transform | keep input columns, append the running summary value after each row |
 | `addrollingcolumns(windows, ss; key, from)` | transform | keep input columns, append each summarizer's value over each named trailing window, prefixed `"{window}_"` (see "Rolling windows") |
 | `asofjoin(right; key, tolerance, strict, leftprefix, rightprefix, righttime)` | transform | left as-of join: append the most recent right row with time `<= time` (`strict`: `<`), per key; `missing` where none qualifies (see "As-of join") |
+| `lag(offset)` | transform | shift every row `offset` later in time (`time -> time + offset`); the value at time `t` is the input's value at `t - offset` (see "Lead and lag") |
 
 Row functions (`pred`, `f`) receive a map-like row object supporting
 `row.name` and `row[:name]` access (Tables.jl row semantics), including
@@ -379,6 +380,38 @@ The op-agnostic helpers (`normprefix`, `prefixed`, `storerowtype`,
 module; only the small config/state-typed helpers (`checkkeys`, `checknames`,
 `prefixleft!`, `assemble`) are duplicated, to carry `futurejoin` in their
 error messages.
+
+## Lead and lag
+
+`lag` and `lead` shift every row in time by a fixed `offset`, changing only the
+`:time` column and passing all others through. They are the standard
+time-series lead/lag: the value observed at time `t` is the input's value at
+`t - offset` for `lag` (the backward-looking, lagged view) and at `t + offset`
+for `lead` (the forward-looking view). Both are stateless `chunkmap`s — no
+buffering, no per-key store — and a constant shift preserves the non-decreasing
+order, so no re-sort is needed.
+
+The one subtlety is the window math. Because `load`/`stream` reject any chunk
+time outside `[start, stop]`, the upstream pipeline is run over an
+*oppositely-shifted* context so the shifted output lands back in `[start, stop)`:
+
+- `lag(offset)` (`t -> t + offset`) runs upstream over `[start - offset,
+  stop - offset)` and adds `offset`. Output at `t` depends only on input at
+  `t - offset <= t`, so it is **causal**, lives in `src/operators.jl`, and is
+  exported. `lagcontext` mirrors `asofjoin`'s `rightcontext`.
+- `lead(offset)` (`t -> t - offset`) runs upstream over `[start + offset,
+  stop + offset)` and subtracts `offset`. Output at `t` depends on input at
+  `t + offset > t`, so it is **acausal** and lives in the `CausalFrames.Acausal`
+  submodule alongside `futurejoin`, never re-exported. `leadcontext` mirrors
+  `futurecontext`.
+
+Both require the time type to support adding and subtracting the offset (numbers
+and `Dates` types do), reject a negative `offset` when the pipeline runs (the
+guard `rightcontext`/`futurecontext` use, since a negative shift would flip the
+causality contract), and treat `offset == 0` as the identity. The shared
+`shiftchunk!`/`shifttime` (broadcast add behind a function barrier) lives in
+`src/operators.jl` and is imported into the submodule; `lead` shifts by
+`-offset`.
 
 ## Rolling windows
 
@@ -807,10 +840,12 @@ Causality gives the *chunk-concatenation property*: for sources and row-wise
 transforms, loading `[a, c)` equals concatenating the results of loading
 `[a, b)` and `[b, c)`. This property is what makes chunked evaluation sound.
 
-The one deliberate exception is `CausalFrames.Acausal.futurejoin` (see
+The deliberate exceptions are `CausalFrames.Acausal.futurejoin` (see
 [Forward join (acausal)](#forward-join-acausal)), whose output at time `t`
-looks at right rows with time `>= t`. It is quarantined in the `Acausal`
-submodule and never re-exported, so opting into acausality is explicit
+looks at right rows with time `>= t`, and `CausalFrames.Acausal.lead` (see
+[Lead and lag](#lead-and-lag)), whose output at time `t` carries the input's
+value from `t + offset`. Both are quarantined in the `Acausal` submodule and
+never re-exported, so opting into acausality is explicit
 (`using CausalFrames.Acausal`) and everything the top-level module exports
 keeps the guarantee above.
 
@@ -858,7 +893,7 @@ still does not hold for them.
 | `src/frame.jl` | `CausalFrame{T}`, invariants, Tables.jl interface |
 | `src/chunks.jl` | internal chunk-iterator machinery (`ChunkSource`, `chunkmap`) |
 | `src/pipeline.jl` | `CausalPipeline{F}`, `load`, `stream` |
-| `src/operators.jl` | sources, the CSV sink, and row-wise transforms |
+| `src/operators.jl` | sources, the CSV sink, row-wise transforms, and the causal time shift (`lag`) with the shared `shiftchunk!` |
 | `src/parquet.jl` | the parquet operators, their docstrings, and backend selection |
 | `ext/CausalFramesDuckDBExt.jl` | the DuckDB backend: the preferred reader, the fallback writer |
 | `ext/CausalFramesParquet2Ext.jl` | the Parquet2 backend: the preferred writer, the fallback reader |
@@ -868,7 +903,7 @@ still does not hold for them.
 | `src/segtree.jl` | the monoid segment tree behind the rolling tree mode |
 | `src/rolling.jl` | the rolling-window summarization transform (`addrollingcolumns`) |
 | `src/intervalize.jl` | the interval-summarization transform (`intervalize`) |
-| `src/acausal.jl` | the `Acausal` submodule: the forward join (`futurejoin`) |
+| `src/acausal.jl` | the `Acausal` submodule: the forward join (`futurejoin`) and the acausal time shift (`lead`) |
 | `src/precompile.jl` | PrecompileTools workload covering the main pipeline paths |
 
 Exports: `Context`, `CausalFrame`, `CausalPipeline`, `load`, `stream`,
@@ -879,11 +914,11 @@ Exports: `Context`, `CausalFrame`, `CausalPipeline`, `load`, `stream`,
 `Moment`, `Product`, `DotProduct`, `Mean`, `Variance`, `Std`, `Covariance`,
 `Correlation`, `Min`, `Max`, `First`, `Last`, `summarize`,
 `summarizecycles`, `intervalize`, `addsummarycolumns`, `addrollingcolumns`,
-`asofjoin`.
+`asofjoin`, `lag`.
 
-`CausalFrames.Acausal` and its `futurejoin` are deliberately **not** in this
-list: the acausal join is reached only through `using CausalFrames.Acausal`,
-so acausality is always an explicit opt-in.
+`CausalFrames.Acausal` and its `futurejoin` and `lead` are deliberately **not**
+in this list: the acausal operators are reached only through
+`using CausalFrames.Acausal`, so acausality is always an explicit opt-in.
 
 Dependencies: DataFrames, CSV, Tables, PrecompileTools; weak
 dependencies DuckDB and Parquet2, each behind a package extension

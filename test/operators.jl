@@ -404,3 +404,53 @@ end
 
     @test_throws ArgumentError readcsv(path; types = it, chunkbytes = 0)
 end
+
+@testset "lag" begin
+    ctx = Context(0, 10)
+    # clock clips to the context; carry the (pre-shift) time as a value column
+    src = clock(1) |> addcolumns(r -> (; v = float(r.time)))
+
+    # lag shifts every row +offset in time; other columns pass through, so the
+    # value seen at time t is the one the input had at t - offset.
+    df = DataFrame(load(ctx, src |> lag(2)))
+    # the window slid back to [-2, 8) fills all of [0, 10); v at output t is (t - 2)
+    @test df.time == 0:9
+    @test df.v == collect(-2.0:7.0)
+    @test names(df) == ["time", "v"]
+
+    # the upstream pipeline is run over the window slid back by the offset
+    seen = Ref{Any}(nothing)
+    recorder = CausalPipeline() do c
+        seen[] = c
+        [DataFrame(time = [c.start], v = [1.0])]
+    end
+    load(ctx, recorder |> lag(3))
+    @test seen[] == Context(-3, 7)
+
+    # offset 0 is the identity
+    @test isequal(DataFrame(load(ctx, src |> lag(0))), DataFrame(load(ctx, src)))
+
+    # a negative offset would look forward (acausal); rejected when the
+    # pipeline runs, mirroring asofjoin's tolerance guard
+    @test_throws ArgumentError load(ctx, src |> lag(-1))
+
+    # streaming matches load
+    streamed = reduce(vcat, [DataFrame(f) for f in stream(ctx, src |> lag(2))])
+    @test isequal(streamed, df)
+
+    # Dates time with a Period offset
+    dsrc = CausalPipeline() do c
+        [DataFrame(time = [DateTime(2020, 1, 1, 1), DateTime(2020, 1, 1, 2)],
+                x = [1, 2])]
+    end
+    dctx = Context(DateTime(2020, 1, 1), DateTime(2020, 1, 2))
+    ddf = DataFrame(load(dctx, dsrc |> lag(Hour(1))))
+    @test ddf.time == [DateTime(2020, 1, 1, 2), DateTime(2020, 1, 1, 3)]
+    @test ddf.x == [1, 2]
+
+    # transform on an empty frame is a no-op
+    @test nrow(load(ctx, emptyframe() |> lag(2))) == 0
+
+    # the uncurried, pipeline-first form equals the |> chain
+    @test isequal(DataFrame(load(ctx, lag(src, 2))), df)
+end
