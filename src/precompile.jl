@@ -26,6 +26,13 @@
         )
         DataFrame(load(ctx, p |> selectcolumns(:sym, r"^q") |> dropcolumns(:sym)))
         DataFrame(load(ctx, p |> lag(1)))
+        DataFrame(
+            load(
+                ctx,
+                concatenate(p |> filterrows(r -> r.time <= 2),
+                    p |> filterrows(r -> r.time > 2)),
+            ),
+        )
         DataFrame(load(ctx, p |> summarize([Count(), Sum(:v)]; key = :sym)))
         DataFrame(load(ctx, p |> summarizecycles(Sum(:v); key = :sym)))
         DataFrame(
