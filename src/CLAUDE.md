@@ -45,26 +45,37 @@ design rationale and performance constraints behind each module.
   so results never depend on it. `backend = :duckdb`/`:parquet2` forces the
   choice, which is how the tests cover all four combinations in one process;
   working on parquet means loading `DuckDB`/`Parquet2` in the session first
-- `src/summarizers.jl` — `Summarizer` (immutable config, column name in a
-  type parameter) and `SummarizerState` (running state, typed from the input
-  schema) plus their interface (`emptyvalue`, `fresh`, `update!`, `value`,
-  `widenstate`, `dependencies`, `combine!`, `downdate!`, `isinvertible` —
-  unexported), the structured subtypes `MonoidSummarizer` (associative
-  `combine!` over stream-ordered ranges, fresh state as identity) and
-  `GroupSummarizer <: MonoidSummarizer` (invertible via `downdate!`), and
-  the concrete summarizers (`Min`/`Max`/`First`/`Last` share one state
-  type, parameterized by the combiner — monoids only, as is `Product`;
-  the accumulators and all dependent summarizers are groups; `Moment` is
-  the dependent-summarizer example, reading its dependencies' values
-  through the two-argument `value(st, vals)`; the sum family
-  `Sum`/`SumPower`/`DotProduct` shares one plain and one compensated
-  state over a term functor — `ColumnTerm`/`PowerTerm`/`PairProductTerm`,
-  terms formed at accumulator width — with the `Compensated` pair doing
-  Neumaier summation over finite terms, NaN/±Inf counted separately, the
-  IEEE result reconstructed in `value`; a `Missing`-admitting column gets
-  the flat `Optional*` counting states over the non-missing type, counting
-  `missing` terms the same way so the accumulator stays invertible — no
-  `Union{Missing,_}` accumulation field, only `value`'s return)
+- `src/summarizers.jl` — `Summarizer` (immutable config, output column name in
+  a type parameter) and `SummarizerState` (running state, typed from the input
+  schema), plus their unexported interface: `emptyvalue`, `fresh`, `update!`,
+  `value`, `widenstate`, `dependencies`, `combine!`, `downdate!`,
+  `isinvertible`. Within that:
+  - the structured subtypes are `MonoidSummarizer` (states combine
+    associatively over stream-ordered ranges via `combine!`, fresh state as
+    the identity) and `GroupSummarizer <: MonoidSummarizer` (also invertible,
+    via `downdate!`). This split is what `rolling.jl` dispatches its window
+    algorithm on, so which one a new summarizer claims is a performance
+    decision, not a taxonomy one
+  - `Min`/`Max`/`First`/`Last` share one state type (`TrackState`,
+    parameterized by the combiner) and are monoids only, as is `Product`; the
+    accumulators and every dependent summarizer are groups
+  - the dependent summarizers (`Moment`, `Mean`, `Variance`, `Std`,
+    `Covariance`, `Correlation`) carry no state of their own — their state
+    structs are empty. They declare `dependencies` and read those values back
+    through the two-argument `value(st, vals)`
+  - the sum family `Sum`/`SumPower`/`DotProduct` shares one plain and one
+    compensated state over a term functor (`ColumnTerm`/`PowerTerm`/
+    `PairProductTerm`, terms formed at accumulator width). The `Compensated`
+    pair runs Neumaier summation over the finite terms and counts NaN/±Inf
+    separately, reconstructing the IEEE result in `value` — that separation is
+    what lets a rolling window evict a nonfinite row cleanly and stay on the
+    running path. `BigFloat` is excluded on purpose: compensation buys nothing
+    at arbitrary precision, and a non-isbits `Compensated` would allocate per
+    row
+  - a `Missing`-admitting accumulator type gets the flat `Optional*` counting
+    states over the non-missing type, counting `missing` terms exactly as the
+    compensated states count nonfinites, so the accumulator stays invertible —
+    no `Union{Missing,_}` accumulation field, only in `value`'s return
 - `src/summarize.jl` — the folding kernels and the transforms `summarize`,
   `summarizecycles`, `addsummarycolumns`; `prototypes` expands dependencies
   topologically and returns the requested output names, which ride through
