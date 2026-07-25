@@ -130,6 +130,30 @@ Summarizers are typed from the input schema, so folding a large window
 allocates on the order of kilobytes — see DESIGN.md for the interface a custom
 `Summarizer` implements.
 
-Every operator is **causal** — its output at time `t` depends only on input
-rows with time `≤ t` — which is what makes streaming evaluation sound. See
-[DESIGN.md](DESIGN.md) for the full design.
+## Causality
+
+Every operator above is **causal**: its output at time `t` depends only on
+input rows with time `≤ t`. That gives the *chunk-concatenation property* —
+loading `[a, c)` equals concatenating the results of loading `[a, b)` and
+`[b, c)` — which is what makes chunked, streaming evaluation sound.
+
+The two forward-looking operators are the deliberate exceptions. They live in
+the `Acausal` submodule and are never re-exported, so opting into acausality is
+always explicit:
+
+```julia
+using CausalFrames.Acausal
+
+quotes |> futurejoin(fills; key = :symbol)  # earliest fill at or after each quote
+prices |> lead(Minute(5))                   # time -> time - offset
+```
+
+`futurejoin` mirrors `asofjoin` with the match direction inverted — the
+**earliest** right row whose time is not before the left row's, `missing` where
+none qualifies — and `lead` mirrors `lag`. One cost worth knowing before
+reaching for it: because `futurejoin` matches the earliest qualifying row, it
+buffers right rows per key until a left row consumes or outruns them, and
+proving that a key has no future match drains the right stream. Worst-case
+memory is therefore O(right rows), against `asofjoin`'s O(keys).
+
+See [DESIGN.md](DESIGN.md) for the full design.
