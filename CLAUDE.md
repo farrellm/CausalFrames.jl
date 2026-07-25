@@ -9,7 +9,9 @@ with any API or semantics change.**
 ## Commands
 
 - Run tests: `julia --project -e 'using Pkg; Pkg.test()'` (includes Aqua
-  and, on released Julia versions, targeted JET checks in `test/jet.jl`)
+  and, on released Julia versions, targeted JET checks in `test/jet.jl`).
+  Test files aren't standalone — they rely on `runtests.jl`'s imports and
+  `test/fixtures.jl`, so `julia --project test/rolling.jl` won't run
 - Build docs: `julia --project=docs docs/make.jl` (one-time setup:
   `julia --project=docs -e 'using Pkg; Pkg.develop(path="."); Pkg.instantiate()'`).
   Documenter runs strict — an unregistered docstring fails the docs CI job
@@ -30,6 +32,9 @@ with any API or semantics change.**
 
 Per-module design rationale lives in `src/CLAUDE.md` (loaded when working
 under `src/`); DESIGN.md's "Module layout" table is the canonical index.
+The parquet backends live in `ext/` behind weak deps. `notes/` holds
+investigation records — measurements and rejected designs, kept so they
+aren't re-derived, and explicitly *not* design law.
 
 ## Adding an operator
 
@@ -44,7 +49,9 @@ fails), `DESIGN.md` (module table, export list, semantics), `src/precompile.jl`
   the closed interval `[start, stop]` (intermediate ops may emit at `stop`).
 - Every operator must be *causal*: output at time `t` depends only on input
   rows with time `<= t`. This guarantees the chunk-concatenation property
-  that streaming will rely on.
+  that streaming will rely on. The sole escape hatch is the `Acausal`
+  submodule (`src/acausal.jl`), never re-exported — a forward-looking
+  operator goes there, reached only via `using CausalFrames.Acausal`.
 - Never expose the backing DataFrames of a `CausalFrame`; `DataFrame(frame)`
   copies. The internal chunk protocol yields only non-empty chunks; `load`
   of an empty stream gives a zero-row frame with only `:time`.

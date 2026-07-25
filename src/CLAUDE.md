@@ -24,7 +24,12 @@ design rationale and performance constraints behind each module.
   so both chain with `|>`; row functions run over concretely typed column
   table rows behind a per-chunk function barrier, never `DataFrameRow`s;
   `clipchunk!` (rename, resolve `:time`, sortedness, clip, convert) and the
-  `ChunkSink` background writer are shared with the parquet operators
+  `ChunkSink` background writer are shared with the parquet operators.
+  `readcsv` never infers types — every column is `String` unless `types`
+  opts it into a concrete one (`notes/readcsv-stringtype.md` records why
+  CSV.jl's own `stringtype` default stays out). `lag` shifts times via the
+  shared `shiftchunk!` and widens the context in `lagcontext`, the mirror
+  of `Acausal.lead`
 - `src/merge.jl` — `Base.merge(ps::CausalPipeline...)`, the n-ary
   time-interleaving source (extends Base rather than shadowing it; no
   zero-arg form, which would capture `merge()`): one `MergeCursor` per
