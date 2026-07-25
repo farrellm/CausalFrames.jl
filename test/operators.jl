@@ -454,3 +454,89 @@ end
     # the uncurried, pipeline-first form equals the |> chain
     @test isequal(DataFrame(load(ctx, lag(src, 2))), df)
 end
+
+@testset "concatenate" begin
+    ctx = Context(0, 10)
+    withv = addcolumns(r -> (; v = float(r.time)))
+    whole = clock(1) |> withv
+    early = clock(1) |> filterrows(r -> r.time < 4) |> withv
+    late = clock(1) |> filterrows(r -> r.time >= 4) |> withv
+
+    # the pipelines are emitted end to end, so splitting a stream in time and
+    # concatenating the halves reproduces it
+    df = DataFrame(load(ctx, concatenate(early, late)))
+    @test df.time == 0:9
+    @test df.v == collect(0.0:9.0)
+    @test names(df) == ["time", "v"]
+    @test isequal(df, DataFrame(load(ctx, whole)))
+
+    # every pipeline is run over the full context, and clips itself
+    seen = Context[]
+    recorder(t) = CausalPipeline() do c
+        push!(seen, c)
+        return [DataFrame(time = [t], x = [t])]
+    end
+    load(ctx, concatenate(recorder(1), recorder(2)))
+    @test seen == [ctx, ctx]
+
+    # a pipeline is not run until the previous one is exhausted
+    runs = Int[]
+    probe(i, t) = CausalPipeline() do c
+        push!(runs, i)
+        return [DataFrame(time = [t], x = [i])]
+    end
+    it = concatenate(probe(1, 1), probe(2, 2)).run(ctx)
+    next = iterate(it)
+    @test runs == [1]
+    @test iterate(it, next[2]) !== nothing
+    @test runs == [1, 2]
+
+    at(t, x) = CausalPipeline(c -> [DataFrame(time = [t], x = [x])])
+
+    # equal times across a boundary are fine — the output only has to be
+    # non-decreasing
+    @test DataFrame(load(ctx, concatenate(at(5, 1), at(5, 2)))).x == [1, 2]
+
+    # pipelines out of time order are rejected
+    @test_throws ArgumentError load(ctx, concatenate(at(5, 1), at(4, 2)))
+    @test_throws ArgumentError load(ctx, concatenate(late, early))
+
+    # so are differing columns, whether renamed or merely reordered
+    ab = CausalPipeline(c -> [DataFrame(time = [1], a = [1], b = [2])])
+    ba = CausalPipeline(c -> [DataFrame(time = [2], b = [2], a = [1])])
+    ac = CausalPipeline(c -> [DataFrame(time = [2], a = [1], c = [3])])
+    @test_throws ArgumentError load(ctx, concatenate(ab, ba))
+    @test_throws ArgumentError load(ctx, concatenate(ab, ac))
+
+    # element types promote across pipelines, as they do across chunks
+    ints = CausalPipeline(c -> [DataFrame(time = [1], x = [1])])
+    floats = CausalPipeline(c -> [DataFrame(time = [2], x = [2.5])])
+    @test eltype(DataFrame(load(ctx, concatenate(ints, floats))).x) == Float64
+
+    # pipelines producing nothing are skipped, wherever they sit
+    @test isequal(
+        DataFrame(
+            load(ctx, concatenate(emptyframe(), early, emptyframe(), late,
+                emptyframe())),
+        ),
+        df,
+    )
+
+    # no pipelines at all is emptyframe, the identity of concatenation
+    blank = load(ctx, concatenate())
+    @test nrow(blank) == 0
+    @test names(blank) == ["time"]
+
+    # one pipeline is that pipeline
+    @test isequal(DataFrame(load(ctx, concatenate(whole))),
+        DataFrame(load(ctx, whole)))
+
+    # the result chains like any other pipeline
+    @test DataFrame(load(ctx,
+        concatenate(early, late) |> filterrows(r -> r.v > 6))).time == 7:9
+
+    # streaming matches load
+    streamed = reduce(vcat,
+        [DataFrame(f) for f in stream(ctx, concatenate(early, late))])
+    @test isequal(streamed, df)
+end

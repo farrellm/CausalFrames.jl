@@ -115,6 +115,7 @@ Two kinds, both compatible with the chaining operator `|>`:
 | Operator | Kind | Semantics |
 |---|---|---|
 | `emptyframe()` | source | zero rows, just a `:time` column |
+| `concatenate(ps...)` | source | run the pipelines one after another over the same context and emit their chunks end to end; they must be passed in time order and have identical columns (see "Concatenation") |
 | `clock(interval; batchsize)` | source | rows at `start, start + interval, …` while `< stop`; no other columns; generated lazily in chunks of `batchsize` rows |
 | `readcsv(path; types, time, rename, delim, chunkbytes)` | source | CSV file, every column read as `String` unless `types` opts it into a concrete type; the time column (named `:time`, or chosen by `time` as a column name or a per-row function) must be typed and sorted; `rename` maps column names first; rows clipped to `[start, stop)`; read incrementally in chunks of roughly `chunkbytes` bytes — never all at once — stopping as soon as a time `>= stop` is seen |
 | `writecsv(path; queue, ...)` | transform | transparent pass-through sink: writes each chunk to `path` as it flows by and yields it downstream unchanged (see "CSV output") |
@@ -285,6 +286,48 @@ against the column names it was resolved from, so a stream whose schema never
 moves — the norm — runs the selectors and the validation once, on its first
 chunk, while a schema that does move is re-resolved and re-validated rather
 than projected through a stale column list.
+
+## Concatenation
+
+`concatenate(ps...)` is the **n-ary** combinator: it runs the pipelines one
+after another over the same context and emits their chunks end to end, the
+time-wise concatenation of their outputs. It is not curried — every argument
+is a `CausalPipeline`, so a curried form would be indistinguishable from a
+direct one, and there is no uncurried/curried pair to provide. Zero pipelines
+gives `emptyframe()`, the identity of concatenation.
+
+Two preconditions, both the caller's to satisfy and both checked as the chunks
+flow by (O(ncols) per chunk, nothing per row):
+
+- **Time order.** The pipelines must be passed in time order; a chunk whose
+  first time precedes the last time already emitted is an `ArgumentError`
+  naming the two pipelines. Equal times across a boundary are fine — the
+  output only has to be non-decreasing. Within one pipeline the chunk protocol
+  already guarantees this, but checking every chunk costs nothing extra and
+  turns what `load`'s `checkchunk` would report as a generic cross-chunk
+  violation into a message that names the pipeline that is out of place.
+- **Identical columns.** Chunks must carry the same column names in the same
+  order as the first chunk seen, the same rule the sinks apply in
+  `sinkchunk`. Element *types* may still differ between pipelines, exactly as
+  they may between the chunks of one pipeline: `DataFrame(cf)` promotes on
+  concatenation.
+
+There is no interleaving and no merging — that would need a lookahead across
+pipelines, and the point here is that the streams are already disjoint in
+time. Each pipeline is evaluated over the **whole** context `[start, stop)`
+and clips itself, so overlapping windows are caught by the time-order check
+rather than silently reordered.
+
+The mechanism is the `ChunkSource` producer `ConcatProducer`, in the shape of
+readcsv's `CSVProducer`: per-run state in fields rather than reassigned
+closure captures, and the dynamically typed fields (the current chunk
+iterator and its state) touched once per *pipeline*, not per chunk and never
+per row. A pipeline's `run(ctx)` is called only once the previous one is
+exhausted, which keeps the chain as lazy as its parts — a chain of file
+sources holds one file open at a time.
+
+Causality is trivial: rows pass through unchanged and in time order, so
+output at time `t` still depends only on input rows at time `≤ t`.
 
 ## As-of join
 
@@ -893,7 +936,7 @@ still does not hold for them.
 | `src/frame.jl` | `CausalFrame{T}`, invariants, Tables.jl interface |
 | `src/chunks.jl` | internal chunk-iterator machinery (`ChunkSource`, `chunkmap`) |
 | `src/pipeline.jl` | `CausalPipeline{F}`, `load`, `stream` |
-| `src/operators.jl` | sources, the CSV sink, row-wise transforms, and the causal time shift (`lag`) with the shared `shiftchunk!` |
+| `src/operators.jl` | sources (including the n-ary `concatenate`), the CSV sink, row-wise transforms, and the causal time shift (`lag`) with the shared `shiftchunk!` |
 | `src/parquet.jl` | the parquet operators, their docstrings, and backend selection |
 | `ext/CausalFramesDuckDBExt.jl` | the DuckDB backend: the preferred reader, the fallback writer |
 | `ext/CausalFramesParquet2Ext.jl` | the Parquet2 backend: the preferred writer, the fallback reader |
@@ -907,7 +950,7 @@ still does not hold for them.
 | `src/precompile.jl` | PrecompileTools workload covering the main pipeline paths |
 
 Exports: `Context`, `CausalFrame`, `CausalPipeline`, `load`, `stream`,
-`scan`, `context`, `timetype`, `emptyframe`, `clock`, `readcsv`, `writecsv`, `readparquet`,
+`scan`, `context`, `timetype`, `emptyframe`, `concatenate`, `clock`, `readcsv`, `writecsv`, `readparquet`,
 `writeparquet`, `filterrows`,
 `addcolumns`, `selectcolumns`, `dropcolumns`, `Summarizer`, `MonoidSummarizer`, `GroupSummarizer`,
 `SummarizerState`, `Count`, `Sum`, `SumPower`,

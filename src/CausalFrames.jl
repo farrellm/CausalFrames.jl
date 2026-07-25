@@ -7,7 +7,8 @@ using Tables
 
 export Context, CausalFrame, CausalPipeline, load, stream, scan, context,
     timetype,
-    emptyframe, clock, readcsv, writecsv, readparquet, writeparquet,
+    emptyframe, concatenate, clock, readcsv, writecsv, readparquet,
+    writeparquet,
     filterrows, addcolumns,
     selectcolumns, dropcolumns, lag,
     Summarizer, MonoidSummarizer, GroupSummarizer, SummarizerState,

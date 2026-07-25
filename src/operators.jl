@@ -14,6 +14,102 @@ a `:time` column).
 emptyframe() = CausalPipeline(ctx -> ChunkSource(() -> nothing))
 
 """
+    concatenate(ps::CausalPipeline...) -> CausalPipeline
+
+A source running the given pipelines one after another over the same context
+and emitting their chunks end to end — the time-wise concatenation of their
+outputs. There is no interleaving and no merging: the pipelines must be passed
+in time order and must produce identical column names.
+
+Every pipeline is evaluated over the whole context `[start, stop)` and clips
+itself, so keeping their windows from overlapping is the caller's business.
+Each is run only once the previous one is exhausted, which keeps the chain as
+lazy as its parts — a chain of file sources holds one file open at a time.
+
+Both requirements are checked as the chunks flow by: an `ArgumentError` is
+thrown when a chunk's column names differ from the first chunk's, or when a
+chunk's first time precedes the last time already emitted (equal times across
+a boundary are fine). Element *types* may differ between pipelines, as they
+may between the chunks of one pipeline — `DataFrame(frame)` promotes on
+concatenation.
+
+`concatenate()` with no pipelines is [`emptyframe`](@ref), the identity of
+concatenation.
+
+```julia
+concatenate(readcsv("jan.csv"; types = tt), readcsv("feb.csv"; types = tt)) |>
+    filterrows(r -> r.bid > 0)
+```
+"""
+concatenate() = emptyframe()
+concatenate(ps::CausalPipeline...) =
+    CausalPipeline(ctx::Context -> ChunkSource(ConcatProducer(ps, ctx)))
+
+# The stateful producer behind concatenate's ChunkSource, in the shape of
+# readcsv's CSVProducer: the pull-to-pull state lives in fields rather than
+# captured locals (captured variables that are reassigned get boxed). The
+# dynamically typed fields are per-pipeline setup state — one dynamic index
+# into the (heterogeneous) pipeline tuple and one iterator hand-off per
+# pipeline; nothing here runs per row.
+mutable struct ConcatProducer{P<:Tuple,C<:Context}
+    const pipelines::P
+    const ctx::C
+    index::Int          # the pipeline currently being drained
+    chunks::Any         # its chunk iterator; nothing until it is reached
+    state::Any          # its iteration state
+    started::Bool
+    names::Union{Nothing,Vector{String}}  # column names of the first chunk
+    prevtime::Any       # last time emitted, for cross-pipeline ordering
+    previndex::Int      # which pipeline emitted it, for the error message
+    ConcatProducer(ps::P, ctx::C) where {P<:Tuple,C<:Context} =
+        new{P,C}(ps, ctx, 1, nothing, nothing, false, nothing, nothing, 0)
+end
+
+function (p::ConcatProducer)()
+    while p.index <= length(p.pipelines)
+        if p.chunks === nothing
+            p.chunks = p.pipelines[p.index].run(p.ctx)
+            p.started = false
+        end
+        next = p.started ? iterate(p.chunks, p.state) : iterate(p.chunks)
+        if next === nothing
+            p.index += 1
+            p.chunks = nothing
+            continue
+        end
+        chunk, p.state = next
+        p.started = true
+        nrow(chunk) == 0 && continue
+        checkconcat!(p, chunk)
+        return chunk
+    end
+    return nothing
+end
+
+# O(ncols) per chunk. Within one pipeline the chunk protocol already
+# guarantees the ordering; checking every chunk costs nothing extra and lets
+# the message name the pipelines when a boundary is the one out of order.
+function checkconcat!(p::ConcatProducer, c::DataFrame)
+    cols = names(c)
+    if p.names === nothing
+        p.names = cols
+    elseif p.names != cols
+        throw(ArgumentError("concatenate: pipelines must have identical \
+            columns; pipeline $(p.index) has $(cols), expected $(p.names)"))
+    end
+    t = first(c.time)
+    p.prevtime === nothing || p.prevtime <= t ||
+        throw(
+            ArgumentError("concatenate: pipelines must be passed in time order; \
+                pipeline $(p.index) starts at $t, before pipeline $(p.previndex) \
+                ends at $(p.prevtime)"),
+        )
+    p.prevtime = last(c.time)
+    p.previndex = p.index
+    return nothing
+end
+
+"""
     clock(interval; batchsize = 1024) -> CausalPipeline
 
 A source producing one row per `interval` at times
