@@ -38,6 +38,8 @@ frame = load(Context(DateTime(2026, 1, 1), DateTime(2026, 2, 1)), p)
 | Operator | Kind | Semantics |
 |---|---|---|
 | `emptyframe()` | source | zero rows, just a `:time` column |
+| `concatenate(ps...)` | source | run the pipelines one after another, emitting their chunks end to end; they must be passed in time order and produce identical column names |
+| `merge(ps...; batchsize)` | source | run the pipelines concurrently and interleave their rows by time; the output carries the union of their columns, `missing` where a pipeline lacks one, ties broken by argument order |
 | `clock(interval)` | source | one row per `interval` in `[start, stop)` |
 | `readcsv(path; types, time, rename, delim)` | source | CSV read as `String` columns (`types` opts columns into concrete types); `time` picks the time column by name or a per-row function; clipped to `[start, stop)`, read incrementally |
 | `writecsv(path; queue, ...)` | transform | pass-through sink: writes each chunk to `path` as it flows by, on a background task, and yields it downstream unchanged |
@@ -49,9 +51,11 @@ frame = load(Context(DateTime(2026, 1, 1), DateTime(2026, 2, 1)), p)
 | `dropcolumns(sel...)` | transform | drop the columns matching the same selector forms (`:time` never dropped) |
 | `summarize(ss; key)` | transform | summarize the whole window into rows at time `stop` |
 | `summarizecycles(ss; key)` | transform | summarize each unique timestamp independently |
+| `intervalize(clock, ss; key, closelast)` | transform | summarize over the intervals `[bₖ, bₖ₊₁)` a `clock` pipeline's times define, each emitted at its end time |
 | `addsummarycolumns(ss; key)` | transform | append running summary values after each row |
 | `addrollingcolumns(windows, ss; key, from)` | transform | append summaries over named trailing windows, columns prefixed `{window}_` |
 | `asofjoin(right; key, tolerance, ...)` | transform | append the most recent right-pipeline row at or before each row's time |
+| `lag(offset)` | transform | shift every row `offset` later in time, so time `t` carries what the input had at `t - offset`; only `:time` changes and `offset` must be non-negative |
 
 Each transform also has an uncurried, pipeline-first form — `filterrows(p, pred)`,
 `addcolumns(p, f)`, `summarize(p, ss; key)` — equivalent to the `|>` chain
