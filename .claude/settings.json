@@ -1,13 +1,12 @@
 {
   "hooks": {
-    "PostToolUse": [
+    "Stop": [
       {
-        "matcher": "Write|Edit",
         "hooks": [
           {
             "type": "command",
-            "command": "{ jq -r '.tool_response.filePath // .tool_input.file_path // empty' | { read -r f; case \"$f\" in *.jl) julia -e 'using JuliaFormatter; format(ARGS[1])' -- \"$f\";; esac; }; } 2>/dev/null || true",
-            "timeout": 60,
+            "command": "cd \"$CLAUDE_PROJECT_DIR\" 2>/dev/null || exit 0\nerr=$(git ls-files -z -mo --exclude-standard -- '*.jl' 2>/dev/null | xargs -0 -r julia -e 'using JuliaFormatter; foreach(format, ARGS)' -- 2>&1 >/dev/null) || true\n[ -z \"$err\" ] || { printf 'JuliaFormatter: %s\\n' \"$err\" >&2; exit 1; }\nexit 0",
+            "timeout": 120,
             "statusMessage": "Formatting Julia"
           }
         ]
