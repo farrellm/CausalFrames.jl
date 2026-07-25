@@ -130,6 +130,18 @@ SUITE["join"]["asof-keyed"] = @benchmarkable load(CTX,
 SUITE["join"]["future-keyed"] = @benchmarkable load(CTX,
     SRC |> futurejoin(SRC2; key = :sym, rightprefix = "r"))
 
+# The n-ary merge over the same two sources. "interleaved" is the worst case
+# — the two streams share every timestamp, so blocks are cycle-sized and the
+# rows are copied; "shifted" moves one source a half-window later so long runs
+# of whole chunks pass through untouched; "union" merges sources with
+# different columns, the missing-filling path.
+SUITE["merge"] = BenchmarkGroup()
+SUITE["merge"]["interleaved"] = @benchmarkable load(CTX, merge(SRC, SRC2))
+SUITE["merge"]["shifted"] = @benchmarkable load(CTX,
+    merge(SRC, SRC2 |> lag(N ÷ 8)))
+SUITE["merge"]["union"] = @benchmarkable load(CTX,
+    merge(SRC |> dropcolumns(:sym), SRC2 |> dropcolumns(:qty)))
+
 if abspath(PROGRAM_FILE) == @__FILE__
     tune!(SUITE)
     results = run(SUITE; verbose = true)

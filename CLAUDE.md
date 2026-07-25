@@ -40,6 +40,14 @@ with any API or semantics change.**
   table rows behind a per-chunk function barrier, never `DataFrameRow`s;
   `clipchunk!` (rename, resolve `:time`, sortedness, clip, convert) and the
   `ChunkSink` background writer are shared with the parquet operators
+- `src/merge.jl` — `Base.merge(ps::CausalPipeline...)`, the n-ary
+  time-interleaving source (extends Base rather than shadowing it; no
+  zero-arg form, which would capture `merge()`): one `MergeCursor` per
+  pipeline buffering a chunk, `pickwinner` choosing by `(time, argument
+  index)`, and piece-at-a-time claiming (`searchsorted*` runs, no data moved
+  until `batchsize` rows are pending, then one allocation per output column
+  and one copy per row; a lone whole-chunk piece is adopted, or passed
+  through untouched when it already has the union schema)
 - `src/parquet.jl` — `readparquet`/`writeparquet`: the API, the docstrings
   and backend selection (`resolvebackend`, `parquetproducer`, `parquetsink`,
   `backendloaded`), none of which name a backend. DuckDB and Parquet2 are

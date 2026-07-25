@@ -116,6 +116,7 @@ Two kinds, both compatible with the chaining operator `|>`:
 |---|---|---|
 | `emptyframe()` | source | zero rows, just a `:time` column |
 | `concatenate(ps...)` | source | run the pipelines one after another over the same context and emit their chunks end to end; they must be passed in time order and have identical columns (see "Concatenation") |
+| `merge(ps...; batchsize)` | source | run the pipelines concurrently over the same context and interleave their rows by time; columns may differ (the output is their union, `missing` where a pipeline lacks one) and ties break by argument order (see "Merging") |
 | `clock(interval; batchsize)` | source | rows at `start, start + interval, …` while `< stop`; no other columns; generated lazily in chunks of `batchsize` rows |
 | `readcsv(path; types, time, rename, delim, chunkbytes)` | source | CSV file, every column read as `String` unless `types` opts it into a concrete type; the time column (named `:time`, or chosen by `time` as a column name or a per-row function) must be typed and sorted; `rename` maps column names first; rows clipped to `[start, stop)`; read incrementally in chunks of roughly `chunkbytes` bytes — never all at once — stopping as soon as a time `>= stop` is seen |
 | `writecsv(path; queue, ...)` | transform | transparent pass-through sink: writes each chunk to `path` as it flows by and yields it downstream unchanged (see "CSV output") |
@@ -312,11 +313,13 @@ flow by (O(ncols) per chunk, nothing per row):
   they may between the chunks of one pipeline: `DataFrame(cf)` promotes on
   concatenation.
 
-There is no interleaving and no merging — that would need a lookahead across
-pipelines, and the point here is that the streams are already disjoint in
-time. Each pipeline is evaluated over the **whole** context `[start, stop)`
-and clips itself, so overlapping windows are caught by the time-order check
-rather than silently reordered.
+There is no interleaving here: the point of `concatenate` is that the streams
+are already disjoint in time, so no pipeline has to be looked at until the
+previous one is done. Streams that do overlap are `merge`'s business (see
+"Merging"), which pays for the interleaving with a chunk of lookahead per
+pipeline. Each pipeline is evaluated over the **whole** context
+`[start, stop)` and clips itself, so overlapping windows are caught by the
+time-order check rather than silently reordered.
 
 The mechanism is the `ChunkSource` producer `ConcatProducer`, in the shape of
 readcsv's `CSVProducer`: per-run state in fields rather than reassigned
@@ -328,6 +331,89 @@ sources holds one file open at a time.
 
 Causality is trivial: rows pass through unchanged and in time order, so
 output at time `t` still depends only on input rows at time `≤ t`.
+
+## Merging
+
+`merge(ps...)` is the other **n-ary** combinator, and the counterpart to
+concatenation: it runs the pipelines *concurrently* over the same context and
+interleaves their rows by time. Like `concatenate` it is a source and is not
+curried, for the same reason — every argument is a `CausalPipeline`. Unlike
+`concatenate` there is no zero-argument form: a bare varargs method would also
+capture the `merge()` call, and `merge` is `Base.merge`, extended here for our
+own type rather than shadowed by a new name (the arguments are all
+`CausalPipeline`s, so this is a method extension, not piracy). `emptyframe()`
+is the identity of merging; one pipeline is that pipeline.
+
+- **Union schema.** The pipelines need not have the same columns. The output
+  carries `:time` first and then their columns in the order the pipelines
+  introduce them; a row from a pipeline that lacks a column carries `missing`
+  there, so a merged column of `T` materializes as `Union{Missing, T}`. A
+  pipeline's own names are fixed by its first chunk, and a later chunk that
+  renames or merely reorders them is an `ArgumentError` naming that pipeline —
+  concatenate's `checkconcat!` rule. A pipeline producing no chunk at all over
+  the window contributes no columns, exactly as an empty right stream
+  contributes none to an as-of join: schemas are data-driven everywhere here,
+  and with no chunk there is no schema to take.
+- **Order.** The emission key is `(time, argument index)`, lexicographic, so
+  rows at equal times go out in argument order — all the tied rows of the
+  first pipeline, then the second's — and each pipeline's own row order is
+  preserved. This is the same tie convention as concatenate's "equal times
+  across a boundary are fine, stream order decides".
+
+The union schema has to be settled before the *first* chunk goes out, because
+a frame's chunks must all carry the same column names. So the first pull runs
+every pipeline and buffers one chunk from each — which the merge needs anyway
+to know whose row comes first, so nothing is pulled that the first block would
+not have pulled. Thereafter each pipeline is one chunk ahead at most. That is
+the cost of interleaving: `merge` holds `n` sources open at once and `n`
+chunks resident, where `concatenate` holds one.
+
+The mechanism is a `ChunkSource` producer over one `MergeCursor` per pipeline
+— the buffered chunk, the row reached in it, and the lazily refilled iterator
+behind it, in the shape of asofjoin's right stream. The cursors sit in a
+`Vector{MergeCursor{T}}` rather than a tuple: selection indexes them by a
+runtime index, and the only field the ordering touches (`times`, the chunk's
+time column as the context's time type) is already concrete in the flat
+struct.
+
+Rows are claimed a **piece** at a time, never a row at a time. Each step picks
+the cursor with the smallest key and claims from it the longest run of rows
+that stays below the runner-up's key — one
+`searchsortedfirst`/`searchsortedlast` on an already-sorted vector, and no data
+movement at all: a piece is just the chunk, a row range into it, and the
+cursor's union-position-to-column map. The winner and the runner-up are
+distinct cursors and equal head times imply the winner has the smaller index
+(it would not have won otherwise), which is what makes the run non-empty and
+every step productive.
+
+Pieces accumulate until `batchsize` rows are claimed (`clock`'s knob, same
+default) and are then materialized together, one allocation per output column,
+each row copied exactly once. Without the batching, two streams alternating row
+by row would emit one chunk per row and `load` would build a vector of chunks
+as long as the data; without the deferral, those rows would be copied twice,
+once into a per-piece frame and once more to concatenate them. The column's
+element type is the promotion of the pieces' own — `Missing` among them
+wherever a piece's input lacks the column, which is what widens it to
+`Union{Missing, T}`. The type is a runtime value, so the filling sits behind a
+function barrier where the output column is concrete; the offsets ride in a
+reused mutable `CopySpan` rather than as loose `Int` arguments, because the
+source column's type is known only at run time and a dynamic call boxes every
+non-pointer argument it is passed.
+
+A batch that is a single piece covering a whole buffered chunk skips the copy
+entirely: the chunk is owned and column vectors are never mutated in place, so
+its columns are adopted as they are, and a chunk that already carries the union
+schema goes downstream untouched. A pipeline that dominates a stretch of time
+therefore passes through free of charge — only genuine interleaving copies.
+
+Causality holds in the ordinary sense: an output row at time `t` carries
+exactly one input row's values at `t`, plus `missing` in the columns that
+pipeline does not have. The lookahead is at other cursors' head *times*, which
+are `≥ t`, and it decides ordering only — never a value. Chunk concatenation
+holds row for row, with the one caveat it shares with an as-of join's empty
+right stream: a pipeline with no rows in a sub-window contributes no columns
+*there*, so merging two halves of a window separately can give two frames with
+different schemas even though their rows concatenate correctly.
 
 ## As-of join
 
@@ -937,6 +1023,7 @@ still does not hold for them.
 | `src/chunks.jl` | internal chunk-iterator machinery (`ChunkSource`, `chunkmap`) |
 | `src/pipeline.jl` | `CausalPipeline{F}`, `load`, `stream` |
 | `src/operators.jl` | sources (including the n-ary `concatenate`), the CSV sink, row-wise transforms, and the causal time shift (`lag`) with the shared `shiftchunk!` |
+| `src/merge.jl` | the n-ary time-interleaving source (`Base.merge`) and its per-pipeline cursors |
 | `src/parquet.jl` | the parquet operators, their docstrings, and backend selection |
 | `ext/CausalFramesDuckDBExt.jl` | the DuckDB backend: the preferred reader, the fallback writer |
 | `ext/CausalFramesParquet2Ext.jl` | the Parquet2 backend: the preferred writer, the fallback reader |
@@ -958,6 +1045,10 @@ Exports: `Context`, `CausalFrame`, `CausalPipeline`, `load`, `stream`,
 `Correlation`, `Min`, `Max`, `First`, `Last`, `summarize`,
 `summarizecycles`, `intervalize`, `addsummarycolumns`, `addrollingcolumns`,
 `asofjoin`, `lag`.
+
+`merge` is not in that list either: it is `Base.merge`, extended for
+`CausalPipeline` arguments rather than exported under a name of our own, so
+`using CausalFrames` leaves the dict and NamedTuple methods alone.
 
 `CausalFrames.Acausal` and its `futurejoin` and `lead` are deliberately **not**
 in this list: the acausal operators are reached only through
