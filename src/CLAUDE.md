@@ -3,6 +3,11 @@
 DESIGN.md's "Module layout" table is the canonical index; this file records the
 design rationale and performance constraints behind each module.
 
+- `src/context.jl` / `src/chunks.jl` — `Context{T}`, the `[start, stop)`
+  evaluation window, and the internal chunk protocol (`ChunkSource`,
+  `chunkmap`): a single-pass lazy iterator of non-empty DataFrame chunks,
+  consumers taking ownership of what they're yielded; empty chunks are
+  filtered out here so all downstream code may assume a chunk has rows
 - `src/frame.jl` — `CausalFrame{T}`: opaque, backed by a vector of
   time-disjoint DataFrame chunks; invariants checked in the public inner
   constructor, while `load`/`stream` build through a `Trusted`-token
@@ -92,3 +97,13 @@ design rationale and performance constraints behind each module.
   pulls clock boundaries into a concrete `Vector{T}` per chunk (the pull is the
   only dynamism; the per-row kernel stays dispatch-free), reusing `SummaryFold`
   whole; `closelast` closes the trailing partial at `stop`
+- `src/acausal.jl` — the `Acausal` submodule (`futurejoin`, `lead`), reached
+  only through `using CausalFrames.Acausal` and never re-exported, so
+  acausality is always an explicit opt-in. `futurejoin` mirrors `asofjoin`'s
+  streaming machinery with the match direction, the tie-break, and the context
+  widening (`stop + tolerance`) all inverted; because it matches the *earliest*
+  qualifying right row it must buffer right rows per key until a left row
+  consumes or outruns them, and proving a key has no future match drains the
+  right stream — worst case O(right rows), against `asofjoin`'s O(keys)
+- `src/precompile.jl` — the PrecompileTools workload over the main pipeline
+  paths; every new operator adds a path here

@@ -10,8 +10,16 @@ with any API or semantics change.**
 
 - Run tests: `julia --project -e 'using Pkg; Pkg.test()'` (includes Aqua
   and, on released Julia versions, targeted JET checks in `test/jet.jl`)
-- Format: `julia -e 'using JuliaFormatter; format(".")'` (config in
-  `.JuliaFormatter.toml`)
+- Build docs: `julia --project=docs docs/make.jl` (one-time setup:
+  `julia --project=docs -e 'using Pkg; Pkg.develop(path="."); Pkg.instantiate()'`).
+  Documenter runs strict — an unregistered docstring fails the docs CI job
+- Benchmark: `julia --project=benchmark benchmark/benchmarks.jl` (same
+  one-time `Pkg.develop(path=".")` setup; defines `SUITE` for PkgBenchmark)
+- Formatting is automatic: a `Stop` hook in `.claude/settings.json` formats
+  modified `.jl` files once per turn (config in `.JuliaFormatter.toml`; CI
+  pins JuliaFormatter v2, so don't format with a v1 install)
+- Run one Julia process at a time — concurrent test/docs/benchmark runs race
+  on the precompile cache and fail transiently
 - Add a dependency: `julia --project -e 'using Pkg; Pkg.add("Name")'`
   (never hand-edit UUIDs; test-only deps also need an `[extras]` entry)
 - CI tests Julia 1.10 (minimum supported), 1.12, and pre-release — don't
@@ -22,6 +30,13 @@ with any API or semantics change.**
 
 Per-module design rationale lives in `src/CLAUDE.md` (loaded when working
 under `src/`); DESIGN.md's "Module layout" table is the canonical index.
+
+## Adding an operator
+
+A new source or transform touches, in the same commit: `src/CausalFrames.jl`
+(include + export), `docs/src/api.md` (register the docstring or the docs job
+fails), `DESIGN.md` (module table, export list, semantics), `src/precompile.jl`
+(a workload path), and `test/runtests.jl` (include the new test file).
 
 ## Invariants and conventions
 
