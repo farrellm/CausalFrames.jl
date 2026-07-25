@@ -32,9 +32,10 @@ with any API or semantics change.**
 
 Per-module design rationale lives in `src/CLAUDE.md` (loaded when working
 under `src/`); DESIGN.md's "Module layout" table is the canonical index.
-The parquet backends live in `ext/` behind weak deps. `notes/` holds
-investigation records — measurements and rejected designs, kept so they
-aren't re-derived, and explicitly *not* design law.
+The parquet backends live in `ext/` behind weak deps, with the backend
+contract in `ext/CLAUDE.md`. `notes/` holds investigation records —
+measurements and rejected designs, kept so they aren't re-derived, and
+explicitly *not* design law.
 
 ## Adding an operator
 
