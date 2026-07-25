@@ -89,3 +89,14 @@ end
     JET.@test_opt CausalFrames.joinsegment!(matches, store, lnt, 1, rnt, 1,
         true, Val(()), <=, nothing)
 end
+
+@testset "merge winner selection" begin
+    # the one per-block loop over the cursors: the ordering comparisons must
+    # stay on the concrete time type
+    cursors = [CausalFrames.MergeCursor{Int}(i, nothing) for i in 1:2]
+    for cur in cursors
+        cur.chunk = DataFrame(time = [cur.index])
+        cur.times = [cur.index]
+    end
+    JET.@test_opt CausalFrames.pickwinner(cursors)
+end

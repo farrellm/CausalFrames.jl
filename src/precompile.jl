@@ -33,6 +33,13 @@
                     p |> filterrows(r -> r.time > 2)),
             ),
         )
+        DataFrame(
+            load(
+                ctx,
+                merge(p |> filterrows(r -> r.time <= 2) |> dropcolumns(:sym),
+                    p |> filterrows(r -> r.time > 1)),
+            ),
+        )
         DataFrame(load(ctx, p |> summarize([Count(), Sum(:v)]; key = :sym)))
         DataFrame(load(ctx, p |> summarizecycles(Sum(:v); key = :sym)))
         DataFrame(

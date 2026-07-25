@@ -24,6 +24,7 @@ scan
 ```@docs
 emptyframe
 concatenate
+Base.merge(::CausalPipeline, ::CausalPipeline...)
 clock
 readcsv
 readparquet
