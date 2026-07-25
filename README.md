@@ -38,6 +38,8 @@ frame = load(Context(DateTime(2026, 1, 1), DateTime(2026, 2, 1)), p)
 | Operator | Kind | Semantics |
 |---|---|---|
 | `emptyframe()` | source | zero rows, just a `:time` column |
+| `concatenate(ps...)` | source | run the pipelines one after another, emitting their chunks end to end; they must be passed in time order and produce identical column names |
+| `merge(ps...; batchsize)` | source | run the pipelines concurrently and interleave their rows by time; the output carries the union of their columns, `missing` where a pipeline lacks one, ties broken by argument order |
 | `clock(interval)` | source | one row per `interval` in `[start, stop)` |
 | `readcsv(path; types, time, rename, delim)` | source | CSV read as `String` columns (`types` opts columns into concrete types); `time` picks the time column by name or a per-row function; clipped to `[start, stop)`, read incrementally |
 | `writecsv(path; queue, ...)` | transform | pass-through sink: writes each chunk to `path` as it flows by, on a background task, and yields it downstream unchanged |
@@ -49,9 +51,11 @@ frame = load(Context(DateTime(2026, 1, 1), DateTime(2026, 2, 1)), p)
 | `dropcolumns(sel...)` | transform | drop the columns matching the same selector forms (`:time` never dropped) |
 | `summarize(ss; key)` | transform | summarize the whole window into rows at time `stop` |
 | `summarizecycles(ss; key)` | transform | summarize each unique timestamp independently |
+| `intervalize(clock, ss; key, closelast)` | transform | summarize over the intervals `[bₖ, bₖ₊₁)` a `clock` pipeline's times define, each emitted at its end time |
 | `addsummarycolumns(ss; key)` | transform | append running summary values after each row |
 | `addrollingcolumns(windows, ss; key, from)` | transform | append summaries over named trailing windows, columns prefixed `{window}_` |
 | `asofjoin(right; key, tolerance, ...)` | transform | append the most recent right-pipeline row at or before each row's time |
+| `lag(offset)` | transform | shift every row `offset` later in time, so time `t` carries what the input had at `t - offset`; only `:time` changes and `offset` must be non-negative |
 
 Each transform also has an uncurried, pipeline-first form — `filterrows(p, pred)`,
 `addcolumns(p, f)`, `summarize(p, ss; key)` — equivalent to the `|>` chain
@@ -126,6 +130,30 @@ Summarizers are typed from the input schema, so folding a large window
 allocates on the order of kilobytes — see DESIGN.md for the interface a custom
 `Summarizer` implements.
 
-Every operator is **causal** — its output at time `t` depends only on input
-rows with time `≤ t` — which is what makes streaming evaluation sound. See
-[DESIGN.md](DESIGN.md) for the full design.
+## Causality
+
+Every operator above is **causal**: its output at time `t` depends only on
+input rows with time `≤ t`. That gives the *chunk-concatenation property* —
+loading `[a, c)` equals concatenating the results of loading `[a, b)` and
+`[b, c)` — which is what makes chunked, streaming evaluation sound.
+
+The two forward-looking operators are the deliberate exceptions. They live in
+the `Acausal` submodule and are never re-exported, so opting into acausality is
+always explicit:
+
+```julia
+using CausalFrames.Acausal
+
+quotes |> futurejoin(fills; key = :symbol)  # earliest fill at or after each quote
+prices |> lead(Minute(5))                   # time -> time - offset
+```
+
+`futurejoin` mirrors `asofjoin` with the match direction inverted — the
+**earliest** right row whose time is not before the left row's, `missing` where
+none qualifies — and `lead` mirrors `lag`. One cost worth knowing before
+reaching for it: because `futurejoin` matches the earliest qualifying row, it
+buffers right rows per key until a left row consumes or outruns them, and
+proving that a key has no future match drains the right stream. Worst-case
+memory is therefore O(right rows), against `asofjoin`'s O(keys).
+
+See [DESIGN.md](DESIGN.md) for the full design.
