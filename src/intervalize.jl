@@ -181,7 +181,7 @@ function intervalstep!(st::IntervalizeState, protos::Tuple, keynames::Val,
     nt = preparechunk!(st.fold, protos, false, keynames, c)
     fillbounds!(st, last(nt.time))
     rows, st.fold.states, st.bi, st.folded =
-        foldintervals!(st.fold.states, st.fold.stateprotos, protos, nt,
+        foldintervals!(st.fold.states, protos, nt,
             st.bounds, st.bi, st.folded, closelast, outs)
     trimbounds!(st)
     return isempty(rows) ? nothing : DataFrame(rows)
@@ -193,7 +193,7 @@ end
 # is the trailing region (the clock is drained past `tmax`), whose rows are
 # folded only when closelast will emit them. Returns the closed rows and the
 # carried state.
-function foldintervals!(states::S, stateprotos::S, protos::P, nt::NamedTuple,
+function foldintervals!(states::S, protos::P, nt::NamedTuple,
     bounds::Vector{T}, bi::Int, folded::Bool, closelast::Bool,
     r::Val) where {S<:Tuple,P<:Tuple,T}
     V = promotedvaluetype(S, protos, r)
@@ -211,7 +211,9 @@ function foldintervals!(states::S, stateprotos::S, protos::P, nt::NamedTuple,
                 closeintervalrow(RT, @inbounds(bounds[bi]), states,
                     folded, emptyrow, r),
             )
-            states = map(fresh, stateprotos)
+            # closeintervalrow copied the values out, so the closed interval's
+            # states are zeroed and reused rather than replaced.
+            states = freshall!(states)
             folded = false
             bi += 1
         end
@@ -230,7 +232,7 @@ function intervalflush!(st::IntervalizeState{T}, protos::Tuple, stop::T,
     # values, typed from the summarizer configs alone.
     st.fold.stateprotos === nothing &&
         return flushemptygrid!(st, protos, stop, closelast, outs)
-    rows = flushintervals!(st.fold.states, st.fold.stateprotos, protos,
+    rows = flushintervals!(st.fold.states, protos,
         st.bounds, st.bi, st.folded, stop, closelast, outs)
     return isempty(rows) ? nothing : DataFrame(rows)
 end
@@ -238,7 +240,7 @@ end
 # Drain the remaining grid: the current interval (with data if folded) and
 # every remaining complete interval up to b_K (each empty), then the trailing
 # partial at stop when closelast.
-function flushintervals!(states::S, stateprotos::S, protos::P, bounds::Vector{T},
+function flushintervals!(states::S, protos::P, bounds::Vector{T},
     bi::Int, folded::Bool, stop::T, closelast::Bool,
     r::Val) where {S<:Tuple,P<:Tuple,T}
     V = promotedvaluetype(S, protos, r)
@@ -252,7 +254,7 @@ function flushintervals!(states::S, stateprotos::S, protos::P, bounds::Vector{T}
             closeintervalrow(RT, @inbounds(bounds[bi]), states, folded,
                 emptyrow, r),
         )
-        states = map(fresh, stateprotos)
+        states = freshall!(states)
         folded = false
         bi += 1
     end
@@ -299,8 +301,8 @@ end
 # The keyed analogue: closing an interval emits one row per present key
 # (sorted) and empties the groups (closecycle!), so empty intervals emit
 # nothing — the grid is sparse per key, as unseen keys cannot be emitted.
-function foldintervalsgrouped!(groups::Dict{K,S}, stateprotos::S, nt::NamedTuple,
-    bounds::Vector{T}, bi::Int, keynames::Val{KN},
+function foldintervalsgrouped!(groups::GroupTable{K,S}, stateprotos::S,
+    nt::NamedTuple, bounds::Vector{T}, bi::Int, keynames::Val{KN},
     closelast::Bool, r::Val) where {K,S,T,KN}
     rows = rowtype(T, K, S, r)[]
     nb = length(bounds)
@@ -313,8 +315,7 @@ function foldintervalsgrouped!(groups::Dict{K,S}, stateprotos::S, nt::NamedTuple
             bi += 1
         end
         (bi > nb && !closelast) && continue
-        states = get!(() -> map(fresh, stateprotos), groups,
-            keyvalues(row, keynames))
+        states = groupstates!(groups, keyvalues(row, keynames), stateprotos)
         updateall!(states, row)
     end
     return rows, bi
@@ -335,8 +336,8 @@ end
 # reached the trailing region instead (bi past the last boundary), closelast
 # closes it at stop. Intervening complete intervals are empty, so they emit
 # nothing (the groups are emptied by the first close).
-function flushintervalsgrouped!(groups::Dict{K,S}, bounds::Vector{T}, bi::Int,
-    ::Type{RT}, stop, closelast::Bool, r::Val) where {K,S,T,RT}
+function flushintervalsgrouped!(groups::GroupTable{K,S}, bounds::Vector{T},
+    bi::Int, ::Type{RT}, stop, closelast::Bool, r::Val) where {K,S,T,RT}
     rows = RT[]
     if bi <= length(bounds)
         closecycle!(rows, groups, @inbounds(bounds[bi]), r)

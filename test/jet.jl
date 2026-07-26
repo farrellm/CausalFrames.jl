@@ -22,7 +22,8 @@ using JET
     groups = CausalFrames.newgroups(states, nt, keynames)
     JET.@test_opt CausalFrames.foldgroups!(groups, states, nt, keynames)
 
-    JET.@test_opt CausalFrames.foldcycles!(states, states, nt, nothing, outs)
+    JET.@test_opt CausalFrames.foldcycles!(states, nt, nothing, outs)
+    JET.@test_opt CausalFrames.freshall!(states)
     JET.@test_opt CausalFrames.foldrunning!(states, nt, 3, outs)
 end
 
@@ -54,7 +55,6 @@ end
     JET.@test_opt CausalFrames.treepush!(tr, states, row)
     CausalFrames.treepush!(tr, states, row)
     JET.@test_opt CausalFrames.treequery(tr, 1, 1)
-    JET.@test_opt CausalFrames.freshall!(states)
     JET.@test_opt CausalFrames.windowstart(tr.times, tr.head, 1, 0)
 end
 
@@ -67,9 +67,9 @@ end
     nt = (time = [1, 3, 6], k = [1, 2, 1], x = [1.0, 2.0, 3.0])
     bounds = [0, 5, 10]
 
-    JET.@test_opt CausalFrames.foldintervals!(states, states, protos, nt,
+    JET.@test_opt CausalFrames.foldintervals!(states, protos, nt,
         bounds, 2, false, true, outs)
-    JET.@test_opt CausalFrames.flushintervals!(states, states, protos, bounds,
+    JET.@test_opt CausalFrames.flushintervals!(states, protos, bounds,
         2, false, 10, true, outs)
 
     keynames = Val((:k,))
