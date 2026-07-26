@@ -37,7 +37,7 @@ contract in `ext/CLAUDE.md`. `notes/` holds investigation records —
 measurements and rejected designs, kept so they aren't re-derived, and
 explicitly *not* design law.
 
-## Adding an operator
+## Adding an operator or summarizer
 
 A new source or transform touches, in the same commit: `src/CausalFrames.jl`
 (include + export), `docs/src/api.md` (register the docstring or the docs job
@@ -47,6 +47,13 @@ fails), `DESIGN.md` (module table, export list, semantics), `src/precompile.jl`
 `README.md`'s operator table. Nothing enforces that last row — no test, no CI
 job — so it is the one that silently drifts; check it before you call the
 commit done.
+
+A new summarizer instead touches `src/summarizers.jl` (the type, its state, and
+which structured subtype it claims — a performance decision, not a taxonomy
+one), `docs/src/api.md`, `DESIGN.md`'s "Summarizers" section and export list,
+`test/summarizers.jl`, and `README.md`'s summarizer paragraph. That paragraph is
+prose rather than a table, so it drifts even more quietly than the operator
+table — check that every exported summarizer still appears there.
 
 ## Invariants and conventions
 

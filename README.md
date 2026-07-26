@@ -85,8 +85,10 @@ readcsv("ticks.csv"; types = Dict(:time => Int, :bid => Float64)) |>
 ## Summarizers
 
 The summarization transforms take one or more summarizers — `Count()`,
-`Sum(:col)`, `SumPower(:col, n)`, `Moment(:col, n)`, `Min(:col)`,
-`Max(:col)`, `First(:col)`, `Last(:col)`, or your own `Summarizer` subtype —
+`Sum(:col)`, `SumPower(:col, n)`, `Product(:col)`, `DotProduct(:a, :b)`,
+`Moment(:col, n)`, `Mean(:col)`, `Variance(:col)`, `Std(:col)`,
+`Covariance(:a, :b)`, `Correlation(:a, :b)`, `Min(:col)`, `Max(:col)`,
+`First(:col)`, `Last(:col)`, or your own `Summarizer` subtype —
 and an optional `key` (one or more column names) to produce a separate
 summary per unique key value. Output columns are named by suffix:
 `Sum(:mid)` produces `:mid_sum`, `Min(:mid)` produces `:mid_min`, and
@@ -99,8 +101,8 @@ p = readcsv("ticks.csv";
     addsummarycolumns([Count(), Sum(:mid), Min(:mid), Max(:mid)]; key = :symbol)
 ```
 
-`Sum` and `SumPower` summarize no rows as `0`; `Moment`, `Min`, `Max`,
-`First`, and `Last` have no identity element and yield `missing` instead.
+`Sum`, `SumPower`, and `DotProduct` summarize no rows as `0` and `Product` as
+`1`; the rest have no identity element and yield `missing` instead.
 `Moment(:mid, n)` — the `n`-th raw moment, producing `:mid_moment_n` — is a
 *dependent* summarizer, computed from `Count()` and `SumPower(:mid, n)`;
 those are folded alongside it but appear in the output only if requested
