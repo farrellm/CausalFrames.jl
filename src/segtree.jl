@@ -117,20 +117,35 @@ end
 # Drop the expired prefix and rebuild at a capacity leaving at least
 # live + 1 free slots, so rebuilds stay amortized-O(1) per append even when
 # nothing has expired.
+#
+# The row buffers are compacted in place and the node vector is reused whenever
+# the capacity has not moved, which is the steady state: under a window short
+# enough to expire rows as fast as they arrive, `live` stays small, so `cap`
+# settles and a rebuild fires every few appends. Rebuilding by allocation there
+# cost O(cap) fresh states each time — about six allocations per admitted row
+# on a 25-unit window, which dominated the tree mode's per-row cost even after
+# the query accumulators stopped allocating.
 function rebuild!(tr::SegTree{S}, stateprotos::S) where {S<:Tuple}
-    rows = tr.rows[tr.head:end]
-    times = tr.times[tr.head:end]
+    dead = tr.head - 1
+    deleteat!(tr.rows, 1:dead)
+    deleteat!(tr.times, 1:dead)
+    rows = tr.rows
     live = length(rows)
     cap = max(4, nextpow(2, 2 * (live + 1)))
-    nodes = [map(fresh, stateprotos) for _ in 1:(2*cap)]
+    nodes = tr.nodes
+    if cap == tr.cap
+        for i in eachindex(nodes)
+            @inbounds nodes[i] = freshall!(nodes[i])
+        end
+    else
+        nodes = [map(fresh, stateprotos) for _ in 1:(2*cap)]
+    end
     for (j, row) in enumerate(rows)
         updateall!(@inbounds(nodes[cap+j-1]), row)
     end
     for i in (cap-1):-1:1
         @inbounds combinenodes!(nodes[i], nodes[2i], nodes[2i+1])
     end
-    tr.rows = rows
-    tr.times = times
     tr.nodes = nodes
     tr.cap = cap
     tr.head = 1

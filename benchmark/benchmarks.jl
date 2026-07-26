@@ -78,6 +78,15 @@ const RSRC = tradesource(tradechunks(RN))
 
 const SUITE = BenchmarkGroup()
 
+# The pass-through sink: `scan` never materializes a frame, so against the
+# drain floor this measures the background writer hand-off and CSV formatting.
+# Over the smaller source, since the cost is dominated by disk I/O. The source
+# ignores the context (it hands out fixed chunks), so the window must be the
+# one that actually contains its rows.
+SUITE["sinks"] = BenchmarkGroup()
+SUITE["sinks"]["writecsv"] =
+    @benchmarkable scan(RCTX, RSRC |> writecsv(SINKPATH))
+
 SUITE["sources"] = BenchmarkGroup()
 SUITE["sources"]["clock"] = @benchmarkable load(CTX, clock(1))
 SUITE["sources"]["readcsv"] = @benchmarkable load(Context(0, 300_000),
@@ -87,12 +96,6 @@ SUITE["sources"]["readcsv"] = @benchmarkable load(Context(0, 300_000),
 # to read an operator's own cost.
 SUITE["sources"]["drain"] = @benchmarkable scan(CTX, SRC)
 SUITE["sources"]["drain-load"] = @benchmarkable load(CTX, SRC)
-
-# The pass-through sink: `scan` never materializes a frame, so this measures
-# the background writer hand-off and CSV formatting against the drain floor.
-SUITE["sinks"] = BenchmarkGroup()
-SUITE["sinks"]["writecsv"] = @benchmarkable scan(Context(0, 50_000),
-    SRC |> writecsv(SINKPATH))
 
 SUITE["rowwise"] = BenchmarkGroup()
 SUITE["rowwise"]["filterrows"] =
