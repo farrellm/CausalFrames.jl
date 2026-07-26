@@ -319,6 +319,49 @@ end
     monoids = [Count(), Sum(:x), SumPower(:x, 2), DotProduct(:x, :y),
         Product(:x), Min(:x), Max(:x), First(:x), Last(:x), MinMax(:x)]
 
+    # fresh! must be indistinguishable from fresh: the transforms zero and
+    # reuse state tuples per cycle, per interval and per window query, so a
+    # state that does not fully reset leaks one emission's values into the
+    # next. MinMax is in the list without implementing fresh!, which is what
+    # exercises the `fresh(st)` default a custom summarizer inherits.
+    selfcontained = [Count(), Sum(:x), SumPower(:x, 2), DotProduct(:x, :y),
+        Product(:x), Min(:x), Max(:x), First(:x), Last(:x), MinMax(:x),
+        Opaque(Sum(:x))]
+    for s in selfcontained
+        reused = CausalFrames.fresh!(fold(s, rows))   # folded, then zeroed
+        rebuilt = CausalFrames.fresh(s, intypes)      # never folded
+        @test typeof(reused) === typeof(rebuilt)
+        @test CausalFrames.isinvertible(reused) ==
+              CausalFrames.isinvertible(rebuilt)
+        # folding the same rows into each must now give the same summary
+        foreach(r -> CausalFrames.update!(reused, r), rows)
+        foreach(r -> CausalFrames.update!(rebuilt, r), rows)
+        @test isequal(CausalFrames.value(reused), CausalFrames.value(rebuilt))
+        # ... and so must a *different*, shorter run: a value leaked from the
+        # first fold only shows up against a summary its rows could dominate
+        reused = CausalFrames.fresh!(reused)
+        rebuilt = CausalFrames.fresh(s, intypes)
+        CausalFrames.update!(reused, rows[2])
+        CausalFrames.update!(rebuilt, rows[2])
+        @test isequal(CausalFrames.value(reused), CausalFrames.value(rebuilt))
+    end
+
+    # the dependent summarizers carry no state of their own, so fresh! only
+    # has to preserve the type (their value comes from `vals` at emission)
+    for s in [Moment(:x, 2), Mean(:x), Variance(:x), Std(:x),
+        Covariance(:x, :y), Correlation(:x, :y), TestVar(:x)]
+        st = CausalFrames.fresh(s, intypes)
+        @test typeof(CausalFrames.fresh!(st)) === typeof(st)
+    end
+
+    # freshall! zeroes a whole tuple and, for the built-in mutable states,
+    # allocates nothing doing it — the property the hot paths rely on
+    let states = map(s -> CausalFrames.fresh(s, intypes), (Sum(:x), Min(:x)))
+        foreach(r -> CausalFrames.updateall!(states, r), rows)
+        CausalFrames.freshall!(states)
+        @test (@allocated CausalFrames.freshall!(states)) == 0
+    end
+
     # combine!(dest, a, b) equals folding a's rows then b's rows, for every
     # split — including an empty (fresh, identity) side — and tolerates dest
     # aliasing either argument

@@ -110,6 +110,7 @@ GroupSummarizer
 SummarizerState
 CausalFrames.emptyvalue
 CausalFrames.fresh
+CausalFrames.fresh!
 CausalFrames.update!
 CausalFrames.value
 CausalFrames.widenstate
