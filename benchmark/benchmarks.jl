@@ -10,27 +10,46 @@ using CausalFrames
 using CausalFrames.Acausal: futurejoin
 using DataFrames
 
-# A deterministic keyed trades table served in chunks, like a real source.
-# Duplicate times (4 rows per timestamp) exercise summarizecycles.
-function tradesource(n; chunkrows = 100_000, nkeys = 100)
-    return CausalPipeline() do ctx
-        return (
-            DataFrame(time = collect(r) .÷ 4,
-                sym = ["s" * string(i % nkeys) for i in r],
-                qty = [1.0 + (i % 7) for i in r])
-            for r in Iterators.partition(0:(n-1), chunkrows)
-        )
-    end
+# A deterministic keyed trades table, built **once** and served in chunks like
+# a real source. Duplicate times (4 rows per timestamp) exercise
+# summarizecycles, and the symbols stay `String`s — the keyed paths hash
+# String-carrying NamedTuple keys, which is what a real source looks like.
+#
+# Building the columns inside the benchmarked expression is the trap this
+# avoids: constructing a million `"s" * string(i)` symbols costs ~3 allocations
+# per row, which put a ~140 ms / 145 MiB / 3.0M-allocation floor under every
+# entry in the suite and buried the operators entirely (`selectcolumns` really
+# costs ~280 allocations; the suite used to report 3,001,037). Generation is
+# therefore hoisted to load time, and only the pipeline is timed.
+function tradechunks(n; chunkrows = 100_000, nkeys = 100)
+    syms = ["s" * string(k) for k in 0:(nkeys-1)]   # interned once
+    return [
+        DataFrame(time = collect(r) .÷ 4,
+            sym = [@inbounds(syms[i%nkeys+1]) for i in r],
+            qty = [1.0 + (i % 7) for i in r])
+        for r in Iterators.partition(0:(n-1), chunkrows)
+    ]
 end
+
+# Chunks are consumed by ownership and some operators mutate the chunk's column
+# *index* in place, so each run is handed a private index over the same column
+# vectors — O(ncols) per chunk rather than O(nrows). Column vectors themselves
+# are never mutated in place anywhere (see DESIGN.md, "CSV output"), which is
+# what makes the sharing sound.
+tradesource(chunks) =
+    CausalPipeline(ctx -> (DataFrame(c; copycols = false) for c in chunks))
 
 const N = 1_000_000
 const CTX = Context(0, N)
-const SRC = tradesource(N)
+const CHUNKS = tradechunks(N)
+const SRC = tradesource(CHUNKS)
 # A second, independent source for the binary joins, so the right side is not
 # a self join (which would need a prefix).
-const SRC2 = tradesource(N)
+const SRC2 = tradesource(tradechunks(N))
 
-const CSVPATH = joinpath(mktempdir(), "bench.csv")
+const BENCHDIR = mktempdir()
+const CSVPATH = joinpath(BENCHDIR, "bench.csv")
+const SINKPATH = joinpath(BENCHDIR, "sink.csv")
 open(CSVPATH, "w") do io
     println(io, "time,qty")
     for t in 1:200_000
@@ -55,7 +74,7 @@ CausalFrames.dependencies(o::RefoldWrap) =
 # O(window) per row, so a million-row input would dominate the suite.
 const RN = 100_000
 const RCTX = Context(0, RN)
-const RSRC = tradesource(RN)
+const RSRC = tradesource(tradechunks(RN))
 
 const SUITE = BenchmarkGroup()
 
@@ -63,6 +82,17 @@ SUITE["sources"] = BenchmarkGroup()
 SUITE["sources"]["clock"] = @benchmarkable load(CTX, clock(1))
 SUITE["sources"]["readcsv"] = @benchmarkable load(Context(0, 300_000),
     readcsv(CSVPATH; types = Dict(:time => Int, :qty => Float64)))
+# The floor every SRC-based entry below sits on: chunk hand-off, the per-chunk
+# load guards, and frame assembly, with no operator in the chain. Subtract it
+# to read an operator's own cost.
+SUITE["sources"]["drain"] = @benchmarkable scan(CTX, SRC)
+SUITE["sources"]["drain-load"] = @benchmarkable load(CTX, SRC)
+
+# The pass-through sink: `scan` never materializes a frame, so this measures
+# the background writer hand-off and CSV formatting against the drain floor.
+SUITE["sinks"] = BenchmarkGroup()
+SUITE["sinks"]["writecsv"] = @benchmarkable scan(Context(0, 50_000),
+    SRC |> writecsv(SINKPATH))
 
 SUITE["rowwise"] = BenchmarkGroup()
 SUITE["rowwise"]["filterrows"] =
@@ -86,6 +116,10 @@ SUITE["summarize"]["keyed"] = @benchmarkable load(CTX,
     SRC |> summarize([Count(), Sum(:qty)]; key = :sym))
 SUITE["summarize"]["cycles"] = @benchmarkable load(CTX,
     SRC |> summarizecycles([Count(), Sum(:qty)]))
+# The keyed cycle fold closes a group table per timestamp — 250k cycles over
+# this source — so it is the path where per-cycle state churn shows up.
+SUITE["summarize"]["cycles-keyed"] = @benchmarkable load(CTX,
+    SRC |> summarizecycles([Count(), Sum(:qty)]; key = :sym))
 SUITE["summarize"]["running"] = @benchmarkable load(CTX,
     SRC |> addsummarycolumns([Sum(:qty), Last(:qty)]))
 
