@@ -53,7 +53,8 @@ end
     tr = CausalFrames.newsegtree(states, typeof(row), Int)
     JET.@test_opt CausalFrames.treepush!(tr, states, row)
     CausalFrames.treepush!(tr, states, row)
-    JET.@test_opt CausalFrames.treequery(tr, states, 1, 1)
+    JET.@test_opt CausalFrames.treequery(tr, 1, 1)
+    JET.@test_opt CausalFrames.freshall!(states)
     JET.@test_opt CausalFrames.windowstart(tr.times, tr.head, 1, 0)
 end
 

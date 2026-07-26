@@ -15,16 +15,23 @@
 # Slots past length(rows) hold fresh (identity) states, so parents are
 # correct without special-casing, and the next append mutates the identity
 # already in place.
+# accl/accr are the query walk's two order-preserving accumulators, owned by
+# the tree and zeroed per query rather than allocated: a query runs once per
+# output row per window, so allocating them there cost one heap allocation per
+# state per row — the single largest per-row allocation in the package.
 mutable struct SegTree{S<:Tuple,R,T}
     rows::Vector{R}    # this key's admitted rows, in time order
     times::Vector{T}   # rows[j].time, aligned; for the window-start search
     nodes::Vector{S}   # length 2cap; index 1 is the root
+    accl::S            # query scratch: left-edge accumulator
+    accr::S            # query scratch: right-edge accumulator
     cap::Int
     head::Int          # 1 + expired-prefix length; only ever advances
 end
 
 newsegtree(stateprotos::S, ::Type{R}, ::Type{T}) where {S<:Tuple,R,T} =
-    SegTree{S,R,T}(R[], T[], [map(fresh, stateprotos) for _ in 1:8], 4, 1)
+    SegTree{S,R,T}(R[], T[], [map(fresh, stateprotos) for _ in 1:8],
+        map(fresh, stateprotos), map(fresh, stateprotos), 4, 1)
 
 # Peeled explicitly rather than through `foreach`/`map`: the three-argument
 # `foreach` folds over a `zip` and does not unroll for tuples, which costs a
@@ -56,14 +63,20 @@ function treepush!(tr::SegTree{S,R}, stateprotos::S, row::R) where {S<:Tuple,R}
 end
 
 # Fold rows lo:hi (1-based, inclusive; caller has checked lo <= hi) into a
-# fresh state tuple: the standard bottom-up walk, kept order-preserving with
-# two accumulators — accL collects left-edge nodes left to right, accR
-# right-edge nodes right to left — because First/Last combine correctly only
-# over stream-ordered ranges.
-function treequery(tr::SegTree{S}, stateprotos::S, lo::Int,
-    hi::Int) where {S<:Tuple}
-    accl = map(fresh, stateprotos)
-    accr = map(fresh, stateprotos)
+# state tuple: the standard bottom-up walk, kept order-preserving with two
+# accumulators — accL collects left-edge nodes left to right, accR right-edge
+# nodes right to left — because First/Last combine correctly only over
+# stream-ordered ranges.
+#
+# The accumulators are the tree's own scratch, zeroed here rather than
+# allocated, so the returned tuple is **borrowed**: it stays valid only until
+# the next query on this tree. Every caller (`emittree!`) reads it straight
+# through `summaryvalues`, which copies the values out.
+function treequery(tr::SegTree{S}, lo::Int, hi::Int) where {S<:Tuple}
+    accl = freshall!(tr.accl)
+    accr = freshall!(tr.accr)
+    tr.accl = accl
+    tr.accr = accr
     l = tr.cap + lo - 1
     r = tr.cap + hi          # one past the last leaf: the walk is half-open
     while l < r

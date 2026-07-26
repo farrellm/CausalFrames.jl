@@ -14,9 +14,11 @@
         CausalFrames.summaryvalues(sts, Val((:x_sum, :x_min, :x_last,
             :x_product)))
     end
+    # the query result is borrowed scratch, valid only until the next query,
+    # so it is read straight through summaryvalues — exactly as emittree! does
     queryvals(tr, lo, hi) =
         CausalFrames.summaryvalues(
-            CausalFrames.treequery(tr, stateprotos, lo, hi),
+            CausalFrames.treequery(tr, lo, hi),
             Val((:x_sum, :x_min, :x_last, :x_product)))
 
     # pseudo-random pushes cross-checked against a naive re-fold, across
@@ -38,8 +40,10 @@
         @test queryvals(tr, i, i) == naive(rows[i:i])
         @test queryvals(tr, 1, i) == naive(rows)
     end
-    @test @inferred(CausalFrames.treequery(tr, stateprotos, 1,
-        length(rows))) isa Tuple
+    @test @inferred(CausalFrames.treequery(tr, 1, length(rows))) isa Tuple
+    # the scratch accumulators are reused, so a query allocates nothing
+    CausalFrames.treequery(tr, 1, length(tr.rows))
+    @test (@allocated CausalFrames.treequery(tr, 1, length(tr.rows))) == 0
 
     # advancing head drops the expired prefix at the next full-capacity
     # rebuild, and queries over the live suffix still agree
