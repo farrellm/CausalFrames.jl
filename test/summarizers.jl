@@ -354,12 +354,34 @@ end
         @test typeof(CausalFrames.fresh!(st)) === typeof(st)
     end
 
-    # freshall! zeroes a whole tuple and, for the built-in mutable states,
-    # allocates nothing doing it — the property the hot paths rely on
-    let states = map(s -> CausalFrames.fresh(s, intypes), (Sum(:x), Min(:x)))
-        foreach(r -> CausalFrames.updateall!(states, r), rows)
-        CausalFrames.freshall!(states)
-        @test (@allocated CausalFrames.freshall!(states)) == 0
+    # Zeroing a built-in state is pure field writes, so it allocates nothing —
+    # the property every reuse path depends on.
+    for s in [Count(), Sum(:x), SumPower(:x, 2), DotProduct(:x, :y),
+        Product(:x), Min(:x), Max(:x), First(:x), Last(:x)]
+        st = fold(s, rows)
+        CausalFrames.fresh!(st)
+        @test (@allocated CausalFrames.fresh!(st)) == 0
+    end
+
+    # And over a whole tuple the cost does not grow with the number of resets.
+    # Asserted as a slope rather than as `@allocated(one call) == 0` because a
+    # lone `@allocated` puts a function boundary around the call, and the
+    # returned tuple has to be materialized to cross it — which Julia 1.10
+    # does even though it elides the tuple once `freshall!` is inlined into a
+    # folding loop, which is the only way the package calls it.
+    function resettotal(states, row, n)
+        acc = 0
+        for _ in 1:n
+            states = CausalFrames.freshall!(states)
+            CausalFrames.updateall!(states, row)
+            acc += states[1].n
+        end
+        return acc
+    end
+    let states = map(s -> CausalFrames.fresh(s, intypes), (Count(), Sum(:x)))
+        resettotal(states, first(rows), 2)
+        base = @allocated resettotal(states, first(rows), 100)
+        @test (@allocated resettotal(states, first(rows), 1000)) <= base + 100
     end
 
     # combine!(dest, a, b) equals folding a's rows then b's rows, for every

@@ -41,9 +41,20 @@
         @test queryvals(tr, 1, i) == naive(rows)
     end
     @test @inferred(CausalFrames.treequery(tr, 1, length(rows))) isa Tuple
-    # the scratch accumulators are reused, so a query allocates nothing
-    CausalFrames.treequery(tr, 1, length(tr.rows))
-    @test (@allocated CausalFrames.treequery(tr, 1, length(tr.rows))) == 0
+
+    # The query accumulators are the tree's own scratch, so the cost of a
+    # query does not grow with the number of queries. Asserted as a slope
+    # rather than as `@allocated(one call) == 0`: a lone `@allocated` puts a
+    # function boundary around the call, and the returned state tuple has to
+    # be materialized to cross it — which Julia 1.10 does (32-48 bytes) even
+    # though it elides the tuple entirely once the query is inlined into its
+    # caller, which is how `emittree!` calls it. Ten times the queries for
+    # (almost) none of the bytes is the property that actually matters; before
+    # the accumulators were reused this was ~96 bytes per query.
+    querytotal(tr, n) = sum(_ -> queryvals(tr, 1, length(tr.rows)).x_sum, 1:n)
+    querytotal(tr, 2)
+    base = @allocated querytotal(tr, 100)
+    @test (@allocated querytotal(tr, 1000)) <= base + 100
 
     # advancing head drops the expired prefix at the next full-capacity
     # rebuild, and queries over the live suffix still agree
