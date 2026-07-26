@@ -208,6 +208,36 @@ using CausalFrames.Acausal
         @test isequal(df.qty, [1, 1])
     end
 
+    @testset "kernel allocates nothing per row" begin
+        # The match buffer is a Vector{V} plus a mask rather than a
+        # Vector{Union{Missing,V}}, so a right row carrying a String — not
+        # isbits — costs no box per left row. (Unlike asofjoin, the store here
+        # needs no rework: KeyBuffer is mutable, so its lookup is already free.)
+        function futurealloc()
+            n = 200
+            V = typeof((time = 1, sym = "a", qty = 1.0))
+            K = typeof((sym = "a",))
+            KB = CausalFrames.Acausal.KeyBuffer
+            syms = ["s" * string(i % 5) for i in 1:n]
+            # every left row is at t = 1 and every buffered row at t = 5, so
+            # each row matches the front without popping it — the call is
+            # idempotent, which is what makes a second one measurable
+            lnt = (time = fill(1, n), sym = syms)
+            rnt = (time = Int[], sym = String[], qty = Float64[])
+            store = Dict{K,KB{V}}(
+                (sym = s,) => KB{V}(V[(time = 5, sym = s, qty = 1.0)], 1)
+                for s in unique(syms))
+            matches = Vector{V}(undef, n)
+            found = fill(false, n)
+            call() = CausalFrames.Acausal.futuresegment!(matches, found, store,
+                lnt, 1, rnt, 1, true, Val((:sym,)), >=, nothing)
+            call()
+            fill!(found, false)
+            return @allocated call()
+        end
+        @test futurealloc() == 0
+    end
+
     @testset "empty streams" begin
         left = onechunk(time = [1, 2], px = [1.0, 2.0])
         # empty right: passthrough, leftprefix still applied

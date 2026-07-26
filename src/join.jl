@@ -108,14 +108,16 @@ mutable struct AsofJoinState
     rpos::Int          # index of the next unadmitted right row in rnt
     rvaluenames::Any   # Vector{Symbol}: right columns minus keys minus time
     rtypes::Union{Nothing,NamedTuple}  # promotion of right schemas seen
-    store::Any         # Dict{K,V}: per-key most recent admitted right row
-    matches::Any       # Vector{Union{Missing,V}}: per-left-row match, reused
+    index::Any         # Dict{K,Int}: per-key slot holding its most recent row
+    slots::Any         # Vector{V}: those rows, one slot per key ever seen
+    matches::Any       # Vector{V}: per-left-row match, reused; see `found`
+    found::Vector{Bool} # which matches slots hold a match; the rest are undef
     passthrough::Bool  # the right stream produced no chunks at all
     leftchecked::Bool  # key validation against the left schema done
     checked::Bool      # output-name duplicate validation done
     AsofJoinState(rchunks) = new(rchunks, nothing, false, false, nothing, 1,
-        nothing, nothing, nothing, nothing, false,
-        false, false)
+        nothing, nothing, nothing, nothing, nothing,
+        Bool[], false, false, false)
 end
 
 # The concrete row and key NamedTuple types for the store, from the promoted
@@ -125,6 +127,18 @@ end
 storerowtype(types::NamedTuple) = NamedTuple{keys(types),Tuple{values(types)...}}
 storekeytype(types::NamedTuple, ::Val{KN}) where {KN} =
     storerowtype(NamedTuple{KN}(types))
+
+# Widen a half-filled matches buffer, copying only the slots `found` marks.
+# The rest are deliberately undefined — a plain `convert` over the vector would
+# read them. Shared with futurejoin, whose buffer has the same shape.
+function convertmatches(::Type{V2}, matches::Vector,
+    found::Vector{Bool}) where {V2}
+    out = Vector{V2}(undef, length(matches))
+    @inbounds for i in eachindex(matches)
+        found[i] && (out[i] = convert(V2, matches[i]))
+    end
+    return out
+end
 
 function checkkeys(keycols::Vector{Symbol}, c::DataFrame, side::String)
     for k in keycols
@@ -137,8 +151,9 @@ end
 # Pull the next right chunk (type-unstable, once per right chunk): create or
 # widen the store when the promoted right schema moves — a source may hand a
 # column a different element type from one chunk to the next. The matches
-# vector may be half-filled mid-left-chunk when this runs, so it is converted
-# along with the store.
+# buffer may be half-filled mid-left-chunk when this runs, so it is converted
+# along with the store — through `convertmatches`, since its unmatched slots
+# are undefined.
 function pullright!(js::AsofJoinState, cfg::AsofJoinConfig)
     next = js.rstarted ? iterate(js.rchunks, js.rstate) : iterate(js.rchunks)
     js.rstarted = true
@@ -158,16 +173,19 @@ function pullright!(js::AsofJoinState, cfg::AsofJoinConfig)
     js.rtypes = types
     js.rnt = Tables.columntable(chunk)
     js.rpos = 1
-    if js.store === nothing
+    if js.index === nothing
         V = storerowtype(types)
-        js.store = Dict{storekeytype(types, cfg.keynames),V}()
-        js.matches = Union{Missing,V}[]
+        js.index = Dict{storekeytype(types, cfg.keynames),Int}()
+        js.slots = V[]
+        js.matches = V[]
     elseif widened
         K = storekeytype(types, cfg.keynames)
         V = storerowtype(types)
-        js.store = Dict{K,V}(convert(K, k) => convert(V, v)
-                             for (k, v) in js.store)
-        js.matches = convert(Vector{Union{Missing,V}}, js.matches)
+        # Slot numbers do not move, so only the keys are rebuilt; every slot is
+        # occupied, so that vector converts wholesale.
+        js.index = Dict{K,Int}(convert(K, k) => j for (k, j) in js.index)
+        js.slots = convert(Vector{V}, js.slots)
+        js.matches = convertmatches(V, js.matches, js.found)
     end
     return nothing
 end
@@ -185,12 +203,13 @@ function joinchunk!(js::AsofJoinState, cfg::AsofJoinConfig, c::DataFrame)
     end
     nt = Tables.columntable(c)
     resize!(js.matches, nrow(c))
-    fill!(js.matches, missing)   # leave no undef slots for a mid-chunk widen
+    resize!(js.found, nrow(c))
+    fill!(js.found, false)   # the only reset needed; matches slots are guarded
     i = 1
     while true
-        i, js.rpos, needpull = joinsegment!(js.matches, js.store, nt, i,
-            js.rnt, js.rpos, js.rdone,
-            cfg.keynames, cfg.before,
+        i, js.rpos, needpull = joinsegment!(js.matches, js.found, js.index,
+            js.slots, nt, i, js.rnt, js.rpos,
+            js.rdone, cfg.keynames, cfg.before,
             cfg.tolerance)
         needpull || break
         pullright!(js, cfg)
@@ -206,26 +225,40 @@ end
 # needpull means the current right chunk is consumed but the stream may still
 # hold rows admissible for left row i — the driver must pull the next right
 # chunk before row i can be matched.
-function joinsegment!(matches::Vector{Union{Missing,V}}, store::Dict{K,V},
-    lnt::NamedTuple, i::Int, rnt::NamedTuple, rpos::Int,
-    rdone::Bool, keynames::Val{KN}, before::B,
-    tolerance) where {K,V,KN,B}
+# The store is an index and a slot vector rather than a Dict of rows, because a
+# Dict of rows can only answer a lookup as `Union{Nothing,V}` — and building
+# that Union out of an inline-stored V heap-allocates it, once per left row,
+# whenever V is not an isbits type (any String or Missing-admitting right
+# column is enough). An Int slot number is isbits, so the lookup is free and
+# the row is read back inline.
+function joinsegment!(matches::Vector{V}, found::Vector{Bool},
+    index::Dict{K,Int}, slots::Vector{V}, lnt::NamedTuple,
+    i::Int, rnt::NamedTuple, rpos::Int, rdone::Bool,
+    keynames::Val{KN}, before::B, tolerance) where {K,V,KN,B}
     n = length(lnt.time)
     rlen = length(rnt.time)
     while i <= n
         t = @inbounds lnt.time[i]
         # Admit right rows not after (strict: strictly before) t; equal right
-        # times overwrite the store, so the later row in stream order wins.
+        # times overwrite the key's slot, so the later row in stream order
+        # wins. `get!` claims the next slot number on a miss, so admitting a
+        # row costs one hash whether or not the key is new.
         while rpos <= rlen && before(@inbounds(rnt.time[rpos]), t)
-            store[keyat(rnt, rpos, keynames)] = rowat(V, rnt, rpos)
+            row = rowat(V, rnt, rpos)
+            j = get!(index, keyat(rnt, rpos, keynames), length(slots) + 1)
+            j > length(slots) ? push!(slots, row) : (@inbounds slots[j] = row)
             rpos += 1
         end
         rpos > rlen && !rdone && return (i, rpos, true)
         # A stored row keeps its time, so tolerance staleness is decided here,
         # against each left row — never by evicting eagerly.
-        m = get(store, keyat(lnt, i, keynames), nothing)
-        if m !== nothing && (tolerance === nothing || t - m.time <= tolerance)
-            @inbounds matches[i] = m
+        j = get(index, keyat(lnt, i, keynames), 0)
+        if j > 0
+            m = @inbounds slots[j]
+            if tolerance === nothing || t - m.time <= tolerance
+                @inbounds matches[i] = m
+                @inbounds found[i] = true
+            end
         end
         i += 1
     end
@@ -283,18 +316,20 @@ end
 function assemble(cfg::AsofJoinConfig, js::AsofJoinState, c::DataFrame)
     rdf = DataFrame()
     for n in js.rvaluenames
-        rdf[!, prefixed(cfg.rightprefix, n)] = matchcolumn(js.matches, Val(n))
+        rdf[!, prefixed(cfg.rightprefix, n)] =
+            matchcolumn(js.matches, js.found, Val(n))
     end
     cfg.righttime === nothing ||
-        (rdf[!, cfg.righttime] = matchcolumn(js.matches, Val(:time)))
+        (rdf[!, cfg.righttime] = matchcolumn(js.matches, js.found, Val(:time)))
     # The chunk is owned, so its columns can be adopted rather than copied.
     return hcat(c, rdf; copycols = false)
 end
 
 # Function barrier: fieldtype fixes the column's element type so the
-# comprehension builds a typed column directly. The eltype is taken apart
-# with nonmissingtype rather than matched as Union{Missing,V}, which would
-# leave V unbound.
-matchcolumn(matches::Vector{T}, ::Val{N}) where {T,N} =
-    Union{Missing,fieldtype(nonmissingtype(T), N)}[
-        m === missing ? missing : getproperty(m, N) for m in matches]
+# comprehension builds a typed column directly. `found` is what makes the
+# unmatched slots safe — they are undefined, never `missing`, because a
+# Vector{Union{Missing,V}} boxes every stored row when V is not isbits.
+matchcolumn(matches::Vector{V}, found::Vector{Bool}, ::Val{N}) where {V,N} =
+    Union{Missing,fieldtype(V, N)}[
+        @inbounds(found[i]) ? getproperty(@inbounds(matches[i]), N) : missing
+        for i in eachindex(matches)]

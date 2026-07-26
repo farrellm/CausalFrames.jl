@@ -82,13 +82,20 @@ end
 end
 
 @testset "asofjoin kernel" begin
-    V = typeof((time = 1, y = 1.0))
-    store = Dict{NamedTuple{(),Tuple{}},V}()
-    matches = Union{Missing,V}[missing]
-    lnt = (time = [1],)
-    rnt = (time = [0], y = [2.0])
-    JET.@test_opt CausalFrames.joinsegment!(matches, store, lnt, 1, rnt, 1,
-        true, Val(()), <=, nothing)
+    # a String field makes V non-isbits, which is the case the index/slots
+    # store exists for: a Dict of rows could only answer as Union{Nothing,V},
+    # boxing once per left row
+    V = typeof((time = 1, sym = "a", y = 1.0))
+    K = typeof((sym = "a",))
+    index = Dict{K,Int}()
+    slots = V[]
+    matches = Vector{V}(undef, 1)
+    found = [false]
+    lnt = (time = [1], sym = ["a"])
+    rnt = (time = [0], sym = ["a"], y = [2.0])
+    JET.@test_opt CausalFrames.joinsegment!(matches, found, index, slots, lnt,
+        1, rnt, 1, true, Val((:sym,)), <=, nothing)
+    JET.@test_opt CausalFrames.matchcolumn(matches, found, Val(:y))
 end
 
 @testset "merge winner selection" begin
