@@ -242,12 +242,15 @@ end
 
 # --- output assembly -------------------------------------------------------
 
+# One rename! over every pair, not one call per column: each call rebuilds the
+# chunk's column index, which made this O(ncols^2) per chunk.
 function prefixleft!(cfg::AsofJoinConfig, c::DataFrame)
     cfg.leftprefix === nothing && return c
-    for n in propertynames(c)
-        (n === :time || n in cfg.keycols) && continue
-        rename!(c, n => prefixed(cfg.leftprefix, n))
-    end
+    pairs = [
+        n => prefixed(cfg.leftprefix, n) for n in propertynames(c)
+        if n !== :time && !(n in cfg.keycols)
+    ]
+    isempty(pairs) || rename!(c, pairs)
     return c
 end
 

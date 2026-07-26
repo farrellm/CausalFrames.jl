@@ -29,17 +29,20 @@ tokeycolumns(ks) = collect(Symbol, ks)
 function prototypes(ss::Vector{Summarizer}, keycols::Vector{Symbol})
     isempty(ss) && throw(ArgumentError("at least one summarizer is required"))
     protos = Summarizer[]
-    seen = Set{Tuple{Vararg{Symbol}}}()      # finished, by output-name tuple
-    visiting = Set{Tuple{Vararg{Symbol}}}()  # walk in progress: cycle guard
+    # Output-name tuples are heterogeneous, so a Set of them would be keyed by
+    # an abstract type; at the handful of summarizers a call can carry (tuple
+    # inference gives up past ~32) a linear `in` is both simpler and faster.
+    seen = Tuple{Vararg{Symbol}}[]      # finished, by output-name tuple
+    visiting = Tuple{Vararg{Symbol}}[]  # walk in progress: cycle guard
     used = Set{Symbol}()
     function expand(s::Summarizer)
         outnames = keys(emptyvalue(s))
         outnames in seen && return
         outnames in visiting && throw(ArgumentError(
             "summarizer dependency cycle through $(first(outnames))"))
-        push!(visiting, outnames)
+        push!(visiting, outnames)          # a stack: the walk is depth-first
         foreach(expand, dependencies(s))
-        delete!(visiting, outnames)
+        pop!(visiting)
         for n in outnames
             n in used && throw(
                 ArgumentError(

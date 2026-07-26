@@ -112,7 +112,7 @@ end
 # empty frame yields the single zero-row frame `DataFrame(frame)` would, so
 # partition-aware sinks see the same table as whole-table consumers.
 Tables.partitions(frame::CausalFrame{T}) where {T} =
-    (copy(c) for c in (isempty(frame.chunks) ? [DataFrame(time = T[])] :
+    (copy(c) for c in (isempty(frame.chunks) ? (DataFrame(time = T[]),) :
                        frame.chunks))
 
 function Base.show(io::IO, mime::MIME"text/plain", frame::CausalFrame{T}) where {T}

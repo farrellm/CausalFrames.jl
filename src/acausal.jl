@@ -291,12 +291,15 @@ end
 
 # --- output assembly -------------------------------------------------------
 
+# One rename! over every pair, as in asofjoin's prefixleft!: renaming column by
+# column rebuilds the chunk's column index each time.
 function prefixleft!(cfg::FutureJoinConfig, c::DataFrame)
     cfg.leftprefix === nothing && return c
-    for n in propertynames(c)
-        (n === :time || n in cfg.keycols) && continue
-        rename!(c, n => prefixed(cfg.leftprefix, n))
-    end
+    pairs = [
+        n => prefixed(cfg.leftprefix, n) for n in propertynames(c)
+        if n !== :time && !(n in cfg.keycols)
+    ]
+    isempty(pairs) || rename!(c, pairs)
     return c
 end
 
