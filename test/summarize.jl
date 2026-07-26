@@ -302,6 +302,73 @@ time,sym,qty
 
     # empty input yields no rows
     @test nrow(load(Context(0, 9), emptyframe() |> summarizecycles(Count()))) == 0
+
+    # State tuples are recycled between cycles rather than rebuilt, so a key
+    # that reappears after an absence must start from zero and must not carry
+    # anything over from whichever key last used that tuple. Min/Max/First/Last
+    # are the sharp case: their value field cannot be un-defined, so only the
+    # `seen` flag is cleared, and a leak here would surface as a stale value
+    # rather than an error.
+    reuse = CausalPipeline(
+        ctx -> [
+            DataFrame(time = [1, 1, 2, 3, 3],
+                sym = ["a", "b", "b", "a", "c"],
+                qty = [100, 7, 8, 1, 2]),
+        ],
+    )
+    df = DataFrame(
+        load(Context(0, 9),
+            reuse |> summarizecycles([Count(), Sum(:qty), Min(:qty), Max(:qty)];
+                key = :sym)),
+    )
+    @test df.time == [1, 1, 2, 3, 3]
+    @test df.sym == ["a", "b", "b", "a", "c"]
+    @test df.count == [1, 1, 1, 1, 1]
+    @test df.qty_sum == [100, 7, 8, 1, 2]
+    # "a" returns in cycle 3 after sitting out cycle 2, and "c" is brand new;
+    # both must report their own row, never 100 (a's cycle-1 value) or 8
+    @test df.qty_min == [100, 7, 8, 1, 2]
+    @test df.qty_max == [100, 7, 8, 1, 2]
+
+    # A wider differential check against a straightforward reference fold, over
+    # many cycles and a key set that churns — the shape that exercises the
+    # recycling pool, the key-ordered emission buffer, and cycles spanning
+    # chunk boundaries all at once.
+    let times = Int[], syms = String[], qtys = Int[]
+        for t in 1:60, k in 0:(t%5)
+            push!(times, t)
+            push!(syms, "k" * string((t * 7 + k) % 9))
+            push!(qtys, t * 10 + k)
+        end
+        chunked = CausalPipeline(
+            ctx -> [
+                DataFrame(time = times[r], sym = syms[r], qty = qtys[r])
+                for r in (1:37, 38:100, 101:length(times))
+            ],
+        )
+        got = DataFrame(
+            load(Context(0, 99),
+                chunked |> summarizecycles(
+                    [Count(), Sum(:qty), Min(:qty),
+                        Max(:qty), First(:qty), Last(:qty)]; key = :sym)),
+        )
+        # reference: group by time, then by key within the cycle, key-sorted
+        exp = DataFrame(time = Int[], sym = String[], count = Int[],
+            qty_sum = Int[], qty_min = Int[], qty_max = Int[],
+            qty_first = Int[], qty_last = Int[])
+        for t in sort(unique(times))
+            rows = findall(==(t), times)
+            for k in sort(unique(syms[rows]))
+                g = [i for i in rows if syms[i] == k]
+                push!(
+                    exp,
+                    (t, k, length(g), sum(qtys[g]), minimum(qtys[g]),
+                        maximum(qtys[g]), qtys[first(g)], qtys[last(g)]),
+                )
+            end
+        end
+        @test got == exp
+    end
 end
 
 @testset "addsummarycolumns" begin

@@ -12,7 +12,7 @@ using DataFrames
 using Tables
 using ..CausalFrames: CausalPipeline, Context, chunkmap, shiftchunk!,
     tokeycolumns, chunktypes, promotetypes, normprefix, prefixed,
-    storerowtype, storekeytype, rowat, keyat, matchcolumn
+    storerowtype, storekeytype, rowat, keyat, matchcolumn, convertmatches
 
 export futurejoin, lead
 
@@ -156,13 +156,14 @@ mutable struct FutureJoinState
     rvaluenames::Any   # Vector{Symbol}: right columns minus keys minus time
     rtypes::Union{Nothing,NamedTuple}  # promotion of right schemas seen
     store::Any         # Dict{K,KeyBuffer{V}}: per-key buffered future rows
-    matches::Any       # Vector{Union{Missing,V}}: per-left-row match, reused
+    matches::Any       # Vector{V}: per-left-row match, reused; see `found`
+    found::Vector{Bool} # which matches slots hold a match; the rest are undef
     passthrough::Bool  # the right stream produced no chunks at all
     leftchecked::Bool  # key validation against the left schema done
     checked::Bool      # output-name duplicate validation done
     FutureJoinState(rchunks) = new(rchunks, nothing, false, false, nothing, 1,
-        nothing, nothing, nothing, nothing, false,
-        false, false)
+        nothing, nothing, nothing, nothing, Bool[],
+        false, false, false)
 end
 
 function checkkeys(keycols::Vector{Symbol}, c::DataFrame, side::String)
@@ -200,14 +201,14 @@ function pullright!(js::FutureJoinState, cfg::FutureJoinConfig)
         V = storerowtype(types)
         K = storekeytype(types, cfg.keynames)
         js.store = Dict{K,KeyBuffer{V}}()
-        js.matches = Union{Missing,V}[]
+        js.matches = V[]
     elseif widened
         K = storekeytype(types, cfg.keynames)
         V = storerowtype(types)
         js.store = Dict{K,KeyBuffer{V}}(
             convert(K, k) => KeyBuffer{V}(convert(Vector{V}, b.rows), b.head)
             for (k, b) in js.store)
-        js.matches = convert(Vector{Union{Missing,V}}, js.matches)
+        js.matches = convertmatches(V, js.matches, js.found)
     end
     return nothing
 end
@@ -225,11 +226,12 @@ function joinchunk!(js::FutureJoinState, cfg::FutureJoinConfig, c::DataFrame)
     end
     nt = Tables.columntable(c)
     resize!(js.matches, nrow(c))
-    fill!(js.matches, missing)   # leave no undef slots for a mid-chunk widen
+    resize!(js.found, nrow(c))
+    fill!(js.found, false)   # the only reset needed; matches slots are guarded
     i = 1
     while true
-        i, js.rpos, needpull = futuresegment!(js.matches, js.store, nt, i,
-            js.rnt, js.rpos, js.rdone,
+        i, js.rpos, needpull = futuresegment!(js.matches, js.found, js.store,
+            nt, i, js.rnt, js.rpos, js.rdone,
             cfg.keynames, cfg.after,
             cfg.tolerance)
         needpull || break
@@ -247,7 +249,7 @@ end
 # (i, rpos, needpull): needpull means a left row's key has no buffered future
 # row yet but the right stream is not exhausted — the driver must pull the
 # next right chunk before row i can be resolved.
-function futuresegment!(matches::Vector{Union{Missing,V}},
+function futuresegment!(matches::Vector{V}, found::Vector{Bool},
     store::Dict{K,KeyBuffer{V}}, lnt::NamedTuple, i::Int, rnt::NamedTuple,
     rpos::Int, rdone::Bool, keynames::Val{KN}, after::A,
     tolerance) where {K,V,KN,A}
@@ -282,6 +284,7 @@ function futuresegment!(matches::Vector{Union{Missing,V}},
             m = buffront(b)
             if tolerance === nothing || m.time - t <= tolerance
                 @inbounds matches[i] = m
+                @inbounds found[i] = true
             end
         end
         i += 1
@@ -291,12 +294,15 @@ end
 
 # --- output assembly -------------------------------------------------------
 
+# One rename! over every pair, as in asofjoin's prefixleft!: renaming column by
+# column rebuilds the chunk's column index each time.
 function prefixleft!(cfg::FutureJoinConfig, c::DataFrame)
     cfg.leftprefix === nothing && return c
-    for n in propertynames(c)
-        (n === :time || n in cfg.keycols) && continue
-        rename!(c, n => prefixed(cfg.leftprefix, n))
-    end
+    pairs = [
+        n => prefixed(cfg.leftprefix, n) for n in propertynames(c)
+        if n !== :time && !(n in cfg.keycols)
+    ]
+    isempty(pairs) || rename!(c, pairs)
     return c
 end
 
@@ -329,10 +335,11 @@ end
 function assemble(cfg::FutureJoinConfig, js::FutureJoinState, c::DataFrame)
     rdf = DataFrame()
     for n in js.rvaluenames
-        rdf[!, prefixed(cfg.rightprefix, n)] = matchcolumn(js.matches, Val(n))
+        rdf[!, prefixed(cfg.rightprefix, n)] =
+            matchcolumn(js.matches, js.found, Val(n))
     end
     cfg.righttime === nothing ||
-        (rdf[!, cfg.righttime] = matchcolumn(js.matches, Val(:time)))
+        (rdf[!, cfg.righttime] = matchcolumn(js.matches, js.found, Val(:time)))
     # The chunk is owned, so its columns can be adopted rather than copied.
     return hcat(c, rdf; copycols = false)
 end

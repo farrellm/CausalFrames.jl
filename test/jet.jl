@@ -22,7 +22,8 @@ using JET
     groups = CausalFrames.newgroups(states, nt, keynames)
     JET.@test_opt CausalFrames.foldgroups!(groups, states, nt, keynames)
 
-    JET.@test_opt CausalFrames.foldcycles!(states, states, nt, nothing, outs)
+    JET.@test_opt CausalFrames.foldcycles!(states, nt, nothing, outs)
+    JET.@test_opt CausalFrames.freshall!(states)
     JET.@test_opt CausalFrames.foldrunning!(states, nt, 3, outs)
 end
 
@@ -53,7 +54,7 @@ end
     tr = CausalFrames.newsegtree(states, typeof(row), Int)
     JET.@test_opt CausalFrames.treepush!(tr, states, row)
     CausalFrames.treepush!(tr, states, row)
-    JET.@test_opt CausalFrames.treequery(tr, states, 1, 1)
+    JET.@test_opt CausalFrames.treequery(tr, 1, 1)
     JET.@test_opt CausalFrames.windowstart(tr.times, tr.head, 1, 0)
 end
 
@@ -66,9 +67,9 @@ end
     nt = (time = [1, 3, 6], k = [1, 2, 1], x = [1.0, 2.0, 3.0])
     bounds = [0, 5, 10]
 
-    JET.@test_opt CausalFrames.foldintervals!(states, states, protos, nt,
+    JET.@test_opt CausalFrames.foldintervals!(states, protos, nt,
         bounds, 2, false, true, outs)
-    JET.@test_opt CausalFrames.flushintervals!(states, states, protos, bounds,
+    JET.@test_opt CausalFrames.flushintervals!(states, protos, bounds,
         2, false, 10, true, outs)
 
     keynames = Val((:k,))
@@ -81,13 +82,20 @@ end
 end
 
 @testset "asofjoin kernel" begin
-    V = typeof((time = 1, y = 1.0))
-    store = Dict{NamedTuple{(),Tuple{}},V}()
-    matches = Union{Missing,V}[missing]
-    lnt = (time = [1],)
-    rnt = (time = [0], y = [2.0])
-    JET.@test_opt CausalFrames.joinsegment!(matches, store, lnt, 1, rnt, 1,
-        true, Val(()), <=, nothing)
+    # a String field makes V non-isbits, which is the case the index/slots
+    # store exists for: a Dict of rows could only answer as Union{Nothing,V},
+    # boxing once per left row
+    V = typeof((time = 1, sym = "a", y = 1.0))
+    K = typeof((sym = "a",))
+    index = Dict{K,Int}()
+    slots = V[]
+    matches = Vector{V}(undef, 1)
+    found = [false]
+    lnt = (time = [1], sym = ["a"])
+    rnt = (time = [0], sym = ["a"], y = [2.0])
+    JET.@test_opt CausalFrames.joinsegment!(matches, found, index, slots, lnt,
+        1, rnt, 1, true, Val((:sym,)), <=, nothing)
+    JET.@test_opt CausalFrames.matchcolumn(matches, found, Val(:y))
 end
 
 @testset "merge winner selection" begin

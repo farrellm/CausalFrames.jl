@@ -342,15 +342,16 @@ textualtime(path::String, what::String) =
 # columns it names; a function is applied to every column name.
 renamecolumns!(::DataFrame, ::Nothing) = nothing
 renamecolumns!(df::DataFrame, f) = (rename!(f, df); nothing)
+# A map may be keyed by either the column name as a String or as a Symbol, so
+# both are looked up; normalizing the pairs to one type up front keeps the two
+# cases from having to be collected separately and spliced together.
 function renamecolumns!(df::DataFrame, m::AbstractDict)
-    pairs = [k => m[k] for k in names(df) if haskey(m, k)]
-    append!(
-        pairs,
-        [
-            Symbol(k) => m[Symbol(k)] for k in names(df)
-            if !haskey(m, k) && haskey(m, Symbol(k))
-        ],
-    )
+    pairs = Pair{String,Symbol}[]
+    for n in names(df)
+        s = Symbol(n)
+        haskey(m, n) ? push!(pairs, n => Symbol(m[n])) :
+        haskey(m, s) && push!(pairs, n => Symbol(m[s]))
+    end
     isempty(pairs) || rename!(df, pairs)
     return nothing
 end
@@ -513,17 +514,23 @@ end
 filterrows(p::CausalPipeline, pred) = filterrows(pred)(p)
 
 function filterchunk(pred, c::DataFrame)
-    mask = rowmask(pred, Tables.columntable(c))
-    return all(mask) ? c : c[mask, :]
+    mask, kept = rowmask(pred, Tables.columntable(c))
+    # The chunk is owned, so a filter that keeps every row needs no copy.
+    return kept == length(mask) ? c : c[mask, :]
 end
 
-# Function barrier: iterates concretely typed rows of the column table.
+# Function barrier: iterates concretely typed rows of the column table. The
+# kept count falls out of the same pass, so the caller's "everything survived"
+# test costs no second walk over the mask.
 function rowmask(pred, nt::NamedTuple)
     mask = Vector{Bool}(undef, length(nt.time))
+    kept = 0
     for (i, row) in enumerate(Tables.rows(nt))
-        mask[i] = pred(row)::Bool
+        keep = pred(row)::Bool
+        @inbounds mask[i] = keep
+        kept += keep
     end
-    return mask
+    return mask, kept
 end
 
 """

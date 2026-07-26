@@ -52,9 +52,13 @@ design rationale and performance constraints behind each module.
   working on parquet means loading `DuckDB`/`Parquet2` in the session first
 - `src/summarizers.jl` — `Summarizer` (immutable config, output column name in
   a type parameter) and `SummarizerState` (running state, typed from the input
-  schema), plus their unexported interface: `emptyvalue`, `fresh`, `update!`,
-  `value`, `widenstate`, `dependencies`, `combine!`, `downdate!`,
+  schema), plus their unexported interface: `emptyvalue`, `fresh`, `fresh!`,
+  `update!`, `value`, `widenstate`, `dependencies`, `combine!`, `downdate!`,
   `isinvertible`. Within that:
+  - `fresh!` zeroes a state in place and returns it (default `fresh(st)`, so
+    it is opt-in for a custom summarizer). It exists because the transforms
+    zero a state tuple per cycle, per interval, and per window query — see
+    DESIGN.md's "Reusing state". Callers must use the return value
   - the structured subtypes are `MonoidSummarizer` (states combine
     associatively over stream-ordered ranges via `combine!`, fresh state as
     the identity) and `GroupSummarizer <: MonoidSummarizer` (also invertible,
@@ -86,15 +90,32 @@ design rationale and performance constraints behind each module.
   topologically and returns the requested output names, which ride through
   the kernels in a `Val` to project hidden dependencies out of the output;
   per-run mutable state lives in the `SummaryFold` struct, never in
-  reassigned closure captures (those get boxed)
+  reassigned closure captures (those get boxed). The per-key states live in a
+  `GroupTable{K,S}` (both parameters concrete, as the bare `Dict` was) that
+  also carries the reused emission buffer and the pool of retired state
+  tuples `closecycle!` retires into and `groupstates!` zeroes back out of —
+  the keyed cycle fold closes a table per timestamp, so rebuilding one per
+  cycle was the package's heaviest allocation site
 - `src/join.jl` — `asofjoin`, the binary as-of join transform: a chunkmap
   over the left stream pulls right chunks on demand (two-pointer merge, per
   left row) into a concretely typed per-key store; `tolerance` widens the
-  right context by `start - tolerance` (the one place times are subtracted)
+  right context by `start - tolerance` (the one place times are subtracted).
+  The store is a `Dict{K,Int}` of slot numbers over a `Vector{V}` of rows, and
+  a match is a `Vector{V}` plus a `Vector{Bool}` mask (unmatched slots left
+  undefined, hence `convertmatches` for a mid-chunk widening) — both to keep
+  `V` out of a `Union`, which Julia cannot store inline unless every member is
+  isbits, so a `String` or `Missing`-admitting right column cost one box per
+  left row. See DESIGN.md's "Representing a match"; the two zero-allocation
+  kernel tests are what stop it regressing
 - `src/segtree.jl` — the monoid segment tree behind the rolling tree mode:
   implicit array tree of `combine!`d partial state tuples, append-only rows,
   logical front expiry (`head`), amortized rebuilds, order-preserving
-  two-accumulator range queries (`treepush!`, `treequery`, `windowstart`)
+  two-accumulator range queries (`treepush!`, `treequery`, `windowstart`).
+  The tree owns its two query accumulators and its node vector: `treequery`
+  returns **borrowed** scratch, valid only until that tree's next query, and
+  `rebuild!` reuses the nodes and compacts the rows in place whenever the
+  capacity has not moved — the steady state under a short window, where
+  rebuilds fire every few appends rather than amortizing away
 - `src/rolling.jl` — `addrollingcolumns` picks its window algorithm from the
   expanded prototype tuple's structure: all-group → per-key running states
   with per-window eviction heads, O(1)/row (`rollsegmentrunning!`);
@@ -120,6 +141,9 @@ design rationale and performance constraints behind each module.
   widening (`stop + tolerance`) all inverted; because it matches the *earliest*
   qualifying right row it must buffer right rows per key until a left row
   consumes or outruns them, and proving a key has no future match drains the
-  right stream — worst case O(right rows), against `asofjoin`'s O(keys)
+  right stream — worst case O(right rows), against `asofjoin`'s O(keys) store.
+  It shares the `Vector{V}` + mask match buffer but needs no store rework of
+  its own: `KeyBuffer` is mutable, so a lookup already answers with a pointer
+  and never boxed
 - `src/precompile.jl` — the PrecompileTools workload over the main pipeline
   paths; every new operator adds a path here

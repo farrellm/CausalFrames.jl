@@ -423,6 +423,10 @@ function rollsegment!(vals::Tuple, buffer::Vector{R}, head::Int,
     emptyrow) where {R,KN,S<:Tuple}
     n = length(lnt.time)
     slen = length(snt.time)
+    # One state tuple for the whole segment: every window of every row folds
+    # into it and `summaryvalues` copies the result out before it is zeroed
+    # again, so the re-fold baseline allocates per segment, not per row.
+    scratch = map(fresh, stateprotos)
     while i <= n
         t = @inbounds lnt.time[i]
         # Admit summarized rows not after t — equal times included, so every
@@ -438,8 +442,9 @@ function rollsegment!(vals::Tuple, buffer::Vector{R}, head::Int,
               outsideall(t - @inbounds(buffer[head]).time, lookbacks...)
             head += 1
         end
-        foldwindows!(vals, i, t, buffer, head, keyat(lnt, i, keynames),
-            keynames, stateprotos, outs, emptyrow, lookbacks...)
+        scratch = foldwindows!(vals, i, t, buffer, head,
+            keyat(lnt, i, keynames), keynames, scratch, outs, emptyrow,
+            lookbacks...)
         i += 1
     end
     return (i, spos, head, false)
@@ -450,17 +455,20 @@ end
 
 # One window per call, peeling the value vectors and look-backs in step
 # (vararg style, so inference tracks the heterogeneous look-back types).
-# Fresh states per window per row: accumulate-only states cannot evict, and
-# they are small mutable structs, so re-folding the window is the simple
-# correct baseline. `seen` guards value: Min/Max/First/Last leave their
-# value field undefined until a row is folded in.
-@inline foldwindows!(::Tuple{}, i, t, buffer, head, k, keynames, stateprotos,
-    outs, emptyrow) = nothing
+# Zeroed states per window per row: accumulate-only states cannot evict, so
+# re-folding the window is the simple correct baseline. The state tuple is
+# `scratch`, threaded through the recursion and owned by the caller, so the
+# baseline costs no allocation per row either — `summaryvalues` copies the
+# values out before the next window zeroes it. `seen` guards value:
+# Min/Max/First/Last leave their value field meaningless until a row is
+# folded in.
+@inline foldwindows!(::Tuple{}, i, t, buffer, head, k, keynames, scratch,
+    outs, emptyrow) = scratch
 @inline function foldwindows!(vals::Tuple, i::Int, t, buffer::Vector,
     head::Int, k::NamedTuple, keynames::Val,
-    stateprotos::Tuple, outs::Val, emptyrow,
+    scratch::Tuple, outs::Val, emptyrow,
     lb, rest...)
-    states = map(fresh, stateprotos)
+    states = freshall!(scratch)
     seen = false
     for j in head:length(buffer)
         s = @inbounds buffer[j]
@@ -472,7 +480,7 @@ end
     v = first(vals)
     @inbounds v[i] = seen ? summaryvalues(states, outs) : emptyrow
     return foldwindows!(Base.tail(vals), i, t, buffer, head, k, keynames,
-        stateprotos, outs, emptyrow, rest...)
+        states, outs, emptyrow, rest...)
 end
 
 # --- running (group) kernel ------------------------------------------------
@@ -588,7 +596,7 @@ function rollsegmenttree!(vals::Tuple, trees::Dict{K,SegTree{S,R,T}},
                 @inbounds v[i] = emptyrow
             end
         else
-            minlo = emittree!(vals, i, t, tr, stateprotos, outs, emptyrow,
+            minlo = emittree!(vals, i, t, tr, outs, emptyrow,
                 length(tr.rows) + 1, 1, lookbacks...)
             tr.head = max(tr.head, minlo)
         end
@@ -597,19 +605,18 @@ function rollsegmenttree!(vals::Tuple, trees::Dict{K,SegTree{S,R,T}},
     return (i, spos, false)
 end
 
-@inline emittree!(vals::Tuple, i::Int, t, tr::SegTree, stateprotos::Tuple,
-    outs::Val, emptyrow, minlo::Int, w::Int) = minlo
-@inline function emittree!(vals::Tuple, i::Int, t, tr::SegTree,
-    stateprotos::Tuple, outs::Val, emptyrow,
-    minlo::Int, w::Int, lb, rest...)
+@inline emittree!(vals::Tuple, i::Int, t, tr::SegTree, outs::Val, emptyrow,
+    minlo::Int, w::Int) = minlo
+@inline function emittree!(vals::Tuple, i::Int, t, tr::SegTree, outs::Val,
+    emptyrow, minlo::Int, w::Int, lb, rest...)
     lo = windowstart(tr.times, tr.head, t, lb)
     hi = length(tr.rows)
     v = vals[w]
     @inbounds v[i] =
         lo > hi ? emptyrow :
-        summaryvalues(treequery(tr, stateprotos, lo, hi), outs)
-    return emittree!(vals, i, t, tr, stateprotos, outs, emptyrow,
-        min(minlo, lo), w + 1, rest...)
+        summaryvalues(treequery(tr, lo, hi), outs)
+    return emittree!(vals, i, t, tr, outs, emptyrow, min(minlo, lo), w + 1,
+        rest...)
 end
 
 # --- output assembly -------------------------------------------------------

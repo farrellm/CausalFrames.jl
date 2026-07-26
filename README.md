@@ -123,7 +123,10 @@ O(1) per row by subtracting exiting rows, `MonoidSummarizer`s (`Min`,
 `Product`, …) fold each window from a segment tree of partial combinations
 in O(log window), and summarizers declaring neither re-fold each window
 from scratch — see DESIGN.md for the `combine!`/`downdate!` interface a
-custom structured summarizer implements.
+custom structured summarizer implements. A summarizer on one of these paths
+should also implement `fresh!`, which zeroes a state in place: the transforms
+zero a state tuple per cycle, per interval and per window query, so building a
+new one there is a heap allocation per summarizer per row.
 
 An output column takes its element type from the input column: `Min`, `Max`,
 `First`, and `Last` reproduce it verbatim, while `Sum` and `SumPower` widen it

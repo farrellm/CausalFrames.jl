@@ -457,13 +457,16 @@ receive the matched row's time.
 
 The implementation is a single-pass two-pointer merge: a `chunkmap` over the
 left stream pulls right chunks on demand — the right pointer advances per
-left *row* — maintaining a `Dict` of the most recent admitted right row per
-key. The store's key and value types are concrete NamedTuple types derived
-from the promoted right schema (widened when a later chunk moves it, as the
-summarizer states are), and the per-row merge sits behind a function barrier
-in the `summarize.jl` style. `strict` and `tolerance` ride in type
-parameters (`strict` as the comparison function `<` vs `<=`), so neither
-costs a per-row branch.
+left *row* — keeping the most recent admitted right row per key. The store's
+key and row types are concrete NamedTuple types derived from the promoted
+right schema (widened when a later chunk moves it, as the summarizer states
+are), and the per-row merge sits behind a function barrier in the
+`summarize.jl` style. `strict` and `tolerance` ride in type parameters
+(`strict` as the comparison function `<` vs `<=`), so neither costs a per-row
+branch.
+
+The store is a `Dict{K, Int}` of slot numbers over a `Vector{V}` of rows,
+rather than the `Dict{K, V}` it reads as — see "Representing a match" below.
 
 ## Forward join (acausal)
 
@@ -501,14 +504,47 @@ barrier — with three inversions:
   row consumes or outruns them, and confirming that a key has no future match
   drains the right stream, so worst-case memory is O(number of right rows) —
   the price of looking forward. `matches` stores copied row values, not buffer
-  indices, so compaction never invalidates an emitted match.
+  indices, so compaction never invalidates an emitted match (see "Representing
+  a match" below).
 
 The op-agnostic helpers (`normprefix`, `prefixed`, `storerowtype`,
-`storekeytype`, `rowat`, `keyat`, `matchcolumn`, plus `chunkmap`,
-`tokeycolumns`, `chunktypes`, `promotetypes`) are imported from the parent
-module; only the small config/state-typed helpers (`checkkeys`, `checknames`,
-`prefixleft!`, `assemble`) are duplicated, to carry `futurejoin` in their
-error messages.
+`storekeytype`, `rowat`, `keyat`, `matchcolumn`, `convertmatches`, plus
+`chunkmap`, `tokeycolumns`, `chunktypes`, `promotetypes`) are imported from the
+parent module; only the small config/state-typed helpers (`checkkeys`,
+`checknames`, `prefixleft!`, `assemble`) are duplicated, to carry `futurejoin`
+in their error messages.
+
+## Representing a match
+
+Both joins accumulate one match per left row and turn them into columns when
+the chunk is assembled. The obvious representation — a
+`Vector{Union{Missing, V}}` over the right row type — costs a **heap
+allocation per left row**, and only for the rows that actually match, which is
+why it went unnoticed: it appears whenever `V` is not an `isbitstype`, and any
+`String` column or any `Missing`-admitting column on the right side is enough.
+Julia stores `V` inline in a `Vector{V}` but not in a `Vector{Union{Missing,
+V}}`, which is a boxed-reference array unless *every* member of the union is
+isbits.
+
+So a match is a `Vector{V}` of rows plus a `Vector{Bool}` mask. Slots for
+unmatched rows are left **undefined** rather than set to a sentinel, so
+`matchcolumn` reads them only where the mask allows, and `convertmatches`
+copies only those slots when a schema widening rebuilds a half-filled buffer
+mid-chunk.
+
+That alone fixes `futurejoin`, whose store holds *mutable* `KeyBuffer`s and so
+answers a lookup with a pointer that needs no box. `asofjoin`'s store held rows
+by value, so `get` had to materialise `Union{Nothing, V}` — boxing exactly the
+same way, and the match array merely reused that box. Hence the `Dict{K, Int}`
+of slot numbers over a `Vector{V}`: an `Int` is isbits, so the lookup is free
+and the row is read back inline. Admission claims a slot with `get!`, so it
+still costs one hash whether or not the key is new, and memory stays O(distinct
+keys).
+
+The rows must be *copied* into the match buffer rather than referenced by
+index: `asofjoin` overwrites a key's slot when a later right row arrives, and
+`futurejoin` compacts its per-key FIFOs, so an index recorded earlier in the
+chunk would silently change meaning.
 
 ## Lead and lag
 
@@ -701,6 +737,12 @@ The interface, extended by concrete subtypes (unexported — extend
 - `fresh(st) -> SummarizerState` — a zero state of the same concrete type,
   which is how the transforms get per-key-group and per-cycle states without
   re-consulting the schema;
+- `fresh!(st) -> SummarizerState` — optional (defaults to `fresh(st)`); zero
+  `st` in place and return it. Purely an optimization, and callers must use
+  the returned value, so a state that cannot be zeroed in place simply returns
+  a new one. It matters because the transforms zero a state tuple per cycle,
+  per interval, per window query, and per window per row: see "Reusing state"
+  below;
 - `update!(st, row)` — fold one row (map-like, as for row functions) into the
   state; a summarizer reads whichever columns it needs, so multi-column
   summarizers need no special support;
@@ -854,6 +896,37 @@ One consequence worth knowing: more than about 32 summarizers in a single
 call — counting hidden dependencies after expansion — exceeds Julia's tuple
 inference limits, and the fold degrades to dynamic dispatch. It stays
 correct, just no longer specialized.
+
+### Reusing state
+
+A state tuple is *zeroed*, never rebuilt, wherever that happens more often than
+once per chunk. States are small mutable structs, so building one per cycle or
+per row is a heap allocation per summarizer on the hottest paths there are:
+`summarizecycles` closes a cycle per timestamp, `intervalize` an interval per
+boundary, and `addrollingcolumns` queries a window per row per window. `fresh!`
+is what makes that free, and the four places that use it are `foldcycles!`,
+`foldintervals!`/`flushintervals!`, the segment tree, and the re-fold window
+kernel.
+
+Three structures own reusable scratch rather than allocating it per use:
+
+- a `SegTree` holds the two order-preserving accumulators its range queries
+  fold into, so `treequery`'s result is **borrowed** — valid until that tree's
+  next query, which is all its callers need, since they read it straight
+  through `summaryvalues`. It also reuses its node vector and compacts its row
+  buffers in place across rebuilds, which matters because a window short enough
+  to expire rows as fast as they arrive keeps the capacity at its floor and
+  rebuilds every few appends;
+- the re-fold window kernel threads one state tuple through its window
+  recursion for a whole segment;
+- a `GroupTable` — the per-key state tuples of the keyed transforms — carries a
+  reused key-ordered emission buffer and a pool of retired state tuples, so
+  closing a cycle neither collects a fresh vector to sort nor leaves the next
+  cycle to rebuild a state tuple per key. `summarize` and `addsummarycolumns`
+  never close their table and leave both buffers empty.
+
+A retired or borrowed tuple is only ever handed out again after `fresh!`, and
+by then `summaryvalues` has copied the values it held into the emitted row.
 
 The three summarization functions take one summarizer or a collection of
 them, plus an optional `key` (one or more column names) to produce a separate

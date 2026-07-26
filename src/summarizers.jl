@@ -109,6 +109,29 @@ is never mutated.
 function fresh end
 
 """
+    fresh!(st::SummarizerState) -> SummarizerState
+
+Zero `st` in place and return it — the in-place counterpart of the one-argument
+[`fresh`](@ref). Callers must use the returned value rather than assume `st`
+was mutated: the default implementation is `fresh(st)`, so a state that cannot
+be zeroed in place (an immutable one) simply returns a new object, and every
+existing summarizer keeps working without implementing this at all.
+
+Implementing it is a pure optimization, and worth it for any state on a hot
+path: the transforms zero a state tuple per cycle
+([`summarizecycles`](@ref)), per window query (the `addrollingcolumns` tree
+mode), and per window per row (its re-fold mode), so an allocating `fresh`
+there costs one heap allocation per state per row.
+
+The zeroed state must be indistinguishable from `fresh(st)` through the rest of
+the interface. The one exception is the same one [`fresh`](@ref) already
+carries: a state whose value field is only meaningful once a row has been
+folded in (`Min`/`Max`/`First`/`Last`) may leave a stale value behind, because
+[`value`](@ref) is never called on a state that has folded no rows.
+"""
+fresh!(st::SummarizerState) = fresh(st)
+
+"""
     update!(st::SummarizerState, row)
 
 Fold one row into the state. `row` is a map-like row object supporting
@@ -214,6 +237,13 @@ isinvertible(::SummarizerState) = true
 @inline updateall!(states::Tuple, row) = foreach(st -> update!(st, row), states)
 @inline downdateall!(states::Tuple, row) =
     foreach(st -> downdate!(st, row), states)
+
+# Zero a whole state tuple in place, returning the tuple to use — the same
+# must-use-the-result contract as `fresh!` itself, since a state that cannot be
+# zeroed in place returns a new object. Over a concrete tuple the map unrolls
+# and each `fresh!` dispatches statically, so for the built-in (mutable) states
+# this is pure field writes and allocates nothing.
+@inline freshall!(states::Tuple) = map(fresh!, states)
 
 # The element type Base.sum produces over a column of eltype T: small signed
 # and unsigned integers widen to Int/UInt, everything else keeps its type. The
@@ -406,6 +436,7 @@ end
 
 fresh(st::AccumState{N,A,T}) where {N,A,T} =
     AccumState{N,A,T}(st.term, convert(A, 0))
+@inline fresh!(st::AccumState{N,A}) where {N,A} = (st.total = convert(A, 0); st)
 @inline update!(st::AccumState{N,A}, row) where {N,A} =
     (st.total += termvalue(st.term, A, row); nothing)
 @inline downdate!(st::AccumState{N,A}, row) where {N,A} =
@@ -429,6 +460,8 @@ end
 
 fresh(st::CompensatedAccumState{N,A,T}) where {N,A,T} =
     CompensatedAccumState{N,A,T}(st.term, compzero(A))
+@inline fresh!(st::CompensatedAccumState{N,A}) where {N,A} =
+    (st.acc = compzero(A); st)
 @inline update!(st::CompensatedAccumState{N,A}, row) where {N,A} =
     (st.acc = compadd(st.acc, termvalue(st.term, A, row)); nothing)
 @inline downdate!(st::CompensatedAccumState{N,A}, row) where {N,A} =
@@ -476,6 +509,8 @@ end
 # would let a missing window collapse a dependent summarizer's output type.
 fresh(st::OptionalAccumState{N,A,T}) where {N,A,T} =
     OptionalAccumState{N,A,T}(st.term, convert(A, 0), 0)
+@inline fresh!(st::OptionalAccumState{N,A}) where {N,A} =
+    (st.total = convert(A, 0); st.missings = 0; st)
 @inline update!(st::OptionalAccumState{N,A}, row) where {N,A} =
     (
         termmissing(st.term, row) ? (st.missings += 1) :
@@ -500,6 +535,8 @@ end
 
 fresh(st::OptionalCompensatedAccumState{N,A,T}) where {N,A,T} =
     OptionalCompensatedAccumState{N,A,T}(st.term, compzero(A), 0)
+@inline fresh!(st::OptionalCompensatedAccumState{N,A}) where {N,A} =
+    (st.acc = compzero(A); st.missings = 0; st)
 @inline update!(st::OptionalCompensatedAccumState{N,A}, row) where {N,A} =
     (
         termmissing(st.term, row) ? (st.missings += 1) :
@@ -545,6 +582,7 @@ end
 emptyvalue(::Count) = (; count = 0)
 fresh(::Count, ::NamedTuple) = CountState(0)
 fresh(::CountState) = CountState(0)
+@inline fresh!(st::CountState) = (st.n = 0; st)
 @inline update!(st::CountState, row) = (st.n += 1; nothing)
 @inline downdate!(st::CountState, row) = (st.n -= 1; nothing)
 combine!(dest::CountState, a::CountState, b::CountState) =
@@ -630,6 +668,8 @@ function fresh(::Product{C}, intypes::NamedTuple) where {C}
     return ProductState{C,Symbol(C, :_product),A}(convert(A, 1))
 end
 fresh(::ProductState{C,N,A}) where {C,N,A} = ProductState{C,N,A}(convert(A, 1))
+@inline fresh!(st::ProductState{C,N,A}) where {C,N,A} =
+    (st.total = convert(A, 1); st)
 @inline update!(st::ProductState{C}, row) where {C} =
     (st.total *= getproperty(row, C); nothing)
 combine!(dest::ProductState{C,N,A}, a::ProductState{C,N,A},
@@ -924,6 +964,10 @@ const DerivedState = Union{MomentState,MeanState,VarianceState,StdState,
     CovarianceState,CorrelationState}
 combine!(::DerivedState, ::DerivedState, ::DerivedState) = nothing
 @inline downdate!(::DerivedState, row) = nothing
+# Fieldless, so already zero — and immutable, so returning `st` is the whole
+# implementation (the default would allocate nothing either, but this keeps
+# `freshall!` free of a call that inference has to see through).
+@inline fresh!(st::DerivedState) = st
 
 # Min/Max/First/Last have no identity element, and all four track one value of
 # the input column's type, so they share a state. `F` is the singleton type of
@@ -951,6 +995,11 @@ mutable struct TrackState{C,N,T,F} <: SummarizerState
 end
 
 fresh(::TrackState{C,N,T,F}) where {C,N,T,F} = TrackState{C,N,T,F}()
+# Only `seen` is cleared: a field cannot be un-defined, so a stale value may
+# survive where `fresh` would leave the field undefined. Both are equally
+# unreadable — `seen` guards every read of `val`, and `value` is only ever
+# called on a state that has folded a row.
+@inline fresh!(st::TrackState) = (st.seen = false; st)
 @inline function update!(st::TrackState{C,N,T,F}, row) where {C,N,T,F}
     v = getproperty(row, C)
     st.val = st.seen ? F.instance(st.val, v) : v

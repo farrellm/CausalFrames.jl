@@ -29,17 +29,20 @@ tokeycolumns(ks) = collect(Symbol, ks)
 function prototypes(ss::Vector{Summarizer}, keycols::Vector{Symbol})
     isempty(ss) && throw(ArgumentError("at least one summarizer is required"))
     protos = Summarizer[]
-    seen = Set{Tuple{Vararg{Symbol}}}()      # finished, by output-name tuple
-    visiting = Set{Tuple{Vararg{Symbol}}}()  # walk in progress: cycle guard
+    # Output-name tuples are heterogeneous, so a Set of them would be keyed by
+    # an abstract type; at the handful of summarizers a call can carry (tuple
+    # inference gives up past ~32) a linear `in` is both simpler and faster.
+    seen = Tuple{Vararg{Symbol}}[]      # finished, by output-name tuple
+    visiting = Tuple{Vararg{Symbol}}[]  # walk in progress: cycle guard
     used = Set{Symbol}()
     function expand(s::Summarizer)
         outnames = keys(emptyvalue(s))
         outnames in seen && return
         outnames in visiting && throw(ArgumentError(
             "summarizer dependency cycle through $(first(outnames))"))
-        push!(visiting, outnames)
+        push!(visiting, outnames)          # a stack: the walk is depth-first
         foreach(expand, dependencies(s))
-        delete!(visiting, outnames)
+        pop!(visiting)
         for n in outnames
             n in used && throw(
                 ArgumentError(
@@ -88,22 +91,53 @@ newstates(protos::Tuple, intypes::NamedTuple) = map(s -> fresh(s, intypes), prot
 widenstates(states::Tuple, intypes::NamedTuple) =
     map(st -> widenstate(st, intypes), states)
 
+# The per-key state tuples of the transforms that summarize by key, plus the
+# two buffers that make *closing* a group of them free. Both type parameters
+# are concrete — the key type comes from the first row, the value type from the
+# state prototypes — so the folding kernels specialize on this rather than on
+# the Dict{Any,Vector{Summarizer}} it would otherwise be.
+#
+# `summarize` and `addsummarycolumns` never close their table and leave the two
+# buffers empty. The cycle-closing transforms (`summarizecycles`,
+# `intervalize`) close one per timestamp or per interval, and there the buffers
+# are the difference between an allocation-free fold and one that rebuilds a
+# Dict entry, a state tuple per key, and a sort buffer every cycle.
+mutable struct GroupTable{K,S<:Tuple}
+    table::Dict{K,S}
+    scratch::Vector{Pair{K,S}}  # key-ordered emission buffer, reused
+    pool::Vector{S}             # retired state tuples, zeroed on reuse
+end
+
+GroupTable{K,S}() where {K,S<:Tuple} =
+    GroupTable{K,S}(Dict{K,S}(), Pair{K,S}[], S[])
+
+Base.keytype(::GroupTable{K}) where {K} = K
+Base.valtype(::GroupTable{K,S}) where {K,S} = S
+
 # `stateprotos` must already be widened: it is what fixes the rebuilt table's
-# value type, which a comprehension over an empty `groups` could not.
-function widengroups(groups::Dict{K}, stateprotos::S,
+# value type, which a comprehension over an empty table could not. The pool is
+# deliberately not carried over — a retired tuple has the pre-widening type.
+function widengroups(gt::GroupTable{K}, stateprotos::S,
     intypes::NamedTuple) where {K,S}
-    widened = Dict{K,S}()
-    for (k, gs) in groups
-        widened[k] = widenstates(gs, intypes)
+    widened = GroupTable{K,S}()
+    for (k, gs) in gt.table
+        widened.table[k] = widenstates(gs, intypes)
     end
     return widened
 end
 
-# The group table's key type comes from the first row and its value type from
-# the state prototypes, so the folding kernels specialize on a concrete Dict
-# rather than the Dict{Any,Vector{Summarizer}} this would otherwise be.
 newgroups(stateprotos::S, nt::NamedTuple, keynames::Val) where {S} =
-    Dict{typeof(keyvalues(first(Tables.rows(nt)), keynames)),S}()
+    GroupTable{typeof(keyvalues(first(Tables.rows(nt)), keynames)),S}()
+
+# This key's state tuple, recycling a retired one where there is one. Zeroing
+# on the way *out* rather than on retirement keeps the cost proportional to the
+# tuples actually reused. The key is left unconstrained so the Dict converts it,
+# as it did before: a lookup may carry narrower value types than the table's
+# key type (asofjoin's store makes the same allowance).
+@inline groupstates!(gt::GroupTable{K,S}, key, stateprotos::S) where {K,S<:Tuple} =
+    get!(gt.table, key) do
+        isempty(gt.pool) ? map(fresh, stateprotos) : freshall!(pop!(gt.pool))
+    end
 
 # Values accumulate left to right over the topologically ordered state tuple,
 # each state seeing the values of everything before it — which is how a
@@ -132,7 +166,14 @@ emptyvalues(protos::Tuple, ::Val{R}) where {R} =
 @inline keyvalues(row, ::Val{KN}) where {KN} =
     NamedTuple{KN}(map(c -> getproperty(row, c), KN))
 
-sortedgroups(groups) = sort!(collect(groups); by = kv -> Tuple(first(kv)))
+# Key order is the emission order everywhere a group table is drained. The key
+# is a NamedTuple, so `values` is already the tuple to compare on — tuples
+# order lexicographically, which is the documented "sorted by key value".
+@inline groupkey(kv::Pair) = values(first(kv))
+
+# For the once-per-run drains (`summarize`'s flush), where a fresh vector costs
+# nothing; the per-cycle drain uses the reusable buffer in `closecycle!`.
+sortedgroups(gt::GroupTable) = sort!(collect(gt.table); by = groupkey)
 
 # The row types the kernels emit. The state prototypes cannot simply be run
 # through `value` to find out: Min/Max/First/Last leave their value field
@@ -215,10 +256,10 @@ function foldall!(states::Tuple, nt::NamedTuple)
     return nothing
 end
 
-function foldgroups!(groups::Dict{K,S}, stateprotos::S, nt::NamedTuple,
+function foldgroups!(gt::GroupTable{K,S}, stateprotos::S, nt::NamedTuple,
     ::Val{KN}) where {K,S,KN}
     for row in Tables.rows(nt)
-        states = get!(() -> map(fresh, stateprotos), groups, keyvalues(row, Val(KN)))
+        states = groupstates!(gt, keyvalues(row, Val(KN)), stateprotos)
         updateall!(states, row)
     end
     return nothing
@@ -226,43 +267,55 @@ end
 
 # A cycle closes when a row with a later time arrives (causal), so the open
 # cycle's state is carried across chunk boundaries and only closed by flush.
-function foldcycles!(states::S, stateprotos::S, nt::NamedTuple,
-    cycletime, r::Val) where {S<:Tuple}
+function foldcycles!(states::S, nt::NamedTuple, cycletime,
+    r::Val) where {S<:Tuple}
     rows = rowtype(eltype(nt.time), S, r)[]
     for row in Tables.rows(nt)
         t = row.time
         if cycletime === nothing || t != cycletime
+            # summaryrow has already copied the values out, so the closed
+            # cycle's states can be zeroed and reused rather than replaced.
             cycletime === nothing ||
                 push!(rows, summaryrow(something(cycletime), states, r))
             cycletime = t
-            states = map(fresh, stateprotos)
+            states = freshall!(states)
         end
         updateall!(states, row)
     end
     return rows, states, cycletime
 end
 
-function foldcyclesgrouped!(groups::Dict{K,S}, stateprotos::S, nt::NamedTuple,
+function foldcyclesgrouped!(gt::GroupTable{K,S}, stateprotos::S, nt::NamedTuple,
     cycletime, ::Val{KN}, r::Val) where {K,S,KN}
     rows = rowtype(eltype(nt.time), K, S, r)[]
     for row in Tables.rows(nt)
         t = row.time
         if cycletime === nothing || t != cycletime
             cycletime === nothing ||
-                closecycle!(rows, groups, something(cycletime), r)
+                closecycle!(rows, gt, something(cycletime), r)
             cycletime = t
         end
-        states = get!(() -> map(fresh, stateprotos), groups, keyvalues(row, Val(KN)))
+        states = groupstates!(gt, keyvalues(row, Val(KN)), stateprotos)
         updateall!(states, row)
     end
     return rows, cycletime
 end
 
-function closecycle!(rows, groups, t, r::Val)
-    for (k, states) in sortedgroups(groups)
+# Emit one row per present key, in key order, then retire the state tuples to
+# the pool and clear the table for the next cycle. `summaryrow` has copied the
+# values out by then, so a retired tuple carries nothing that is still needed —
+# `groupstates!` zeroes it before it is handed out again. Both buffers are
+# reused, so a close allocates only the rows it pushes.
+function closecycle!(rows, gt::GroupTable, t, r::Val)
+    scratch = gt.scratch
+    empty!(scratch)
+    append!(scratch, gt.table)
+    sort!(scratch; by = groupkey)
+    for (k, states) in scratch
         push!(rows, summaryrow(t, k, states, r))
+        push!(gt.pool, states)
     end
-    empty!(groups)
+    empty!(gt.table)
     return rows
 end
 
@@ -277,12 +330,12 @@ function foldrunning!(states::S, nt::NamedTuple, n::Int,
     return vals
 end
 
-function foldrunninggrouped!(groups::Dict{K,S}, stateprotos::S, nt::NamedTuple,
+function foldrunninggrouped!(gt::GroupTable{K,S}, stateprotos::S, nt::NamedTuple,
     n::Int, ::Val{KN}, r::Val) where {K,S,KN}
     vals = Vector{valuetype(S, r)}(undef, n)
     i = 0
     for row in Tables.rows(nt)
-        states = get!(() -> map(fresh, stateprotos), groups, keyvalues(row, Val(KN)))
+        states = groupstates!(gt, keyvalues(row, Val(KN)), stateprotos)
         updateall!(states, row)
         vals[i+=1] = summaryvalues(states, r)
     end
@@ -376,8 +429,7 @@ function summarizecycles(summarizers; key = nothing)
                     rs
                 else
                     rs, fold.states, fold.cycletime = foldcycles!(
-                        fold.states, fold.stateprotos, nt, fold.cycletime,
-                        outs)
+                        fold.states, nt, fold.cycletime, outs)
                     rs
                 end
                 return isempty(rows) ? nothing : DataFrame(rows)

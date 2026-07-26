@@ -199,6 +199,63 @@
                     qty = [1]))),
         )
         @test isequal(df.qty, [1, 1])
+
+        # ... and the same widening with an *unmatched* left row already
+        # behind it: the match buffer's unmatched slots are undefined rather
+        # than `missing`, so the widening conversion has to skip them. Left
+        # row 1 precedes every right row, so its slot is still undef when the
+        # second right chunk widens qty from Int to Float64.
+        latewide = CausalPipeline(
+            ctx -> [DataFrame(time = [2], qty = [1]),
+                DataFrame(time = [3], qty = [2.5])],
+        )
+        df = DataFrame(
+            load(Context(0, 10),
+                CausalPipeline(ctx -> [DataFrame(time = [1, 3, 4])]) |>
+                asofjoin(latewide)),
+        )
+        @test isequal(df.qty, [missing, 2.5, 2.5])
+        @test eltype(df.qty) == Union{Missing,Float64}
+
+        # keyed, so the widening also rekeys the slot index, and key "b" never
+        # matches at all
+        keyedwide = CausalPipeline(
+            ctx -> [DataFrame(time = [2], sym = ["a"], qty = [1]),
+                DataFrame(time = [3], sym = ["a"], qty = [2.5])],
+        )
+        df = DataFrame(
+            load(Context(0, 10),
+                onechunk(time = [1, 3, 4], sym = ["a", "a", "b"]) |>
+                asofjoin(keyedwide; key = :sym)),
+        )
+        @test isequal(df.qty, [missing, 2.5, missing])
+        @test eltype(df.qty) == Union{Missing,Float64}
+    end
+
+    @testset "kernel allocates nothing per row" begin
+        # The store is an index and a slot vector, and the match buffer is a
+        # Vector{V} plus a mask, precisely so that a right row type carrying a
+        # String — i.e. not isbits — costs no box per left row. Nothing else in
+        # the suite would notice if that regressed.
+        function joinalloc()
+            n = 200
+            V = typeof((time = 1, sym = "a", qty = 1.0))
+            K = typeof((sym = "a",))
+            syms = ["s" * string(i % 5) for i in 1:n]
+            lnt = (time = collect(1:n), sym = syms)
+            rnt = (time = collect(1:n), sym = syms, qty = fill(1.0, n))
+            kn = Val((:sym,))
+            matches = Vector{V}(undef, n)
+            found = fill(false, n)
+            index = Dict{K,Int}()
+            slots = V[]
+            call() = CausalFrames.joinsegment!(matches, found, index, slots,
+                lnt, 1, rnt, 1, true, kn, <=, nothing)
+            call()                      # warm up: grows the index and slots
+            fill!(found, false)
+            return @allocated call()
+        end
+        @test joinalloc() == 0
     end
 
     @testset "empty streams" begin
