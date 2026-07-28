@@ -972,7 +972,8 @@ statistical dependents: `Mean(:x)` is `Sum(:x) / Count()`; `Variance(:x)`
 combines `Count()`, `Sum(:x)`, and `SumPower(:x, 2)` by the computational
 identity `(Σx² − (Σx)²/n) / (n − corrected)`; `Std(:x)` is the square root of
 `Variance(:x)`; `Covariance(:x, :y)` combines `Count()`, `Sum(:x)`,
-`Sum(:y)`, and `DotProduct(:x, :y)` analogously; and `Correlation(:x, :y)` is
+`Sum(:y)`, and the canonically ordered `DotProduct` analogously; and
+`Correlation(:x, :y)` is
 `Covariance(:x, :y) / (Std(:x) · Std(:y))`, clamped to `[-1, 1]`. Dependencies
 may themselves be dependent — `Std` depends on `Variance`, which depends on the
 raw sums, and `Correlation` depends on all three — and the topological
@@ -996,10 +997,10 @@ of `Count()`, `SumPower(pᵢ, 2)`, `SumPower(response, 2)`, the pairwise
 `Sum(response)`. That is what makes the sharing free: two regressions over
 overlapping columns fold each cross product once, and because a squared term is
 requested as `SumPower(c, 2)` rather than `DotProduct(c, c)`, and every genuine
-cross product under one canonical (sorted) argument order, a regression also
-shares with a `Variance`, `Std`, `Correlation`, or `Covariance(a, b)` the user
-asked for separately — the last of these only when written in that same sorted
-order, since `Covariance` does not canonicalize its own dependency. With an intercept the normal equations are centered on the column
+cross product under the canonical order described below, a regression also
+shares with a `Variance`, `Std`, `Correlation`, or `Covariance` the user asked
+for separately, whichever way round the latter's arguments are
+written. With an intercept the normal equations are centered on the column
 means — the multivariate form of the `Covariance` identity, better conditioned
 and one dimension smaller than carrying a column of ones — and the intercept is
 recovered as `ȳ − Σᵢ βᵢ x̄ᵢ`. The system is symmetric positive semidefinite, so
@@ -1011,6 +1012,45 @@ allocates — `K ≥ 2` builds a `K × K` workspace per emitted row — which is
 simple regression (`K = 1`) is special-cased to a closed form over scalars, the
 shape that actually runs per row under `addsummarycolumns` and
 `addrollingcolumns`.
+
+### Symmetric summarizers
+
+A summarizer whose value does not depend on the order of two column arguments
+— `DotProduct(a, b)`, `Covariance(a, b)`, and every pairwise term inside
+`LinearRegression` — **folds its work under one canonical argument order,
+while still emitting the output column the caller asked for.** `Σab` and `Σba`
+are the same number, so folding both would be duplicated per-row work; but
+silently renaming the caller's column would be surprising, so
+`DotProduct(:y, :x)` still produces `:y_x_dotproduct`. The canonical order is
+the `isless`-sorted one, and `canonicaldot`/`canonicaldotname` in
+`src/summarizers.jl` are the shared implementation.
+
+That splits into two cases, and a new symmetric summarizer should follow
+whichever fits:
+
+- **An accumulator** — one that folds real per-row state, like `DotProduct` —
+  makes its *non-canonical* form a dependent summarizer over the canonical
+  one, folding nothing itself and renaming the value. `AliasState{N,D}` exists
+  for exactly this: fieldless, a member of the derived-state union, emitting
+  `N` from the dependency's `D`. Its `isinvertible` and `widenstate` defaults
+  are already correct, since it holds no state of its own to invert or widen.
+- **Something already dependent**, like `Covariance`, needs no new layer: it
+  simply names the canonical form in `dependencies` and reads it back under
+  the canonical name. `Covariance(:y, :x)` produces `:y_x_covariance` from the
+  one `:x_y_dotproduct` accumulator.
+
+Deduplication is by output name, so this composes: asking both ways in one
+call, or asking one way beside a `LinearRegression` needing the same product,
+costs one accumulator plus a free fieldless rename.
+
+The rule is about argument *order*, and one related gap is deliberately left
+open: `Covariance(:x, :x)` still depends on `DotProduct(:x, :x)` rather than
+`SumPower(:x, 2)`, so it does not share with `Variance(:x)`. That is a
+question of which *representation* a squared term takes, not which order its
+arguments are in. `LinearRegression` resolves it in its own favour — its
+diagonal terms go to `SumPower(c, 2)` — but changing `Covariance` to match
+would alter an existing summarizer's dependency set for no case the regression
+does not already handle.
 
 Before running, the transforms expand the requested summarizers into the
 full set to fold: each one's dependencies recursively, in topological order

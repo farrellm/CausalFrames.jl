@@ -682,6 +682,27 @@ function widenstate(st::ProductState{C,N,A}, intypes::NamedTuple) where {C,N,A}
     return ProductState{C,N,A2}(convert(A2, st.total))
 end
 
+# A summarizer that emits, under its own name N, a value another summarizer
+# already computed under the name D. It folds nothing: the summarizer that
+# claims it declares that other one as a dependency, and the topological
+# expansion guarantees D is in `vals` by the time this runs. Fieldless, so it
+# joins DerivedState below and inherits the no-op combine!/downdate!/fresh!.
+#
+# This is what lets a summarizer whose value is symmetric in two columns fold
+# under one canonical argument order while still answering to the name the
+# caller asked for — see DESIGN.md's "Symmetric summarizers".
+struct AliasState{N,D} <: SummarizerState end
+
+fresh(st::AliasState) = st
+@inline update!(::AliasState, row) = nothing
+# The value type comes from the dependency's declared field type, never from
+# `typeof` of the value, so a missing-poisoned accumulator keeps the output
+# column's Union{Missing,...} eltype instead of collapsing it to Missing.
+@inline function value(::AliasState{N,D}, vals::NamedTuple) where {N,D}
+    V = fieldtype(typeof(vals), D)
+    return NamedTuple{(N,),Tuple{V}}((vals[D],))
+end
+
 """
     DotProduct(a, b) -> Summarizer
 
@@ -696,14 +717,35 @@ multiplying in the input columns' own types would. Floating-point
 accumulators use compensated summation with NaN and ±Inf *terms* (the
 per-row product, so `Inf * 0.0` counts as a NaN term) counted separately, as
 in [`Sum`](@ref).
+
+The value is symmetric, so the fold happens under one canonical (sorted)
+argument order: `DotProduct(:y, :x)` still produces `:y_x_dotproduct`, but it
+folds nothing of its own — it is a dependent summarizer over
+`DotProduct(:x, :y)`, renaming that value. Asking both ways in one call, or
+asking one way beside a [`Covariance`](@ref) or [`LinearRegression`](@ref) that
+needs the same product, therefore costs one accumulator rather than two.
 """
 struct DotProduct{A,B} <: GroupSummarizer end
 DotProduct(a::Symbol, b::Symbol) = DotProduct{a,b}()
 
 dotname(a, b) = Symbol(a, :_, b, :_dotproduct)
+
+# Σab and Σba are the same number, so every summarizer needing one asks for it
+# under the sorted argument order and they all share the accumulator. See
+# DESIGN.md's "Symmetric summarizers" for the rule these two implement.
+canonicaldot(a::Symbol, b::Symbol) =
+    isless(b, a) ? DotProduct(b, a) : DotProduct(a, b)
+canonicaldotname(a::Symbol, b::Symbol) =
+    isless(b, a) ? dotname(b, a) : dotname(a, b)
+
 emptyvalue(::DotProduct{A,B}) where {A,B} = NamedTuple{(dotname(A, B),)}((0,))
+# Reversed arguments name the canonical accumulator as their one dependency and
+# rename its value; the sorted form is the accumulator itself.
+dependencies(::DotProduct{A,B}) where {A,B} =
+    isless(B, A) ? (DotProduct(B, A),) : ()
 # The classified term is the per-row product, so Inf * 0.0 counts as NaN.
 fresh(::DotProduct{A,B}, intypes::NamedTuple) where {A,B} =
+    isless(B, A) ? AliasState{dotname(A, B),dotname(B, A)}() :
     accumfresh(PairProductTerm{A,B}(), dotname(A, B),
         dottype(intypes[A], intypes[B]))
 
@@ -890,12 +932,15 @@ Covariance(a::Symbol, b::Symbol; corrected::Bool = true) =
 struct CovarianceState{A,B,N,D,SA,SB,R} <: SummarizerState end
 
 covname(a, b) = Symbol(a, :_, b, :_covariance)
+# The covariance is symmetric, so it reads the canonically ordered dot product
+# rather than its own argument order: Covariance(:y, :x) still produces
+# :y_x_covariance, but shares the one :x_y_dotproduct accumulator.
 dependencies(::Covariance{A,B}) where {A,B} =
-    (Count(), Sum(A), Sum(B), DotProduct(A, B))
+    (Count(), Sum(A), Sum(B), canonicaldot(A, B))
 emptyvalue(::Covariance{A,B}) where {A,B} =
     NamedTuple{(covname(A, B),)}((missing,))
 fresh(c::Covariance{A,B}, ::NamedTuple) where {A,B} =
-    CovarianceState{A,B,covname(A, B),dotname(A, B),Symbol(A, :_sum),
+    CovarianceState{A,B,covname(A, B),canonicaldotname(A, B),Symbol(A, :_sum),
         Symbol(B, :_sum),c.corrected}()
 fresh(st::CovarianceState) = st
 @inline update!(::CovarianceState, row) = nothing
@@ -1021,13 +1066,12 @@ normal-equations system and every statistic drawn from it are functions of
 those. They are folded alongside the regression but appear in the output only
 if requested themselves, and because dependencies deduplicate by output name,
 two regressions over overlapping columns fold each cross product exactly once.
-Cross products are requested under a canonical (sorted) argument order, so
-regressions listing the same columns in either order share one accumulator, and
-a squared term is requested as `SumPower(c, 2)` — the name `Variance`, `Std`,
-and `Correlation` already depend on — so a regression run beside them shares
-that too. A `Covariance` or `DotProduct` the user requests separately shares
-only if it is written in the same sorted order: `Covariance(:x, :y)` does,
-`Covariance(:y, :x)` folds its own `:y_x_dotproduct`.
+Cross products are requested under the canonical (sorted) argument order every
+symmetric summarizer shares, so a `Covariance` or `DotProduct` requested
+separately shares the accumulator whichever way round it is written. A squared
+term is requested as `SumPower(c, 2)` — the name `Variance`, `Std`, and
+`Correlation` already depend on — so a regression run beside them shares that
+too.
 
 With an intercept the system is centered on the column means, the multivariate
 form of the identity [`Covariance`](@ref) uses: better conditioned, and one
@@ -1092,16 +1136,14 @@ function regnames(P::Tuple, name, intercept::Bool)
     return Tuple(ns)
 end
 
-# Cross products go through one canonical (sorted) name so that regressions
-# listing the same columns in either order fold the accumulator once. A squared
-# term is requested as SumPower(c, 2) rather than DotProduct(c, c) for the same
-# reason: that is the name Variance, Std and Correlation already depend on.
-# Covariance does not canonicalize its own dependency, so a Covariance the user
-# asked for separately shares only when written in the same sorted order.
+# Cross products go through the canonical (sorted) dot product every symmetric
+# summarizer shares. A squared term instead goes to SumPower(c, 2) rather than
+# DotProduct(c, c): same value, under the name Variance, Std and Correlation
+# already depend on.
 crossdep(a::Symbol, b::Symbol) =
-    a === b ? SumPower(a, 2) : isless(a, b) ? DotProduct(a, b) : DotProduct(b, a)
+    a === b ? SumPower(a, 2) : canonicaldot(a, b)
 crossname(a::Symbol, b::Symbol) =
-    a === b ? Symbol(a, :_sumpower_2) : isless(a, b) ? dotname(a, b) : dotname(b, a)
+    a === b ? Symbol(a, :_sumpower_2) : canonicaldotname(a, b)
 
 # Entry (i, j), i <= j, of a K x K matrix packed row-major over its upper
 # triangle — the layout GN is built in.
@@ -1281,8 +1323,8 @@ end
 # dependencies' values at emission time — so combining and downdating them is
 # a no-op; their group structure is exactly that of their (transitively all
 # group) dependencies, which the transforms fold alongside them.
-const DerivedState = Union{MomentState,MeanState,VarianceState,StdState,
-    CovarianceState,CorrelationState,LinearRegressionState}
+const DerivedState = Union{AliasState,MomentState,MeanState,VarianceState,
+    StdState,CovarianceState,CorrelationState,LinearRegressionState}
 combine!(::DerivedState, ::DerivedState, ::DerivedState) = nothing
 @inline downdate!(::DerivedState, row) = nothing
 # Fieldless, so already zero — and immutable, so returning `st` is the whole

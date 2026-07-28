@@ -85,6 +85,12 @@ named by suffix: `Sum(:mid)` produces `:mid_sum`, `Min(:mid)` produces
 `DotProduct(:bid, :ask)` produces `:bid_ask_dotproduct`. `LinearRegression` is
 the exception, emitting a block of columns under an optional `name` prefix.
 
+Summarizers whose value is symmetric in two columns — `DotProduct`,
+`Covariance`, and the pairwise terms inside `LinearRegression` — accept either
+argument order and still name the column the way you asked, but fold the
+underlying accumulator only once between them: `DotProduct(:ask, :bid)`
+produces `:ask_bid_dotproduct` without folding a second sum.
+
 ```julia
 p = readcsv("ticks.csv";
         types = Dict(:time => Int, :bid => Float64, :ask => Float64)) |>

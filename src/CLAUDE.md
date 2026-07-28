@@ -72,6 +72,14 @@ design rationale and performance constraints behind each module.
     `Covariance`, `Correlation`, `LinearRegression`) carry no state of their
     own — their state structs are empty. They declare `dependencies` and read
     those values back through the two-argument `value(st, vals)`
+  - a summarizer whose value is symmetric in two columns (`DotProduct`,
+    `Covariance`, every pairwise term in `LinearRegression`) folds under the
+    `isless`-sorted argument order via `canonicaldot`/`canonicaldotname`, but
+    still emits the column name the caller asked for. For an accumulator that
+    means the reversed form becomes a dependent over the canonical one, using
+    the reusable fieldless `AliasState{N,D}`; for something already dependent
+    it just names the canonical form. DESIGN.md's "Symmetric summarizers" is
+    the rule to follow when adding another one
   - `LinearRegression` is the outlier among them in two ways: it is the only
     one emitting more than one column (a coefficient and a t statistic per
     term, plus `r2`/`stderr`/`n`, so its output names are a tuple parameter

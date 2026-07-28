@@ -295,6 +295,98 @@ end
           (x_y_correlation = -0.75,)
 end
 
+@testset "symmetric summarizers" begin
+    # A summarizer symmetric in two columns folds under the isless-sorted
+    # argument order but still emits the column the caller asked for, so
+    # Σab and Σba cost one accumulator between them rather than two.
+    chunks(cs...) = CausalPipeline(ctx -> collect(cs))
+    stats(xcol, ycol, ss) = DataFrame(
+        load(Context(0, 9),
+            chunks(DataFrame(time = [1, 2, 3], x = xcol, y = ycol)) |>
+            summarize(ss)),
+    )
+    intypes = (time = Int64, x = Int32, y = Int32)
+    # a prototype that folds real per-row state, as against a fieldless
+    # derived one — which is what "shares the accumulator" actually means
+    accumulators(protos) = [
+        only(keys(CausalFrames.emptyvalue(s))) for s in protos
+        if length(keys(CausalFrames.emptyvalue(s))) == 1 &&
+            !(CausalFrames.fresh(s, intypes) isa CausalFrames.DerivedState)
+    ]
+
+    # the reversed request gets its own column, holding the same value
+    df = stats(Int32[3, 1, 2], Int32[2, 5, 4],
+        [DotProduct(:x, :y), DotProduct(:y, :x),
+            Covariance(:x, :y), Covariance(:y, :x)])
+    @test only(df.y_x_dotproduct) == only(df.x_y_dotproduct) == 19
+    @test only(df.y_x_covariance) == only(df.x_y_covariance) == -1.5
+    @test eltype(df.y_x_dotproduct) == Int64
+    @test eltype(df.y_x_covariance) == Float64
+
+    # ... including on its own, with nothing canonical requested alongside
+    df = stats(Int32[3, 1, 2], Int32[2, 5, 4], [DotProduct(:y, :x)])
+    @test only(df.y_x_dotproduct) == 19
+    @test names(df) == ["time", "y_x_dotproduct"]
+    df = stats(Float32[3, 1, 2], Float32[2, 5, 4],
+        [DotProduct(:y, :x), Covariance(:y, :x)])
+    @test eltype(df.y_x_dotproduct) == Float32
+    @test eltype(df.y_x_covariance) == Float32
+
+    # the point of the change: both orders fold one accumulator, and the
+    # reversed one is a fieldless rename over it
+    protos, requested =
+        CausalFrames.prototypes(Summarizer[DotProduct(:x, :y),
+                DotProduct(:y, :x)], Symbol[])
+    @test requested === (:x_y_dotproduct, :y_x_dotproduct)
+    @test accumulators(protos) == [:x_y_dotproduct]
+    @test CausalFrames.fresh(DotProduct(:y, :x), intypes) isa CausalFrames.AliasState
+    # a Covariance written either way reaches the same accumulator
+    # (compared as a set: the two orders expand their Sums in their own order)
+    for cov in (Covariance(:x, :y), Covariance(:y, :x))
+        protos, _ = CausalFrames.prototypes(
+            Summarizer[DotProduct(:x, :y), cov], Symbol[])
+        @test Set(accumulators(protos)) ==
+              Set([:x_y_dotproduct, :count, :x_sum, :y_sum])
+        @test length(accumulators(protos)) == 4
+    end
+    # ... as does a Correlation, transitively through its Covariance
+    protos, _ = CausalFrames.prototypes(
+        Summarizer[DotProduct(:x, :y), Correlation(:y, :x)], Symbol[])
+    @test count(==(:x_y_dotproduct), accumulators(protos)) == 1
+    @test !(:y_x_dotproduct in accumulators(protos))
+
+    # the alias renames its dependency's value and infers doing it
+    st = CausalFrames.fresh(DotProduct(:y, :x), intypes)
+    @test @inferred(CausalFrames.value(st, (x_y_dotproduct = Int64(19),))) ===
+          (y_x_dotproduct = Int64(19),)
+    protos, requested = CausalFrames.prototypes(
+        Summarizer[DotProduct(:y, :x), Covariance(:y, :x)], Symbol[])
+    states = map(s -> CausalFrames.fresh(s, (time = Int64, x = Int64, y = Int64)),
+        protos)
+    for (t, xv, yv) in [(1, 3, 2), (2, 1, 5), (3, 2, 4)]
+        foreach(s -> CausalFrames.update!(s, (time = t, x = xv, y = yv)), states)
+    end
+    @test @inferred(CausalFrames.summaryvalues(states, Val(requested))) ===
+          (y_x_dotproduct = 19, y_x_covariance = -1.5)
+
+    # the value type comes from the dependency's declared field type, so a
+    # missing-poisoned accumulator does not collapse the alias to Missing
+    df = stats(Union{Missing,Int}[1, missing, 3], Int[2, 5, 4],
+        [DotProduct(:y, :x), Covariance(:y, :x)])
+    @test eltype(df.y_x_dotproduct) == Union{Missing,Int64}
+    @test eltype(df.y_x_covariance) == Union{Missing,Float64}
+    @test ismissing(only(df.y_x_dotproduct))
+
+    # the reversed form keeps its declared structure, so a rolling window over
+    # it stays on the running path (the differential lives in test/rolling.jl)
+    @test DotProduct(:y, :x) isa GroupSummarizer
+    @test CausalFrames.isinvertible(CausalFrames.fresh(DotProduct(:y, :x), intypes))
+    @test CausalFrames.emptyvalue(DotProduct(:y, :x)) === (y_x_dotproduct = 0,)
+    # fieldless, so zeroing preserves the type as for any other derived state
+    st = CausalFrames.fresh(DotProduct(:y, :x), intypes)
+    @test typeof(CausalFrames.fresh!(st)) === typeof(st)
+end
+
 @testset "linear regression" begin
     chunks(cs...) = CausalPipeline(ctx -> collect(cs))
     # five points with a deliberate wobble, so the fit is not exact and the
@@ -506,8 +598,8 @@ end
     @test count(==(:y_sumpower_2), folded) == 1
     @test count(==(:x_y_dotproduct), folded) == 1
     @test count(==(:x_sum), folded) == 1
-    # Covariance does not canonicalize its own dependency, so the reversed
-    # argument order folds a second accumulator for the same quantity
+    # ... and the sharing survives a Covariance written the other way round,
+    # since every symmetric summarizer folds under the canonical order
     protos, _ = CausalFrames.prototypes(
         Summarizer[LinearRegression(:x, :y; name = :m1), Covariance(:y, :x)],
         Symbol[])
@@ -515,7 +607,8 @@ end
         only(keys(CausalFrames.emptyvalue(s))) for s in protos
         if length(keys(CausalFrames.emptyvalue(s))) == 1
     ]
-    @test :x_y_dotproduct in folded && :y_x_dotproduct in folded
+    @test count(==(:x_y_dotproduct), folded) == 1
+    @test !(:y_x_dotproduct in folded)
 
     # the whole accumulate-then-project fold stays inferrable
     protos, requested = CausalFrames.prototypes(
