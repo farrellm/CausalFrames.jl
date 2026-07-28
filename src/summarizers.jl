@@ -1215,11 +1215,21 @@ end
 fresh(st::LinearRegressionState) = st
 @inline update!(::LinearRegressionState, row) = nothing
 
-# The statistic columns' shared element type. Promote the dependencies'
-# *declared* field types — never `typeof` of a runtime value, or one
-# missing-poisoned accumulator would collapse the columns' Union{Missing,...}
-# eltype to Missing — run the centered identity's arithmetic over the result,
-# then force it floating point, since a rank-deficient fit reports NaN.
+# The dependency values this regression reads, and — separately — the tuple
+# type they are *declared* to have. The two must not be confused: `typeof` of
+# the values is value-dependent (a poisoned accumulator holding `missing`
+# reports `Missing`, not `Union{Missing,_}`), so it both collapses the output
+# column's element type and, because it is then not a compile-time constant,
+# drops the whole emission into runtime dispatch. `Base.promote_op` asks
+# inference for the declared type instead, which is constant.
+@inline depvalues(vals::NamedTuple, ::Val{NS}) where {NS} =
+    values(NamedTuple{NS}(vals))
+@inline deptypes(::Type{V}, ::Val{NS}) where {V<:NamedTuple,NS} =
+    Base.promote_op(depvalues, V, Val{NS})
+
+# The statistic columns' shared element type: promote those declared types,
+# run the centered identity's arithmetic over the result, then force it
+# floating point, since a rank-deficient fit reports NaN.
 @inline _promotefields(::Type{Tuple{A}}) where {A} = A
 @inline _promotefields(::Type{T}) where {T<:Tuple} =
     promote_type(Base.tuple_type_head(T), _promotefields(Base.tuple_type_tail(T)))
@@ -1330,11 +1340,10 @@ end
 
 @inline function value(::LinearRegressionState{NN,SN,AN,SP,SY,QY,GN,DN,I},
     vals::NamedTuple) where {NN,SN,AN,SP,SY,QY,GN,DN,I}
-    deps = values(NamedTuple{AN}(vals))
-    V = _regtype(typeof(deps))
+    V = _regtype(deptypes(typeof(vals), Val(AN)))
     M = length(SN)
     nrow = NamedTuple{(NN,),Tuple{Int}}((vals.count,))
-    if Missing <: V && _anymissing(deps)
+    if Missing <: V && _anymissing(depvalues(vals, Val(AN)))
         return merge(nrow,
             NamedTuple{SN,NTuple{M,V}}(ntuple(_ -> missing, Val(M))))
     end

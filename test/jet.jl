@@ -27,6 +27,65 @@ using JET
     JET.@test_opt CausalFrames.foldrunning!(states, nt, 3, outs)
 end
 
+@testset "dependent summarizer emission" begin
+    # A dependent summarizer's `value` runs per emitted row on the
+    # addsummarycolumns and addrollingcolumns paths, so it has to stay
+    # dispatch-free too. `@inferred` is not enough on its own: it proves the
+    # *return* type is concrete while saying nothing about the body, and the
+    # missing-admitting regression passed it while every line inside went
+    # dynamic — because the element type was derived from `typeof` of the
+    # dependency values, which is value-dependent and so not a constant.
+    lr = (time = Int, x = Float64, z = Float64, y = Float64)
+    st = CausalFrames.fresh(LinearRegression(:x, :y), lr)
+    JET.@test_opt CausalFrames.value(st,
+        (count = 5, x_sumpower_2 = 55.0, y_sumpower_2 = 200.0,
+            x_y_dotproduct = 100.0, x_sum = 15.0, y_sum = 30.0))
+    st = CausalFrames.fresh(LinearRegression(:x, :y; intercept = false), lr)
+    JET.@test_opt CausalFrames.value(st,
+        (count = 5, x_sumpower_2 = 55.0, y_sumpower_2 = 200.0,
+            x_y_dotproduct = 100.0))
+    st = CausalFrames.fresh(LinearRegression([:x, :z], :y), lr)
+    JET.@test_opt CausalFrames.value(st,
+        (count = 5, x_sumpower_2 = 55.0, z_sumpower_2 = 55.0,
+            y_sumpower_2 = 200.0, x_z_dotproduct = 50.0,
+            x_y_dotproduct = 100.0, y_z_dotproduct = 90.0,
+            x_sum = 15.0, z_sum = 15.0, y_sum = 30.0))
+
+    # the missing-admitting variant, where the early-return branch is live and
+    # the dependency values are Union-typed
+    MF = Union{Missing,Float64}
+    st = CausalFrames.fresh(LinearRegression(:x, :y),
+        (time = Int, x = MF, y = Float64))
+    JET.@test_opt CausalFrames.value(st,
+        NamedTuple{(:count, :x_sumpower_2, :y_sumpower_2, :x_y_dotproduct,
+                :x_sum, :y_sum),
+            Tuple{Int,MF,Float64,MF,MF,Float64}}((5, 55.0, 200.0, 100.0, 15.0,
+                30.0)))
+
+    # the rename a non-canonical symmetric summarizer folds through
+    st = CausalFrames.fresh(DotProduct(:y, :x), (time = Int, x = Int, y = Int))
+    JET.@test_opt CausalFrames.value(st, (x_y_dotproduct = 19,))
+
+    # and the whole accumulate-then-project fold with a regression in the set
+    protos, requested = CausalFrames.prototypes(
+        CausalFrames.tosummarizers([LinearRegression(:x, :y), Count()]),
+        Symbol[])
+    states = CausalFrames.newstates(protos,
+        (time = Int, x = Float64, y = Float64))
+    nt = (time = [1, 1, 2], x = [1.0, 2.0, 3.0], y = [3.0, 5.0, 7.0])
+    JET.@test_opt CausalFrames.foldall!(states, nt)
+    JET.@test_opt CausalFrames.summaryvalues(states, Val(requested))
+end
+
+@testset "SumPower term specialization" begin
+    # the specialized terms must be as dispatch-free as the general one
+    for n in (1, 2, 3)
+        st = CausalFrames.fresh(SumPower(:x, n), (time = Int, x = Float64))
+        JET.@test_opt CausalFrames.update!(st, (time = 1, x = 0.5))
+        JET.@test_opt CausalFrames.downdate!(st, (time = 1, x = 0.5))
+    end
+end
+
 @testset "compensated accumulators" begin
     st = CausalFrames.fresh(Sum(:x), (time = Int, x = Float64))
     row = (time = 1, x = 0.5)
