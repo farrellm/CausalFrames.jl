@@ -845,6 +845,23 @@ it statically. Every term is formed *in the accumulator's widened type* —
 multiplies widened values — so a per-row power or product cannot overflow
 the way computing it in the input columns' own types would.
 
+Carrying the exponent in a field is what makes `PowerTerm` the slow one: `^`
+cannot specialize on a runtime value, so every row pays a general power where a
+move or a multiply would do. `SumPower(c, 1)` and `SumPower(c, 2)` therefore
+borrow the terms that hold their exponent in the *type* — `ColumnTerm{c}` and
+`PairProductTerm{c,c}` — which is worth roughly 3× on the fold, and matters
+well beyond `SumPower` itself since every `Variance`, `Std`, `Covariance`,
+`Correlation`, and `LinearRegression` depends on the squared power sum. This is
+an implementation detail: the output column keeps its own name and the
+accumulator type is unchanged (`powertype(T, 1) === sumtype(T)` and
+`powertype(T, 2) === dottype(T, T)`), so no schema moves. The term value is
+bit-identical at `n = 1` and for integers; at `n = 2` over floats `x * x` is
+the correctly rounded square, which the runtime `^` misses by 1 ULP for inputs
+whose square lands near underflow — more accurate, but a change. It does not
+disturb what the compensated states rely on, since they classify NaN and ±Inf
+*terms* and carry the sign of zero, and no nonfinite or signed-zero case
+differs. `notes/sumpower-terms.md` records the measurements.
+
 When the realized accumulator type is a fixed-precision float (a non-BigFloat
 `AbstractFloat`), the sum accumulators (`Sum`, `SumPower`, `DotProduct`) switch
 to a compensated state: Kahan-Babuška-Neumaier summation over the finite terms

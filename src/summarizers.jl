@@ -635,11 +635,39 @@ powertype(::Type{T}, ::Int) where {T} = sumtype(Base.promote_op(^, T, Int))
 
 emptyvalue(s::SumPower{C}) where {C} =
     NamedTuple{(Symbol(C, :_sumpower_, s.power),)}((0,))
+
+# PowerTerm carries its exponent in a *field*, so `^` cannot specialize on it:
+# every row pays a runtime power (`power_by_squaring` for integers, `pow_body`
+# for floats) where a move or a single multiply would do. The two exponents that
+# actually turn up in this package — 1 from `Moment(c, 1)`, 2 from every
+# variance, covariance, correlation and regression — therefore borrow the terms
+# whose exponent is in the *type*: ColumnTerm is `x` and PairProductTerm{C,C} is
+# `x * x`. Worth about 3x on the per-row fold (see notes/sumpower-terms.md).
+#
+# The output column keeps its own name and the accumulator type is unchanged
+# (`powertype(T, 1) === sumtype(T)` and `powertype(T, 2) === dottype(T, T)` for
+# every T the package admits), so nothing about the schema moves.
+#
+# The *value* is bit-identical for `n = 1`, and for integers and Bool at both
+# exponents. At `n = 2` over floats it is not quite: `x * x` is the correctly
+# rounded square, while the runtime `^` is 1 ULP off it for a small fraction of
+# inputs whose square lands near underflow (66 of 500k random Float64 bit
+# patterns). The specialization is the more accurate of the two there — but it
+# is a change, so it is stated rather than glossed. What the compensated states
+# actually require is unaffected: they classify NaN and ±Inf *terms* and carry
+# the sign of zero, and no nonfinite, signed-zero or subnormal case differs at
+# either exponent. See notes/sumpower-terms.md; the properties are tested.
+function powerterm(::Type{Val{C}}, power::Int) where {C}
+    power == 1 && return ColumnTerm{C}()
+    power == 2 && return PairProductTerm{C,C}()
+    return PowerTerm{C}(power)
+end
+
 # The term is formed in the accumulator's type before raising to the power
 # (see termvalue), then classified: NaN^0 and Inf^0 are the finite term 1.0,
 # exactly as they contribute to `sum(x .^ 0)`.
 fresh(s::SumPower{C}, intypes::NamedTuple) where {C} =
-    accumfresh(PowerTerm{C}(s.power), Symbol(C, :_sumpower_, s.power),
+    accumfresh(powerterm(Val{C}, s.power), Symbol(C, :_sumpower_, s.power),
         powertype(intypes[C], s.power))
 
 # A monoid but not a group: dividing a row back out fails outright at zero

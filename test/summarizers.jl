@@ -823,6 +823,137 @@ end
     end
 end
 
+@testset "SumPower term specialization" begin
+    # SumPower(c, 1) and SumPower(c, 2) fold the terms whose exponent is in the
+    # type — a move and a multiply — rather than PowerTerm's runtime `^`. That
+    # is an implementation detail, so it has to leave the output name, the
+    # accumulator type and the term's *bits* alone. See notes/sumpower-terms.md.
+    chunks(cs...) = CausalPipeline(ctx -> collect(cs))
+    intypes = (time = Int64, x = Float64)
+
+    # the specialized exponents pick the cheap terms, everything else does not
+    termof(n) = CausalFrames.fresh(SumPower(:x, n), intypes).term
+    @test termof(1) isa CausalFrames.ColumnTerm{:x}
+    @test termof(2) isa CausalFrames.PairProductTerm{:x,:x}
+    @test termof(0) isa CausalFrames.PowerTerm{:x}
+    @test termof(3) isa CausalFrames.PowerTerm{:x}
+    # ... and the output column is untouched: SumPower(:x, 1) is still its own
+    # column, distinct from Sum(:x), and SumPower(:x, 2) from DotProduct(:x, :x)
+    @test keys(CausalFrames.emptyvalue(SumPower(:x, 1))) === (:x_sumpower_1,)
+    @test keys(CausalFrames.emptyvalue(SumPower(:x, 2))) === (:x_sumpower_2,)
+
+    # the accumulator type must not move, or the output column's eltype does.
+    # This is the identity the specialization rests on, over every type the
+    # package admits — including the Missing unions and the widening integers.
+    for T in (Int8, Int16, Int32, Int64, Int128, UInt8, UInt64, Bool,
+        Float16, Float32, Float64, BigInt, BigFloat, Rational{Int},
+        Union{Missing,Int64}, Union{Missing,Float64}, Union{Missing,Int8})
+        @test CausalFrames.powertype(T, 1) === CausalFrames.sumtype(T)
+        @test CausalFrames.powertype(T, 2) === CausalFrames.dottype(T, T)
+    end
+
+    # The exponent MUST stay in a variable here. Julia's parser rewrites a
+    # *literal* exponent to Base.literal_pow(^, x, Val(2)), which for Float64
+    # is `x * x` — so `@test same(x^2, x * x)` compares x*x with itself and
+    # proves nothing. Only `runtimepow` reaches ^(::Float64, ::Int), the
+    # algorithm these terms actually replace. Do not "simplify" it back.
+    runtimepow(x, n::Int) = x^n
+    bits(x) = reinterpret(Unsigned, x)
+    same(a, b) = (isnan(a) && isnan(b)) || bits(a) === bits(b)
+    edge = Float64[0.0, -0.0, 1.0, -1.0, 0.5, Inf, -Inf, NaN, 5.0e-324,
+        floatmin(Float64), -floatmin(Float64), floatmax(Float64), 1e308, 1e-308,
+        nextfloat(0.0), prevfloat(0.0), 3.141592653589793, -2.718281828459045]
+    # a deterministic spread of bit patterns, without pulling Random into the
+    # test dependencies: an LCG's high bits are good, and it is the exponent
+    # field that has to vary here
+    function bitpatterns(n)
+        out = Vector{Float64}(undef, n)
+        s = 0x2545f4914f6cdd1d
+        for i in 1:n
+            s = s * 0x5851f42d4c957f2d + 0x14057b7ef767814f
+            out[i] = reinterpret(Float64, s)
+        end
+        return out
+    end
+    rnd = bitpatterns(50_000)
+
+    # n = 1 is exactly the runtime power, everywhere
+    @test all(x -> same(runtimepow(x, 1), x), edge)
+    @test all(x -> same(runtimepow(x, 1), x), rnd)
+    @test all(x -> same(runtimepow(x, 1), x),
+        Float32[0.0f0, -0.0f0, Inf32, -Inf32, NaN32, floatmin(Float32),
+            floatmax(Float32), 1.0f-45])
+    ints = Int64[0, 1, -1, 2, -2, 127, -128, 3037000499, -3037000499,
+        typemax(Int64), typemin(Int64)]
+    @test all(x -> runtimepow(x, 1) === x, ints)
+    @test all(x -> runtimepow(x, 2) === x * x, ints)   # incl. the wrap-around
+    @test all(x -> runtimepow(x, 2) === x * x, (true, false))
+
+    # n = 2 is *not* bit-identical to the runtime power over floats, and the
+    # honest claim is stronger than equality: x * x is the correctly rounded
+    # square, which the runtime ^ misses by 1 ULP near underflow. Assert the
+    # correct rounding, and bound the disagreement — a real regression (a wrong
+    # exponent, a dropped convert) would miss by far more than one ULP.
+    setprecision(BigFloat, 512) do
+        @test all(x -> same(x * x, Float64(BigFloat(x)^2)), rnd)
+        # concrete inputs whose square lands just above floatmin, where the two
+        # genuinely disagree — pinned rather than searched for, so the property
+        # is asserted deterministically
+        nearunderflow = Float64[-2.6128464698398773e-154, 4.055521534318182e-154,
+            2.3402388344754422e-154, -3.731470536494672e-154, 4.20214231599087e-154]
+        @test all(x -> !same(runtimepow(x, 2), x * x), nearunderflow)
+        @test all(x -> same(x * x, Float64(BigFloat(x)^2)), nearunderflow)
+        @test all(x -> !same(runtimepow(x, 2), Float64(BigFloat(x)^2)),
+            nearunderflow)          # the runtime power is the inaccurate one
+        @test all(x -> abs(runtimepow(x, 2) - x * x) <= eps(x * x), nearunderflow)
+        @test all(x -> floatmin(Float64) < abs(x * x) < 1e-300, nearunderflow)
+    end
+    # across the sample the disagreement is rare and never more than one ULP —
+    # a real regression (a wrong exponent, a dropped convert) misses by far more
+    differing = [x for x in rnd if !same(runtimepow(x, 2), x * x)]
+    @test length(differing) < length(rnd) ÷ 1000
+    @test all(x -> abs(runtimepow(x, 2) - x * x) <= eps(x * x), differing)
+    @test all(x -> abs(x * x) < 1e-300, differing)
+
+    # The property the compensated accumulators actually rest on: they classify
+    # NaN and ±Inf *terms* and carry the sign of zero, so those bits must not
+    # move. None of them do, at either exponent.
+    @test all(x -> same(runtimepow(x, 1), x), edge)
+    @test all(x -> same(runtimepow(x, 2), x * x), edge)
+
+    # End to end, the specialized fold must agree with the general PowerTerm
+    # one over the values the compensated classifier cares about. The reference
+    # is that same accumulator folding PowerTerm — not `Base.sum`, which sums
+    # naively where these states compensate ([0.1, 0.2, 0.3] is exactly 0.6
+    # here and 0.6000000000000001 there). `isequal` is the right comparison:
+    # it separates -0.0 from 0.0 and matches NaN to NaN.
+    #
+    # The equality holds because every column below is well scaled. It is not a
+    # universal property: at n = 2 the two folds differ by one ULP per term
+    # once a square lands near underflow (see above), so a column of ~1e-160
+    # would legitimately fail this.
+    summed(col, n) = only(DataFrame(
+        load(Context(0, 9),
+            chunks(DataFrame(time = 1:length(col), x = col)) |>
+            summarize([SumPower(:x, n)])),
+    )[!, Symbol(:x_sumpower_, n)])
+    function general(col, n)
+        raw = CausalFrames.accumfresh(CausalFrames.PowerTerm{:x}(n),
+            Symbol(:x_sumpower_, n), CausalFrames.powertype(eltype(col), n))
+        foreach(x -> CausalFrames.update!(raw, (; x)), col)
+        return only(CausalFrames.value(raw))
+    end
+    for col in (Float64[1.5, -0.0, 2.5], Float64[-0.0, -0.0], Float64[1.0, Inf, 2.0],
+        Float64[1.0, -Inf, Inf], Float64[1.0, NaN, 2.0],
+        Float64[1e300, 1e300, -1e300], Float64[0.1, 0.2, 0.3],
+        Union{Missing,Float64}[1.5, missing, 2.5], Int64[3, -4, 5],
+        Int32[3, -4, 5], Int8[100, 100, 100], Float32[1.5, -2.5, 3.5])
+        for n in (1, 2)
+            @test isequal(summed(col, n), general(col, n))
+        end
+    end
+end
+
 @testset "compensated float summation" begin
     chunks(cs...) = CausalPipeline(ctx -> collect(cs))
     ftypes = (time = Int64, x = Float64, y = Float64)
