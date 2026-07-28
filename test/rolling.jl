@@ -335,7 +335,14 @@ end
     rolled(p, ss; kwargs...) = DataFrame(load(Context(0, 1000),
         p |> addrollingcolumns(windows, ss; kwargs...)))
 
-    groupset = [Count(), Sum(:x), Mean(:x), Variance(:x), Correlation(:x, :y)]
+    # DotProduct(:y, :x) and Covariance(:y, :x) are the reversed (non-canonical)
+    # argument order, so they fold through the alias over the canonical
+    # accumulator — the differential is what proves that path keeps the running
+    # structure rather than quietly demoting the whole set.
+    groupset = [Count(), Sum(:x), Mean(:x), Variance(:x), Correlation(:x, :y),
+        DotProduct(:y, :x), Covariance(:y, :x),
+        LinearRegression(:x, :y; name = :m1),
+        LinearRegression([:x, :y], :y; name = :m2)]
     monoidset = [Min(:x), Max(:x), First(:x), Last(:x), Product(:x)]
     mixedset = [Sum(:x), Min(:x), MinMax(:y)]     # group ⊂ monoid: tree path
     plainset = [Sum(:x), TestVar(:x)]             # plain present: re-fold

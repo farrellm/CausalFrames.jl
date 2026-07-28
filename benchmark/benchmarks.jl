@@ -117,6 +117,12 @@ SUITE["summarize"]["keyless"] = @benchmarkable load(CTX,
     SRC |> summarize([Count(), Sum(:qty), Min(:qty), Max(:qty)]))
 SUITE["summarize"]["keyed"] = @benchmarkable load(CTX,
     SRC |> summarize([Count(), Sum(:qty)]; key = :sym))
+# The squared power sum, which nothing else in this suite reaches: every
+# Variance, Std, Covariance, Correlation and LinearRegression folds one, so it
+# is the busiest term in the package and the one whose per-row cost is worth
+# watching (see notes/sumpower-terms.md).
+SUITE["summarize"]["powersum"] = @benchmarkable load(CTX,
+    SRC |> summarize([SumPower(:qty, 2), Variance(:qty)]))
 SUITE["summarize"]["cycles"] = @benchmarkable load(CTX,
     SRC |> summarizecycles([Count(), Sum(:qty)]))
 # The keyed cycle fold closes a group table per timestamp — 250k cycles over

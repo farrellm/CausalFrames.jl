@@ -75,13 +75,21 @@ readcsv("ticks.csv"; types = Dict(:time => Int, :bid => Float64)) |>
 The summarization transforms take one or more summarizers — `Count()`,
 `Sum(:col)`, `SumPower(:col, n)`, `Product(:col)`, `DotProduct(:a, :b)`,
 `Moment(:col, n)`, `Mean(:col)`, `Variance(:col)`, `Std(:col)`,
-`Covariance(:a, :b)`, `Correlation(:a, :b)`, `Min(:col)`, `Max(:col)`,
+`Covariance(:a, :b)`, `Correlation(:a, :b)`,
+`LinearRegression(predictors, response)`, `Min(:col)`, `Max(:col)`,
 `First(:col)`, `Last(:col)`,
 or your own `Summarizer` subtype — and an optional `key` (one or more column
 names) to produce a separate summary per unique key value. Output columns are
 named by suffix: `Sum(:mid)` produces `:mid_sum`, `Min(:mid)` produces
 `:mid_min`, `SumPower(:mid, 2)` produces `:mid_sumpower_2`, and the two-column
-`DotProduct(:bid, :ask)` produces `:bid_ask_dotproduct`.
+`DotProduct(:bid, :ask)` produces `:bid_ask_dotproduct`. `LinearRegression` is
+the exception, emitting a block of columns under an optional `name` prefix.
+
+Summarizers whose value is symmetric in two columns — `DotProduct`,
+`Covariance`, and the pairwise terms inside `LinearRegression` — accept either
+argument order and still name the column the way you asked, but fold the
+underlying accumulator only once between them: `DotProduct(:ask, :bid)`
+produces `:ask_bid_dotproduct` without folding a second sum.
 
 ```julia
 p = readcsv("ticks.csv";
@@ -94,12 +102,25 @@ p = readcsv("ticks.csv";
 they summarize no rows as `0` (`Product` as `1`); the rest have none and yield
 `missing` instead. `Moment(:mid, n)` — the `n`-th raw moment, producing
 `:mid_moment_n` — is a *dependent* summarizer, computed from `Count()` and
-`SumPower(:mid, n)`; `Mean`, `Variance`, `Std`, `Covariance`, and
-`Correlation` are dependent too. Dependencies are folded alongside a
+`SumPower(:mid, n)`; `Mean`, `Variance`, `Std`, `Covariance`, `Correlation`,
+and `LinearRegression` are dependent too. Dependencies are folded alongside a
 summarizer but appear in the output only if requested themselves. `Variance`,
 `Std`, and `Covariance` follow `Statistics`, taking a `corrected::Bool = true`
 keyword (the divisor is `n - Int(corrected)`); `Correlation` follows
 `Statistics.cor`, taking no `corrected` keyword and clamping to `[-1, 1]`.
+
+`LinearRegression(predictors, response; intercept = true, name = nothing)` fits
+ordinary least squares, emitting `:n`, `:r2`, `:stderr` (the residual standard
+error), the intercept's `:intercept_beta` and `:intercept_tstat`, and a
+`Symbol(p, :_beta)`, `Symbol(p, :_tstat)` pair per predictor `p` — all of them
+prefixed by `name` when given, which is what lets two regressions share a call
+without colliding on the model-level columns. Being dependent is what makes
+several of them cheap together: each is a function of the same `Count`, `Sum`,
+`SumPower`, and `DotProduct` accumulators, so overlapping predictors fold each
+cross product exactly once, and a `Variance` or `Correlation` requested beside
+them shares those accumulators too. A window without enough rows, or with
+collinear predictors, yields `NaN` rather than raising, and `:n` is always the
+honest row count.
 
 An output column takes its element type from the input column: `Min`, `Max`,
 `First`, and `Last` reproduce it verbatim, while `Sum` and `SumPower` widen it

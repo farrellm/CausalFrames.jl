@@ -24,6 +24,20 @@
                     Correlation(:v, :qty)]),
             ),
         )
+        # The regressions get a workload of their own rather than joining the
+        # list above: they expand to a dependency apiece per cross product, and
+        # a prototype tuple much past 32 falls off Julia's inference cliff. Both
+        # solve paths are covered — the K = 1 closed form and the general
+        # factorization — over predictors that are not collinear, so the
+        # Cholesky succeeds and the coefficient and standard-error code runs.
+        DataFrame(
+            load(
+                ctx,
+                p |> addcolumns(r -> (; u = r.qty * r.qty)) |>
+                summarize([LinearRegression(:qty, :v; name = :m1),
+                    LinearRegression([:qty, :u], :v; name = :m2)]),
+            ),
+        )
         DataFrame(load(ctx, p |> selectcolumns(:sym, r"^q") |> dropcolumns(:sym)))
         DataFrame(load(ctx, p |> lag(1)))
         DataFrame(
@@ -46,7 +60,7 @@
             load(
                 ctx,
                 p |> intervalize(clock(2), [Count(), Sum(:v),
-                        Mean(:v)]; closelast = true),
+                    Mean(:v)]; closelast = true),
             ),
         )
         DataFrame(load(ctx, p |> intervalize(clock(2), [Count(), Sum(:v)];

@@ -87,12 +87,14 @@ readcsv("ticks.csv"; types = Dict(:time => Int, :bid => Float64)) |>
 The summarization transforms take one or more summarizers — `Count()`,
 `Sum(:col)`, `SumPower(:col, n)`, `Product(:col)`, `DotProduct(:a, :b)`,
 `Moment(:col, n)`, `Mean(:col)`, `Variance(:col)`, `Std(:col)`,
-`Covariance(:a, :b)`, `Correlation(:a, :b)`, `Min(:col)`, `Max(:col)`,
+`Covariance(:a, :b)`, `Correlation(:a, :b)`,
+`LinearRegression(predictors, response)`, `Min(:col)`, `Max(:col)`,
 `First(:col)`, `Last(:col)`, or your own `Summarizer` subtype —
 and an optional `key` (one or more column names) to produce a separate
 summary per unique key value. Output columns are named by suffix:
 `Sum(:mid)` produces `:mid_sum`, `Min(:mid)` produces `:mid_min`, and
-`SumPower(:mid, 2)` produces `:mid_sumpower_2`.
+`SumPower(:mid, 2)` produces `:mid_sumpower_2`. `LinearRegression` is the
+exception, emitting a block of columns under an optional `name` prefix.
 
 ```julia
 p = readcsv("ticks.csv";
@@ -106,7 +108,30 @@ p = readcsv("ticks.csv";
 `Moment(:mid, n)` — the `n`-th raw moment, producing `:mid_moment_n` — is a
 *dependent* summarizer, computed from `Count()` and `SumPower(:mid, n)`;
 those are folded alongside it but appear in the output only if requested
-themselves.
+themselves. `Mean`, `Variance`, `Std`, `Covariance`, `Correlation`, and
+`LinearRegression` are dependent too.
+
+`LinearRegression` fits ordinary least squares of a response on one or more
+predictors, emitting a coefficient and a t statistic per term alongside `:r2`,
+`:stderr` (the residual standard error), and `:n`:
+
+```julia
+p |> addrollingcolumns((h1 = Hour(1),),
+    [LinearRegression([:mid, :size], :ret; name = :m1)])
+# h1_m1_n, h1_m1_r2, h1_m1_stderr, h1_m1_intercept_beta,
+# h1_m1_intercept_tstat, h1_m1_mid_beta, h1_m1_mid_tstat,
+# h1_m1_size_beta, h1_m1_size_tstat
+```
+
+Pass `intercept = false` to drop the constant term. The `name` prefix is what
+lets two regressions share a call — without it they collide on `:n`, `:r2`,
+and `:stderr`. Being dependent is what makes running several cheap: every
+regression is a function of the same `Count`, `Sum`, `SumPower`, and
+`DotProduct` accumulators, so overlapping predictors fold each cross product
+exactly once, and a `Variance` or `Correlation` requested beside them shares
+those accumulators too. A window without enough rows, or with collinear
+predictors, yields `NaN` rather than raising; `:n` always reports the honest
+row count.
 
 `addrollingcolumns` summarizes named trailing windows instead of the whole
 window so far: `addrollingcolumns((m5 = Minute(5), h1 = Hour(1)), Mean(:mid);

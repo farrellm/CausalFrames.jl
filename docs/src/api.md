@@ -92,6 +92,7 @@ Variance
 Std
 Covariance
 Correlation
+LinearRegression
 Min
 Max
 First

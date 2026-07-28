@@ -93,7 +93,7 @@ function readparquet(path::AbstractString; time = nothing, rename = nothing,
     return CausalPipeline() do ctx::Context
         return ChunkSource(
             parquetproducer(resolvebackend(backend, :duckdb,
-                    READHINT), ctx, String(path), time, rename),
+                READHINT), ctx, String(path), time, rename),
         )
     end
 end

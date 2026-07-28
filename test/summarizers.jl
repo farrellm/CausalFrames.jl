@@ -295,6 +295,359 @@ end
           (x_y_correlation = -0.75,)
 end
 
+@testset "symmetric summarizers" begin
+    # A summarizer symmetric in two columns folds under the isless-sorted
+    # argument order but still emits the column the caller asked for, so
+    # Σab and Σba cost one accumulator between them rather than two.
+    chunks(cs...) = CausalPipeline(ctx -> collect(cs))
+    stats(xcol, ycol, ss) = DataFrame(
+        load(Context(0, 9),
+            chunks(DataFrame(time = [1, 2, 3], x = xcol, y = ycol)) |>
+            summarize(ss)),
+    )
+    intypes = (time = Int64, x = Int32, y = Int32)
+    # a prototype that folds real per-row state, as against a fieldless
+    # derived one — which is what "shares the accumulator" actually means
+    accumulators(protos) = [
+        only(keys(CausalFrames.emptyvalue(s))) for s in protos
+        if length(keys(CausalFrames.emptyvalue(s))) == 1 &&
+            !(CausalFrames.fresh(s, intypes) isa CausalFrames.DerivedState)
+    ]
+
+    # the reversed request gets its own column, holding the same value
+    df = stats(Int32[3, 1, 2], Int32[2, 5, 4],
+        [DotProduct(:x, :y), DotProduct(:y, :x),
+            Covariance(:x, :y), Covariance(:y, :x)])
+    @test only(df.y_x_dotproduct) == only(df.x_y_dotproduct) == 19
+    @test only(df.y_x_covariance) == only(df.x_y_covariance) == -1.5
+    @test eltype(df.y_x_dotproduct) == Int64
+    @test eltype(df.y_x_covariance) == Float64
+
+    # ... including on its own, with nothing canonical requested alongside
+    df = stats(Int32[3, 1, 2], Int32[2, 5, 4], [DotProduct(:y, :x)])
+    @test only(df.y_x_dotproduct) == 19
+    @test names(df) == ["time", "y_x_dotproduct"]
+    df = stats(Float32[3, 1, 2], Float32[2, 5, 4],
+        [DotProduct(:y, :x), Covariance(:y, :x)])
+    @test eltype(df.y_x_dotproduct) == Float32
+    @test eltype(df.y_x_covariance) == Float32
+
+    # the point of the change: both orders fold one accumulator, and the
+    # reversed one is a fieldless rename over it
+    protos, requested =
+        CausalFrames.prototypes(Summarizer[DotProduct(:x, :y),
+            DotProduct(:y, :x)], Symbol[])
+    @test requested === (:x_y_dotproduct, :y_x_dotproduct)
+    @test accumulators(protos) == [:x_y_dotproduct]
+    @test CausalFrames.fresh(DotProduct(:y, :x), intypes) isa CausalFrames.AliasState
+    # a Covariance written either way reaches the same accumulator
+    # (compared as a set: the two orders expand their Sums in their own order)
+    for cov in (Covariance(:x, :y), Covariance(:y, :x))
+        protos, _ = CausalFrames.prototypes(
+            Summarizer[DotProduct(:x, :y), cov], Symbol[])
+        @test Set(accumulators(protos)) ==
+              Set([:x_y_dotproduct, :count, :x_sum, :y_sum])
+        @test length(accumulators(protos)) == 4
+    end
+    # ... as does a Correlation, transitively through its Covariance
+    protos, _ = CausalFrames.prototypes(
+        Summarizer[DotProduct(:x, :y), Correlation(:y, :x)], Symbol[])
+    @test count(==(:x_y_dotproduct), accumulators(protos)) == 1
+    @test !(:y_x_dotproduct in accumulators(protos))
+
+    # the alias renames its dependency's value and infers doing it
+    st = CausalFrames.fresh(DotProduct(:y, :x), intypes)
+    @test @inferred(CausalFrames.value(st, (x_y_dotproduct = Int64(19),))) ===
+          (y_x_dotproduct = Int64(19),)
+    protos, requested = CausalFrames.prototypes(
+        Summarizer[DotProduct(:y, :x), Covariance(:y, :x)], Symbol[])
+    states = map(s -> CausalFrames.fresh(s, (time = Int64, x = Int64, y = Int64)),
+        protos)
+    for (t, xv, yv) in [(1, 3, 2), (2, 1, 5), (3, 2, 4)]
+        foreach(s -> CausalFrames.update!(s, (time = t, x = xv, y = yv)), states)
+    end
+    @test @inferred(CausalFrames.summaryvalues(states, Val(requested))) ===
+          (y_x_dotproduct = 19, y_x_covariance = -1.5)
+
+    # the value type comes from the dependency's declared field type, so a
+    # missing-poisoned accumulator does not collapse the alias to Missing
+    df = stats(Union{Missing,Int}[1, missing, 3], Int[2, 5, 4],
+        [DotProduct(:y, :x), Covariance(:y, :x)])
+    @test eltype(df.y_x_dotproduct) == Union{Missing,Int64}
+    @test eltype(df.y_x_covariance) == Union{Missing,Float64}
+    @test ismissing(only(df.y_x_dotproduct))
+
+    # the reversed form keeps its declared structure, so a rolling window over
+    # it stays on the running path (the differential lives in test/rolling.jl)
+    @test DotProduct(:y, :x) isa GroupSummarizer
+    @test CausalFrames.isinvertible(CausalFrames.fresh(DotProduct(:y, :x), intypes))
+    @test CausalFrames.emptyvalue(DotProduct(:y, :x)) === (y_x_dotproduct = 0,)
+    # fieldless, so zeroing preserves the type as for any other derived state
+    st = CausalFrames.fresh(DotProduct(:y, :x), intypes)
+    @test typeof(CausalFrames.fresh!(st)) === typeof(st)
+end
+
+@testset "linear regression" begin
+    chunks(cs...) = CausalPipeline(ctx -> collect(cs))
+    # five points with a deliberate wobble, so the fit is not exact and the
+    # standard error and t statistics have something to report
+    xs = Float64[1, 2, 3, 4, 5]
+    zs = Float64[1, 3, 2, 5, 4]
+    ys = Float64[2.1, 3.9, 6.2, 7.8, 10.1]
+    fit(ss; x = xs, z = zs, y = ys) = DataFrame(
+        load(Context(0, 9),
+            chunks(DataFrame(time = 1:length(x), x = x, z = z, y = y)) |>
+            summarize(ss)),
+    )
+    rows(n, ss) = DataFrame(
+        load(Context(0, 9),
+            chunks(DataFrame(time = 1:n, x = xs[1:n], z = zs[1:n],
+                y = ys[1:n])) |> summarize(ss)),
+    )
+
+    # simple regression against the textbook closed form, computed by hand here
+    n = 5
+    sx, sy = sum(xs), sum(ys)
+    sxx = sum(xs .^ 2) - sx^2 / n
+    sxy = sum(xs .* ys) - sx * sy / n
+    syy = sum(ys .^ 2) - sy^2 / n
+    beta = sxy / sxx
+    alpha = sy / n - beta * sx / n
+    sse = syy - beta * sxy
+    sigma2 = sse / (n - 2)
+    df = fit([LinearRegression(:x, :y)])
+    @test only(df.x_beta) ≈ beta
+    @test only(df.intercept_beta) ≈ alpha
+    @test only(df.r2) ≈ 1 - sse / syy
+    @test only(df.stderr) ≈ sqrt(sigma2)
+    @test only(df.x_tstat) ≈ beta / sqrt(sigma2 / sxx)
+    @test only(df.intercept_tstat) ≈
+          alpha / sqrt(sigma2 * (1 / n + (sx / n)^2 / sxx))
+    @test only(df.n) == 5
+
+    # the output columns, exactly — this is the published contract, and
+    # emptyvalue's keys are what the name-keyed deduplication works on
+    outnames(s) = keys(CausalFrames.emptyvalue(s))
+    @test outnames(LinearRegression([:x, :z], :y)) ===
+          (:n, :r2, :stderr, :intercept_beta, :intercept_tstat,
+        :x_beta, :x_tstat, :z_beta, :z_tstat)
+    @test outnames(LinearRegression([:x, :z], :y; intercept = false)) ===
+          (:n, :r2, :stderr, :x_beta, :x_tstat, :z_beta, :z_tstat)
+    @test outnames(LinearRegression([:x, :z], :y; name = :m1)) ===
+          (:m1_n, :m1_r2, :m1_stderr, :m1_intercept_beta, :m1_intercept_tstat,
+        :m1_x_beta, :m1_x_tstat, :m1_z_beta, :m1_z_tstat)
+    @test outnames(LinearRegression(:x, :y)) ===
+          (:n, :r2, :stderr, :intercept_beta, :intercept_tstat,
+        :x_beta, :x_tstat)
+    # the predictor block follows the argument order, not sorted order
+    @test outnames(LinearRegression([:z, :x], :y)) ===
+          (:n, :r2, :stderr, :intercept_beta, :intercept_tstat,
+        :z_beta, :z_tstat, :x_beta, :x_tstat)
+    # ... and the emitted frame agrees with emptyvalue, in order
+    df = fit([LinearRegression([:x, :z], :y; name = :m1)])
+    @test Symbol.(Base.names(df)) ==
+          [:time, collect(outnames(LinearRegression([:x, :z], :y; name = :m1)))...]
+
+    # multiple regression: an exact fit y = 2x + 3z + 1 must be recovered
+    ey = 2 .* xs .+ 3 .* zs .+ 1
+    df = fit([LinearRegression([:x, :z], :y)]; y = ey)
+    @test only(df.x_beta) ≈ 2
+    @test only(df.z_beta) ≈ 3
+    @test only(df.intercept_beta) ≈ 1
+    @test only(df.r2) ≈ 1
+    @test only(df.stderr) ≈ 0 atol = 1e-6
+
+    # with orthogonal predictors each coefficient collapses to its own
+    # univariate slope, which is the closed form checked above
+    ox = Float64[1, 2, 3, 4]
+    oz = Float64[1, -1, -1, 1]      # zero mean, and orthogonal to ox centered
+    oy = Float64[1.0, 2.5, 4.0, 4.5]
+    @test sum((ox .- sum(ox) / 4) .* (oz .- sum(oz) / 4)) == 0
+    df = fit([LinearRegression([:x, :z], :y)]; x = ox, z = oz, y = oy)
+    m = length(ox)
+    sxxo = sum(ox .^ 2) - sum(ox)^2 / m
+    szzo = sum(oz .^ 2) - sum(oz)^2 / m
+    @test only(df.x_beta) ≈ (sum(ox .* oy) - sum(ox) * sum(oy) / m) / sxxo
+    @test only(df.z_beta) ≈ (sum(oz .* oy) - sum(oz) * sum(oy) / m) / szzo
+
+    # intercept = false: the uncentered fit, and no intercept columns
+    df = fit([LinearRegression(:x, :y; intercept = false)])
+    @test only(df.x_beta) ≈ sum(xs .* ys) / sum(xs .^ 2)
+    @test !hasproperty(df, :intercept_beta)
+    b0 = sum(xs .* ys) / sum(xs .^ 2)
+    @test only(df.r2) ≈ 1 - (sum(ys .^ 2) - b0 * sum(xs .* ys)) / sum(ys .^ 2)
+
+    # element types: the statistics divide integers to Float64 and keep
+    # Float32, while n is Int either way
+    df = fit([LinearRegression(:x, :y)]; x = Int32.(1:5), y = Int32[2, 4, 6, 8, 11])
+    @test all(
+        eltype(df[!, c]) == Float64
+        for c in [:r2, :stderr, :intercept_beta, :intercept_tstat, :x_beta,
+            :x_tstat]
+    )
+    @test eltype(df.n) == Int
+    df = fit([LinearRegression(:x, :y)]; x = Float32.(xs), y = Float32.(ys))
+    @test all(
+        eltype(df[!, c]) == Float32
+        for c in [:r2, :stderr, :intercept_beta, :intercept_tstat, :x_beta,
+            :x_tstat]
+    )
+    @test eltype(df.n) == Int
+
+    # degenerate windows report NaN, never a DivideError or DomainError — and
+    # n is the honest row count throughout, so a poisoned fit still says how
+    # much data it saw
+    df = rows(1, [LinearRegression(:x, :y)])          # rank deficient
+    @test only(df.n) == 1
+    @test all(
+        isnan(only(df[!, c]))
+        for c in [:r2, :stderr, :intercept_beta, :intercept_tstat, :x_beta,
+            :x_tstat]
+    )
+    df = rows(2, [LinearRegression(:x, :y)])          # exact fit, dof = 0
+    @test only(df.n) == 2 && only(df.r2) ≈ 1
+    @test isnan(only(df.stderr)) && isnan(only(df.x_tstat))
+    @test isfinite(only(df.x_beta)) && isfinite(only(df.intercept_beta))
+    df = fit([LinearRegression(:x, :y)]; y = fill(4.0, 5))   # constant response
+    @test isnan(only(df.r2))
+    df = fit([LinearRegression(:x, :y)]; x = fill(1.0, 5))   # constant predictor
+    @test isnan(only(df.x_beta)) && isnan(only(df.r2))
+    df = fit([LinearRegression([:x, :z], :y)]; z = 2 .* xs)  # collinear
+    @test only(df.n) == 5
+    @test all(
+        isnan(only(df[!, c]))
+        for c in [:r2, :stderr, :intercept_beta, :x_beta, :z_beta]
+    )
+
+    # missing-permitting input stays missing-permitting and poisons every
+    # statistic, but never n
+    df = fit([LinearRegression(:x, :y)];
+        x = Union{Missing,Float64}[1, 2, missing, 4, 5])
+    @test all(
+        eltype(df[!, c]) == Union{Missing,Float64}
+        for c in [:r2, :stderr, :intercept_beta, :intercept_tstat, :x_beta,
+            :x_tstat]
+    )
+    @test all(
+        ismissing(only(df[!, c]))
+        for c in [:r2, :stderr, :intercept_beta, :intercept_tstat, :x_beta,
+            :x_tstat]
+    )
+    @test eltype(df.n) == Int && only(df.n) == 5
+
+    # no rows: missing statistics, but a count of zero rather than missing
+    df = DataFrame(load(Context(0, 9), chunks() |> summarize(
+        [LinearRegression(:x, :y)])))
+    @test only(df.n) == 0 && ismissing(only(df.r2))
+
+    # the two-argument value infers, on both solve paths and with the
+    # intercept flag baked into the state type
+    intypes = (time = Int64, x = Int32, z = Int32, y = Int32)
+    st = CausalFrames.fresh(LinearRegression(:x, :y), intypes)
+    @test @inferred(
+        CausalFrames.value(st,
+            (count = 5, x_sumpower_2 = Int64(55), y_sumpower_2 = Int64(200),
+                x_y_dotproduct = Int64(100), x_sum = Int64(15),
+                y_sum = Int64(30)))
+    ).x_beta ≈ 1.0
+    st = CausalFrames.fresh(LinearRegression(:x, :y; intercept = false), intypes)
+    @test @inferred(
+        CausalFrames.value(st,
+            (count = 5, x_sumpower_2 = Int64(55), y_sumpower_2 = Int64(200),
+                x_y_dotproduct = Int64(100)))
+    ).x_beta ≈ 100 / 55
+    st = CausalFrames.fresh(LinearRegression([:x, :z], :y), intypes)
+    @test @inferred(
+        CausalFrames.value(st,
+            (count = 5, x_sumpower_2 = Int64(55), z_sumpower_2 = Int64(55),
+                y_sumpower_2 = Int64(200), x_z_dotproduct = Int64(50),
+                x_y_dotproduct = Int64(100), y_z_dotproduct = Int64(90),
+                x_sum = Int64(15), z_sum = Int64(15), y_sum = Int64(30)))
+    ) isa
+          NamedTuple
+
+    # the sharing claim, tested rather than assumed: two regressions over the
+    # same predictors fold one accumulator per cross product between them
+    protos, requested = CausalFrames.prototypes(
+        Summarizer[LinearRegression([:x, :z], :y; name = :m1),
+            LinearRegression([:x, :z], :w; name = :m2)], Symbol[])
+    folded = [
+        only(keys(CausalFrames.emptyvalue(s))) for s in protos
+        if length(keys(CausalFrames.emptyvalue(s))) == 1
+    ]
+    @test count(==(:count), folded) == 1
+    @test count(==(:x_z_dotproduct), folded) == 1
+    @test count(==(:x_sumpower_2), folded) == 1
+    @test count(==(:x_sum), folded) == 1
+    # the response-specific work is not shared, and appears once each
+    @test count(==(:x_y_dotproduct), folded) == 1
+    @test count(==(:w_x_dotproduct), folded) == 1
+    @test requested === (outnames(LinearRegression([:x, :z], :y; name = :m1))...,
+        outnames(LinearRegression([:x, :z], :w; name = :m2))...)
+
+    # a regression shares with the statistical summarizers too: the squared
+    # term goes through SumPower, the cross product through the canonically
+    # (sorted) ordered DotProduct
+    protos, _ = CausalFrames.prototypes(
+        Summarizer[LinearRegression(:x, :y; name = :m1), Variance(:y),
+            Covariance(:x, :y)], Symbol[])
+    folded = [
+        only(keys(CausalFrames.emptyvalue(s))) for s in protos
+        if length(keys(CausalFrames.emptyvalue(s))) == 1
+    ]
+    @test count(==(:y_sumpower_2), folded) == 1
+    @test count(==(:x_y_dotproduct), folded) == 1
+    @test count(==(:x_sum), folded) == 1
+    # ... and the sharing survives a Covariance written the other way round,
+    # since every symmetric summarizer folds under the canonical order
+    protos, _ = CausalFrames.prototypes(
+        Summarizer[LinearRegression(:x, :y; name = :m1), Covariance(:y, :x)],
+        Symbol[])
+    folded = [
+        only(keys(CausalFrames.emptyvalue(s))) for s in protos
+        if length(keys(CausalFrames.emptyvalue(s))) == 1
+    ]
+    @test count(==(:x_y_dotproduct), folded) == 1
+    @test !(:y_x_dotproduct in folded)
+
+    # the whole accumulate-then-project fold stays inferrable
+    protos, requested = CausalFrames.prototypes(
+        Summarizer[LinearRegression(:x, :y)], Symbol[])
+    states = map(s -> CausalFrames.fresh(s, (time = Int64, x = Int64, y = Int64)),
+        protos)
+    for (t, xv, yv) in [(1, 1, 3), (2, 2, 5), (3, 3, 7)]
+        foreach(s -> CausalFrames.update!(s, (time = t, x = xv, y = yv)), states)
+    end
+    out = @inferred CausalFrames.summaryvalues(states, Val(requested))
+    @test out.x_beta ≈ 2.0 && out.intercept_beta ≈ 1.0 && out.n == 3
+
+    # constructor and collision errors
+    @test_throws ArgumentError LinearRegression(Symbol[], :y)
+    @test_throws ArgumentError LinearRegression([:x, :x], :y)
+    # two un-prefixed regressions collide on n/r2/stderr even with disjoint
+    # predictors — which is exactly why `name` exists
+    @test_throws ArgumentError CausalFrames.prototypes(
+        Summarizer[LinearRegression(:x, :y), LinearRegression(:z, :y)],
+        Symbol[])
+    # ... as does one regression against itself with the intercept flipped
+    @test_throws ArgumentError CausalFrames.prototypes(
+        Summarizer[LinearRegression(:x, :y; name = :m1),
+            LinearRegression(:x, :y; name = :m1, intercept = false)], Symbol[])
+    # ... while a predictor named after a model-level column is rejected at
+    # construction, rather than surfacing as a NamedTuple field-name error
+    @test_throws ArgumentError LinearRegression([:x, :intercept], :y)
+    # ... and only that one: the other model-level names take no suffix, so a
+    # predictor sharing one of them produces distinct columns
+    @test outnames(LinearRegression([:x, :r2], :y)) ===
+          (:n, :r2, :stderr, :intercept_beta, :intercept_tstat,
+        :x_beta, :x_tstat, :r2_beta, :r2_tstat)
+    # an `intercept` predictor is fine once there is no constant term to clash
+    # with, or once a prefix separates them
+    @test outnames(LinearRegression([:x, :intercept], :y; intercept = false)) ===
+          (:n, :r2, :stderr, :x_beta, :x_tstat,
+        :intercept_beta, :intercept_tstat)
+end
+
 @testset "monoid and group structure" begin
     intypes = (time = Int64, x = Int64, y = Int64)
     rows = [(time = 1, x = 3, y = 2), (time = 2, x = 1, y = 7),
@@ -311,7 +664,8 @@ end
     @test all(s -> s isa GroupSummarizer,
         [Count(), Sum(:x), SumPower(:x, 2), DotProduct(:x, :y),
             Moment(:x, 2), Mean(:x), Variance(:x), Std(:x),
-            Covariance(:x, :y), Correlation(:x, :y)])
+            Covariance(:x, :y), Correlation(:x, :y),
+            LinearRegression(:x, :y), LinearRegression([:x, :y], :y)])
     @test all(s -> s isa MonoidSummarizer && !(s isa GroupSummarizer),
         [Product(:x), Min(:x), Max(:x), First(:x), Last(:x), MinMax(:x)])
     @test !(Opaque(Sum(:x)) isa MonoidSummarizer)
@@ -349,7 +703,8 @@ end
     # the dependent summarizers carry no state of their own, so fresh! only
     # has to preserve the type (their value comes from `vals` at emission)
     for s in [Moment(:x, 2), Mean(:x), Variance(:x), Std(:x),
-        Covariance(:x, :y), Correlation(:x, :y), TestVar(:x)]
+        Covariance(:x, :y), Correlation(:x, :y), LinearRegression(:x, :y),
+        TestVar(:x)]
         st = CausalFrames.fresh(s, intypes)
         @test typeof(CausalFrames.fresh!(st)) === typeof(st)
     end
@@ -465,6 +820,160 @@ end
     mintypes = (time = Int64, x = Union{Missing,Int}, y = Union{Missing,Int})
     for s in [Sum(:x), SumPower(:x, 2), DotProduct(:x, :y)]
         @test CausalFrames.isinvertible(CausalFrames.fresh(s, mintypes))
+    end
+end
+
+@testset "SumPower term specialization" begin
+    # SumPower(c, 1) and SumPower(c, 2) fold the terms whose exponent is in the
+    # type — a move and a multiply — rather than PowerTerm's runtime `^`. That
+    # is an implementation detail, so it has to leave the output name, the
+    # accumulator type and the term's *bits* alone. See notes/sumpower-terms.md.
+    chunks(cs...) = CausalPipeline(ctx -> collect(cs))
+    intypes = (time = Int64, x = Float64)
+
+    # the specialized exponents pick the cheap terms, everything else does not
+    termof(n) = CausalFrames.fresh(SumPower(:x, n), intypes).term
+    @test termof(1) isa CausalFrames.ColumnTerm{:x}
+    @test termof(2) isa CausalFrames.PairProductTerm{:x,:x}
+    @test termof(0) isa CausalFrames.PowerTerm{:x}
+    @test termof(3) isa CausalFrames.PowerTerm{:x}
+    # ... and the output column is untouched: SumPower(:x, 1) is still its own
+    # column, distinct from Sum(:x), and SumPower(:x, 2) from DotProduct(:x, :x)
+    @test keys(CausalFrames.emptyvalue(SumPower(:x, 1))) === (:x_sumpower_1,)
+    @test keys(CausalFrames.emptyvalue(SumPower(:x, 2))) === (:x_sumpower_2,)
+
+    # the accumulator type must not move, or the output column's eltype does.
+    # This is the identity the specialization rests on, over every type the
+    # package admits — including the Missing unions and the widening integers.
+    for T in (Int8, Int16, Int32, Int64, Int128, UInt8, UInt64, Bool,
+        Float16, Float32, Float64, BigInt, BigFloat, Rational{Int},
+        Union{Missing,Int64}, Union{Missing,Float64}, Union{Missing,Int8})
+        @test CausalFrames.powertype(T, 1) === CausalFrames.sumtype(T)
+        @test CausalFrames.powertype(T, 2) === CausalFrames.dottype(T, T)
+    end
+
+    # The exponent MUST stay in a variable here. Julia's parser rewrites a
+    # *literal* exponent to Base.literal_pow(^, x, Val(2)), which for Float64
+    # is `x * x` — so `@test same(x^2, x * x)` compares x*x with itself and
+    # proves nothing. Only `runtimepow` reaches ^(::Float64, ::Int), the
+    # algorithm these terms actually replace. Do not "simplify" it back.
+    runtimepow(x, n::Int) = x^n
+    bits(x) = reinterpret(Unsigned, x)
+    same(a, b) = (isnan(a) && isnan(b)) || bits(a) === bits(b)
+    edge = Float64[0.0, -0.0, 1.0, -1.0, 0.5, Inf, -Inf, NaN, 5.0e-324,
+        floatmin(Float64), -floatmin(Float64), floatmax(Float64), 1e308, 1e-308,
+        nextfloat(0.0), prevfloat(0.0), 3.141592653589793, -2.718281828459045]
+    # a deterministic spread of bit patterns, without pulling Random into the
+    # test dependencies: an LCG's high bits are good, and it is the exponent
+    # field that has to vary here
+    function bitpatterns(n)
+        out = Vector{Float64}(undef, n)
+        s = 0x2545f4914f6cdd1d
+        for i in 1:n
+            s = s * 0x5851f42d4c957f2d + 0x14057b7ef767814f
+            out[i] = reinterpret(Float64, s)
+        end
+        return out
+    end
+    rnd = bitpatterns(50_000)
+
+    # n = 1 is exactly the runtime power, with one exception — and it is
+    # Julia's, not ours: on 1.10 `^(::Float64, ::Integer)` drops the sign of
+    # zero, returning 0.0 for (-0.0)^1. That was fixed in 1.11. ColumnTerm
+    # hands the column value back untouched, so on 1.10 the specialization is
+    # the more correct of the two; and it is unobservable in output either way,
+    # since the compensated accumulator starts at +0.0 and 0.0 + -0.0 is 0.0
+    # (asserted end to end below). Float32 is unaffected on every version.
+    dropssignedzero(x) = VERSION < v"1.11" && x === -0.0
+    @test all(x -> dropssignedzero(x) || same(runtimepow(x, 1), x), edge)
+    @test all(x -> same(runtimepow(x, 1), x), rnd)
+    # pin the quirk itself, so a change in either direction is noticed
+    @test VERSION < v"1.11" ? runtimepow(-0.0, 1) === 0.0 :
+          same(runtimepow(-0.0, 1), -0.0)
+    @test all(x -> same(runtimepow(x, 1), x),
+        Float32[0.0f0, -0.0f0, Inf32, -Inf32, NaN32, floatmin(Float32),
+            floatmax(Float32), 1.0f-45])
+    ints = Int64[0, 1, -1, 2, -2, 127, -128, 3037000499, -3037000499,
+        typemax(Int64), typemin(Int64)]
+    @test all(x -> runtimepow(x, 1) === x, ints)
+    @test all(x -> runtimepow(x, 2) === x * x, ints)   # incl. the wrap-around
+    @test all(x -> runtimepow(x, 2) === x * x, (true, false))
+
+    # n = 2 is *not* bit-identical to the runtime power over floats, and the
+    # honest claim is stronger than equality: x * x is the correctly rounded
+    # square, which the runtime ^ misses by 1 ULP near underflow. Assert the
+    # correct rounding, and bound the disagreement — a real regression (a wrong
+    # exponent, a dropped convert) would miss by far more than one ULP.
+    setprecision(BigFloat, 512) do
+        @test all(x -> same(x * x, Float64(BigFloat(x)^2)), rnd)
+        # concrete inputs whose square lands just above floatmin, where the two
+        # genuinely disagree — pinned rather than searched for, so the property
+        # is asserted deterministically
+        nearunderflow = Float64[-2.6128464698398773e-154, 4.055521534318182e-154,
+            2.3402388344754422e-154, -3.731470536494672e-154, 4.20214231599087e-154]
+        @test all(x -> !same(runtimepow(x, 2), x * x), nearunderflow)
+        @test all(x -> same(x * x, Float64(BigFloat(x)^2)), nearunderflow)
+        @test all(x -> !same(runtimepow(x, 2), Float64(BigFloat(x)^2)),
+            nearunderflow)          # the runtime power is the inaccurate one
+        @test all(x -> abs(runtimepow(x, 2) - x * x) <= eps(x * x), nearunderflow)
+        @test all(x -> floatmin(Float64) < abs(x * x) < 1e-300, nearunderflow)
+    end
+    # across the sample the disagreement is rare and never more than one ULP —
+    # a real regression (a wrong exponent, a dropped convert) misses by far more
+    differing = [x for x in rnd if !same(runtimepow(x, 2), x * x)]
+    @test length(differing) < length(rnd) ÷ 1000
+    @test all(x -> abs(runtimepow(x, 2) - x * x) <= eps(x * x), differing)
+    @test all(x -> abs(x * x) < 1e-300, differing)
+
+    # The property the compensated accumulators actually rest on: they classify
+    # NaN and ±Inf *terms* and carry the sign of zero, so those bits must not
+    # move. None do, apart from Julia 1.10's own (-0.0)^1 above — and the
+    # accumulator absorbs that one, since its running total starts at +0.0.
+    @test all(x -> dropssignedzero(x) || same(runtimepow(x, 1), x), edge)
+    @test all(x -> same(runtimepow(x, 2), x * x), edge)
+    @test only(
+        DataFrame(
+            load(Context(0, 9),
+                chunks(DataFrame(time = [1, 2], x = [-0.0, -0.0])) |>
+                summarize([SumPower(:x, 1)])),
+        ).x_sumpower_1,
+    ) === 0.0
+
+    # End to end, the specialized fold must agree with the general PowerTerm
+    # one over the values the compensated classifier cares about. The reference
+    # is that same accumulator folding PowerTerm — not `Base.sum`, which sums
+    # naively where these states compensate ([0.1, 0.2, 0.3] is exactly 0.6
+    # here and 0.6000000000000001 there). `isequal` is the right comparison:
+    # it separates -0.0 from 0.0 and matches NaN to NaN.
+    #
+    # The equality holds because every column below is well scaled. It is not a
+    # universal property: at n = 2 the two folds differ by one ULP per term
+    # once a square lands near underflow (see above), so a column of ~1e-160
+    # would legitimately fail this.
+    summed(col, n) = only(
+        DataFrame(
+            load(Context(0, 9),
+                chunks(DataFrame(time = 1:length(col), x = col)) |>
+                summarize([SumPower(:x, n)])),
+        )[
+            !,
+            Symbol(:x_sumpower_, n),
+        ],
+    )
+    function general(col, n)
+        raw = CausalFrames.accumfresh(CausalFrames.PowerTerm{:x}(n),
+            Symbol(:x_sumpower_, n), CausalFrames.powertype(eltype(col), n))
+        foreach(x -> CausalFrames.update!(raw, (; x)), col)
+        return only(CausalFrames.value(raw))
+    end
+    for col in (Float64[1.5, -0.0, 2.5], Float64[-0.0, -0.0], Float64[1.0, Inf, 2.0],
+        Float64[1.0, -Inf, Inf], Float64[1.0, NaN, 2.0],
+        Float64[1e300, 1e300, -1e300], Float64[0.1, 0.2, 0.3],
+        Union{Missing,Float64}[1.5, missing, 2.5], Int64[3, -4, 5],
+        Int32[3, -4, 5], Int8[100, 100, 100], Float32[1.5, -2.5, 3.5])
+        for n in (1, 2)
+            @test isequal(summed(col, n), general(col, n))
+        end
     end
 end
 
