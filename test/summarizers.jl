@@ -295,6 +295,266 @@ end
           (x_y_correlation = -0.75,)
 end
 
+@testset "linear regression" begin
+    chunks(cs...) = CausalPipeline(ctx -> collect(cs))
+    # five points with a deliberate wobble, so the fit is not exact and the
+    # standard error and t statistics have something to report
+    xs = Float64[1, 2, 3, 4, 5]
+    zs = Float64[1, 3, 2, 5, 4]
+    ys = Float64[2.1, 3.9, 6.2, 7.8, 10.1]
+    fit(ss; x = xs, z = zs, y = ys) = DataFrame(
+        load(Context(0, 9),
+            chunks(DataFrame(time = 1:length(x), x = x, z = z, y = y)) |>
+            summarize(ss)),
+    )
+    rows(n, ss) = DataFrame(
+        load(Context(0, 9),
+            chunks(DataFrame(time = 1:n, x = xs[1:n], z = zs[1:n],
+                y = ys[1:n])) |> summarize(ss)),
+    )
+
+    # simple regression against the textbook closed form, computed by hand here
+    n = 5
+    sx, sy = sum(xs), sum(ys)
+    sxx = sum(xs .^ 2) - sx^2 / n
+    sxy = sum(xs .* ys) - sx * sy / n
+    syy = sum(ys .^ 2) - sy^2 / n
+    beta = sxy / sxx
+    alpha = sy / n - beta * sx / n
+    sse = syy - beta * sxy
+    sigma2 = sse / (n - 2)
+    df = fit([LinearRegression(:x, :y)])
+    @test only(df.x_beta) ≈ beta
+    @test only(df.intercept_beta) ≈ alpha
+    @test only(df.r2) ≈ 1 - sse / syy
+    @test only(df.stderr) ≈ sqrt(sigma2)
+    @test only(df.x_tstat) ≈ beta / sqrt(sigma2 / sxx)
+    @test only(df.intercept_tstat) ≈
+          alpha / sqrt(sigma2 * (1 / n + (sx / n)^2 / sxx))
+    @test only(df.n) == 5
+
+    # the output columns, exactly — this is the published contract, and
+    # emptyvalue's keys are what the name-keyed deduplication works on
+    outnames(s) = keys(CausalFrames.emptyvalue(s))
+    @test outnames(LinearRegression([:x, :z], :y)) ===
+          (:n, :r2, :stderr, :intercept_beta, :intercept_tstat,
+        :x_beta, :x_tstat, :z_beta, :z_tstat)
+    @test outnames(LinearRegression([:x, :z], :y; intercept = false)) ===
+          (:n, :r2, :stderr, :x_beta, :x_tstat, :z_beta, :z_tstat)
+    @test outnames(LinearRegression([:x, :z], :y; name = :m1)) ===
+          (:m1_n, :m1_r2, :m1_stderr, :m1_intercept_beta, :m1_intercept_tstat,
+        :m1_x_beta, :m1_x_tstat, :m1_z_beta, :m1_z_tstat)
+    @test outnames(LinearRegression(:x, :y)) ===
+          (:n, :r2, :stderr, :intercept_beta, :intercept_tstat,
+        :x_beta, :x_tstat)
+    # the predictor block follows the argument order, not sorted order
+    @test outnames(LinearRegression([:z, :x], :y)) ===
+          (:n, :r2, :stderr, :intercept_beta, :intercept_tstat,
+        :z_beta, :z_tstat, :x_beta, :x_tstat)
+    # ... and the emitted frame agrees with emptyvalue, in order
+    df = fit([LinearRegression([:x, :z], :y; name = :m1)])
+    @test Symbol.(Base.names(df)) ==
+          [:time, collect(outnames(LinearRegression([:x, :z], :y; name = :m1)))...]
+
+    # multiple regression: an exact fit y = 2x + 3z + 1 must be recovered
+    ey = 2 .* xs .+ 3 .* zs .+ 1
+    df = fit([LinearRegression([:x, :z], :y)]; y = ey)
+    @test only(df.x_beta) ≈ 2
+    @test only(df.z_beta) ≈ 3
+    @test only(df.intercept_beta) ≈ 1
+    @test only(df.r2) ≈ 1
+    @test only(df.stderr) ≈ 0 atol = 1e-6
+
+    # with orthogonal predictors each coefficient collapses to its own
+    # univariate slope, which is the closed form checked above
+    ox = Float64[1, 2, 3, 4]
+    oz = Float64[1, -1, -1, 1]      # zero mean, and orthogonal to ox centered
+    oy = Float64[1.0, 2.5, 4.0, 4.5]
+    @test sum((ox .- sum(ox) / 4) .* (oz .- sum(oz) / 4)) == 0
+    df = fit([LinearRegression([:x, :z], :y)]; x = ox, z = oz, y = oy)
+    m = length(ox)
+    sxxo = sum(ox .^ 2) - sum(ox)^2 / m
+    szzo = sum(oz .^ 2) - sum(oz)^2 / m
+    @test only(df.x_beta) ≈ (sum(ox .* oy) - sum(ox) * sum(oy) / m) / sxxo
+    @test only(df.z_beta) ≈ (sum(oz .* oy) - sum(oz) * sum(oy) / m) / szzo
+
+    # intercept = false: the uncentered fit, and no intercept columns
+    df = fit([LinearRegression(:x, :y; intercept = false)])
+    @test only(df.x_beta) ≈ sum(xs .* ys) / sum(xs .^ 2)
+    @test !hasproperty(df, :intercept_beta)
+    b0 = sum(xs .* ys) / sum(xs .^ 2)
+    @test only(df.r2) ≈ 1 - (sum(ys .^ 2) - b0 * sum(xs .* ys)) / sum(ys .^ 2)
+
+    # element types: the statistics divide integers to Float64 and keep
+    # Float32, while n is Int either way
+    df = fit([LinearRegression(:x, :y)]; x = Int32.(1:5), y = Int32[2, 4, 6, 8, 11])
+    @test all(
+        eltype(df[!, c]) == Float64
+        for c in [:r2, :stderr, :intercept_beta, :intercept_tstat, :x_beta,
+            :x_tstat]
+    )
+    @test eltype(df.n) == Int
+    df = fit([LinearRegression(:x, :y)]; x = Float32.(xs), y = Float32.(ys))
+    @test all(
+        eltype(df[!, c]) == Float32
+        for c in [:r2, :stderr, :intercept_beta, :intercept_tstat, :x_beta,
+            :x_tstat]
+    )
+    @test eltype(df.n) == Int
+
+    # degenerate windows report NaN, never a DivideError or DomainError — and
+    # n is the honest row count throughout, so a poisoned fit still says how
+    # much data it saw
+    df = rows(1, [LinearRegression(:x, :y)])          # rank deficient
+    @test only(df.n) == 1
+    @test all(
+        isnan(only(df[!, c]))
+        for c in [:r2, :stderr, :intercept_beta, :intercept_tstat, :x_beta,
+            :x_tstat]
+    )
+    df = rows(2, [LinearRegression(:x, :y)])          # exact fit, dof = 0
+    @test only(df.n) == 2 && only(df.r2) ≈ 1
+    @test isnan(only(df.stderr)) && isnan(only(df.x_tstat))
+    @test isfinite(only(df.x_beta)) && isfinite(only(df.intercept_beta))
+    df = fit([LinearRegression(:x, :y)]; y = fill(4.0, 5))   # constant response
+    @test isnan(only(df.r2))
+    df = fit([LinearRegression(:x, :y)]; x = fill(1.0, 5))   # constant predictor
+    @test isnan(only(df.x_beta)) && isnan(only(df.r2))
+    df = fit([LinearRegression([:x, :z], :y)]; z = 2 .* xs)  # collinear
+    @test only(df.n) == 5
+    @test all(
+        isnan(only(df[!, c]))
+        for c in [:r2, :stderr, :intercept_beta, :x_beta, :z_beta]
+    )
+
+    # missing-permitting input stays missing-permitting and poisons every
+    # statistic, but never n
+    df = fit([LinearRegression(:x, :y)];
+        x = Union{Missing,Float64}[1, 2, missing, 4, 5])
+    @test all(
+        eltype(df[!, c]) == Union{Missing,Float64}
+        for c in [:r2, :stderr, :intercept_beta, :intercept_tstat, :x_beta,
+            :x_tstat]
+    )
+    @test all(
+        ismissing(only(df[!, c]))
+        for c in [:r2, :stderr, :intercept_beta, :intercept_tstat, :x_beta,
+            :x_tstat]
+    )
+    @test eltype(df.n) == Int && only(df.n) == 5
+
+    # no rows: missing statistics, but a count of zero rather than missing
+    df = DataFrame(load(Context(0, 9), chunks() |> summarize(
+        [LinearRegression(:x, :y)])))
+    @test only(df.n) == 0 && ismissing(only(df.r2))
+
+    # the two-argument value infers, on both solve paths and with the
+    # intercept flag baked into the state type
+    intypes = (time = Int64, x = Int32, z = Int32, y = Int32)
+    st = CausalFrames.fresh(LinearRegression(:x, :y), intypes)
+    @test @inferred(
+        CausalFrames.value(st,
+            (count = 5, x_sumpower_2 = Int64(55), y_sumpower_2 = Int64(200),
+                x_y_dotproduct = Int64(100), x_sum = Int64(15),
+                y_sum = Int64(30)))
+    ).x_beta ≈ 1.0
+    st = CausalFrames.fresh(LinearRegression(:x, :y; intercept = false), intypes)
+    @test @inferred(
+        CausalFrames.value(st,
+            (count = 5, x_sumpower_2 = Int64(55), y_sumpower_2 = Int64(200),
+                x_y_dotproduct = Int64(100)))
+    ).x_beta ≈ 100 / 55
+    st = CausalFrames.fresh(LinearRegression([:x, :z], :y), intypes)
+    @test @inferred(
+        CausalFrames.value(st,
+            (count = 5, x_sumpower_2 = Int64(55), z_sumpower_2 = Int64(55),
+                y_sumpower_2 = Int64(200), x_z_dotproduct = Int64(50),
+                x_y_dotproduct = Int64(100), y_z_dotproduct = Int64(90),
+                x_sum = Int64(15), z_sum = Int64(15), y_sum = Int64(30)))
+    ) isa
+          NamedTuple
+
+    # the sharing claim, tested rather than assumed: two regressions over the
+    # same predictors fold one accumulator per cross product between them
+    protos, requested = CausalFrames.prototypes(
+        Summarizer[LinearRegression([:x, :z], :y; name = :m1),
+            LinearRegression([:x, :z], :w; name = :m2)], Symbol[])
+    folded = [
+        only(keys(CausalFrames.emptyvalue(s))) for s in protos
+        if length(keys(CausalFrames.emptyvalue(s))) == 1
+    ]
+    @test count(==(:count), folded) == 1
+    @test count(==(:x_z_dotproduct), folded) == 1
+    @test count(==(:x_sumpower_2), folded) == 1
+    @test count(==(:x_sum), folded) == 1
+    # the response-specific work is not shared, and appears once each
+    @test count(==(:x_y_dotproduct), folded) == 1
+    @test count(==(:w_x_dotproduct), folded) == 1
+    @test requested === (outnames(LinearRegression([:x, :z], :y; name = :m1))...,
+        outnames(LinearRegression([:x, :z], :w; name = :m2))...)
+
+    # a regression shares with the statistical summarizers too: the squared
+    # term goes through SumPower, the cross product through the canonically
+    # (sorted) ordered DotProduct
+    protos, _ = CausalFrames.prototypes(
+        Summarizer[LinearRegression(:x, :y; name = :m1), Variance(:y),
+            Covariance(:x, :y)], Symbol[])
+    folded = [
+        only(keys(CausalFrames.emptyvalue(s))) for s in protos
+        if length(keys(CausalFrames.emptyvalue(s))) == 1
+    ]
+    @test count(==(:y_sumpower_2), folded) == 1
+    @test count(==(:x_y_dotproduct), folded) == 1
+    @test count(==(:x_sum), folded) == 1
+    # Covariance does not canonicalize its own dependency, so the reversed
+    # argument order folds a second accumulator for the same quantity
+    protos, _ = CausalFrames.prototypes(
+        Summarizer[LinearRegression(:x, :y; name = :m1), Covariance(:y, :x)],
+        Symbol[])
+    folded = [
+        only(keys(CausalFrames.emptyvalue(s))) for s in protos
+        if length(keys(CausalFrames.emptyvalue(s))) == 1
+    ]
+    @test :x_y_dotproduct in folded && :y_x_dotproduct in folded
+
+    # the whole accumulate-then-project fold stays inferrable
+    protos, requested = CausalFrames.prototypes(
+        Summarizer[LinearRegression(:x, :y)], Symbol[])
+    states = map(s -> CausalFrames.fresh(s, (time = Int64, x = Int64, y = Int64)),
+        protos)
+    for (t, xv, yv) in [(1, 1, 3), (2, 2, 5), (3, 3, 7)]
+        foreach(s -> CausalFrames.update!(s, (time = t, x = xv, y = yv)), states)
+    end
+    out = @inferred CausalFrames.summaryvalues(states, Val(requested))
+    @test out.x_beta ≈ 2.0 && out.intercept_beta ≈ 1.0 && out.n == 3
+
+    # constructor and collision errors
+    @test_throws ArgumentError LinearRegression(Symbol[], :y)
+    @test_throws ArgumentError LinearRegression([:x, :x], :y)
+    # two un-prefixed regressions collide on n/r2/stderr even with disjoint
+    # predictors — which is exactly why `name` exists
+    @test_throws ArgumentError CausalFrames.prototypes(
+        Summarizer[LinearRegression(:x, :y), LinearRegression(:z, :y)],
+        Symbol[])
+    # ... as does one regression against itself with the intercept flipped
+    @test_throws ArgumentError CausalFrames.prototypes(
+        Summarizer[LinearRegression(:x, :y; name = :m1),
+            LinearRegression(:x, :y; name = :m1, intercept = false)], Symbol[])
+    # ... while a predictor named after a model-level column is rejected at
+    # construction, rather than surfacing as a NamedTuple field-name error
+    @test_throws ArgumentError LinearRegression([:x, :intercept], :y)
+    # ... and only that one: the other model-level names take no suffix, so a
+    # predictor sharing one of them produces distinct columns
+    @test outnames(LinearRegression([:x, :r2], :y)) ===
+          (:n, :r2, :stderr, :intercept_beta, :intercept_tstat,
+        :x_beta, :x_tstat, :r2_beta, :r2_tstat)
+    # an `intercept` predictor is fine once there is no constant term to clash
+    # with, or once a prefix separates them
+    @test outnames(LinearRegression([:x, :intercept], :y; intercept = false)) ===
+          (:n, :r2, :stderr, :x_beta, :x_tstat,
+        :intercept_beta, :intercept_tstat)
+end
+
 @testset "monoid and group structure" begin
     intypes = (time = Int64, x = Int64, y = Int64)
     rows = [(time = 1, x = 3, y = 2), (time = 2, x = 1, y = 7),
@@ -311,7 +571,8 @@ end
     @test all(s -> s isa GroupSummarizer,
         [Count(), Sum(:x), SumPower(:x, 2), DotProduct(:x, :y),
             Moment(:x, 2), Mean(:x), Variance(:x), Std(:x),
-            Covariance(:x, :y), Correlation(:x, :y)])
+            Covariance(:x, :y), Correlation(:x, :y),
+            LinearRegression(:x, :y), LinearRegression([:x, :y], :y)])
     @test all(s -> s isa MonoidSummarizer && !(s isa GroupSummarizer),
         [Product(:x), Min(:x), Max(:x), First(:x), Last(:x), MinMax(:x)])
     @test !(Opaque(Sum(:x)) isa MonoidSummarizer)
@@ -349,7 +610,8 @@ end
     # the dependent summarizers carry no state of their own, so fresh! only
     # has to preserve the type (their value comes from `vals` at emission)
     for s in [Moment(:x, 2), Mean(:x), Variance(:x), Std(:x),
-        Covariance(:x, :y), Correlation(:x, :y), TestVar(:x)]
+        Covariance(:x, :y), Correlation(:x, :y), LinearRegression(:x, :y),
+        TestVar(:x)]
         st = CausalFrames.fresh(s, intypes)
         @test typeof(CausalFrames.fresh!(st)) === typeof(st)
     end

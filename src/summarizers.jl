@@ -956,12 +956,333 @@ fresh(st::CorrelationState) = st
     return NamedTuple{(N,),Tuple{V}}((_clampcor(vals[CV] / (vals[SA] * vals[SB])),))
 end
 
+"""
+    LinearRegression(predictors, response; intercept = true, name = nothing)
+
+Ordinary least squares of `response` on `predictors` — a collection of column
+names, or a single column name. With `intercept` (the default) the fit carries
+a constant term.
+
+# Output columns
+
+`name`, when given, prefixes every output column as `Symbol(name, :_, base)`;
+the base names are:
+
+| # | base column | meaning |
+|---|---|---|
+| 1 | `n` | rows folded in |
+| 2 | `r2` | coefficient of determination |
+| 3 | `stderr` | residual standard error |
+| 4 | `intercept_beta` | the constant term, omitted when `intercept = false` |
+| 5 | `intercept_tstat` | its t statistic, omitted when `intercept = false` |
+| 6.. | `Symbol(p, :_beta)`, `Symbol(p, :_tstat)` | per predictor `p`, in the order given |
+
+so `2K + 5` columns for `K` predictors with an intercept, `2K + 3` without:
+
+```julia
+LinearRegression([:x, :z], :y)
+# :n, :r2, :stderr, :intercept_beta, :intercept_tstat,
+# :x_beta, :x_tstat, :z_beta, :z_tstat
+
+LinearRegression([:x, :z], :y; name = :m1)
+# :m1_n, :m1_r2, :m1_stderr, :m1_intercept_beta, :m1_intercept_tstat,
+# :m1_x_beta, :m1_x_tstat, :m1_z_beta, :m1_z_tstat
+```
+
+The un-prefixed defaults are deliberately grabby: `n`, `r2`, and `stderr` say
+nothing about the model, so **two regressions in one call need distinct
+`name`s** — without them they collide on those three columns even when their
+predictors differ entirely, and the collision is an error. A regression and the
+same regression with `intercept` flipped likewise cannot share a `name`. A
+predictor named `intercept` collides with the constant term's own pair and is
+rejected by the constructor; the other model-level names take no suffix, so a
+predictor named `n`, `r2`, or `stderr` is fine.
+
+The `2K + 4` statistic columns share one element type, the computation's result
+(`Float64` for integer input, `Float32` for `Float32`), and a
+`Missing`-admitting input makes all of them `Union{Missing,…}`. `n` is
+separately `Int`, exactly as [`Count`](@ref)'s `:count` is, and is never
+`missing`.
+
+The regression of no rows is `missing` in every statistic and `0` in `n`; so is
+any window holding a `missing` in a predictor or the response. A rank-deficient
+system — collinear predictors, or `n ≤ K` (`n ≤ K + 1` with an intercept) —
+gives `NaN` statistics rather than raising, as `Correlation` does for a single
+row. With no residual degrees of freedom left (`n = K + 1`, or `n = K` without
+an intercept) the coefficients and `r2` are the exact fit but `stderr` and every
+t statistic are `NaN`, and a constant response makes `r2` `NaN`. `n` is the
+honest row count throughout, so a poisoned fit still says how much data it saw.
+
+# Sharing
+
+A dependent summarizer over [`Count`](@ref), [`SumPower`](@ref)`(·, 2)`,
+[`DotProduct`](@ref), and — only when `intercept` — [`Sum`](@ref): the whole
+normal-equations system and every statistic drawn from it are functions of
+those. They are folded alongside the regression but appear in the output only
+if requested themselves, and because dependencies deduplicate by output name,
+two regressions over overlapping columns fold each cross product exactly once.
+Cross products are requested under a canonical (sorted) argument order, so
+regressions listing the same columns in either order share one accumulator, and
+a squared term is requested as `SumPower(c, 2)` — the name `Variance`, `Std`,
+and `Correlation` already depend on — so a regression run beside them shares
+that too. A `Covariance` or `DotProduct` the user requests separately shares
+only if it is written in the same sorted order: `Covariance(:x, :y)` does,
+`Covariance(:y, :x)` folds its own `:y_x_dotproduct`.
+
+With an intercept the system is centered on the column means, the multivariate
+form of the identity [`Covariance`](@ref) uses: better conditioned, and one
+dimension smaller than carrying a column of ones. Without one, `r2` is the
+uncentered coefficient of determination, as is conventional for a
+no-intercept fit.
+
+Unlike every other dependent summarizer, a multiple regression allocates: `K ≥
+2` builds a `K × K` workspace per emitted row. Simple regression (`K = 1`, the
+common case) runs a closed form over scalars and allocates nothing.
+"""
+struct LinearRegression{P,Y} <: GroupSummarizer
+    intercept::Bool
+    name::Union{Nothing,Symbol}
+end
+
+function LinearRegression(predictors, response::Symbol;
+    intercept::Bool = true, name::Union{Nothing,Symbol} = nothing)
+    ps = Tuple(Symbol(p) for p in predictors)
+    isempty(ps) &&
+        throw(ArgumentError("LinearRegression needs at least one predictor"))
+    allunique(ps) || throw(ArgumentError(
+        "LinearRegression predictors must be distinct, got $ps"))
+    # A predictor named `intercept` produces the constant term's own pair of
+    # columns. Caught here rather than left to the NamedTuple constructor,
+    # whose "duplicate field name" says nothing about which summarizer built
+    # it. The check is on the whole name set rather than that one case, so it
+    # stays honest if the naming scheme grows.
+    outs = regnames(ps, name, intercept)
+    allunique(outs) || throw(ArgumentError(
+        "LinearRegression output columns are not distinct: $outs"))
+    return LinearRegression{ps,response}(intercept, name)
+end
+LinearRegression(predictor::Symbol, response::Symbol; kwargs...) =
+    LinearRegression((predictor,), response; kwargs...)
+
+# Fieldless like every other derived state, and every name it reads back is a
+# type parameter so the two-argument `value` infers: NN and SN are the output
+# names (the row count, then the statistics), AN every accumulator name read —
+# deduplicated, since a predictor may be the response — and SP/SY/QY/GN/DN the
+# sums, the response's power sum, the packed upper triangle of the cross-product
+# matrix, and the predictor-response cross products. I is the intercept flag,
+# baked in like Variance's `corrected` so the state stays fieldless.
+struct LinearRegressionState{NN,SN,AN,SP,SY,QY,GN,DN,I} <: SummarizerState end
+
+_regname(::Nothing, base::Symbol) = base
+_regname(prefix::Symbol, base::Symbol) = Symbol(prefix, :_, base)
+
+# The output names in emission order: the row count, the two model-level
+# statistics, the intercept's pair when there is one, then a (beta, tstat) pair
+# per predictor in the order given.
+function regnames(P::Tuple, name, intercept::Bool)
+    ns = Symbol[_regname(name, :n), _regname(name, :r2), _regname(name, :stderr)]
+    if intercept
+        push!(ns, _regname(name, :intercept_beta))
+        push!(ns, _regname(name, :intercept_tstat))
+    end
+    for p in P
+        push!(ns, _regname(name, Symbol(p, :_beta)))
+        push!(ns, _regname(name, Symbol(p, :_tstat)))
+    end
+    return Tuple(ns)
+end
+
+# Cross products go through one canonical (sorted) name so that regressions
+# listing the same columns in either order fold the accumulator once. A squared
+# term is requested as SumPower(c, 2) rather than DotProduct(c, c) for the same
+# reason: that is the name Variance, Std and Correlation already depend on.
+# Covariance does not canonicalize its own dependency, so a Covariance the user
+# asked for separately shares only when written in the same sorted order.
+crossdep(a::Symbol, b::Symbol) =
+    a === b ? SumPower(a, 2) : isless(a, b) ? DotProduct(a, b) : DotProduct(b, a)
+crossname(a::Symbol, b::Symbol) =
+    a === b ? Symbol(a, :_sumpower_2) : isless(a, b) ? dotname(a, b) : dotname(b, a)
+
+# Entry (i, j), i <= j, of a K x K matrix packed row-major over its upper
+# triangle — the layout GN is built in.
+@inline gramindex(i::Int, j::Int, K::Int) =
+    (i - 1) * K - ((i - 1) * (i - 2)) ÷ 2 + (j - i + 1)
+
+function dependencies(r::LinearRegression{P,Y}) where {P,Y}
+    ds = Summarizer[Count(), SumPower(Y, 2)]
+    for (i, p) in pairs(P)
+        push!(ds, SumPower(p, 2))
+        push!(ds, crossdep(p, Y))
+        for j in (i+1):length(P)
+            push!(ds, crossdep(p, P[j]))
+        end
+    end
+    if r.intercept
+        push!(ds, Sum(Y))
+        for p in P
+            push!(ds, Sum(p))
+        end
+    end
+    return Tuple(ds)
+end
+
+function emptyvalue(r::LinearRegression{P,Y}) where {P,Y}
+    ns = regnames(P, r.name, r.intercept)
+    return NamedTuple{ns}((0, ntuple(_ -> missing, length(ns) - 1)...))
+end
+
+function fresh(r::LinearRegression{P,Y}, ::NamedTuple) where {P,Y}
+    ns = regnames(P, r.name, r.intercept)
+    gn = Tuple(crossname(P[i], P[j]) for i in eachindex(P) for j in i:length(P))
+    dn = map(p -> crossname(p, Y), P)
+    qy = (Symbol(Y, :_sumpower_2),)
+    sy = r.intercept ? (Symbol(Y, :_sum),) : ()
+    sp = r.intercept ? map(p -> Symbol(p, :_sum), P) : ()
+    an = Tuple(unique((qy..., gn..., dn..., sy..., sp...)))
+    return LinearRegressionState{first(ns),Base.tail(ns),an,sp,sy,qy,gn,dn,
+        r.intercept}()
+end
+fresh(st::LinearRegressionState) = st
+@inline update!(::LinearRegressionState, row) = nothing
+
+# The statistic columns' shared element type. Promote the dependencies'
+# *declared* field types — never `typeof` of a runtime value, or one
+# missing-poisoned accumulator would collapse the columns' Union{Missing,...}
+# eltype to Missing — run the centered identity's arithmetic over the result,
+# then force it floating point, since a rank-deficient fit reports NaN.
+@inline _promotefields(::Type{Tuple{A}}) where {A} = A
+@inline _promotefields(::Type{T}) where {T<:Tuple} =
+    promote_type(Base.tuple_type_head(T), _promotefields(Base.tuple_type_tail(T)))
+
+_tofloat(x) = float(x)
+_tofloat(::Missing) = missing
+
+@inline function _regtype(::Type{T}) where {T<:Tuple}
+    A = _promotefields(T)
+    Q = Base.promote_op(-, A, Base.promote_op(/, Base.promote_op(*, A, A), Int))
+    return Base.promote_op(_tofloat, Base.promote_op(/, Q, Q))
+end
+
+@inline _anymissing(::Tuple{}) = false
+@inline _anymissing(t::Tuple) = ismissing(first(t)) || _anymissing(Base.tail(t))
+
+# A dependency read back as a scalar; the empty name tuple is the no-intercept
+# case, where there is no such dependency and the value is never used.
+@inline _regscalar(::Type{Vc}, ::NamedTuple, ::Val{()}) where {Vc} = zero(Vc)
+@inline _regscalar(::Type{Vc}, vals::NamedTuple, ::Val{NS}) where {Vc,NS} =
+    Vc(only(values(NamedTuple{NS}(vals))))
+
+# Simple regression in closed form. This is the common case and the one that
+# runs per row under addsummarycolumns and addrollingcolumns, so it stays on
+# scalars and never builds the workspace the general path needs. Every quotient
+# that can go 0/0 does so in floating point, and every sqrt argument is clamped
+# at zero, so a degenerate window yields NaN rather than raising.
+@inline function regstats(::Type{Vc}, ::Val{I}, ::Val{M}, n::Vc,
+    g::NTuple{G,Vc}, d::NTuple{1,Vc}, s::Tuple{Vararg{Vc}}, sy::Vc,
+    qy::Vc) where {Vc,I,M,G}
+    nan = Vc(NaN)
+    if I
+        sxx = g[1] - s[1] * s[1] / n
+        sxy = d[1] - s[1] * sy / n
+        sst = qy - sy * sy / n
+        dof = n - 2
+    else
+        sxx = g[1]
+        sxy = d[1]
+        sst = qy
+        dof = n - 1
+    end
+    sxx > zero(Vc) || return ntuple(_ -> nan, Val(M))
+    beta = sxy / sxx
+    sse = sst - beta * sxy
+    r2 = one(Vc) - sse / sst
+    positive = dof > zero(Vc)
+    sigma2 = positive ? max(sse, zero(Vc)) / dof : nan
+    stderr = sqrt(sigma2)
+    tbeta = beta / sqrt(sigma2 / sxx)
+    if I
+        xbar = s[1] / n
+        alpha = sy / n - beta * xbar
+        talpha = alpha / sqrt(sigma2 * (one(Vc) / n + xbar * xbar / sxx))
+        return (r2, stderr, alpha, talpha, beta, tbeta)
+    end
+    return (r2, stderr, beta, tbeta)
+end
+
+# Multiple regression. The cross-product matrix is symmetric positive
+# semidefinite, so Cholesky is the factorization; `check = false` turns rank
+# deficiency into a flag rather than a PosDefException, and its inverse gives
+# both the coefficients' standard errors and the intercept's quadratic form.
+function regstats(::Type{Vc}, ::Val{I}, ::Val{M}, n::Vc, g::NTuple{G,Vc},
+    d::NTuple{K,Vc}, s::Tuple{Vararg{Vc}}, sy::Vc, qy::Vc) where {Vc,I,M,G,K}
+    nan = Vc(NaN)
+    rhs = I ? ntuple(i -> d[i] - s[i] * sy / n, Val(K)) : d
+    sst = I ? qy - sy * sy / n : qy
+    dof = I ? n - K - 1 : n - K
+    A = Matrix{Vc}(undef, K, K)
+    for i in 1:K, j in i:K
+        A[i, j] = I ? g[gramindex(i, j, K)] - s[i] * s[j] / n :
+                  g[gramindex(i, j, K)]
+    end
+    F = cholesky!(Symmetric(A, :U); check = false)
+    issuccess(F) || return ntuple(_ -> nan, Val(M))
+    b = Vector{Vc}(undef, K)
+    copyto!(b, rhs)
+    ldiv!(F, b)
+    ssr = zero(Vc)
+    for i in 1:K
+        ssr += b[i] * rhs[i]
+    end
+    sse = sst - ssr
+    r2 = one(Vc) - sse / sst
+    sigma2 = dof > zero(Vc) ? max(sse, zero(Vc)) / dof : nan
+    stderr = sqrt(sigma2)
+    Ci = inv(F)
+    coefs = ntuple(Val(2 * K)) do k
+        i = (k + 1) >> 1
+        isodd(k) ? b[i] : b[i] / sqrt(sigma2 * Ci[i, i])
+    end
+    if I
+        xbar = ntuple(i -> s[i] / n, Val(K))
+        alpha = sy / n
+        for i in 1:K
+            alpha -= b[i] * xbar[i]
+        end
+        quad = zero(Vc)
+        for i in 1:K, j in 1:K
+            quad += xbar[i] * Ci[i, j] * xbar[j]
+        end
+        talpha = alpha / sqrt(sigma2 * (one(Vc) / n + quad))
+        return (r2, stderr, alpha, talpha, coefs...)
+    end
+    return (r2, stderr, coefs...)
+end
+
+@inline function value(::LinearRegressionState{NN,SN,AN,SP,SY,QY,GN,DN,I},
+    vals::NamedTuple) where {NN,SN,AN,SP,SY,QY,GN,DN,I}
+    deps = values(NamedTuple{AN}(vals))
+    V = _regtype(typeof(deps))
+    M = length(SN)
+    nrow = NamedTuple{(NN,),Tuple{Int}}((vals.count,))
+    if Missing <: V && _anymissing(deps)
+        return merge(nrow,
+            NamedTuple{SN,NTuple{M,V}}(ntuple(_ -> missing, Val(M))))
+    end
+    Vc = nonmissingtype(V)
+    stats = regstats(Vc, Val(I), Val(M), Vc(vals.count),
+        map(Vc, values(NamedTuple{GN}(vals))),
+        map(Vc, values(NamedTuple{DN}(vals))),
+        map(Vc, values(NamedTuple{SP}(vals))),
+        _regscalar(Vc, vals, Val(SY)), _regscalar(Vc, vals, Val(QY)))
+    return merge(nrow, NamedTuple{SN,NTuple{M,V}}(stats))
+end
+
 # The derived states are fieldless — the summary is computed from the
 # dependencies' values at emission time — so combining and downdating them is
 # a no-op; their group structure is exactly that of their (transitively all
 # group) dependencies, which the transforms fold alongside them.
 const DerivedState = Union{MomentState,MeanState,VarianceState,StdState,
-    CovarianceState,CorrelationState}
+    CovarianceState,CorrelationState,LinearRegressionState}
 combine!(::DerivedState, ::DerivedState, ::DerivedState) = nothing
 @inline downdate!(::DerivedState, row) = nothing
 # Fieldless, so already zero — and immutable, so returning `st` is the whole

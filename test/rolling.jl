@@ -335,7 +335,9 @@ end
     rolled(p, ss; kwargs...) = DataFrame(load(Context(0, 1000),
         p |> addrollingcolumns(windows, ss; kwargs...)))
 
-    groupset = [Count(), Sum(:x), Mean(:x), Variance(:x), Correlation(:x, :y)]
+    groupset = [Count(), Sum(:x), Mean(:x), Variance(:x), Correlation(:x, :y),
+        LinearRegression(:x, :y; name = :m1),
+        LinearRegression([:x, :y], :y; name = :m2)]
     monoidset = [Min(:x), Max(:x), First(:x), Last(:x), Product(:x)]
     mixedset = [Sum(:x), Min(:x), MinMax(:y)]     # group ⊂ monoid: tree path
     plainset = [Sum(:x), TestVar(:x)]             # plain present: re-fold

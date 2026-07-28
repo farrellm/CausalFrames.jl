@@ -69,9 +69,17 @@ design rationale and performance constraints behind each module.
     parameterized by the combiner) and are monoids only, as is `Product`; the
     accumulators and every dependent summarizer are groups
   - the dependent summarizers (`Moment`, `Mean`, `Variance`, `Std`,
-    `Covariance`, `Correlation`) carry no state of their own — their state
-    structs are empty. They declare `dependencies` and read those values back
-    through the two-argument `value(st, vals)`
+    `Covariance`, `Correlation`, `LinearRegression`) carry no state of their
+    own — their state structs are empty. They declare `dependencies` and read
+    those values back through the two-argument `value(st, vals)`
+  - `LinearRegression` is the outlier among them in two ways: it is the only
+    one emitting more than one column (a coefficient and a t statistic per
+    term, plus `r2`/`stderr`/`n`, so its output names are a tuple parameter
+    rather than a single `N`), and the only one that allocates — `K >= 2`
+    builds a `K x K` workspace per emitted row for the Cholesky, while `K = 1`
+    takes a closed form over scalars. It reads its dependencies back through
+    `NamedTuple{names}(vals)` projections rather than by indexing with a
+    symbol, so no name is a runtime value on the emission path
   - the sum family `Sum`/`SumPower`/`DotProduct` shares one plain and one
     compensated state over a term functor (`ColumnTerm`/`PowerTerm`/
     `PairProductTerm`, terms formed at accumulator width). The `Compensated`

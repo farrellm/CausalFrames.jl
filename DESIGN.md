@@ -779,7 +779,9 @@ Output column names are deterministic, formed by suffixing the column name:
 `Sum(:x)` produces `:x_sum`, `Min(:x)` produces `:x_min`, and `SumPower(:x, 2)`
 and `Moment(:x, 2)` carry their exponent in the suffix to produce
 `:x_sumpower_2` and `:x_moment_2`; `Count()` reads no column and produces
-`:count`.
+`:count`. `LinearRegression` is the one summarizer that departs from the
+suffixing rule: it emits several columns, some of them model-level rather than
+per-input, and takes an optional `name` prefixing all of them (see below).
 
 Concrete summarizers provided, for an input column of element type `T`:
 
@@ -796,10 +798,31 @@ Concrete summarizers provided, for an input column of element type `T`:
 | `Std(column; corrected)` | `:x_std` | `sqrt` of the variance | `missing` |
 | `Covariance(a, b; corrected)` | `:a_b_covariance` | division result | `missing` |
 | `Correlation(a, b)` | `:a_b_correlation` | division result | `missing` |
+| `LinearRegression(predictors, response; intercept, name)` | `:n`, `:r2`, `:stderr`, `:intercept_beta`, `:intercept_tstat`, and `:x_beta`/`:x_tstat` per predictor | `Int` for `:n`, the division result for the rest | `0` for `:n`, `missing` for the rest |
 | `Min(column)` | `:x_min` | `T` | `missing` |
 | `Max(column)` | `:x_max` | `T` | `missing` |
 | `First(column)` | `:x_first` | `T` | `missing` |
 | `Last(column)` | `:x_last` | `T` | `missing` |
+
+`LinearRegression` is the only summarizer emitting a whole block of columns, so
+its contract is spelled out here. For `K` predictors it produces `2K + 5`
+columns with an intercept and `2K + 3` without, in this order: `:n`, `:r2`,
+`:stderr`, then `:intercept_beta` and `:intercept_tstat` when there is an
+intercept, then a `Symbol(p, :_beta)`, `Symbol(p, :_tstat)` pair per predictor
+`p` in the order given. An optional `name` prefixes every one of them as
+`Symbol(name, :_, base)`, which is how two regressions coexist in one call —
+without it they collide on `:n`, `:r2`, and `:stderr` even when their
+predictors are disjoint, and the name-keyed deduplication rejects that. The
+`2K + 4` statistic columns share one element type, the computation's result;
+`:n` is separately `Int` and never `missing`, being the `Count` dependency
+under another name. No rows gives `missing` statistics and `n = 0`; a `missing`
+anywhere in a predictor or the response gives `missing` statistics and the
+honest count; a rank-deficient system — collinear predictors, or `n ≤ K`
+(`n ≤ K + 1` with an intercept) — gives `NaN` rather than raising, as
+`Correlation` does for a single row; and with no residual degrees of freedom
+left the coefficients and `:r2` are the exact fit while `:stderr` and the t
+statistics are `NaN`. Without an intercept, `:r2` is the uncentered
+coefficient of determination, as is conventional for a no-intercept fit.
 
 `Min`/`Max`/`First`/`Last` produce the input column's element type verbatim;
 all four are backed by one shared state type, parameterized by the combining
@@ -966,6 +989,29 @@ raises a `DomainError`. `Correlation` takes no `corrected` keyword — the facto
 cancels between the covariance and the standard deviations — and its result is
 clamped to `[-1, 1]`, both matching `Statistics.cor`.
 
+`LinearRegression(predictors, response)` is the largest dependent: the whole
+ordinary-least-squares system, and every statistic drawn from it, is a function
+of `Count()`, `SumPower(pᵢ, 2)`, `SumPower(response, 2)`, the pairwise
+`DotProduct`s, and — only when there is an intercept — `Sum(pᵢ)` and
+`Sum(response)`. That is what makes the sharing free: two regressions over
+overlapping columns fold each cross product once, and because a squared term is
+requested as `SumPower(c, 2)` rather than `DotProduct(c, c)`, and every genuine
+cross product under one canonical (sorted) argument order, a regression also
+shares with a `Variance`, `Std`, `Correlation`, or `Covariance(a, b)` the user
+asked for separately — the last of these only when written in that same sorted
+order, since `Covariance` does not canonicalize its own dependency. With an intercept the normal equations are centered on the column
+means — the multivariate form of the `Covariance` identity, better conditioned
+and one dimension smaller than carrying a column of ones — and the intercept is
+recovered as `ȳ − Σᵢ βᵢ x̄ᵢ`. The system is symmetric positive semidefinite, so
+it is solved by a Cholesky factorization taken with `check = false`: rank
+deficiency becomes `NaN` output rather than a `PosDefException`, and the
+factor's inverse supplies both the coefficients' standard errors and the
+intercept's. `LinearRegression` is also the one dependent summarizer that
+allocates — `K ≥ 2` builds a `K × K` workspace per emitted row — which is why
+simple regression (`K = 1`) is special-cased to a closed form over scalars, the
+shape that actually runs per row under `addsummarycolumns` and
+`addrollingcolumns`.
+
 Before running, the transforms expand the requested summarizers into the
 full set to fold: each one's dependencies recursively, in topological order
 by a post-order depth-first walk (dependencies may themselves be dependent;
@@ -1008,11 +1054,11 @@ declaring what a summarizer's states support beyond folding:
   exact inverse of addition for integer accumulators; float accumulators
   use the compensated, nonfinite-counting states (see above), leaving only
   the compensated round-off; and a `Missing`-admitting column counts its
-  `missing` terms the same way, so it stays invertible rather than absorbing. The dependent summarizers (`Moment` through
-  `Correlation`) are groups too: their states are fieldless, so `combine!`
-  and `downdate!` are no-ops, and their effective structure is that of
-  their transitive dependencies — all of which are the group accumulators
-  above.
+  `missing` terms the same way, so it stays invertible rather than absorbing. The dependent summarizers (`Moment`, `Mean`,
+  `Variance`, `Std`, `Covariance`, `Correlation`, `LinearRegression`) are
+  groups too: their states are fieldless, so `combine!` and `downdate!` are
+  no-ops, and their effective structure is that of their transitive
+  dependencies — all of which are the group accumulators above.
 - **Monoids only**: `Product` — dividing a row back out fails outright at
   zero (the total is `0` regardless of what else was folded) and truncates
   for integers; `Min`/`Max`/`First`/`Last` — no inverse exists, but two
@@ -1115,7 +1161,7 @@ Exports: `Context`, `CausalFrame`, `CausalPipeline`, `load`, `stream`,
 `addcolumns`, `selectcolumns`, `dropcolumns`, `Summarizer`, `MonoidSummarizer`, `GroupSummarizer`,
 `SummarizerState`, `Count`, `Sum`, `SumPower`,
 `Moment`, `Product`, `DotProduct`, `Mean`, `Variance`, `Std`, `Covariance`,
-`Correlation`, `Min`, `Max`, `First`, `Last`, `summarize`,
+`Correlation`, `LinearRegression`, `Min`, `Max`, `First`, `Last`, `summarize`,
 `summarizecycles`, `intervalize`, `addsummarycolumns`, `addrollingcolumns`,
 `asofjoin`, `lag`.
 
@@ -1127,7 +1173,7 @@ Exports: `Context`, `CausalFrame`, `CausalPipeline`, `load`, `stream`,
 in this list: the acausal operators are reached only through
 `using CausalFrames.Acausal`, so acausality is always an explicit opt-in.
 
-Dependencies: DataFrames, CSV, Tables, PrecompileTools; weak
+Dependencies: DataFrames, CSV, Tables, LinearAlgebra, PrecompileTools; weak
 dependencies DuckDB and Parquet2, each behind a package extension
 (see "Parquet I/O").
 
