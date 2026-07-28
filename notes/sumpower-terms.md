@@ -90,8 +90,19 @@ is a change in output, and worth saying plainly.
 What the accumulators actually depend on is unaffected. The compensated states
 classify NaN and ±Inf *terms* separately and `Compensated` carries the sign of
 zero through the running total, so those are the values whose bits matter — and
-no nonfinite, signed-zero or subnormal case differs at either exponent. Only a
-finite term can move, by 1 ULP, near underflow.
+no nonfinite or subnormal case differs at either exponent. Only a finite term
+can move, by 1 ULP, near underflow.
+
+**One version-specific exception**, and it runs the other way. On Julia 1.10,
+`^(::Float64, ::Integer)` drops the sign of zero: `(-0.0)^1` returns `0.0`.
+That was fixed in 1.11. `ColumnTerm` returns the column value untouched, so on
+1.10 the specialization gives `-0.0` where the old path gave `0.0` — the
+specialization is the correct one. It makes no difference to the output: the
+compensated accumulator's running total starts at `+0.0`, and `0.0 + -0.0` is
+`0.0`, so a column of negative zeros sums to `0.0` either way (which is also
+what `Sum` has always given, since it has always used `ColumnTerm`). `Float32`
+is unaffected on every version. The test pins the quirk with a `VERSION` guard
+rather than skipping it, so a change in either direction is noticed.
 
 ### The trap in the original check
 

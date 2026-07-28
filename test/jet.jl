@@ -60,9 +60,9 @@ end
         (time = Int, x = MF, y = Float64))
     JET.@test_opt CausalFrames.value(st,
         NamedTuple{(:count, :x_sumpower_2, :y_sumpower_2, :x_y_dotproduct,
-                :x_sum, :y_sum),
+            :x_sum, :y_sum),
             Tuple{Int,MF,Float64,MF,MF,Float64}}((5, 55.0, 200.0, 100.0, 15.0,
-                30.0)))
+            30.0)))
     for T in (MF, Union{Missing,Int})
         protos, requested = CausalFrames.prototypes(
             CausalFrames.tosummarizers([LinearRegression([:x, :z], :y)]),

@@ -336,7 +336,7 @@ end
     # reversed one is a fieldless rename over it
     protos, requested =
         CausalFrames.prototypes(Summarizer[DotProduct(:x, :y),
-                DotProduct(:y, :x)], Symbol[])
+            DotProduct(:y, :x)], Symbol[])
     @test requested === (:x_y_dotproduct, :y_x_dotproduct)
     @test accumulators(protos) == [:x_y_dotproduct]
     @test CausalFrames.fresh(DotProduct(:y, :x), intypes) isa CausalFrames.AliasState
@@ -877,9 +877,19 @@ end
     end
     rnd = bitpatterns(50_000)
 
-    # n = 1 is exactly the runtime power, everywhere
-    @test all(x -> same(runtimepow(x, 1), x), edge)
+    # n = 1 is exactly the runtime power, with one exception — and it is
+    # Julia's, not ours: on 1.10 `^(::Float64, ::Integer)` drops the sign of
+    # zero, returning 0.0 for (-0.0)^1. That was fixed in 1.11. ColumnTerm
+    # hands the column value back untouched, so on 1.10 the specialization is
+    # the more correct of the two; and it is unobservable in output either way,
+    # since the compensated accumulator starts at +0.0 and 0.0 + -0.0 is 0.0
+    # (asserted end to end below). Float32 is unaffected on every version.
+    dropssignedzero(x) = VERSION < v"1.11" && x === -0.0
+    @test all(x -> dropssignedzero(x) || same(runtimepow(x, 1), x), edge)
     @test all(x -> same(runtimepow(x, 1), x), rnd)
+    # pin the quirk itself, so a change in either direction is noticed
+    @test VERSION < v"1.11" ? runtimepow(-0.0, 1) === 0.0 :
+          same(runtimepow(-0.0, 1), -0.0)
     @test all(x -> same(runtimepow(x, 1), x),
         Float32[0.0f0, -0.0f0, Inf32, -Inf32, NaN32, floatmin(Float32),
             floatmax(Float32), 1.0f-45])
@@ -917,9 +927,17 @@ end
 
     # The property the compensated accumulators actually rest on: they classify
     # NaN and ±Inf *terms* and carry the sign of zero, so those bits must not
-    # move. None of them do, at either exponent.
-    @test all(x -> same(runtimepow(x, 1), x), edge)
+    # move. None do, apart from Julia 1.10's own (-0.0)^1 above — and the
+    # accumulator absorbs that one, since its running total starts at +0.0.
+    @test all(x -> dropssignedzero(x) || same(runtimepow(x, 1), x), edge)
     @test all(x -> same(runtimepow(x, 2), x * x), edge)
+    @test only(
+        DataFrame(
+            load(Context(0, 9),
+                chunks(DataFrame(time = [1, 2], x = [-0.0, -0.0])) |>
+                summarize([SumPower(:x, 1)])),
+        ).x_sumpower_1,
+    ) === 0.0
 
     # End to end, the specialized fold must agree with the general PowerTerm
     # one over the values the compensated classifier cares about. The reference
@@ -932,11 +950,16 @@ end
     # universal property: at n = 2 the two folds differ by one ULP per term
     # once a square lands near underflow (see above), so a column of ~1e-160
     # would legitimately fail this.
-    summed(col, n) = only(DataFrame(
-        load(Context(0, 9),
-            chunks(DataFrame(time = 1:length(col), x = col)) |>
-            summarize([SumPower(:x, n)])),
-    )[!, Symbol(:x_sumpower_, n)])
+    summed(col, n) = only(
+        DataFrame(
+            load(Context(0, 9),
+                chunks(DataFrame(time = 1:length(col), x = col)) |>
+                summarize([SumPower(:x, n)])),
+        )[
+            !,
+            Symbol(:x_sumpower_, n),
+        ],
+    )
     function general(col, n)
         raw = CausalFrames.accumfresh(CausalFrames.PowerTerm{:x}(n),
             Symbol(:x_sumpower_, n), CausalFrames.powertype(eltype(col), n))

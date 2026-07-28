@@ -60,7 +60,7 @@
             load(
                 ctx,
                 p |> intervalize(clock(2), [Count(), Sum(:v),
-                        Mean(:v)]; closelast = true),
+                    Mean(:v)]; closelast = true),
             ),
         )
         DataFrame(load(ctx, p |> intervalize(clock(2), [Count(), Sum(:v)];

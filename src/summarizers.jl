@@ -655,8 +655,11 @@ emptyvalue(s::SumPower{C}) where {C} =
 # patterns). The specialization is the more accurate of the two there — but it
 # is a change, so it is stated rather than glossed. What the compensated states
 # actually require is unaffected: they classify NaN and ±Inf *terms* and carry
-# the sign of zero, and no nonfinite, signed-zero or subnormal case differs at
-# either exponent. See notes/sumpower-terms.md; the properties are tested.
+# the sign of zero, and no nonfinite or subnormal case differs at either
+# exponent. (On Julia 1.10 only, `(-0.0)^1` returns `0.0` — a `^` bug fixed in
+# 1.11 — so there ColumnTerm is the *more* correct of the two; the accumulator
+# starts at +0.0 and absorbs the difference either way.) See
+# notes/sumpower-terms.md; the properties are tested.
 function powerterm(::Type{Val{C}}, power::Int) where {C}
     power == 1 && return ColumnTerm{C}()
     power == 2 && return PairProductTerm{C,C}()
