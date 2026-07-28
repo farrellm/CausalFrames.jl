@@ -1246,11 +1246,23 @@ end
 @inline _anymissing(::Tuple{}) = false
 @inline _anymissing(t::Tuple) = ismissing(first(t)) || _anymissing(Base.tail(t))
 
+# Narrow a dependency value to the compute type. By the time this runs the
+# caller has already returned if anything was missing, but the compiler does
+# not know that, so the `ismissing` test is what keeps it dispatch-free: it
+# splits the Union explicitly and lets `convert` resolve statically. Leaving it
+# to `convert` alone only looks fine on a one-element tuple — Julia
+# union-splits that — and goes dynamic as soon as a second Union-typed value
+# joins it, which is what the K >= 2 cross-product tuple is.
+@inline _conv(::Type{Vc}, x) where {Vc} = ismissing(x) ? zero(Vc) : convert(Vc, x)
+@inline _convall(::Type{Vc}, ::Tuple{}) where {Vc} = ()
+@inline _convall(::Type{Vc}, t::Tuple) where {Vc} =
+    (_conv(Vc, first(t)), _convall(Vc, Base.tail(t))...)
+
 # A dependency read back as a scalar; the empty name tuple is the no-intercept
 # case, where there is no such dependency and the value is never used.
 @inline _regscalar(::Type{Vc}, ::NamedTuple, ::Val{()}) where {Vc} = zero(Vc)
 @inline _regscalar(::Type{Vc}, vals::NamedTuple, ::Val{NS}) where {Vc,NS} =
-    Vc(only(values(NamedTuple{NS}(vals))))
+    _conv(Vc, only(depvalues(vals, Val(NS))))
 
 # Simple regression in closed form. This is the common case and the one that
 # runs per row under addsummarycolumns and addrollingcolumns, so it stays on
@@ -1348,10 +1360,10 @@ end
             NamedTuple{SN,NTuple{M,V}}(ntuple(_ -> missing, Val(M))))
     end
     Vc = nonmissingtype(V)
-    stats = regstats(Vc, Val(I), Val(M), Vc(vals.count),
-        map(Vc, values(NamedTuple{GN}(vals))),
-        map(Vc, values(NamedTuple{DN}(vals))),
-        map(Vc, values(NamedTuple{SP}(vals))),
+    stats = regstats(Vc, Val(I), Val(M), convert(Vc, vals.count),
+        _convall(Vc, depvalues(vals, Val(GN))),
+        _convall(Vc, depvalues(vals, Val(DN))),
+        _convall(Vc, depvalues(vals, Val(SP))),
         _regscalar(Vc, vals, Val(SY)), _regscalar(Vc, vals, Val(QY)))
     return merge(nrow, NamedTuple{SN,NTuple{M,V}}(stats))
 end

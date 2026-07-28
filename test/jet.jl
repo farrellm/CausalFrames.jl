@@ -51,8 +51,10 @@ end
             x_y_dotproduct = 100.0, y_z_dotproduct = 90.0,
             x_sum = 15.0, z_sum = 15.0, y_sum = 30.0))
 
-    # the missing-admitting variant, where the early-return branch is live and
-    # the dependency values are Union-typed
+    # The Missing-admitting variants, where the early-return branch is live and
+    # the dependency values are Union-typed. Both arities are checked on
+    # purpose: a one-element tuple of Union values union-splits and looks fine,
+    # so K = 1 stayed clean while the K >= 2 cross-product tuple went dynamic.
     MF = Union{Missing,Float64}
     st = CausalFrames.fresh(LinearRegression(:x, :y),
         (time = Int, x = MF, y = Float64))
@@ -61,6 +63,14 @@ end
                 :x_sum, :y_sum),
             Tuple{Int,MF,Float64,MF,MF,Float64}}((5, 55.0, 200.0, 100.0, 15.0,
                 30.0)))
+    for T in (MF, Union{Missing,Int})
+        protos, requested = CausalFrames.prototypes(
+            CausalFrames.tosummarizers([LinearRegression([:x, :z], :y)]),
+            Symbol[])
+        states = CausalFrames.newstates(protos,
+            (time = Int, x = T, z = T, y = T))
+        JET.@test_opt CausalFrames.summaryvalues(states, Val(requested))
+    end
 
     # the rename a non-canonical symmetric summarizer folds through
     st = CausalFrames.fresh(DotProduct(:y, :x), (time = Int, x = Int, y = Int))
