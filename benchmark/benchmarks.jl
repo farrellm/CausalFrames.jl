@@ -50,6 +50,7 @@ const SRC2 = tradesource(tradechunks(N))
 const BENCHDIR = mktempdir()
 const CSVPATH = joinpath(BENCHDIR, "bench.csv")
 const SINKPATH = joinpath(BENCHDIR, "sink.csv")
+const CSVTYPES = Dict(:time => Int, :qty => Float64)
 open(CSVPATH, "w") do io
     println(io, "time,qty")
     for t in 1:200_000
@@ -90,7 +91,7 @@ SUITE["sinks"]["writecsv"] =
 SUITE["sources"] = BenchmarkGroup()
 SUITE["sources"]["clock"] = @benchmarkable load(CTX, clock(1))
 SUITE["sources"]["readcsv"] = @benchmarkable load(Context(0, 300_000),
-    readcsv(CSVPATH; types = Dict(:time => Int, :qty => Float64)))
+    readcsv(CSVPATH; types = CSVTYPES))
 # The floor every SRC-based entry below sits on: chunk hand-off, the per-chunk
 # load guards, and frame assembly, with no operator in the chain. Subtract it
 # to read an operator's own cost.
@@ -111,6 +112,34 @@ SUITE["rowwise"]["pipeline"] = @benchmarkable load(
     clock(1) |>
     filterrows(r -> r.time % 3 != 0) |> addcolumns(r -> (; x = 0.5 * r.time)),
 )
+# Two entries, because they measure different things. Over SRC the cost is just
+# the one partial-chunk slice: SRC hands out pre-built chunks, so `drain-load`
+# is nearly free and a head that failed to stop early would look the same.
+# Over readcsv it is the early exit itself. `chunkbytes` has to be set: the
+# 4 MiB default swallows this 200k-row file whole, so head would read all of it
+# whatever it did. At 64 KiB the file is ~45 chunks and head(1000) should read
+# one, landing far under `head-drain` — which is that same read without the
+# truncation, and exactly what head would cost if it were ever rebuilt on a
+# chunkmap, since chunkmap's `advance` cannot stop pulling.
+SUITE["rowwise"]["head"] = @benchmarkable load(CTX, SRC |> head(1000))
+SUITE["rowwise"]["head-early-exit"] = @benchmarkable load(Context(0, 300_000),
+    readcsv(CSVPATH; types = CSVTYPES, chunkbytes = 65_536) |> head(1000))
+SUITE["rowwise"]["head-drain"] = @benchmarkable load(Context(0, 300_000),
+    readcsv(CSVPATH; types = CSVTYPES, chunkbytes = 65_536))
+# settime's per-row work: the forward check over two concrete vectors, plus one
+# maptime pass in the function form.
+SUITE["rowwise"]["settime-column"] = @benchmarkable load(CTX,
+    SRC |> addcolumns(r -> (; t2 = r.time + 1)) |> settime(:t2))
+SUITE["rowwise"]["settime-function"] =
+    @benchmarkable load(CTX, SRC |> settime(r -> r.time + 1))
+
+# One hash and one inline row store per row on the keyed path, directly
+# comparable to summarize/keyed over the same source and keys; keyless does
+# nothing per row and should read as the drain floor. SRC's `sym` column is a
+# String, which is the non-isbits V the store's design exists for.
+SUITE["lastrow"] = BenchmarkGroup()
+SUITE["lastrow"]["keyless"] = @benchmarkable load(CTX, SRC |> lastrow())
+SUITE["lastrow"]["keyed"] = @benchmarkable load(CTX, SRC |> lastrow(; key = :sym))
 
 SUITE["summarize"] = BenchmarkGroup()
 SUITE["summarize"]["keyless"] = @benchmarkable load(CTX,

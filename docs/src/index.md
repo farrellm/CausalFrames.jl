@@ -48,6 +48,9 @@ frame = load(Context(DateTime(2026, 1, 1), DateTime(2026, 2, 1)), p)
 | `addsummarycolumns(ss; key)` | transform | append running summary values after each row |
 | `addrollingcolumns(windows, ss; key, from)` | transform | append summaries over named trailing windows, columns prefixed `{window}_` |
 | `asofjoin(right; key, tolerance, strict, ...)` | transform | append the most recent right row not after each left row, per key; `missing` where none |
+| `settime(spec)` | transform | recompute `:time` from a column name or a per-row function; rows may only move later, and the result is re-clipped to `[start, stop)` |
+| `head(n)` | transform | the first up to `n` rows, after which the source is no longer pulled |
+| `lastrow(; key)` | transform | the last row, or one per key, retimed to the window's `stop` |
 
 Row functions receive a map-like row object: `row.time`, `row.price`,
 `row[:price]`.

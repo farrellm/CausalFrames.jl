@@ -332,3 +332,53 @@ end
     # the uncurried, pipeline-first form equals the |> chain
     @test isequal(DataFrame(load(ctx, lead(src, 2))), df)
 end
+
+@testset "Acausal.settime" begin
+    settime = CausalFrames.Acausal.settime
+    ctx = Context(0, 10)
+    src = clock(1; batchsize = 3) |> addcolumns(r -> (; v = float(r.time)))
+
+    # it is the only name in Acausal reached by qualification alone: exporting
+    # it would clash with the causal settime and make both unusable unqualified
+    @test !(:settime in names(CausalFrames.Acausal))
+    @test :lead in names(CausalFrames.Acausal)
+
+    # rows may move earlier, which the causal variant rejects
+    df = DataFrame(load(ctx, src |> settime(r -> r.time - 2)))
+    @test df.time == 0:7          # 0 and 1 moved to -2, -1 and were clipped
+    @test df.v == collect(2.0:9.0)
+    @test names(df) == ["time", "v"]
+    @test_throws ArgumentError load(ctx, src |> CausalFrames.settime(r -> r.time - 2))
+
+    # the symbol form works the same way as the causal one
+    sdf = DataFrame(load(ctx, src |> addcolumns(r -> (; t2 = r.time - 2)) |>
+                              settime(:t2)))
+    @test names(sdf) == ["v", "time"]
+    @test sdf.time == 0:7
+
+    # clipping happens at both ends
+    span = CausalPipeline() do _
+        [DataFrame(time = [1, 2, 3], x = [-5, 4, 20])]
+    end
+    @test DataFrame(load(ctx, span |> settime(:x))).time == [4]
+
+    # order is still required, within a chunk and across chunk boundaries
+    @test_throws ArgumentError load(ctx, src |> settime(r -> 9 - r.time))
+    twochunks = CausalPipeline() do _
+        [DataFrame(time = [1, 2], x = [5, 9]), DataFrame(time = [3, 4], x = [6, 7])]
+    end
+    @test_throws ArgumentError load(ctx, twochunks |> settime(:x))
+
+    # like the causal variant, it cannot widen the window the way lead does, so
+    # the rows lead pulls in from at or past stop are simply absent
+    @test DataFrame(load(ctx, src |> settime(r -> r.time - 2))).time == 0:7
+    @test DataFrame(load(ctx, src |> lead(2))).time == 0:9
+
+    @test_throws ArgumentError settime(3)                     # eager
+    @test nrow(load(ctx, emptyframe() |> settime(r -> r.time))) == 0
+    # streaming matches load
+    @test isequal(reduce(vcat, DataFrame.(stream(ctx, src |> settime(r -> r.time - 2)))),
+        df)
+    # the uncurried, pipeline-first form equals the |> chain
+    @test isequal(DataFrame(load(ctx, settime(src, r -> r.time - 2))), df)
+end

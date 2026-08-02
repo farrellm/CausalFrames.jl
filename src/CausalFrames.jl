@@ -11,7 +11,7 @@ export Context, CausalFrame, CausalPipeline, load, stream, scan, context,
     emptyframe, concatenate, clock, readcsv, writecsv, readparquet,
     writeparquet,
     filterrows, addcolumns,
-    selectcolumns, dropcolumns, lag,
+    selectcolumns, dropcolumns, lag, head, settime, lastrow,
     Summarizer, MonoidSummarizer, GroupSummarizer, SummarizerState,
     Count, Sum, SumPower, Moment, Product,
     DotProduct, Mean, Variance, Std, Covariance, Correlation,
@@ -29,6 +29,7 @@ include("parquet.jl")
 include("summarizers.jl")
 include("summarize.jl")
 include("join.jl")
+include("lastrow.jl")
 include("segtree.jl")
 include("rolling.jl")
 include("intervalize.jl")

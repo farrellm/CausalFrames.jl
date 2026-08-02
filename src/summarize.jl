@@ -171,9 +171,12 @@ emptyvalues(protos::Tuple, ::Val{R}) where {R} =
 # order lexicographically, which is the documented "sorted by key value".
 @inline groupkey(kv::Pair) = values(first(kv))
 
-# For the once-per-run drains (`summarize`'s flush), where a fresh vector costs
-# nothing; the per-cycle drain uses the reusable buffer in `closecycle!`.
-sortedgroups(gt::GroupTable) = sort!(collect(gt.table); by = groupkey)
+# For the once-per-run drains (`summarize`'s and `lastrow`'s flush), where a
+# fresh vector costs nothing; the per-cycle drain uses the reusable buffer in
+# `closecycle!`. `lastrow` keys a bare Dict rather than a GroupTable, so the
+# convention lives on the dict method and GroupTable forwards to it.
+sortedgroups(d::AbstractDict) = sort!(collect(d); by = groupkey)
+sortedgroups(gt::GroupTable) = sortedgroups(gt.table)
 
 # The row types the kernels emit. The state prototypes cannot simply be run
 # through `value` to find out: Min/Max/First/Last leave their value field

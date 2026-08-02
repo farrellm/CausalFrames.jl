@@ -56,6 +56,9 @@ frame = load(Context(DateTime(2026, 1, 1), DateTime(2026, 2, 1)), p)
 | `addrollingcolumns(windows, ss; key, from)` | transform | append summaries over named trailing windows, columns prefixed `{window}_` |
 | `asofjoin(right; key, tolerance, ...)` | transform | append the most recent right-pipeline row at or before each row's time |
 | `lag(offset)` | transform | shift every row `offset` later in time, so time `t` carries what the input had at `t - offset`; only `:time` changes and `offset` must be non-negative |
+| `settime(spec)` | transform | recompute `:time` from a column name or a per-row function; rows may only move later, and the result is re-clipped to `[start, stop)` |
+| `head(n)` | transform | emit the first up to `n` rows, then stop pulling the source — it genuinely stops, so a `readcsv` behind `head(10)` reads one file chunk |
+| `lastrow(; key)` | transform | emit the last row, or one per key, retimed to the window's `stop` |
 
 Each transform also has an uncurried, pipeline-first form — `filterrows(p, pred)`,
 `addcolumns(p, f)`, `summarize(p, ss; key)` — equivalent to the `|>` chain
@@ -167,8 +170,8 @@ input rows with time `≤ t`. That gives the *chunk-concatenation property* —
 loading `[a, c)` equals concatenating the results of loading `[a, b)` and
 `[b, c)` — which is what makes chunked, streaming evaluation sound.
 
-The two forward-looking operators are the deliberate exceptions. They live in
-the `Acausal` submodule and are never re-exported, so opting into acausality is
+The forward-looking operators are the deliberate exceptions. They live in the
+`Acausal` submodule and are never re-exported, so opting into acausality is
 always explicit:
 
 ```julia
@@ -176,7 +179,13 @@ using CausalFrames.Acausal
 
 quotes |> futurejoin(fills; key = :symbol)  # earliest fill at or after each quote
 prices |> lead(Minute(5))                   # time -> time - offset
+# the permissive settime, which may move rows earlier:
+prices |> CausalFrames.Acausal.settime(r -> r.exchange_time)
 ```
+
+The permissive `settime` is the one exception to the submodule's export rule:
+it is reached only as `CausalFrames.Acausal.settime`, never unqualified, so
+that `using CausalFrames.Acausal` leaves the causal `settime` usable.
 
 `futurejoin` mirrors `asofjoin` with the match direction inverted — the
 **earliest** right row whose time is not before the left row's, `missing` where

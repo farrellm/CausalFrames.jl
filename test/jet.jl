@@ -167,6 +167,22 @@ end
     JET.@test_opt CausalFrames.matchcolumn(matches, found, Val(:y))
 end
 
+@testset "lastrow kernel" begin
+    # the same non-isbits V the asofjoin store exists for: a Dict{K,V} would
+    # answer every lookup as Union{Nothing,V} and box it once per row
+    V = typeof((time = 1, sym = "a", y = 1.0))
+    K = typeof((sym = "a",))
+    index = Dict{K,Int}()
+    slots = V[]
+    nt = (time = [1, 2], sym = ["a", "b"], y = [1.0, 2.0])
+    JET.@test_opt CausalFrames.lastsegment!(index, slots, nt, Val((:sym,)))
+end
+
+@testset "settime kernel" begin
+    # the per-row causality check, behind its function barrier
+    JET.@test_opt CausalFrames.checkforward([1, 2], [3, 4], "settime")
+end
+
 @testset "merge winner selection" begin
     # the one per-block loop over the cursors: the ordering comparisons must
     # stay on the concrete time type

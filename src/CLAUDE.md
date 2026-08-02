@@ -29,7 +29,14 @@ design rationale and performance constraints behind each module.
   opts it into a concrete one (`notes/readcsv-stringtype.md` records why
   CSV.jl's own `stringtype` default stays out). `lag` shifts times via the
   shared `shiftchunk!` and widens the context in `lagcontext`, the mirror
-  of `Acausal.lead`
+  of `Acausal.lead`; `settime` is the general, per-row form of that shift,
+  sharing `settimechunk!` with `Acausal.settime` the same way, but it cannot
+  widen the context (the shift is data-dependent) and so needs three
+  independent order checks instead — see DESIGN.md's "Retiming". `head` is
+  the one transform not built on `chunkmap`, which cannot terminate early:
+  it drives the upstream iterator from a mutable `HeadProducer` behind a
+  `ChunkSource`, the `CSVProducer` shape. If a second early-exit operator
+  ever arrives, that is the point to extract a `chunks.jl` primitive
 - `src/merge.jl` — `Base.merge(ps::CausalPipeline...)`, the n-ary
   time-interleaving source (extends Base rather than shadowing it; no
   zero-arg form, which would capture `merge()`): one `MergeCursor` per
@@ -123,6 +130,14 @@ design rationale and performance constraints behind each module.
   isbits, so a `String` or `Missing`-admitting right column cost one box per
   left row. See DESIGN.md's "Representing a match"; the two zero-allocation
   kernel tests are what stop it regressing
+- `src/lastrow.jl` — `lastrow`, the last-row-per-key transform: `summarize`'s
+  fold-and-flush-at-`stop` shape over `join.jl`'s store rather than a
+  `GroupTable`, since it keeps whole rows and a `Dict{K,V}` would box one per
+  row for any non-isbits `V`. No `found` mask (every slot is written the instant
+  it is claimed, so widening is a plain `convert`), and the keyless path skips
+  the store entirely — the chunk's last row is the last row so far, so it costs
+  nothing per row. Output schema is the input's exactly, `:time` overwritten
+  with `stop` via `merge`, which preserves the column position
 - `src/segtree.jl` — the monoid segment tree behind the rolling tree mode:
   implicit array tree of `combine!`d partial state tuples, append-only rows,
   logical front expiry (`head`), amortized rebuilds, order-preserving
@@ -150,9 +165,14 @@ design rationale and performance constraints behind each module.
   pulls clock boundaries into a concrete `Vector{T}` per chunk (the pull is the
   only dynamism; the per-row kernel stays dispatch-free), reusing `SummaryFold`
   whole; `closelast` closes the trailing partial at `stop`
-- `src/acausal.jl` — the `Acausal` submodule (`futurejoin`, `lead`), reached
-  only through `using CausalFrames.Acausal` and never re-exported, so
-  acausality is always an explicit opt-in. `futurejoin` mirrors `asofjoin`'s
+- `src/acausal.jl` — the `Acausal` submodule (`futurejoin`, `lead`, `settime`),
+  reached only through `using CausalFrames.Acausal` and never re-exported, so
+  acausality is always an explicit opt-in. `settime` goes further and is not in
+  the submodule's `export` list at all: the top level exports that name too, and
+  a name exported by two `using`d modules is an error to use unqualified — so
+  exporting it here would break the *causal* `settime` for anyone who also
+  imported `Acausal`. Reach it as `CausalFrames.Acausal.settime`; a test pins
+  its absence from `names(Acausal)`. `futurejoin` mirrors `asofjoin`'s
   streaming machinery with the match direction, the tie-break, and the context
   widening (`stop + tolerance`) all inverted; because it matches the *earliest*
   qualifying right row it must buffer right rows per key until a left row

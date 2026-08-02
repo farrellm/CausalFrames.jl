@@ -133,6 +133,9 @@ Two kinds, both compatible with the chaining operator `|>`:
 | `addrollingcolumns(windows, ss; key, from)` | transform | keep input columns, append each summarizer's value over each named trailing window, prefixed `"{window}_"` (see "Rolling windows") |
 | `asofjoin(right; key, tolerance, strict, leftprefix, rightprefix, righttime)` | transform | left as-of join: append the most recent right row with time `<= time` (`strict`: `<`), per key; `missing` where none qualifies (see "As-of join") |
 | `lag(offset)` | transform | shift every row `offset` later in time (`time -> time + offset`); the value at time `t` is the input's value at `t - offset` (see "Lead and lag") |
+| `settime(spec)` | transform | recompute `:time` from a column name or a per-row function; times may only move later, and the result is re-clipped to `[start, stop)` (see "Retiming") |
+| `head(n)` | transform | emit the first up to `n` rows and stop pulling upstream (see "Truncation") |
+| `lastrow(; key)` | transform | emit each key's last row, retimed to `stop`; keyless emits the stream's last row (see "Last row") |
 
 Row functions (`pred`, `f`) receive a map-like row object supporting
 `row.name` and `row[:name]` access (Tables.jl row semantics), including
@@ -164,9 +167,10 @@ closes it with the exception and the pipeline task sees it at the next
 `put!` rather than deadlocking on a full queue.
 
 This is the one place chunk ownership is shared, and it needs care. A
-consumer owns the chunk it is handed, and two operators use that licence to
+consumer owns the chunk it is handed, and three operators use that licence to
 mutate the chunk's *column index* in place (`asofjoin`'s `prefixleft!`,
-`addrollingcolumns`' `assembleempty`) — which would race the writer reading
+`addrollingcolumns`' `assembleempty`, `settime`'s symbol form, which drops the
+old `:time` and renames another column onto it) — which would race the writer reading
 the same DataFrame on another task. Column *vectors*, by contrast, are never
 mutated in place anywhere: every operator builds new ones. So the writer
 keeps the original chunk and downstream gets `DataFrame(c; copycols = false)`
@@ -287,6 +291,50 @@ against the column names it was resolved from, so a stream whose schema never
 moves — the norm — runs the selectors and the validation once, on its first
 chunk, while a schema that does move is re-resolved and re-validated rather
 than projected through a stale column list.
+
+## Truncation
+
+`head(n)` emits the first up to `n` rows of the stream and then stops. Stopping
+is the whole point, and it is why `head` is the one transform not built on
+`chunkmap`: `chunkmap`'s `advance` loops until upstream returns `nothing`, so a
+`step` returning `nothing` only *skips* a chunk. A `head` built that way would
+still read the entire file.
+
+Instead `head` returns a `ChunkSource` over a mutable `HeadProducer`, which
+drives the upstream iterator itself — readcsv's `CSVProducer` shape, with the
+pull-to-pull state in fields rather than in reassigned closure captures (which
+would be boxed). `ChunkSource.produce()` takes no arguments, so the upstream
+iterator *and* its state must be fields; the dynamically typed `state` field is
+the same trade `ConcatProducer` already makes, and it costs one dynamic
+`iterate` dispatch **per chunk**, never per row. The pulled chunk carries a
+`::DataFrame` annotation — the chunk protocol guarantees it — so `produce()`
+still infers `Union{Nothing, DataFrame}` through that field.
+
+A chunk that fits entirely under the remaining budget is passed on untouched
+(the chunk is owned and column vectors are never mutated in place, so the
+"keeps everything, so no copy" rule `filterchunk` and `clipchunk!` follow
+applies); only the chunk that spends the budget is sliced. `head(0)` builds the
+upstream pipeline but never iterates it, so a generator source is never
+advanced. `n` must be non-negative, rejected eagerly at construction.
+
+`head` is **causal** — rows pass through unchanged and in order — but
+**stateful**: its row budget spans the whole window. Concatenating the frames of
+`stream(ctx, p |> head(n))` therefore still equals `load(ctx, p |> head(n))`
+(`stream`'s one chunk of lookahead calls `produce()` once more, which returns
+`nothing` without touching upstream), while the chunk-concatenation property
+over *split* contexts does not hold: `head(n)` over `[a, b)` and over `[b, c)`
+yields up to `2n` rows where the whole window yields `n`. It is stateful in
+exactly the sense `summarize` is.
+
+One known limitation. The sinks finalize in `chunkmap`'s once-only `flush`, and
+`head` abandons its upstream, so a sink placed *upstream* of `head` never
+finalizes: its channel is never closed, its writer task blocks forever holding
+an open file, and the file is left unfinished. This is the documented
+"abandoning a `stream` part-way" hazard, but `head` makes it reachable from a
+fully drained `load`, which is new. Truncate first —
+`p |> head(n) |> writecsv(path)`, never the reverse. Fixing it properly wants a
+`close`-style hook on the chunk protocol so an abandoning consumer can release
+its upstream; that does not exist today and is deliberately out of scope here.
 
 ## Concatenation
 
@@ -578,6 +626,76 @@ causality contract), and treat `offset == 0` as the identity. The shared
 `src/operators.jl` and is imported into the submodule; `lead` shifts by
 `-offset`.
 
+## Retiming
+
+`settime(spec)` is the general form of the constant shift: it recomputes `:time`
+per row rather than moving every row by the same amount. `spec` is either a
+`Symbol` — that column *becomes* `:time`, taking over the position it already
+occupied, and the old `:time` disappears — or a per-row function whose result
+overwrites `:time` in place. These are `readcsv`'s two `time =` modes, applied
+mid-stream. Either way the result is converted to the context's time type and
+the chunk is re-clipped to `[start, stop)`.
+
+It ships as a causal/acausal pair, the same split as `lag`/`lead`:
+
+- `settime` (`src/operators.jl`, exported) requires every row's new time to be
+  at least its old one, so a row may only move later. Output at `t` then depends
+  only on input at some `t' <= t`: **causal**.
+- `CausalFrames.Acausal.settime` drops that requirement, so rows may move
+  earlier and the output at `t` may carry what the input held later: **acausal**,
+  and clipped at both ends of the window.
+
+The acausal variant is the one exception to the submodule's export rule. Both
+modules would otherwise export `settime`, and Julia makes a name exported by two
+`using`d modules an error to use unqualified — so `using CausalFrames.Acausal`
+would break the *causal* `settime` for everyone, including someone who only
+wanted `futurejoin`. It is therefore defined in `Acausal` but left out of its
+`export` list, reached as `CausalFrames.Acausal.settime`. That is strictly more
+quarantined than the rule requires, which suits an escape hatch.
+
+Three **independent** validity checks, all raised when the pipeline runs, none
+implying another:
+
+1. every row's new time is at least its old one (causal variant only);
+2. the resulting column is non-decreasing within the chunk;
+3. it does not step back across a chunk boundary.
+
+(1) does not imply (3): with `spec = :x`, chunk 1 `time=[1,2], x=[5,9]` and
+chunk 2 `time=[3,4], x=[6,7]` pass (1) and (2) in both chunks yet emit
+`5, 9, 6, 7`. Nor does (1) imply (2) — a forward-only map can still reorder rows
+within a chunk — and (2) implies neither, since mapping every row to `start` is
+sorted, boundary-safe, and backward. So `settimechunk!` carries a `prevtime`
+across chunks the way `clipchunk!` does.
+
+`settimechunk!` is shared with the acausal variant exactly as `shiftchunk!` is
+shared with `lead`; the two differ only in a `causal::Bool` and the operator name
+used in messages, one branch per chunk and none per row. It could not reuse
+`resolvetime!`: that renames onto `:time` without dropping the existing one,
+which DataFrames rejects, and its error wording is welded to the file sources'
+`path`/`what`. Only `maptime` is shared. The per-row causality check is an
+explicit loop behind a function barrier over two concretely typed vectors —
+`all(new .>= old)` would allocate a `BitVector` per chunk and lose the row index
+the message wants.
+
+**The window is not widened.** `lag`/`lead` slide their upstream window because
+their shift is a constant known before any data is read (`lagcontext` /
+`leadcontext`). `settime`'s shift is per-row and data-dependent, so upstream runs
+over `[start, stop)` unchanged and only rows *already in the window* can be
+retimed. A row whose *original* time lies outside `[start, stop)` but whose *new*
+time would lie inside it is never seen: for the causal variant that means rows
+before `start` that would move into the window; for the acausal variant,
+additionally rows at or after `stop` that would move back into it. The same fact
+costs `settime` the chunk-concatenation property — loading `[a, c)` is not the
+concatenation of loading `[a, b)` and `[b, c)`, because a row retimed across `b`
+is clipped away by the first evaluation and never offered to the second. Only the
+`prevtime` guard crosses chunks, so streaming still equals loading. If you need
+the out-of-window rows, widen the context yourself; nothing can infer how far.
+
+`settime(:time)` is legal and leaves the values alone, but it still re-clips, so
+a row sitting exactly at `stop` — which frames tolerate and `summarize` emits —
+is dropped. Special-casing it into a true no-op was rejected: it would then
+behave differently from `settime(r -> r.time)`, which is worse.
+
 ## Rolling windows
 
 `addrollingcolumns(windows, ss; key, from)` is the second binary operator:
@@ -714,6 +832,62 @@ current interval's begin; the `SummaryFold` from the summarize transforms is
 reused whole (schema promotion, state building and widening — a widening
 carries the open interval's accumulated state, exactly as `summarizecycles`
 does across a cycle boundary).
+
+## Last row
+
+`lastrow(; key)` folds the whole window the way `summarize` does — one pass per
+chunk, nothing emitted until the input is exhausted, everything produced in
+`chunkmap`'s once-only `flush` — but keeps rows rather than summaries. The output
+schema is the input's **exactly**: every column, in its own position, `:time`
+included.
+
+- **Keyless** emits exactly one row, the stream's last. An input with no rows
+  emits nothing at all — the asymmetry with keyless `summarize`, which always
+  has an identity summary to fall back on. There is no "identity row".
+- **Keyed** emits one row per distinct key value, each that key's last row,
+  sorted by key (the `sortedgroups` convention shared with `summarize` and
+  `closecycle!`). `time` may not be a key and key columns must be unique, both
+  rejected eagerly; the key columns are checked against the first chunk.
+
+Every emitted row is **retimed to `stop`**, which is what makes sorting by key
+legal: the chunk protocol demands non-decreasing times, and equal times satisfy
+it whatever the row order. Frames tolerate the closed interval `[start, stop]`,
+so emitting there is allowed — `summarize` already does it. The consequence is
+that the original timestamp is lost; the composable recovery is
+`addcolumns(r -> (; t0 = r.time))` upstream, rather than a magic extra column.
+
+The per-key store is **join.jl's**, not a `GroupTable`: a `Dict{K,Int}` of slot
+numbers over a `Vector{V}` of concretely typed rows, with `V` and `K` built by
+`storerowtype`/`storekeytype` from the promoted input schema, and rows read with
+`rowat`/`keyat`. The reasoning is "Representing a match" applied unchanged — a
+`Dict{K,V}` can only answer `get` as `Union{Nothing,V}`, which Julia heap-boxes
+whenever `V` is not isbits, and `lastrow` does a dict operation *per row*, so one
+`String` column would cost one box per row. A `Dict{K,DataFrame}` of one-row
+slices dodges the box only because a DataFrame is already a pointer, at the cost
+of a whole DataFrames `Index` plus a one-element vector per column per key.
+
+What `lastrow` does *not* need is the join's `found` mask: every slot a key
+claims is written the same instant, so the store is never half-filled and a
+widening is a plain `convert(Vector{V}, slots)` rather than `convertmatches`.
+Slot numbers do not move under a widening either, so only the dict's keys are
+rebuilt — `pullright!`'s pattern. Because the store is one concretely typed
+vector, the flush builds the output through a `DataFrame(rows)` over it directly:
+no `vcat` of per-key frames, and so no `cols = :union` question and no promotion
+pass. Element types may drift chunk to chunk, as everywhere else, and the store
+tracks the promotion; column *names* may not, because the row type is fixed by
+them, so a chunk whose names differ in content or in order is an `ArgumentError`
+rather than an opaque `convert` failure later.
+
+The keyless path skips the store entirely — the chunk's last row *is* the last
+row so far, so it costs O(ncols) per chunk and nothing per row. Routing it
+through a `K = @NamedTuple{}` store would unify the code at the price of a hash
+per row for no benefit, so the fold branches on the key tuple's emptiness the way
+`summarize` branches on `keyed`.
+
+`lastrow` is **causal** — a row emitted at `stop` folds only rows with time
+`<= stop` — and **stateful** in the `summarize` sense: streaming equals loading
+(its stream is a single frame over `[start, stop]`), while split contexts do not
+compose, since each half emits its own last row per key.
 
 ## Summarizers
 
@@ -1147,12 +1321,16 @@ transforms, loading `[a, c)` equals concatenating the results of loading
 
 The deliberate exceptions are `CausalFrames.Acausal.futurejoin` (see
 [Forward join (acausal)](#forward-join-acausal)), whose output at time `t`
-looks at right rows with time `>= t`, and `CausalFrames.Acausal.lead` (see
+looks at right rows with time `>= t`, `CausalFrames.Acausal.lead` (see
 [Lead and lag](#lead-and-lag)), whose output at time `t` carries the input's
-value from `t + offset`. Both are quarantined in the `Acausal` submodule and
-never re-exported, so opting into acausality is explicit
+value from `t + offset`, and `CausalFrames.Acausal.settime` (see
+[Retiming](#retiming)), whose output at `t` may carry what the input held
+later. All three are quarantined in the `Acausal` submodule and never
+re-exported, so opting into acausality is explicit
 (`using CausalFrames.Acausal`) and everything the top-level module exports
-keeps the guarantee above.
+keeps the guarantee above. `settime` goes one step further and is not exported
+from the submodule either, for the name-clash reason [Retiming](#retiming)
+gives.
 
 Evaluation is streaming end to end: operators pass chunks between each other
 lazily and only `load` materializes the whole window. The incremental entry
@@ -1184,10 +1362,20 @@ left chunk boundaries (it is causal — a row emitted at time `t` looks only
 at right rows with time `<= t`, possibly from before `start` when
 `tolerance` widens the right window), and so is `addrollingcolumns`, whose
 buffer of summarized rows and position in the summarized stream carry
-across augmented chunk boundaries. Consequently concatenating the frames
+across augmented chunk boundaries. `head` and `lastrow` join that list:
+`head`'s remaining-row budget spans the window (see
+[Truncation](#truncation)), and `lastrow`'s per-key store does, emitting once
+at `stop` exactly as `summarize` does (see [Last row](#last-row)).
+Consequently concatenating the frames
 of `stream(ctx, p)` always equals `load(ctx, p)`, even for stateful
 operators — but the chunk-concatenation property over *split contexts*
 still does not hold for them.
+
+`settime` is the odd one out: it carries only a `prevtime` for validation, so it
+is not stateful in the sense above, yet it still loses the chunk-concatenation
+property, for the different reason [Retiming](#retiming) gives — a row retimed
+across a split boundary is clipped by the first evaluation and never offered to
+the second.
 
 ## Module layout
 
@@ -1198,7 +1386,7 @@ still does not hold for them.
 | `src/frame.jl` | `CausalFrame{T}`, invariants, Tables.jl interface |
 | `src/chunks.jl` | internal chunk-iterator machinery (`ChunkSource`, `chunkmap`) |
 | `src/pipeline.jl` | `CausalPipeline{F}`, `load`, `stream` |
-| `src/operators.jl` | sources (including the n-ary `concatenate`), the CSV sink, row-wise transforms, and the causal time shift (`lag`) with the shared `shiftchunk!` |
+| `src/operators.jl` | sources (including the n-ary `concatenate`), the CSV sink, row-wise transforms, the causal time shift (`lag`) with the shared `shiftchunk!`, the truncating `head` with its `HeadProducer`, and the causal retiming (`settime`) with the shared `settimechunk!` |
 | `src/merge.jl` | the n-ary time-interleaving source (`Base.merge`) and its per-pipeline cursors |
 | `src/parquet.jl` | the parquet operators, their docstrings, and backend selection |
 | `ext/CausalFramesDuckDBExt.jl` | the DuckDB backend: the preferred reader, the fallback writer |
@@ -1206,10 +1394,11 @@ still does not hold for them.
 | `src/summarizers.jl` | `Summarizer`/`SummarizerState` interface and the concrete summarizers |
 | `src/summarize.jl` | folding kernels and the summarization transforms |
 | `src/join.jl` | the as-of join transform (`asofjoin`) |
+| `src/lastrow.jl` | the last-row-per-key transform (`lastrow`), over the join's store |
 | `src/segtree.jl` | the monoid segment tree behind the rolling tree mode |
 | `src/rolling.jl` | the rolling-window summarization transform (`addrollingcolumns`) |
 | `src/intervalize.jl` | the interval-summarization transform (`intervalize`) |
-| `src/acausal.jl` | the `Acausal` submodule: the forward join (`futurejoin`) and the acausal time shift (`lead`) |
+| `src/acausal.jl` | the `Acausal` submodule: the forward join (`futurejoin`), the acausal time shift (`lead`), and the permissive retiming (`settime`, not exported even from the submodule) |
 | `src/precompile.jl` | PrecompileTools workload covering the main pipeline paths |
 
 Exports: `Context`, `CausalFrame`, `CausalPipeline`, `load`, `stream`,
@@ -1220,15 +1409,17 @@ Exports: `Context`, `CausalFrame`, `CausalPipeline`, `load`, `stream`,
 `Moment`, `Product`, `DotProduct`, `Mean`, `Variance`, `Std`, `Covariance`,
 `Correlation`, `LinearRegression`, `Min`, `Max`, `First`, `Last`, `summarize`,
 `summarizecycles`, `intervalize`, `addsummarycolumns`, `addrollingcolumns`,
-`asofjoin`, `lag`.
+`asofjoin`, `lag`, `settime`, `head`, `lastrow`.
 
 `merge` is not in that list either: it is `Base.merge`, extended for
 `CausalPipeline` arguments rather than exported under a name of our own, so
 `using CausalFrames` leaves the dict and NamedTuple methods alone.
 
-`CausalFrames.Acausal` and its `futurejoin` and `lead` are deliberately **not**
-in this list: the acausal operators are reached only through
-`using CausalFrames.Acausal`, so acausality is always an explicit opt-in.
+`CausalFrames.Acausal` and its `futurejoin`, `lead` and `settime` are
+deliberately **not** in this list: the acausal operators are reached only
+through `using CausalFrames.Acausal`, so acausality is always an explicit
+opt-in. The submodule's `settime` is not exported from the submodule either, so
+that `using CausalFrames.Acausal` cannot shadow the causal one.
 
 Dependencies: DataFrames, CSV, Tables, LinearAlgebra, PrecompileTools; weak
 dependencies DuckDB and Parquet2, each behind a package extension

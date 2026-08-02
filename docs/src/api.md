@@ -46,6 +46,16 @@ selectcolumns
 dropcolumns
 ```
 
+## Truncation and reduction
+
+Neither of these is row-wise: both carry state across the whole window, `head`
+a remaining-row budget and `lastrow` a store of rows per key.
+
+```@docs
+head
+lastrow
+```
+
 ## Joins
 
 ```@docs
@@ -71,6 +81,24 @@ the `CausalFrames.Acausal` submodule and is not re-exported — reach it with
 
 ```@docs
 CausalFrames.Acausal.lead
+```
+
+## Retiming
+
+Where `lag` and `lead` shift every row by one constant, `settime` recomputes
+`:time` per row, from a column or a function.
+
+```@docs
+settime
+```
+
+The permissive variant, which may move rows earlier, is acausal and lives in
+the `CausalFrames.Acausal` submodule. Unlike `futurejoin` and `lead` it is not
+exported even from there, so that `using CausalFrames.Acausal` leaves the
+causal `settime` unambiguous — reach it as `CausalFrames.Acausal.settime`.
+
+```@docs
+CausalFrames.Acausal.settime
 ```
 
 ## Summarization

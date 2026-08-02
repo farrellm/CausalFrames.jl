@@ -40,6 +40,14 @@
         )
         DataFrame(load(ctx, p |> selectcolumns(:sym, r"^q") |> dropcolumns(:sym)))
         DataFrame(load(ctx, p |> lag(1)))
+        DataFrame(load(ctx, p |> head(2)))
+        DataFrame(load(ctx, p |> settime(r -> r.time + 1)))
+        # the Symbol form's rename branch, not the `settime(:time)` early return
+        DataFrame(
+            load(ctx, p |> addcolumns(r -> (; t2 = r.time + 1)) |> settime(:t2)),
+        )
+        DataFrame(load(ctx, p |> lastrow()))
+        DataFrame(load(ctx, p |> lastrow(; key = :sym)))
         DataFrame(
             load(
                 ctx,
@@ -110,6 +118,7 @@
             ),
         )
         DataFrame(load(ctx, p |> Acausal.lead(1)))
+        DataFrame(load(ctx, p |> Acausal.settime(r -> r.time - 1)))
         foreach(DataFrame, stream(ctx, clock(1) |> summarize(Count())))
         scan(ctx, p |> writecsv(joinpath(dir, "precompile-out.csv")))
         DataFrame(load(ctx, emptyframe()))
