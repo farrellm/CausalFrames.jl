@@ -619,6 +619,247 @@ shiftchunk!(c::DataFrame, delta) = (c[!, :time] = shifttime(c.time, delta); c)
 shifttime(times::AbstractVector, delta) = times .+ delta
 
 """
+    head(n) -> (CausalPipeline -> CausalPipeline)
+    head(p::CausalPipeline, n) -> CausalPipeline
+
+A transform emitting the first `n` rows of the stream and then stopping. It
+stops for real: once `n` rows have gone out the upstream pipeline is never
+pulled again, so `readcsv(path; types) |> head(10)` reads one file chunk and no
+more. `n` must be non-negative (an `ArgumentError` at construction otherwise),
+and `head(0)` is the empty stream — the upstream pipeline is built but never
+iterated.
+
+`head` is causal — rows pass through unchanged and in order — but **stateful**:
+its row budget spans the whole window. Concatenating the frames of
+[`stream`](@ref) therefore still equals [`load`](@ref) of the same window, while
+the chunk-concatenation property over *split* contexts does not hold, since
+`head(n)` over `[a, b)` and over `[b, c)` yields up to `2n` rows where the whole
+window yields `n`.
+
+Do not put a sink upstream of `head`: [`writecsv`](@ref) and
+[`writeparquet`](@ref) finalize when the stream is *exhausted*, which `head`
+prevents, leaving the file unfinished and its writer task unjoined. Truncate
+first — `p |> head(n) |> writecsv(path)`.
+
+The curried form composes with `|>`; the uncurried form applies directly, so
+`head(p, n)` is equivalent to `p |> head(n)`.
+"""
+function head(n::Integer)
+    n >= 0 || throw(ArgumentError("head n must be non-negative, got $n"))
+    limit = Int(n)
+    return function (p::CausalPipeline)
+        return CausalPipeline() do ctx::Context
+            return ChunkSource(HeadProducer(p.run(ctx), limit))
+        end
+    end
+end
+head(p::CausalPipeline, n::Integer) = head(n)(p)
+
+# The stateful producer behind head's ChunkSource. head must genuinely stop
+# pulling upstream once the budget is spent, which a chunkmap cannot do — its
+# `advance` loops until upstream returns nothing — so it drives the upstream
+# iterator itself, in the shape of readcsv's CSVProducer: the pull-to-pull state
+# lives in fields rather than captured locals (captured variables that are
+# reassigned get boxed). The dynamically typed `state` field is touched once per
+# chunk, never per row, exactly as ConcatProducer's is.
+mutable struct HeadProducer{U}
+    const upstream::U
+    remaining::Int
+    state::Any          # the upstream iteration state
+    started::Bool
+end
+HeadProducer(upstream::U, n::Int) where {U} = HeadProducer{U}(upstream, n, nothing, false)
+
+function (p::HeadProducer)()
+    p.remaining > 0 || return nothing
+    next = p.started ? iterate(p.upstream, p.state) : iterate(p.upstream)
+    p.started = true
+    if next === nothing
+        p.remaining = 0     # ChunkSource requires nothing to be sticky
+        return nothing
+    end
+    chunk, p.state = next
+    # The chunk protocol guarantees the annotation, which is what lets produce()
+    # infer Union{Nothing, DataFrame} through the dynamically typed state.
+    return takerows!(p, chunk::DataFrame)
+end
+
+# The chunk is owned and its column vectors are never mutated in place, so one
+# that fits entirely under the budget is passed on as it is — filterchunk's and
+# clipchunk!'s "keeps everything, so no copy" rule. Only the chunk that spends
+# the budget is sliced.
+function takerows!(p::HeadProducer, c::DataFrame)
+    k = nrow(c)
+    if k <= p.remaining
+        p.remaining -= k
+        return c
+    end
+    k = p.remaining
+    p.remaining = 0
+    return c[1:k, :]
+end
+
+"""
+    settime(spec) -> (CausalPipeline -> CausalPipeline)
+    settime(p::CausalPipeline, spec) -> CausalPipeline
+
+A transform recomputing the `:time` column. `spec` is either
+
+- a `Symbol` — the named column *becomes* `:time`, taking over the position it
+  already occupied, and the old `:time` column disappears ([`readcsv`](@ref)'s
+  `time = :name` rename, applied mid-stream); or
+- a per-row function — `spec(row)` is called for each row, receiving the same
+  map-like row object as [`addcolumns`](@ref), and its result overwrites
+  `:time` in place, keeping that column's position.
+
+Either way the resulting column is converted to the context's time type and the
+chunk is re-clipped to the half-open interval `[start, stop)`. All other columns
+pass through unchanged.
+
+The transform is **causal**, and enforces it. Three independent checks, each an
+`ArgumentError` when the pipeline runs:
+
+- every row's new time is at least its old one (use
+  [`CausalFrames.Acausal.settime`](@ref) to move rows earlier);
+- the resulting column is non-decreasing within the chunk;
+- and it does not step back across a chunk boundary.
+
+None implies another: a forward-only map can still reorder rows, and an ordered
+map can move every row back to `start`.
+
+The context is **not widened**. [`lag`](@ref) slides its upstream window because
+its shift is a constant known before any data is read; `settime`'s is per-row
+and data-dependent, so upstream still runs over `[start, stop)` and only rows
+*already* in the window can be retimed — a row before `start` that `spec` would
+move into the window is never seen. For the same reason `settime` does not have
+the chunk-concatenation property: loading `[a, c)` is not the concatenation of
+loading `[a, b)` and `[b, c)`, since a row retimed across `b` is dropped by the
+first half and never offered to the second. Streaming still equals loading.
+
+`settime(:time)` is legal and leaves the values alone, but it still re-clips to
+`[start, stop)` — a row sitting exactly at `stop`, which frames tolerate and
+[`summarize`](@ref) emits, is dropped.
+
+The curried form composes with `|>`; the uncurried form applies directly, so
+`settime(p, spec)` is equivalent to `p |> settime(spec)`.
+"""
+function settime(spec)
+    checktimespec(spec, "settime")
+    return function (p::CausalPipeline)
+        return CausalPipeline() do ctx::Context
+            st = SetTimeState{timetype(ctx)}()
+            return chunkmap(
+                c -> settimechunk!(st, spec, c, ctx.start, ctx.stop, true, "settime"),
+                p.run(ctx),
+            )
+        end
+    end
+end
+settime(p::CausalPipeline, spec) = settime(spec)(p)
+
+# Eager validation, shared by the two variants: a column name or a per-row
+# function, nothing else. A CausalPipeline lands here too, which is what turns a
+# mistyped `settime(p)` into a message rather than a MethodError deep in a chunk.
+checktimespec(::Symbol, ::String) = nothing
+checktimespec(::Function, ::String) = nothing
+checktimespec(x, opname::String) = throw(
+    ArgumentError(
+        "$opname spec must be a column name (Symbol) or a per-row function, \
+        got $(typeof(x))"),
+)
+
+# Per-run mutable state, in a field rather than a reassigned closure capture
+# (those get boxed). Unlike CSVProducer's `prevtime::Any` the type is known
+# here — it is the context's — so the cross-chunk comparison stays concrete.
+mutable struct SetTimeState{T}
+    prevtime::Union{Nothing,T}
+end
+SetTimeState{T}() where {T} = SetTimeState{T}(nothing)
+
+# Shared by the causal `settime` and `Acausal.settime`, the way `shiftchunk!` is
+# shared with `lead`: recompute the owned chunk's :time from `spec`, validate the
+# result, and clip to [start, stop). `causal` adds the per-row "no row moves
+# earlier" rule; `opname` names the operator in the messages, which is the only
+# other thing the two variants disagree about. Returns the clipped chunk, which
+# may have no rows — chunkmap drops those.
+function settimechunk!(st::SetTimeState{T}, spec, c::DataFrame, start::T, stop::T,
+    causal::Bool, opname::String) where {T}
+    old = c.time
+    new = converttimes(T, newtimes(spec, c, opname), opname)
+    causal && checkforward(old, new, opname)
+    issorted(new) ||
+        throw(ArgumentError("$opname produced a time column that is not non-decreasing"))
+    st.prevtime === nothing || st.prevtime <= first(new) ||
+        throw(
+            ArgumentError("$opname produced a time column that is not non-decreasing \
+                across chunk boundaries"),
+        )
+    st.prevtime = last(new)          # pre-clip, as clipchunk! carries it
+    lo = searchsortedfirst(new, start)
+    hi = searchsortedfirst(new, stop) - 1
+    settimecolumn!(c, spec, new)
+    # The chunk is owned, so a clip that keeps every row needs no copy — the
+    # rule filterchunk and clipchunk! follow.
+    return lo == 1 && hi == nrow(c) ? c : c[lo:hi, :]
+end
+
+# The raw new time values. Both forms reject a textual column outright, as
+# `resolvetime!` does: a String cannot be ordered against the window.
+function newtimes(spec::Symbol, c::DataFrame, opname::String)
+    String(spec) in names(c) ||
+        throw(ArgumentError("$opname: no column named $(repr(spec))"))
+    return checktimevalues(c[!, spec], opname)
+end
+newtimes(spec::Function, c::DataFrame, opname::String) =
+    checktimevalues(maptime(spec, Tables.columntable(c)), opname)
+
+checktimevalues(v::AbstractVector, opname::String) =
+    eltype(v) <: AbstractString ?
+    throw(
+        ArgumentError("$opname produced a textual time column (element type \
+            $(eltype(v))); parse it to an ordered type first"),
+    ) : v
+
+# The new column must live in the context's time type, as every source's does.
+function converttimes(::Type{T}, times::AbstractVector, opname::String) where {T}
+    eltype(times) <: T && return times
+    return convert(Vector{T}, times)
+end
+
+# Function barrier: both vectors are concretely typed, so this compiles to a
+# straight comparison loop. An explicit loop rather than `all(new .>= old)`,
+# which would allocate a BitVector per chunk and lose the row index the message
+# wants; `eachindex(old, new)` also asserts equal axes, which is what catches a
+# `spec` function returning the wrong number of values.
+function checkforward(old::AbstractVector, new::AbstractVector, opname::String)
+    @inbounds for i in eachindex(old, new)
+        new[i] >= old[i] || throw(
+            ArgumentError(
+                "$opname may not move a row earlier in time: row $i moves from \
+                $(old[i]) to $(new[i]); use CausalFrames.Acausal.settime for that"),
+        )
+    end
+    return nothing
+end
+
+# The Symbol form makes the named column the new :time — resolvetime!'s rename,
+# with the twist that a :time column already exists and must go first, since
+# `rename!` onto an existing name is an error. The renamed column keeps its own
+# position, so the output schema is a fixed function of the input's. The Function
+# form overwrites :time, which keeps its position for free. Both mutate the
+# chunk's column index in place, which the owner may do (see DESIGN.md, "CSV
+# output").
+function settimecolumn!(c::DataFrame, spec::Symbol, new::AbstractVector)
+    if spec !== :time
+        select!(c, Not(:time))
+        rename!(c, spec => :time)
+    end
+    c[!, :time] = new
+    return c
+end
+settimecolumn!(c::DataFrame, ::Function, new::AbstractVector) = (c[!, :time] = new; c)
+
+"""
     selectcolumns(selectors...) -> (CausalPipeline -> CausalPipeline)
     selectcolumns(p::CausalPipeline, selectors...) -> CausalPipeline
 

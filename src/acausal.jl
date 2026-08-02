@@ -11,6 +11,7 @@ module Acausal
 using DataFrames
 using Tables
 using ..CausalFrames: CausalPipeline, Context, chunkmap, shiftchunk!,
+    settimechunk!, SetTimeState, checktimespec, timetype,
     tokeycolumns, chunktypes, promotetypes, normprefix, prefixed,
     storerowtype, storekeytype, rowat, keyat, matchcolumn, convertmatches
 
@@ -389,5 +390,51 @@ function leadcontext(ctx::Context, offset)
         throw(ArgumentError("lead offset must be non-negative, got $offset"))
     return Context(start, ctx.stop + offset)
 end
+
+# --- settime: the permissive time reassignment -----------------------------
+
+"""
+    CausalFrames.Acausal.settime(spec) -> (CausalPipeline -> CausalPipeline)
+    CausalFrames.Acausal.settime(p::CausalPipeline, spec) -> CausalPipeline
+
+The permissive mirror of [`settime`](@ref CausalFrames.settime): the same
+`Symbol`-or-function `spec`, the same conversion to the context's time type, and
+the same clip — but **without** the requirement that a row's new time be at
+least its old one, so rows may move *earlier*. The result must still be
+non-decreasing within each chunk and across chunk boundaries, since the chunk
+protocol depends on it, and it is clipped to `[start, stop)` at **both** ends.
+
+This operator is **acausal**: a row emitted at time `t` may carry data the input
+held at some later time. That is why it lives in the `CausalFrames.Acausal`
+submodule; everything the top-level module exports stays causal.
+
+Unlike [`futurejoin`](@ref) and [`lead`](@ref), it is deliberately **not
+exported even from this submodule**, so that `using CausalFrames.Acausal`
+alongside `using CausalFrames` leaves the causal `settime` unambiguous. Reach it
+as `CausalFrames.Acausal.settime`.
+
+As for the causal variant the context is **not widened**, which bites harder
+here: a row whose original time is at or past `stop` is never produced upstream,
+so a `spec` that would move it back into the window can never see it — the
+difference from [`lead`](@ref), whose constant shift lets it slide the upstream
+window instead.
+
+The curried form composes with `|>`; the uncurried form applies directly, so
+`settime(p, spec)` is equivalent to `p |> settime(spec)`.
+"""
+function settime(spec)
+    checktimespec(spec, "Acausal.settime")
+    return function (p::CausalPipeline)
+        return CausalPipeline() do ctx::Context
+            st = SetTimeState{timetype(ctx)}()
+            return chunkmap(
+                c -> settimechunk!(st, spec, c, ctx.start, ctx.stop, false,
+                    "Acausal.settime"),
+                p.run(ctx),
+            )
+        end
+    end
+end
+settime(p::CausalPipeline, spec) = settime(spec)(p)
 
 end # module Acausal

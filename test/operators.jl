@@ -455,6 +455,135 @@ end
     @test isequal(DataFrame(load(ctx, lag(src, 2))), df)
 end
 
+@testset "head" begin
+    ctx = Context(0, 100)
+    src = clock(1; batchsize = 4)
+
+    @test DataFrame(load(ctx, src |> head(10))).time == 0:9
+    @test DataFrame(load(ctx, src |> head(6))).time == 0:5     # partial slice
+    # a budget larger than the stream just takes everything
+    @test DataFrame(load(Context(0, 5), src |> head(10))).time == 0:4
+    blank = load(ctx, src |> head(0))
+    @test nrow(blank) == 0 && names(blank) == ["time"]
+
+    # The early-exit proof: upstream is asked for exactly the chunks head
+    # consumes and not one more. Built on a chunkmap, this would drain all 25.
+    pulled = Ref(0)
+    counting = CausalPipeline() do _
+        (
+            begin
+                pulled[] += 1
+                DataFrame(time = collect((4i-4):(4i-1)), v = fill(i, 4))
+            end for i in 1:25
+        )
+    end
+    @test DataFrame(load(ctx, counting |> head(6))).time == 0:5
+    @test pulled[] == 2                       # not 25
+    pulled[] = 0                              # a budget landing on a boundary
+    @test DataFrame(load(ctx, counting |> head(8))).time == 0:7
+    @test pulled[] == 2                       # no extra pull to discover the end
+    pulled[] = 0                              # stream's lookahead must not reach upstream
+    @test reduce(vcat, DataFrame.(stream(ctx, counting |> head(8)))).time == 0:7
+    @test pulled[] == 2
+    pulled[] = 0                              # head(0) never advances the generator
+    @test nrow(load(ctx, counting |> head(0))) == 0
+    @test pulled[] == 0
+    pulled[] = 0                              # baseline: without head, everything
+    @test nrow(load(ctx, counting)) == 100 && pulled[] == 25
+
+    # the upstream context is not rewritten
+    seen = Ref{Any}(nothing)
+    recorder = CausalPipeline() do c
+        seen[] = c
+        [DataFrame(time = [c.start])]
+    end
+    load(ctx, recorder |> head(1))
+    @test seen[] == ctx
+
+    # a whole-chunk take shares the chunk rather than copying it
+    chunk = DataFrame(time = [1, 2])
+    frame = load(ctx, CausalPipeline(_ -> [chunk]) |> head(5))
+    @test only(frame.chunks) === chunk
+
+    @test_throws ArgumentError head(-1)                        # eager
+    @test nrow(load(ctx, emptyframe() |> head(3))) == 0        # empty frame no-op
+    # the uncurried, pipeline-first form equals the |> chain
+    @test isequal(DataFrame(load(ctx, head(src, 6))),
+        DataFrame(load(ctx, src |> head(6))))
+    # streaming matches load
+    @test isequal(reduce(vcat, DataFrame.(stream(ctx, src |> head(6)))),
+        DataFrame(load(ctx, src |> head(6))))
+end
+
+@testset "settime" begin
+    ctx = Context(0, 10)
+    src = clock(1; batchsize = 3) |> addcolumns(r -> (; v = float(r.time)))
+
+    # the function form overwrites :time in place, keeping its position
+    df = DataFrame(load(ctx, src |> settime(r -> r.time + 2)))
+    @test df.time == 2:9          # 8 and 9 shifted to 10, 11 and were clipped
+    @test df.v == collect(0.0:7.0)
+    @test names(df) == ["time", "v"]
+
+    # the symbol form makes that column :time, in its own position, and the old
+    # :time column disappears
+    sdf = DataFrame(load(ctx, src |> addcolumns(r -> (; t2 = r.time + 2)) |>
+                              settime(:t2)))
+    @test names(sdf) == ["v", "time"]
+    @test sdf.time == 2:9
+    @test sdf.v == collect(0.0:7.0)
+
+    # settime cannot widen the window the way lag does, so the rows lag pulls in
+    # from before start are simply absent
+    @test DataFrame(load(ctx, src |> settime(r -> r.time + 2))).time == 2:9
+    @test DataFrame(load(ctx, src |> lag(2))).time == 0:9
+    seen = Ref{Any}(nothing)
+    recorder = CausalPipeline() do c
+        seen[] = c
+        [DataFrame(time = [c.start])]
+    end
+    load(ctx, recorder |> settime(r -> r.time))
+    @test seen[] == ctx
+
+    # settime(:time) leaves the values alone but still re-clips to [start, stop),
+    # so summarize's row sitting exactly at stop is dropped
+    @test nrow(load(ctx, src |> summarize(Count()))) == 1
+    @test nrow(load(ctx, src |> summarize(Count()) |> settime(:time))) == 0
+    @test isequal(DataFrame(load(ctx, src |> settime(:time))),
+        DataFrame(load(ctx, src)))
+
+    # a row may not move earlier in time
+    @test_throws ArgumentError load(ctx, src |> settime(r -> r.time - 1))
+    # nor may the result be out of order within a chunk
+    @test_throws ArgumentError load(ctx, src |> settime(r -> 9 - r.time))
+    # ... nor across a chunk boundary, which the forward and within-chunk rules
+    # do not imply: every row here moves forward and each chunk is sorted, yet
+    # the stream emits 5, 9, 6, 7. This is why settimechunk! carries prevtime.
+    twochunks = CausalPipeline() do _
+        [DataFrame(time = [1, 2], x = [5, 9]), DataFrame(time = [3, 4], x = [6, 7])]
+    end
+    @test_throws ArgumentError load(ctx, twochunks |> settime(:x))
+    # a textual column cannot be ordered against the window
+    @test_throws ArgumentError load(ctx,
+        src |> addcolumns(r -> (; s = "x")) |> settime(:s))
+    # and the named column must exist
+    @test_throws ArgumentError load(ctx, src |> settime(:nope))
+
+    # eager: the spec must be a column name or a per-row function
+    @test_throws ArgumentError settime(3)
+    @test_throws ArgumentError settime(src)
+
+    # multi-chunk state: prevtime is carried, and a legal shift streams cleanly
+    shifted = src |> settime(r -> r.time + 1)
+    @test isequal(reduce(vcat, DataFrame.(stream(ctx, shifted))),
+        DataFrame(load(ctx, shifted)))
+
+    # transform on an empty frame is a no-op
+    @test nrow(load(ctx, emptyframe() |> settime(r -> r.time))) == 0
+    # the uncurried, pipeline-first form equals the |> chain
+    @test isequal(DataFrame(load(ctx, settime(src, r -> r.time + 2))), df)
+end
+
 @testset "concatenate" begin
     ctx = Context(0, 10)
     withv = addcolumns(r -> (; v = float(r.time)))
