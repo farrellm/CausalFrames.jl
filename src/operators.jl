@@ -771,10 +771,13 @@ checktimespec(x, opname::String) = throw(
 # Per-run mutable state, in a field rather than a reassigned closure capture
 # (those get boxed). Unlike CSVProducer's `prevtime::Any` the type is known
 # here — it is the context's — so the cross-chunk comparison stays concrete.
+# The constructor is inner, as ConcatProducer's is, which suppresses the default
+# outer one: `SetTimeState(prevtime::Union{Nothing,T}) where {T}` cannot bind T
+# when called with `nothing`, and Aqua's unbound-type-parameter check fails on it.
 mutable struct SetTimeState{T}
     prevtime::Union{Nothing,T}
+    SetTimeState{T}() where {T} = new{T}(nothing)
 end
-SetTimeState{T}() where {T} = SetTimeState{T}(nothing)
 
 # Shared by the causal `settime` and `Acausal.settime`, the way `shiftchunk!` is
 # shared with `lead`: recompute the owned chunk's :time from `spec`, validate the
