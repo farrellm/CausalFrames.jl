@@ -59,6 +59,8 @@ frame = load(Context(DateTime(2026, 1, 1), DateTime(2026, 2, 1)), p)
 | `settime(spec)` | transform | recompute `:time` from a column name or a per-row function; rows may only move later, and the result is re-clipped to `[start, stop)` |
 | `head(n)` | transform | emit the first up to `n` rows, then stop pulling the source — it genuinely stops, so a `readcsv` behind `head(10)` reads one file chunk |
 | `lastrow(; key)` | transform | emit the last row, or one per key, retimed to the window's `stop` |
+| `forwardfill(sel...; key, tolerance)` | transform | replace `missing` in the selected columns with that column's last non-missing value, per key, while not older than `tolerance` |
+| `fillmissing(specs...)` | transform | replace `missing` with a per-column constant, given as `name => value` pairs or a `NamedTuple` |
 
 Each transform also has an uncurried, pipeline-first form — `filterrows(p, pred)`,
 `addcolumns(p, f)`, `summarize(p, ss; key)` — equivalent to the `|>` chain

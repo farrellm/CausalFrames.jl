@@ -138,6 +138,21 @@ design rationale and performance constraints behind each module.
   the store entirely — the chunk's last row is the last row so far, so it costs
   nothing per row. Output schema is the input's exactly, `:time` overwritten
   with `stop` via `merge`, which preserves the column position
+- `src/fill.jl` — the two missing-value fills. `fillmissing` is row-wise and
+  stateless (a constant per column, so `fillcolumn` is the whole hot path, and
+  the output eltype narrows — the one place in the package that does, via
+  `promote_type(nonmissingtype(T), typeof(value))`). `forwardfill` carries the
+  last non-missing value across rows, chunks and keys, so it joins the stateful
+  operators DESIGN.md's streaming section lists. Its state is a `FillCell` per
+  (key, *column*), not a row per key: a forward fill is column-independent, so
+  `lastrow`'s whole-row store cannot serve it. The cells are mutable, which is
+  why the store is a plain `Dict{K,NamedTuple}` rather than join.jl's
+  `Dict{K,Int}` over a slot vector — a lookup already answers with a pointer,
+  so there is no `Union{Nothing,V}` to box (`KeyBuffer`'s reason). A selected
+  column whose promoted type admits no `Missing` gets `nothing` instead of a
+  replacement column, which folds the write out of the unrolled kernel.
+  `tolerance` widens the input context as `asofjoin` does, so `clipstart!` has
+  to drop the pre-`start` rows the fill was allowed to see
 - `src/segtree.jl` — the monoid segment tree behind the rolling tree mode:
   implicit array tree of `combine!`d partial state tuples, append-only rows,
   logical front expiry (`head`), amortized rebuilds, order-preserving

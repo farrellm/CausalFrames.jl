@@ -48,6 +48,11 @@
         )
         DataFrame(load(ctx, p |> lastrow()))
         DataFrame(load(ctx, p |> lastrow(; key = :sym)))
+        # the fills need a Missing-admitting column, which nothing else here has
+        pm = p |> addcolumns(r -> (; m = isodd(r.time) ? missing : r.qty))
+        DataFrame(load(ctx, pm |> forwardfill(:m)))
+        DataFrame(load(ctx, pm |> forwardfill(:m; key = :sym, tolerance = 2)))
+        DataFrame(load(ctx, pm |> fillmissing(:m => 0.0)))
         DataFrame(
             load(
                 ctx,

@@ -46,6 +46,18 @@ selectcolumns
 dropcolumns
 ```
 
+## Filling
+
+Two ways to resolve `missing` values — the ones a [`merge`](@ref) schema
+union, an [`asofjoin`](@ref) non-match or a nullable parquet column leaves
+behind. Only `fillmissing` is row-wise; `forwardfill` carries the last
+non-missing value of every filled column across rows, chunks and keys.
+
+```@docs
+forwardfill
+fillmissing
+```
+
 ## Truncation and reduction
 
 Neither of these is row-wise: both carry state across the whole window, `head`
