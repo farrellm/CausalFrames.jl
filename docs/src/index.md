@@ -51,6 +51,8 @@ frame = load(Context(DateTime(2026, 1, 1), DateTime(2026, 2, 1)), p)
 | `settime(spec)` | transform | recompute `:time` from a column name or a per-row function; rows may only move later, and the result is re-clipped to `[start, stop)` |
 | `head(n)` | transform | the first up to `n` rows, after which the source is no longer pulled |
 | `lastrow(; key)` | transform | the last row, or one per key, retimed to the window's `stop` |
+| `forwardfill(sel...; key, tolerance)` | transform | replace `missing` in the selected columns with that column's last non-missing value, per key, while not older than `tolerance` |
+| `fillmissing(specs...)` | transform | replace `missing` with a per-column constant, given as `name => value` pairs or a `NamedTuple` |
 
 Row functions receive a map-like row object: `row.time`, `row.price`,
 `row[:price]`.

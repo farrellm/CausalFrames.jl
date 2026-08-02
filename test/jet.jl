@@ -178,6 +178,20 @@ end
     JET.@test_opt CausalFrames.lastsegment!(index, slots, nt, Val((:sym,)))
 end
 
+@testset "forwardfill kernels" begin
+    # the same non-isbits carried value the mutable cells exist for
+    C = CausalFrames.FillCell{String,Int}
+    times = [1, 2]
+    incol = Union{Missing,String}["a", missing]
+    groups = ((incol, Vector{Union{Missing,String}}(undef, 2)),)
+    JET.@test_opt CausalFrames.fillkeyless!(times, groups, (C(),), 2)
+
+    NT = typeof((v = C(),))
+    store = Dict{typeof((k = "a",)),NT}()
+    nt = (time = times, k = ["a", "a"], v = incol)
+    JET.@test_opt CausalFrames.fillkeyed!(times, groups, nt, Val((:k,)), store, 2)
+end
+
 @testset "settime kernel" begin
     # the per-row causality check, behind its function barrier
     JET.@test_opt CausalFrames.checkforward([1, 2], [3, 4], "settime")

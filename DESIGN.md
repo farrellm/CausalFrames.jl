@@ -136,6 +136,8 @@ Two kinds, both compatible with the chaining operator `|>`:
 | `settime(spec)` | transform | recompute `:time` from a column name or a per-row function; times may only move later, and the result is re-clipped to `[start, stop)` (see "Retiming") |
 | `head(n)` | transform | emit the first up to `n` rows and stop pulling upstream (see "Truncation") |
 | `lastrow(; key)` | transform | emit each key's last row, retimed to `stop`; keyless emits the stream's last row (see "Last row") |
+| `forwardfill(selectors...; key, tolerance)` | transform | replace `missing` in the selected columns (see "Column selectors") with that column's last non-missing value, per key, while not older than `tolerance` (see "Filling") |
+| `fillmissing(specs...)` | transform | replace `missing` with a per-column constant, given as `name => value` pairs or a `NamedTuple`; the column's element type narrows (see "Filling") |
 
 Row functions (`pred`, `f`) receive a map-like row object supporting
 `row.name` and `row[:name]` access (Tables.jl row semantics), including
@@ -889,6 +891,71 @@ per row for no benefit, so the fold branches on the key tuple's emptiness the wa
 (its stream is a single frame over `[start, stop]`), while split contexts do not
 compose, since each half emits its own last row per key.
 
+## Filling
+
+`missing` enters a pipeline from three places — the schema union `merge`
+builds, an `asofjoin` that found no right row, and a nullable parquet column —
+and two transforms resolve it.
+
+`fillmissing(specs...)` replaces `missing` with a per-column constant. It is
+row-wise and stateless: a chunk is the whole context it needs. It is also the
+one transform whose output element type *narrows*, to
+`promote_type(nonmissingtype(T), typeof(value))` — every `missing` is
+replaced, so admitting `Missing` afterwards would be a lie. Every other type
+computation in the package only ever widens (`promotetypes`,
+`promotedvaluetype`), so this is deliberately its own rule and not a shared
+helper. A named column whose type admits no `Missing` is left untouched rather
+than copied.
+
+`forwardfill(selectors...; key, tolerance)` replaces `missing` with the
+column's last non-missing value. It keeps the `Union{Missing, T}` element type,
+because the rows before a column's first value — and the rows past
+`tolerance` — genuinely stay missing.
+
+The carried state is one cell per **(key, column)**, not one row per key: a
+forward fill is column-independent, so `:a` may carry from row 3 while `:b`
+carries from row 7, and `lastrow`'s whole-row store cannot express that. Since
+a cell must be *updated* in place rather than replaced, it is a mutable struct,
+and that in turn settles the store: a plain `Dict{K, NamedTuple}` of cells,
+not the `Dict{K, Int}` over a slot vector [Representing a
+match](#representing-a-match) argues for. The reason that store exists is that
+a `Dict{K, V}` of immutable rows answers every lookup as `Union{Nothing, V}`
+and boxes it whenever `V` is not isbits; a lookup of a mutable cell already
+answers with a pointer, so there is nothing to box — the same reasoning that
+makes `futurejoin`'s `KeyBuffer` mutable. A cell is typed at the column's
+*non-missing* type, so gaining `Missing` mid-stream does not disturb it, and
+the `seen` flag keeps "nothing carried yet" distinct from a column holding
+`missing`, exactly as `TrackState`'s does.
+
+A selected column whose promoted type admits no `Missing` has nothing to fill.
+It gets no replacement column at all — `nothing` in the kernel's group tuple,
+which folds the write away at compile time — and passes through untouched.
+
+`tolerance` is decided per output row, against the time of the row the carried
+value came from; a stale value is declined, never evicted, which is
+`asofjoin`'s rule and for the same reason (a value too old for this row is not
+too old for a row that shares its time). As there, `tolerance` widens the input
+context to `[start - tolerance, stop)` so rows near `start` can be filled from
+before the window — and, as there, without a `tolerance` there is no finite
+amount to widen by, so the input sees only `[start, stop)`. The widening is the
+one thing `forwardfill` must undo: `load` rejects a chunk beginning before
+`start`, so the pre-window rows update the cells and are then clipped away.
+
+Element types may move from chunk to chunk, as everywhere else, and the cells
+track their promotion. The *set* of columns being filled may not: it fixes the
+cell tuple's names and hence the store's type, so a chunk that changes it is an
+`ArgumentError` rather than an opaque `convert` failure later — `lastrow`'s
+rule, narrowed to the columns that matter here.
+
+`forwardfill` is **causal** — the value at time `t` came from a row with time
+`<= t` — and **stateful** in the streaming sense: concatenating its streamed
+frames equals loading the window, while split contexts do not compose, since
+the second half starts with nothing carried.
+
+A *backward* fill would be acausal, and would have to buffer output rows until
+the next non-missing value arrived — a `HeadProducer`-shaped operator in the
+`Acausal` submodule, not a `chunkmap`. It is deliberately not provided.
+
 ## Summarizers
 
 A summarization is split in two: a subtype of `Summarizer` holding only the
@@ -1365,7 +1432,9 @@ buffer of summarized rows and position in the summarized stream carry
 across augmented chunk boundaries. `head` and `lastrow` join that list:
 `head`'s remaining-row budget spans the window (see
 [Truncation](#truncation)), and `lastrow`'s per-key store does, emitting once
-at `stop` exactly as `summarize` does (see [Last row](#last-row)).
+at `stop` exactly as `summarize` does (see [Last row](#last-row)). So does
+`forwardfill`, whose carried value per key and column spans the window (see
+[Filling](#filling)); `fillmissing`, having no state at all, does not.
 Consequently concatenating the frames
 of `stream(ctx, p)` always equals `load(ctx, p)`, even for stateful
 operators — but the chunk-concatenation property over *split contexts*
@@ -1395,6 +1464,7 @@ the second.
 | `src/summarize.jl` | folding kernels and the summarization transforms |
 | `src/join.jl` | the as-of join transform (`asofjoin`) |
 | `src/lastrow.jl` | the last-row-per-key transform (`lastrow`), over the join's store |
+| `src/fill.jl` | the missing-value fills: the stateful `forwardfill` and the row-wise `fillmissing` |
 | `src/segtree.jl` | the monoid segment tree behind the rolling tree mode |
 | `src/rolling.jl` | the rolling-window summarization transform (`addrollingcolumns`) |
 | `src/intervalize.jl` | the interval-summarization transform (`intervalize`) |
@@ -1409,7 +1479,7 @@ Exports: `Context`, `CausalFrame`, `CausalPipeline`, `load`, `stream`,
 `Moment`, `Product`, `DotProduct`, `Mean`, `Variance`, `Std`, `Covariance`,
 `Correlation`, `LinearRegression`, `Min`, `Max`, `First`, `Last`, `summarize`,
 `summarizecycles`, `intervalize`, `addsummarycolumns`, `addrollingcolumns`,
-`asofjoin`, `lag`, `settime`, `head`, `lastrow`.
+`asofjoin`, `lag`, `settime`, `head`, `lastrow`, `forwardfill`, `fillmissing`.
 
 `merge` is not in that list either: it is `Base.merge`, extended for
 `CausalPipeline` arguments rather than exported under a name of our own, so
