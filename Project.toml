@@ -20,7 +20,7 @@ CausalFramesParquet2Ext = "Parquet2"
 
 [compat]
 Aqua = "0.8"
-CSV = "0.10"
+CSV = "0.10.0 - 0.10.16"
 DataFrames = "1.8"
 Dates = "1.10"
 DuckDB = "1.5.2"
