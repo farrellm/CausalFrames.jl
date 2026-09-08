@@ -343,7 +343,8 @@ end
         DotProduct(:y, :x), Covariance(:y, :x),
         LinearRegression(:x, :y; name = :m1),
         LinearRegression([:x, :y], :y; name = :m2)]
-    monoidset = [Min(:x), Max(:x), First(:x), Last(:x), Product(:x)]
+    monoidset = [Min(:x), Max(:x), First(:x), Last(:x), Product(:x),
+        CountDistinct(:x)]
     mixedset = [Sum(:x), Min(:x), MinMax(:y)]     # group ⊂ monoid: tree path
     plainset = [Sum(:x), TestVar(:x)]             # plain present: re-fold
 

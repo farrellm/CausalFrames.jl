@@ -1029,6 +1029,7 @@ Concrete summarizers provided, for an input column of element type `T`:
 | Summarizer | Output column | Output type | Value over no rows |
 |---|---|---|---|
 | `Count()` | `:count` | `Int` | `0` |
+| `CountDistinct(column)` | `:x_countdistinct` | `Int` | `0` |
 | `Sum(column)` | `:x_sum` | `sum` of `T` | `0` |
 | `SumPower(column, n)` | `:x_sumpower_2` for `n = 2` | `sum` of `T^n` | `0` |
 | `Product(column)` | `:x_product` | `prod` of `T` | `1` |
@@ -1134,9 +1135,36 @@ promotions — plain→compensated (an `Int` column promoted to float), and, whe
 `missing` first appears, plain/compensated→`Optional*` (missings start at zero,
 the existing total carried) and widening within the `Optional*` family.
 
-`Sum`, `SumPower`, `Product`, and `DotProduct` have an identity element, so
-they summarize no rows as `0` (`Product` as `1`). The others do not, and yield
-`missing` instead — reachable only
+`CountDistinct` is the one summarizer that departs from both of the rules
+above, and the one whose state is not O(1). It holds a `Set` of the values it
+has seen, so folding `n` rows costs O(distinct) memory rather than a few fields
+— the reason its docstring says so, since nothing else in the package makes a
+caller think about the cardinality of a column. And a `missing` does not poison
+it: `missing` is pushed into the set like any other value and the output column
+is `Int`, never `Union{Missing, Int}`. The distinction is that the poisoning
+rule exists because a total with an unknown term is unknowable, which a
+*count of distinct values* never is — you know exactly how many distinct things
+you saw, `missing` among them. `count(DISTINCT x)`'s null-skipping is a
+`filterrows` upstream.
+
+Its structure is a deliberate trade. Set union is a lawful monoid — associative,
+with a fresh set as the identity — so `CountDistinct` is a `MonoidSummarizer`
+and rolling windows take the tree path. The tree is not asymptotically better
+here the way it is for `Min`: a node's `combine!` copies a set, so a query
+costs O(window) either way, and the nodes hold O(n log n) elements where the
+re-fold path holds one window's worth. Measured over 200k rows in one key
+group with a 5,000-row window, tree beats re-fold 5.3 s to 6.6 s alone and
+5.4 s to 7.6 s beside a `Mean` (where declaring it plain would drag the
+`Mean` off the running path too); at a 50,000-row window the times converge
+(72 s to 76 s) and the tree's live memory is 122 MiB against 28 MiB. So the
+monoid classification wins on time everywhere measured and loses on memory at
+large windows — which is the direction worth documenting rather than hiding,
+since a caller who knows their window is huge and their cardinality high is
+the one who needs to know.
+
+`Sum`, `SumPower`, `Product`, `DotProduct`, and `CountDistinct` have an
+identity element, so they summarize no rows as `0` (`Product` as `1`). The
+others do not, and yield `missing` instead — reachable only
 through a keyless `summarize` of an empty input, since every key group and
 every cycle folds at least one row before emitting. That case is answered by
 `emptyvalue` and is also the one case with no type to speak of: the chunk
@@ -1357,7 +1385,9 @@ declaring what a summarizer's states support beyond folding:
   groups too: their states are fieldless, so `combine!` and `downdate!` are
   no-ops, and their effective structure is that of their transitive
   dependencies — all of which are the group accumulators above.
-- **Monoids only**: `Product` — dividing a row back out fails outright at
+- **Monoids only**: `CountDistinct` — a set union combines, but removing a
+  row cannot tell you whether its value still appears elsewhere in the window;
+  `Product` — dividing a row back out fails outright at
   zero (the total is `0` regardless of what else was folded) and truncates
   for integers; `Min`/`Max`/`First`/`Last` — no inverse exists, but two
   ordered sub-ranges combine (for `First`/`Last` *because* the ranges are
@@ -1475,7 +1505,7 @@ Exports: `Context`, `CausalFrame`, `CausalPipeline`, `load`, `stream`,
 `scan`, `context`, `timetype`, `emptyframe`, `concatenate`, `clock`, `readcsv`, `writecsv`, `readparquet`,
 `writeparquet`, `filterrows`,
 `addcolumns`, `selectcolumns`, `dropcolumns`, `Summarizer`, `MonoidSummarizer`, `GroupSummarizer`,
-`SummarizerState`, `Count`, `Sum`, `SumPower`,
+`SummarizerState`, `Count`, `CountDistinct`, `Sum`, `SumPower`,
 `Moment`, `Product`, `DotProduct`, `Mean`, `Variance`, `Std`, `Covariance`,
 `Correlation`, `LinearRegression`, `Min`, `Max`, `First`, `Last`, `summarize`,
 `summarizecycles`, `intervalize`, `addsummarycolumns`, `addrollingcolumns`,

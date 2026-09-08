@@ -90,9 +90,9 @@ readcsv("ticks.csv"; types = Dict(:time => Int, :bid => Float64)) |>
 ## Summarizers
 
 The summarization transforms take one or more summarizers — `Count()`,
-`Sum(:col)`, `SumPower(:col, n)`, `Product(:col)`, `DotProduct(:a, :b)`,
-`Moment(:col, n)`, `Mean(:col)`, `Variance(:col)`, `Std(:col)`,
-`Covariance(:a, :b)`, `Correlation(:a, :b)`,
+`CountDistinct(:col)`, `Sum(:col)`, `SumPower(:col, n)`, `Product(:col)`,
+`DotProduct(:a, :b)`, `Moment(:col, n)`, `Mean(:col)`, `Variance(:col)`,
+`Std(:col)`, `Covariance(:a, :b)`, `Correlation(:a, :b)`,
 `LinearRegression(predictors, response)`, `Min(:col)`, `Max(:col)`,
 `First(:col)`, `Last(:col)`, or your own `Summarizer` subtype —
 and an optional `key` (one or more column names) to produce a separate
@@ -108,8 +108,13 @@ p = readcsv("ticks.csv";
     addsummarycolumns([Count(), Sum(:mid), Min(:mid), Max(:mid)]; key = :symbol)
 ```
 
-`Sum`, `SumPower`, and `DotProduct` summarize no rows as `0` and `Product` as
-`1`; the rest have no identity element and yield `missing` instead.
+`Sum`, `SumPower`, `DotProduct`, and `CountDistinct` summarize no rows as `0`
+and `Product` as `1`; the rest have no identity element and yield `missing`
+instead. `CountDistinct(:col)` — producing `:col_countdistinct`, always an
+`Int` — is also the one summarizer that does not let a `missing` poison its
+output: `missing` counts as a distinct value, because unlike a sum a distinct
+count stays knowable. It is the one whose state is not O(1) either, holding the
+distinct values it has seen.
 `Moment(:mid, n)` — the `n`-th raw moment, producing `:mid_moment_n` — is a
 *dependent* summarizer, computed from `Count()` and `SumPower(:mid, n)`;
 those are folded alongside it but appear in the output only if requested
