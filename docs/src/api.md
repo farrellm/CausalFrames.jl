@@ -122,6 +122,7 @@ intervalize
 addsummarycolumns
 addrollingcolumns
 Count
+CountDistinct
 Sum
 SumPower
 Moment

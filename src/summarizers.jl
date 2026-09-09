@@ -590,6 +590,68 @@ combine!(dest::CountState, a::CountState, b::CountState) =
 value(st::CountState) = (; count = st.n)
 
 """
+    CountDistinct(column) -> Summarizer
+
+Counts the distinct values of `column`. Produces the output column
+`Symbol(column, :_countdistinct)`, e.g. `CountDistinct(:x)` produces
+`:x_countdistinct`, of type `Int`. The distinct count of no rows is `0`.
+
+`missing` counts as a value like any other, so a column holding `1`, `missing`,
+`1` has two distinct values, and the output column is `Int` rather than
+`Union{Missing, Int}`. This is the one place the accumulating summarizers'
+poisoning rule does not apply, and deliberately: a sum with a `missing` term is
+unknowable, while a distinct count never is — you know exactly how many
+distinct things you saw. SQL's `count(DISTINCT x)` skips nulls instead;
+`filterrows(r -> !ismissing(r.x))` upstream recovers that reading.
+
+Unlike every other summarizer, whose state is O(1), this one holds the distinct
+values it has seen: folding `n` rows costs O(distinct) memory, and a rolling
+window pays that per window per key.
+"""
+struct CountDistinct{C} <: MonoidSummarizer end
+CountDistinct(column::Symbol) = CountDistinct{column}()
+
+mutable struct CountDistinctState{C,N,T} <: SummarizerState
+    seen::Set{T}
+    CountDistinctState{C,N,T}() where {C,N,T} = new{C,N,T}(Set{T}())
+end
+
+emptyvalue(::CountDistinct{C}) where {C} =
+    NamedTuple{(Symbol(C, :_countdistinct),)}((0,))
+fresh(::CountDistinct{C}, intypes::NamedTuple) where {C} =
+    CountDistinctState{C,Symbol(C, :_countdistinct),intypes[C]}()
+fresh(::CountDistinctState{C,N,T}) where {C,N,T} = CountDistinctState{C,N,T}()
+# `empty!` keeps the set's slots, so the per-cycle, per-interval and per-window
+# zeroing is allocation-free once the first fold has sized it.
+@inline fresh!(st::CountDistinctState) = (empty!(st.seen); st)
+@inline update!(st::CountDistinctState{C}, row) where {C} =
+    (push!(st.seen, getproperty(row, C)); nothing)
+value(st::CountDistinctState{C,N}) where {C,N} =
+    NamedTuple{(N,),Tuple{Int}}((length(st.seen),))
+function combine!(dest::CountDistinctState{C,N,T}, a::CountDistinctState{C,N,T},
+    b::CountDistinctState{C,N,T}) where {C,N,T}
+    # `dest` may alias either argument, so it can only be cleared once both
+    # have been read — which, for a union, means not clearing it at all.
+    if dest === a
+        union!(dest.seen, b.seen)
+    elseif dest === b
+        union!(dest.seen, a.seen)
+    else
+        empty!(dest.seen)
+        union!(dest.seen, a.seen, b.seen)
+    end
+    return nothing
+end
+function widenstate(st::CountDistinctState{C,N,T},
+    intypes::NamedTuple) where {C,N,T}
+    T2 = intypes[C]
+    T2 === T && return st
+    widened = CountDistinctState{C,N,T2}()
+    union!(widened.seen, st.seen)
+    return widened
+end
+
+"""
     Sum(column) -> Summarizer
 
 Sums `column`. Produces the output column `Symbol(column, :_sum)`, e.g.

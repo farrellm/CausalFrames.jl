@@ -126,6 +126,75 @@
           (x_moment_2 = 4.0,)
 end
 
+@testset "distinct counting" begin
+    chunks(cs...) = CausalPipeline(ctx -> collect(cs))
+    summarized(p, ss; kwargs...) =
+        DataFrame(load(Context(0, 9), p |> summarize(ss; kwargs...)))
+
+    # the count is of values, not rows, and it is an Int whatever the input
+    df = summarized(chunks(DataFrame(time = [1, 2, 3, 4], x = [1, 2, 2, 3])),
+        [Count(), CountDistinct(:x)])
+    @test only(df.count) == 4
+    @test only(df.x_countdistinct) == 3
+    @test eltype(df.x_countdistinct) == Int
+
+    # missing is a value like any other, and does NOT poison the way the
+    # accumulating summarizers do: a distinct count stays knowable, so the
+    # output column is Int rather than Union{Missing, Int}
+    df = summarized(
+        chunks(
+            DataFrame(time = [1, 2, 3, 4],
+                x = Union{Missing,Int}[1, missing, 1, missing]),
+        ),
+        [CountDistinct(:x), Sum(:x)])
+    @test only(df.x_countdistinct) == 2
+    @test eltype(df.x_countdistinct) == Int
+    @test ismissing(only(df.x_sum))            # the contrast: sum poisons
+    @test eltype(df.x_sum) == Union{Missing,Int64}
+
+    # a source may hand a column a different element type per chunk, so the
+    # state widens rather than forcing the first chunk's type — and values
+    # equal across the promotion still count once (1 and 1.0 are one value)
+    df = summarized(
+        chunks(DataFrame(time = [1, 2], x = Int[1, 2]),
+            DataFrame(time = [3, 4], x = Float64[1.0, 2.5])),
+        CountDistinct(:x))
+    @test only(df.x_countdistinct) == 3
+
+    # strings, to pin that the state is typed from the schema and not numeric
+    df = summarized(
+        chunks(DataFrame(time = [1, 2, 3], s = ["a", "b", "a"])),
+        CountDistinct(:s))
+    @test only(df.s_countdistinct) == 2
+
+    # no rows at all: the emptyvalue, reachable only through a keyless
+    # summarize of an empty input
+    df = summarized(emptyframe(), CountDistinct(:x))
+    @test only(df.x_countdistinct) == 0
+
+    # per key, and per cycle — the paths that zero and reuse a state tuple,
+    # where a set that did not fully reset would leak into the next emission
+    p = chunks(
+        DataFrame(time = [1, 1, 1, 2, 2], k = ["a", "a", "b", "a", "a"],
+            x = [1, 1, 7, 5, 6]),
+    )
+    df = summarized(p, CountDistinct(:x); key = :k)
+    @test df.k == ["a", "b"]
+    @test df.x_countdistinct == [3, 1]
+    df = DataFrame(load(Context(0, 9), p |> summarizecycles(CountDistinct(:x))))
+    @test df.x_countdistinct == [2, 2]
+
+    # an empty interval emits the identity, not a stale count; the trailing
+    # partial [4, 6) is the closelast row, timestamped at the context's stop
+    df = DataFrame(
+        load(Context(0, 6),
+            chunks(DataFrame(time = [0, 0, 4], x = [1, 2, 9])) |>
+            intervalize(clock(2), CountDistinct(:x); closelast = true)),
+    )
+    @test df.time == [2, 4, 6]
+    @test df.x_countdistinct == [2, 0, 1]
+end
+
 @testset "statistical summarizers" begin
     chunks(cs...) = CausalPipeline(ctx -> collect(cs))
     # x and y over three rows; the reference values are computed by hand:
@@ -667,11 +736,13 @@ end
             Covariance(:x, :y), Correlation(:x, :y),
             LinearRegression(:x, :y), LinearRegression([:x, :y], :y)])
     @test all(s -> s isa MonoidSummarizer && !(s isa GroupSummarizer),
-        [Product(:x), Min(:x), Max(:x), First(:x), Last(:x), MinMax(:x)])
+        [Product(:x), Min(:x), Max(:x), First(:x), Last(:x), MinMax(:x),
+            CountDistinct(:x)])
     @test !(Opaque(Sum(:x)) isa MonoidSummarizer)
 
     monoids = [Count(), Sum(:x), SumPower(:x, 2), DotProduct(:x, :y),
-        Product(:x), Min(:x), Max(:x), First(:x), Last(:x), MinMax(:x)]
+        Product(:x), Min(:x), Max(:x), First(:x), Last(:x), MinMax(:x),
+        CountDistinct(:x)]
 
     # fresh! must be indistinguishable from fresh: the transforms zero and
     # reuse state tuples per cycle, per interval and per window query, so a
@@ -680,7 +751,7 @@ end
     # exercises the `fresh(st)` default a custom summarizer inherits.
     selfcontained = [Count(), Sum(:x), SumPower(:x, 2), DotProduct(:x, :y),
         Product(:x), Min(:x), Max(:x), First(:x), Last(:x), MinMax(:x),
-        Opaque(Sum(:x))]
+        CountDistinct(:x), Opaque(Sum(:x))]
     for s in selfcontained
         reused = CausalFrames.fresh!(fold(s, rows))   # folded, then zeroed
         rebuilt = CausalFrames.fresh(s, intypes)      # never folded
@@ -712,9 +783,11 @@ end
     # Zeroing a built-in state is pure field writes, so it allocates nothing —
     # the property every reuse path depends on.
     for s in [Count(), Sum(:x), SumPower(:x, 2), DotProduct(:x, :y),
-        Product(:x), Min(:x), Max(:x), First(:x), Last(:x)]
+        Product(:x), Min(:x), Max(:x), First(:x), Last(:x), CountDistinct(:x)]
         st = fold(s, rows)
         CausalFrames.fresh!(st)
+        # CountDistinct is in this list because `empty!` keeps a Set's slots:
+        # zeroing it is a write per slot, not a new allocation.
         @test (@allocated CausalFrames.fresh!(st)) == 0
     end
 
