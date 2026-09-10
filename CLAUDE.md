@@ -14,7 +14,9 @@ with any API or semantics change.**
   `test/fixtures.jl`, so `julia --project test/rolling.jl` won't run
 - Build docs: `julia --project=docs docs/make.jl` (one-time setup:
   `julia --project=docs -e 'using Pkg; Pkg.develop(path="."); Pkg.instantiate()'`).
-  Documenter runs strict — an unregistered docstring fails the docs CI job
+  Documenter runs strict — an unregistered docstring fails the docs CI job.
+  The home page is **generated from `README.md`** by `docs/make.jl`;
+  `docs/src/index.md` is gitignored, so edit the README, never that file
 - Benchmark: `julia --project=benchmark benchmark/benchmarks.jl` (same
   one-time `Pkg.develop(path=".")` setup; defines `SUITE` for PkgBenchmark)
 - Formatting is automatic: a `Stop` hook in `.claude/settings.json` formats
