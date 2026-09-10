@@ -25,6 +25,11 @@ design rationale and performance constraints behind each module.
   table rows behind a per-chunk function barrier, never `DataFrameRow`s;
   `clipchunk!` (rename, resolve `:time`, sortedness, clip, convert) and the
   `ChunkSink` background writer are shared with the parquet operators.
+  The three column operators share one selector vocabulary and one per-run,
+  schema-keyed resolution memo; `reordercolumns` is the only one that reads the
+  selectors as an *order*, which is why `foreachselector` exists beside
+  `foreachliteral` — matching can stop at the first hit and ignore pattern
+  leaves, ordering can do neither.
   `readcsv` never infers types — every column is `String` unless `types`
   opts it into a concrete one (`notes/readcsv-stringtype.md` records why
   CSV.jl's own `stringtype` default stays out). `lag` shifts times via the

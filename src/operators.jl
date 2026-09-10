@@ -912,6 +912,45 @@ function dropcolumns(selectors...)
 end
 dropcolumns(p::CausalPipeline, selectors...) = dropcolumns(selectors...)(p)
 
+"""
+    reordercolumns(selectors...) -> (CausalPipeline -> CausalPipeline)
+    reordercolumns(p::CausalPipeline, selectors...) -> CausalPipeline
+
+A transform moving the selected columns to the front, in the **selectors'**
+order, and leaving the rest behind them in the input's own column order.
+Selectors take the same forms as for [`selectcolumns`](@ref), except that here
+their order is what the output order follows: nested collections are flattened
+in place, so `reordercolumns([:a, :b])` orders as `reordercolumns(:a, :b)`
+does. A `Regex` or predicate matching several columns contributes them in the
+input's order, and a column matched by more than one selector is placed by the
+first of them.
+
+Naming only some of the columns is the point — the rest keep their relative
+order at the back, so a reorder never has to re-list the whole schema.
+
+`:time` is always first, whatever the selectors say: a `Regex` or predicate
+matching it is ignored, and naming it outright is an `ArgumentError`. Naming a
+column that the data does not have is an `ArgumentError` too; a `Regex` or
+predicate matching nothing is not.
+
+The curried form composes with `|>`; the uncurried form applies directly, so
+`reordercolumns(p, sel)` is equivalent to `p |> reordercolumns(sel)`.
+
+```julia
+p |> reordercolumns(:px, :size)   # time, px, size, then the rest
+p |> reordercolumns(r"^px_")
+```
+"""
+function reordercolumns(selectors...)
+    checkselectors(selectors, "reordercolumns", false)
+    foreachliteral(selectors) do n
+        n == "time" && throw(
+            ArgumentError("reordercolumns: the time column is always first"))
+    end
+    return columnreorder(selectors)
+end
+reordercolumns(p::CausalPipeline, selectors...) = reordercolumns(selectors...)(p)
+
 # Both transforms are the same chunkmap over a per-run resolution cache; they
 # differ only in which side of the match survives.
 function columnprojection(selectors::Tuple, selecting::Bool, opname::String)
@@ -973,6 +1012,72 @@ function keptcolumns(selectors::Tuple, cols::Vector{String}, selecting::Bool,
     return length(keep) == length(cols) ? nothing : keep
 end
 
+# The projections' chunkmap-over-a-resolution-cache shape, differing only in
+# what the resolution computes: a permutation of every column rather than a
+# subset of them.
+function columnreorder(selectors::Tuple)
+    return function (p::CausalPipeline)
+        return CausalPipeline() do ctx::Context
+            ordering = ColumnOrder()
+            return chunkmap(c -> reorderchunk(ordering, selectors, c), p.run(ctx))
+        end
+    end
+end
+
+# The resolved column order, cached against the schema it was resolved from;
+# `order === nothing` means the chunk is already in it and passes through
+# untouched. Per-run mutable state, as in `ColumnSelection`.
+mutable struct ColumnOrder
+    lastnames::Union{Nothing,Vector{String}}
+    order::Union{Nothing,Vector{Symbol}}
+end
+ColumnOrder() = ColumnOrder(nothing, nothing)
+
+function reorderchunk(ordering::ColumnOrder, selectors::Tuple, c::DataFrame)
+    order = resolveorder!(ordering, selectors, c)
+    # The chunk is owned, so the reindex can share its columns.
+    return order === nothing ? c : c[!, order]
+end
+
+# Memoized exactly as `resolvecolumns!` is, and for the same two reasons: the
+# selectors are wasted work on a schema that never moves, and re-resolving when
+# it does keeps the validation per-chunk-strict.
+function resolveorder!(ordering::ColumnOrder, selectors::Tuple, c::DataFrame)
+    cols = names(c)
+    ordering.lastnames == cols && return ordering.order
+    ordering.order = orderedcolumns(selectors, cols)
+    ordering.lastnames = cols
+    return ordering.order
+end
+
+# The column order to impose, or `nothing` when the chunk already has it.
+# `placed` tracks by column position rather than by name: no hashing, and no
+# second pass to subtract the columns the selectors claimed.
+function orderedcolumns(selectors::Tuple, cols::Vector{String})
+    foreachliteral(selectors) do n
+        n in cols || throw(
+            ArgumentError("reordercolumns: no column named $(repr(Symbol(n)))"))
+    end
+    order = Symbol[:time]
+    placed = falses(length(cols))
+    for (i, n) in pairs(cols)
+        n == "time" && (placed[i] = true)
+    end
+    foreachselector(selectors) do s
+        for (i, n) in pairs(cols)
+            placed[i] && continue
+            matchescolumn(s, n) || continue
+            push!(order, Symbol(n))
+            placed[i] = true
+        end
+    end
+    for (i, n) in pairs(cols)
+        placed[i] || push!(order, Symbol(n))
+    end
+    return all(i -> order[i] === Symbol(cols[i]), eachindex(cols)) ? nothing :
+           order
+end
+
 # Numbers and Chars iterate as scalars in Base, so they would recurse forever
 # through the collection fallback below rather than being rejected by it.
 const ScalarSelector = Union{Number,Char}
@@ -1007,6 +1112,22 @@ function foreachliteral(f, selectors)
     checkselector(selectors)
     for s in selectors
         foreachliteral(f, s)
+    end
+    return nothing
+end
+
+# Walk every leaf of a selector spec, in order — unlike `foreachliteral`, which
+# visits only the name leaves. `reordercolumns` orders by the selectors, so it
+# needs the regex and predicate ones too, and needs them in the order written.
+foreachselector(f, s::Symbol) = (f(s); nothing)
+foreachselector(f, s::AbstractString) = (f(s); nothing)
+foreachselector(f, r::Regex) = (f(r); nothing)
+foreachselector(f, g::Function) = (f(g); nothing)
+foreachselector(::Any, x::ScalarSelector) = selectorerror(x)
+function foreachselector(f, selectors)
+    checkselector(selectors)
+    for s in selectors
+        foreachselector(f, s)
     end
     return nothing
 end
