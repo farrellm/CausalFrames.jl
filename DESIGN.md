@@ -126,6 +126,7 @@ Two kinds, both compatible with the chaining operator `|>`:
 | `addcolumns(f)` | transform | `f(row)` returns a `NamedTuple` of new column values for that row; may **not** contain a `time` key (this preserves the time invariant without re-validation) |
 | `selectcolumns(selectors...)` | transform | keep only the matching columns, in the input's own order (see "Column selectors") |
 | `dropcolumns(selectors...)` | transform | keep only the non-matching columns, in the input's own order (see "Column selectors") |
+| `reordercolumns(selectors...)` | transform | move the matching columns to the front, in the selectors' own order, the rest following in the input's order (see "Column selectors") |
 | `summarize(ss; key)` | transform | summarize the whole context into rows at time `stop`; drops input columns |
 | `summarizecycles(ss; key)` | transform | summarize each cycle (maximal run of rows sharing a timestamp) independently; drops input columns |
 | `intervalize(clock, ss; key, closelast)` | transform | summarize over the intervals a clock pipeline defines (`[bₖ, bₖ₊₁)`, timestamped at `bₖ₊₁`); keyless is a regular grid, keyed is sparse (see "Interval summarization") |
@@ -261,7 +262,8 @@ rejects the other, Parquet2-specific options rather than silently dropping them.
 ## Column selectors
 
 `selectcolumns` and `dropcolumns` project a stream onto a subset of its
-columns. Both are variadic, and each selector is one of:
+columns, and `reordercolumns` permutes them. All three are variadic, and each
+selector is one of:
 
 - a column name — a `Symbol` or an `AbstractString`;
 - a `Regex`, matched against the column name with `occursin`;
@@ -269,30 +271,56 @@ columns. Both are variadic, and each selector is one of:
   `Cols(f)` convention, and what makes `startswith("px_")` work directly);
 - recursively, any collection of those.
 
-A column matches when *any* selector matches it; `selectcolumns` keeps the
-matches and `dropcolumns` keeps the rest, both in the **input's own column
-order**, never the selectors'. Selecting nothing is legal (the result is a
-`:time`-only stream); a projection that keeps every column passes its chunks
-through untouched.
+For the two **projections**, a column matches when *any* selector matches it;
+`selectcolumns` keeps the matches and `dropcolumns` keeps the rest, both in the
+**input's own column order**, never the selectors'. Selecting nothing is legal
+(the result is a `:time`-only stream); a projection that keeps every column
+passes its chunks through untouched.
+
+`reordercolumns` is the one operator that reads the selectors as an *order*.
+It moves the matching columns to the front in the **selectors' own order**,
+every unmatched column following in the input's order — so a reorder names only
+the columns it cares about and never has to re-list the schema. Three rules
+follow from ordering by the selectors rather than matching against them:
+
+- nested collections are **flattened in place**, so `reordercolumns([:a, :b])`
+  orders as `reordercolumns(:a, :b)` does. A collection is punctuation, not a
+  group;
+- a `Regex` or predicate contributes every column it matches, among themselves
+  in the input's order — a pattern says which columns, not which order;
+- a column matched by more than one selector is placed by the **first** of
+  them, and appears once.
+
+A reorder that asks for the order the chunk already has passes it through
+untouched, exactly as an all-keeping projection does.
 
 - **`:time` is implicit.** It is always kept, whatever the selectors say, and
   a `Regex` or predicate matching `"time"` is ignored rather than obeyed.
   Naming it outright in `dropcolumns` is an `ArgumentError`, raised eagerly
   at construction — the `addcolumns` rule that a row function may not return
-  a `time` key, from the other direction.
+  a `time` key, from the other direction. `reordercolumns` pins it **first**
+  and rejects naming it the same way: it is the one column whose position is
+  not the caller's to choose, so a request to place it elsewhere would be a
+  lie rather than a no-op.
 - **A named column absent from the data is an `ArgumentError`**, so a typo
   fails rather than silently selecting nothing. A `Regex` or predicate
   matching nothing is not an error. Requesting zero selectors, or a selector
   that is neither a name, a pattern, a predicate, nor a collection, is an
   `ArgumentError` at construction.
 
-The work is per column, not per row: a chunk is projected with `df[!, keep]`,
-which shares the selected column vectors rather than copying them (the chunk
-is owned, as in `addcolumns`). Resolving the selectors is memoized per run
-against the column names it was resolved from, so a stream whose schema never
-moves — the norm — runs the selectors and the validation once, on its first
-chunk, while a schema that does move is re-resolved and re-validated rather
-than projected through a stale column list.
+The work is per column, not per row: a chunk is projected — or permuted — with
+`df[!, keep]`, which shares the column vectors rather than copying them (the
+chunk is owned, as in `addcolumns`). Resolving the selectors is memoized per
+run against the column names it was resolved from, so a stream whose schema
+never moves — the norm — runs the selectors and the validation once, on its
+first chunk, while a schema that does move is re-resolved and re-validated
+rather than projected through a stale column list.
+
+Ordering needs one primitive the projections do not: matching asks only whether
+*any* selector matched, so it can walk the spec in any order and stop early,
+while `reordercolumns` must visit every leaf, in the order written. Hence
+`foreachselector` beside `foreachliteral` — the same recursion, but visiting
+the pattern and predicate leaves rather than skipping them.
 
 ## Truncation
 
@@ -1485,7 +1513,7 @@ the second.
 | `src/frame.jl` | `CausalFrame{T}`, invariants, Tables.jl interface |
 | `src/chunks.jl` | internal chunk-iterator machinery (`ChunkSource`, `chunkmap`) |
 | `src/pipeline.jl` | `CausalPipeline{F}`, `load`, `stream` |
-| `src/operators.jl` | sources (including the n-ary `concatenate`), the CSV sink, row-wise transforms, the causal time shift (`lag`) with the shared `shiftchunk!`, the truncating `head` with its `HeadProducer`, and the causal retiming (`settime`) with the shared `settimechunk!` |
+| `src/operators.jl` | sources (including the n-ary `concatenate`), the CSV sink, row-wise transforms, the causal time shift (`lag`) with the shared `shiftchunk!`, the column projections and `reordercolumns` over one shared selector vocabulary, the truncating `head` with its `HeadProducer`, and the causal retiming (`settime`) with the shared `settimechunk!` |
 | `src/merge.jl` | the n-ary time-interleaving source (`Base.merge`) and its per-pipeline cursors |
 | `src/parquet.jl` | the parquet operators, their docstrings, and backend selection |
 | `ext/CausalFramesDuckDBExt.jl` | the DuckDB backend: the preferred reader, the fallback writer |
@@ -1504,7 +1532,7 @@ the second.
 Exports: `Context`, `CausalFrame`, `CausalPipeline`, `load`, `stream`,
 `scan`, `context`, `timetype`, `emptyframe`, `concatenate`, `clock`, `readcsv`, `writecsv`, `readparquet`,
 `writeparquet`, `filterrows`,
-`addcolumns`, `selectcolumns`, `dropcolumns`, `Summarizer`, `MonoidSummarizer`, `GroupSummarizer`,
+`addcolumns`, `selectcolumns`, `dropcolumns`, `reordercolumns`, `Summarizer`, `MonoidSummarizer`, `GroupSummarizer`,
 `SummarizerState`, `Count`, `CountDistinct`, `Sum`, `SumPower`,
 `Moment`, `Product`, `DotProduct`, `Mean`, `Variance`, `Std`, `Covariance`,
 `Correlation`, `LinearRegression`, `Min`, `Max`, `First`, `Last`, `summarize`,

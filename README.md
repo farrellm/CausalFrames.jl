@@ -49,6 +49,7 @@ frame = load(Context(DateTime(2026, 1, 1), DateTime(2026, 2, 1)), p)
 | `addcolumns(f)` | transform | `f(row)::NamedTuple` of new column values |
 | `selectcolumns(sel...)` | transform | keep the columns matching a name, `Regex`, name predicate, or collection of those (`:time` always kept) |
 | `dropcolumns(sel...)` | transform | drop the columns matching the same selector forms (`:time` never dropped) |
+| `reordercolumns(sel...)` | transform | move the matching columns to the front, in the selectors' order, the rest following in the input's order (`:time` always first) |
 | `summarize(ss; key)` | transform | summarize the whole window into rows at time `stop` |
 | `summarizecycles(ss; key)` | transform | summarize each unique timestamp independently |
 | `intervalize(clock, ss; key, closelast)` | transform | summarize over the intervals `[bₖ, bₖ₊₁)` a `clock` pipeline's times define, each emitted at its end time |

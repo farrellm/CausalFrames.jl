@@ -39,6 +39,7 @@
             ),
         )
         DataFrame(load(ctx, p |> selectcolumns(:sym, r"^q") |> dropcolumns(:sym)))
+        DataFrame(load(ctx, p |> reordercolumns(:v, r"^q")))
         DataFrame(load(ctx, p |> lag(1)))
         DataFrame(load(ctx, p |> head(2)))
         DataFrame(load(ctx, p |> settime(r -> r.time + 1)))

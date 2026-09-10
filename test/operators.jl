@@ -340,6 +340,86 @@ end
     @test nrow(load(ctx, emptyframe() |> selectcolumns(r"x"))) == 0
 end
 
+@testset "reordercolumns" begin
+    ctx = Context(0, 100)
+    src = clock(1) |> addcolumns(
+        r -> (; bid = 1.0 * r.time, ask = 2.0 * r.time, sym = "a"))
+
+    # the matched columns move to the front, the rest follow in input order
+    @test names(load(ctx, src |> reordercolumns(:sym))) ==
+          ["time", "sym", "bid", "ask"]
+
+    # ...and they move in the selectors' order, not the input's — the whole
+    # difference from selectcolumns, which would give ["time", "bid", "ask"]
+    @test names(load(ctx, src |> reordercolumns(:ask, :bid))) ==
+          ["time", "ask", "bid", "sym"]
+
+    # every selector form
+    @test names(load(ctx, src |> reordercolumns("sym"))) ==
+          ["time", "sym", "bid", "ask"]
+    @test names(load(ctx, src |> reordercolumns(r"^s"))) ==
+          ["time", "sym", "bid", "ask"]
+    @test names(load(ctx, src |> reordercolumns(startswith("s")))) ==
+          ["time", "sym", "bid", "ask"]
+
+    # a collection is punctuation, not a group: it flattens in place
+    @test names(load(ctx, src |> reordercolumns([:ask, :bid]))) ==
+          names(load(ctx, src |> reordercolumns(:ask, :bid)))
+    @test names(load(ctx, src |> reordercolumns([[:sym], (r"^a",)]))) ==
+          ["time", "sym", "ask", "bid"]
+
+    # a pattern says which columns, not which order: its matches keep the
+    # input's order among themselves
+    @test names(load(ctx, src |> reordercolumns(r"s"))) ==
+          ["time", "ask", "sym", "bid"]
+
+    # a column matched twice is placed once, by the first selector
+    @test names(load(ctx, src |> reordercolumns(:sym, r"", :bid))) ==
+          ["time", "sym", "bid", "ask"]
+
+    # values ride along untouched
+    df = DataFrame(load(Context(0, 4), src |> reordercolumns(:ask)))
+    @test names(df) == ["time", "ask", "bid", "sym"]
+    @test df.time == 0:3
+    @test df.ask == [0.0, 2.0, 4.0, 6.0]
+    @test df.bid == [0.0, 1.0, 2.0, 3.0]
+
+    # :time is pinned first, and is never matched by a pattern
+    @test names(load(ctx, src |> reordercolumns(r""))) ==
+          ["time", "bid", "ask", "sym"]
+    @test names(load(ctx, src |> reordercolumns(_ -> true))) ==
+          ["time", "bid", "ask", "sym"]
+    @test_throws ArgumentError reordercolumns(:time)          # eager
+    @test_throws ArgumentError reordercolumns([:bid, "time"])  # eager, nested
+
+    # naming a column the data does not have
+    @test_throws ArgumentError load(ctx, src |> reordercolumns(:nope))
+
+    # at least one selector is required, in either form
+    @test_throws ArgumentError reordercolumns()
+    @test_throws ArgumentError reordercolumns(src)
+
+    # an unusable selector
+    @test_throws ArgumentError load(ctx, src |> reordercolumns(1.5))
+
+    # a reorder into the order already held passes the chunk through unchanged
+    @test DataFrame(load(ctx, src |> reordercolumns(:bid, :ask, :sym))) ==
+          DataFrame(load(ctx, src))
+    @test DataFrame(load(ctx, src |> reordercolumns(r"zzz"))) ==
+          DataFrame(load(ctx, src))
+
+    # the uncurried, pipeline-first form is equivalent to the |> chain
+    @test DataFrame(load(ctx, reordercolumns(src, :sym, :ask))) ==
+          DataFrame(load(ctx, src |> reordercolumns(:sym, :ask)))
+
+    # a no-op on an empty frame
+    @test nrow(load(ctx, emptyframe() |> reordercolumns(r"x"))) == 0
+
+    # it composes with the projections
+    @test names(load(ctx, src |> dropcolumns(:bid) |> reordercolumns(:sym))) ==
+          ["time", "sym", "ask"]
+end
+
 @testset "selectcolumns over several chunks" begin
     path = joinpath(mktempdir(), "long.csv")
     open(path, "w") do io
@@ -360,6 +440,31 @@ end
     df = DataFrame(load(ctx, p))
     @test names(df) == ["time", "y"]
     @test df.y == 3 .* (1:50)
+    @test DataFrame(load(ctx, p)) == df
+    @test reduce(vcat, DataFrame.(stream(ctx, p))) == df
+end
+
+@testset "reordercolumns over several chunks" begin
+    path = joinpath(mktempdir(), "long.csv")
+    open(path, "w") do io
+        println(io, "time,x,y")
+        for t in 1:50
+            println(io, "$t,$(2t),$(3t)")
+        end
+    end
+    types = Dict(:time => Int, :x => Int, :y => Int)
+    ctx = Context(0, 100)
+
+    chunked = readcsv(path; types = types, chunkbytes = 64)
+    @test length(collect(stream(ctx, chunked))) > 1
+
+    # the resolved order is cached per run, so it must hold across chunk
+    # boundaries and be rebuilt for the next run of the same pipeline
+    p = chunked |> reordercolumns(:y)
+    df = DataFrame(load(ctx, p))
+    @test names(df) == ["time", "y", "x"]
+    @test df.y == 3 .* (1:50)
+    @test df.x == 2 .* (1:50)
     @test DataFrame(load(ctx, p)) == df
     @test reduce(vcat, DataFrame.(stream(ctx, p))) == df
 end

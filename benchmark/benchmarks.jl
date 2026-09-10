@@ -107,6 +107,8 @@ SUITE["rowwise"]["selectcolumns"] =
     @benchmarkable load(CTX, SRC |> selectcolumns(:qty))
 SUITE["rowwise"]["dropcolumns"] =
     @benchmarkable load(CTX, SRC |> dropcolumns(startswith("s")))
+SUITE["rowwise"]["reordercolumns"] =
+    @benchmarkable load(CTX, SRC |> reordercolumns(:qty))
 SUITE["rowwise"]["pipeline"] = @benchmarkable load(
     CTX,
     clock(1) |>

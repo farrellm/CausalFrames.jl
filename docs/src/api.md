@@ -44,6 +44,7 @@ filterrows
 addcolumns
 selectcolumns
 dropcolumns
+reordercolumns
 ```
 
 ## Filling
