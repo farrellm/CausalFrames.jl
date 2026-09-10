@@ -466,6 +466,9 @@ running summary is kept per unique key value. State runs over the whole
 window, carried across chunk boundaries. The output columns may not collide
 with existing columns.
 
+A keyed `Count()` is therefore a per-key row number; see the manual's Recipes
+page for when that amounts to an arbitrary `ORDER BY`.
+
 The curried form composes with `|>`; the uncurried form applies directly, so
 `addsummarycolumns(p, ss; key)` is equivalent to
 `p |> addsummarycolumns(ss; key)`.

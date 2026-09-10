@@ -36,6 +36,10 @@ in particular a self join (`p |> asofjoin(p)`) needs a prefix. A right
 stream producing no chunks passes left chunks through unchanged (no right
 columns, no `righttime`), except for the `leftprefix` rename.
 
+A right pipeline whose rows all share one time is a plain keyed lookup; see the
+manual's Recipes page, which also covers the way that fails when the time falls
+outside the window.
+
 The curried form composes with `|>`; the uncurried form applies directly, so
 `asofjoin(left, right; ...)` is equivalent to `left |> asofjoin(right; ...)`.
 """

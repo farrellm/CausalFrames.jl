@@ -203,4 +203,8 @@ buffers right rows per key until a left row consumes or outruns them, and
 proving that a key has no future match drains the right stream. Worst-case
 memory is therefore O(right rows), against `asofjoin`'s O(keys).
 
+The [Recipes](https://farrellm.github.io/CausalFrames.jl/dev/recipes/) page
+collects the patterns that are not obvious from the operator list: ranking
+within a group, joining a reference table, and using a derived stream as one.
+
 See [DESIGN.md](DESIGN.md) for the full design.
