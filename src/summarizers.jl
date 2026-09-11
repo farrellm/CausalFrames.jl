@@ -1198,8 +1198,10 @@ function LinearRegression(predictors, response::Symbol;
         "LinearRegression output columns are not distinct: $outs"))
     return LinearRegression{ps,response}(intercept, name)
 end
-LinearRegression(predictor::Symbol, response::Symbol; kwargs...) =
-    LinearRegression((predictor,), response; kwargs...)
+# A lone name. A string is one name too, never iterated as a collection of
+# one-character names.
+LinearRegression(predictor::Union{Symbol,AbstractString}, response::Symbol;
+    kwargs...) = LinearRegression((Symbol(predictor),), response; kwargs...)
 
 # Fieldless like every other derived state, and every name it reads back is a
 # type parameter so the two-argument `value` infers: NN and SN are the output

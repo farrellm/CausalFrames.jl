@@ -508,6 +508,8 @@ end
     @test outnames(LinearRegression(:x, :y)) ===
           (:n, :r2, :stderr, :intercept_beta, :intercept_tstat,
         :x_beta, :x_tstat)
+    # a string is one predictor name, not one name per character
+    @test LinearRegression("price", :y) isa LinearRegression{(:price,),:y}
     # the predictor block follows the argument order, not sorted order
     @test outnames(LinearRegression([:z, :x], :y)) ===
           (:n, :r2, :stderr, :intercept_beta, :intercept_tstat,
