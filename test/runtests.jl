@@ -29,6 +29,7 @@ include("fixtures.jl")
     include("segtree.jl")
     include("rolling.jl")
     include("intervalize.jl")
+    include("windows.jl")
     include("summarize.jl")
     include("summarizers.jl")
 

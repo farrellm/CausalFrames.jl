@@ -132,6 +132,7 @@ Two kinds, both compatible with the chaining operator `|>`:
 | `summarize(ss; key)` | transform | summarize the whole context into rows at time `stop`; drops input columns |
 | `summarizecycles(ss; key)` | transform | summarize each cycle (maximal run of rows sharing a timestamp) independently; drops input columns |
 | `intervalize(clock, ss; key, closelast)` | transform | summarize over the intervals a clock pipeline defines (`[bₖ, bₖ₊₁)`, timestamped at `bₖ₊₁`); keyless is a regular grid, keyed is sparse (see "Interval summarization") |
+| `summarizewindows(clock, lookback, ss; key)` | transform | at each tick `τ` of a clock pipeline, summarize the trailing window `[τ - lookback, τ)` at `τ`; keyless is a regular grid, keyed is sparse plus one empty row when a key's window empties (see "Window summarization") |
 | `addsummarycolumns(ss; key)` | transform | keep input columns, append the running summary value after each row |
 | `addrollingcolumns(windows, ss; key, from)` | transform | keep input columns, append each summarizer's value over each named trailing window, prefixed `"{window}_"` (see "Rolling windows") |
 | `asofjoin(right; key, tolerance, strict, leftprefix, rightprefix, righttime)` | transform | left as-of join: append the most recent right row with time `<= time` (`strict`: `<`), per key; `missing` where none qualifies (see "As-of join") |
@@ -901,6 +902,83 @@ reused whole (schema promotion, state building and widening — a widening
 carries the open interval's accumulated state, exactly as `summarizecycles`
 does across a cycle boundary).
 
+## Window summarization
+
+`summarizewindows(clock, lookback, ss; key)` separates *when* a summary is
+taken from *what* it covers: a clock pipeline supplies the ticks, and at each
+tick `τ` the rows in the trailing window `[τ - lookback, τ)` are summarized and
+emitted at `τ`, dropping the input columns. It sits between two neighbours.
+`intervalize` samples at ticks but covers only the gap since the previous tick;
+a look-back equal to a regular clock's spacing reproduces it at every tick
+after the first. `addrollingcolumns` covers a trailing window but emits a row
+per row of the stream it augments, and its keys must be present on both sides,
+which a bare clock cannot supply. Per-key windows sampled at clock ticks were
+the gap — fitting a model per key at every tick is the motivating case (see
+"Model fitting (MLJ)").
+
+- **Windows** are half-open: they include `τ - lookback` and exclude `τ`
+  itself. That is `intervalize`'s convention, and it is what makes a summary
+  emitted at `τ` fold only rows strictly before it. (`addrollingcolumns`'
+  windows include their own row's time instead, because there the row *is* the
+  observation being annotated.) The input runs over `[start - lookback, stop)`,
+  so the first tick already sees a full window — the `rollingcontext` widening,
+  with the same generic non-negativity check — and the clock over
+  `[start, stop)`.
+- **Keyless is a regular grid.** Every tick emits one row; an empty window
+  emits the summarizers' empty values, so element types widen through the
+  shared `promotedvaluetype`. No data at all still emits the whole grid, typed
+  from the configs.
+- **Keyed is sparse, with a vanish row.** Each tick emits one row per key with
+  rows in its window, sorted by key, plus one row of empty values for every key
+  that had rows at the previous tick and has none now. The key is then
+  forgotten until it returns. Pure sparsity (`intervalize`'s rule) would leave
+  a consumer that tracks the latest row per key — an `asofjoin`, or
+  `applymodels` — holding that key's last summary forever. The vanish row is
+  the one extra row that lets it see the summary go empty, without the
+  ticks × keys cost of emitting every key ever seen at every tick. "Present at
+  the previous tick" is decided from what was *emitted*, not from what was
+  admitted, so a key whose rows arrive and age out between two ticks (a
+  look-back shorter than the spacing) emits nothing at all.
+
+The mechanism is `intervalize`'s driver over `addrollingcolumns`' bookkeeping.
+A `chunkmap` over the data stream pulls ticks on demand through
+`intervalize.jl`'s `IntervalCursor`. Before each chunk it fills a concrete
+`Vector{T}` of pending ticks up to just past the chunk's last time, so the
+per-row kernel never touches the clock. For each row at time `s`, every pending
+tick `τ ≤ s` is closed first — the row belongs to no window of a tick at or
+before it — and then the row is admitted into a buffer of concretely typed
+rows (`storerowtype`, `rowat`) with an eviction head. Closing `τ` advances the
+head past the rows with `τ - time > lookback`. Flush drains the clock and
+closes the remaining ticks against the buffer as it stands.
+
+There are two window algorithms. As in `addrollingcolumns`, the choice is made
+from the expanded prototype tuple and re-derived whenever the states are built
+or widened:
+
+- **Running**, for an all-`GroupSummarizer` set whose realized states are all
+  `isinvertible`. Per-key `RunningGroup`s live in a `Dict` (keyless is the key
+  `(;)`, the `rolling.jl` precedent); they are `update!`ed on admission and
+  `downdate!`ed on eviction, and a group is deleted with its last row, so
+  presence means rows in the window. Cost: O(1) amortized per row, plus a key
+  sort per tick into a reused scratch vector.
+- **Re-fold** otherwise. At each tick the live rows are folded into per-key
+  states drawn from a `GroupTable`'s pool, emitted, and retired back —
+  `closecycle!`'s protocol — at O(window) per tick. This is the path `FitModel`
+  takes, and the differential-test oracle for the running one.
+
+There is no tree mode. `addrollingcolumns` queries a window per *row*, which is
+where a segment tree's O(log n) pays; here a window is queried per *tick*,
+typically far more rarely, so the monoid-only sets that would use a tree
+re-fold for now. A widening that defeats `isinvertible` demotes running to
+re-fold mid-stream; the buffer is common to both modes, so demotion rebuilds
+nothing. A widening that stays running replays the live rows into fresh groups
+(`replaygroups!`).
+
+`summarizewindows` is **causal**: a row emitted at `τ` folds only rows with time
+`< τ`. It is **stateful** in the usual sense, so streaming equals loading,
+while split contexts do not compose: ticks realign to each context's start,
+and the vanish rule depends on the previous tick.
+
 ## Last row
 
 `lastrow(; key)` folds the whole window the way `summarize` does — one pass per
@@ -1530,7 +1608,10 @@ across augmented chunk boundaries. `head` and `lastrow` join that list:
 [Truncation](#truncation)), and `lastrow`'s per-key store does, emitting once
 at `stop` exactly as `summarize` does (see [Last row](#last-row)). So does
 `forwardfill`, whose carried value per key and column spans the window (see
-[Filling](#filling)); `fillmissing`, having no state at all, does not.
+[Filling](#filling)); `fillmissing`, having no state at all, does not. So does
+`summarizewindows`, whose buffer of live rows, pending ticks and previous
+tick's keys all span the window (see
+[Window summarization](#window-summarization)).
 Consequently concatenating the frames
 of `stream(ctx, p)` always equals `load(ctx, p)`, even for stateful
 operators — but the chunk-concatenation property over *split contexts*
@@ -1565,6 +1646,7 @@ the second.
 | `src/segtree.jl` | the monoid segment tree behind the rolling tree mode |
 | `src/rolling.jl` | the rolling-window summarization transform (`addrollingcolumns`) |
 | `src/intervalize.jl` | the interval-summarization transform (`intervalize`) |
+| `src/windows.jl` | the clock-sampled trailing-window summarization transform (`summarizewindows`) |
 | `src/acausal.jl` | the `Acausal` submodule: the forward join (`futurejoin`), the acausal time shift (`lead`), and the permissive retiming (`settime`, not exported even from the submodule) |
 | `src/precompile.jl` | PrecompileTools workload covering the main pipeline paths |
 
@@ -1575,7 +1657,8 @@ Exports: `Context`, `CausalFrame`, `CausalPipeline`, `load`, `stream`,
 `SummarizerState`, `Count`, `CountDistinct`, `Sum`, `SumPower`,
 `Moment`, `Product`, `DotProduct`, `Mean`, `Variance`, `Std`, `Covariance`,
 `Correlation`, `LinearRegression`, `Min`, `Max`, `First`, `Last`, `summarize`,
-`summarizecycles`, `intervalize`, `addsummarycolumns`, `addrollingcolumns`,
+`summarizecycles`, `intervalize`, `summarizewindows`, `addsummarycolumns`,
+`addrollingcolumns`,
 `asofjoin`, `lag`, `settime`, `head`, `lastrow`, `forwardfill`, `fillmissing`.
 
 `merge` is not in that list either: it is `Base.merge`, extended for

@@ -122,6 +122,7 @@ CausalFrames.Acausal.settime
 summarize
 summarizecycles
 intervalize
+summarizewindows
 addsummarycolumns
 addrollingcolumns
 Count

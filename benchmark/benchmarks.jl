@@ -177,6 +177,19 @@ SUITE["intervalize"]["keyed"] = @benchmarkable load(CTX,
 SUITE["intervalize"]["closelast"] = @benchmarkable load(CTX,
     SRC |> intervalize(clock(1000), [Count(), Sum(:qty)]; closelast = true))
 
+# The same ~1000 ticks, each now summarizing a trailing 5000 time units (about
+# 20,000 rows, five tick spacings, so windows overlap five-fold). The running
+# mode slides per-key states once per row; the re-fold mode (Min/Max are
+# monoids only) folds every window at its tick, paying the overlap.
+SUITE["windows"] = BenchmarkGroup()
+SUITE["windows"]["running"] = @benchmarkable load(CTX,
+    SRC |> summarizewindows(clock(1000), 5000, [Count(), Sum(:qty), Mean(:qty)]))
+SUITE["windows"]["running-keyed"] = @benchmarkable load(CTX,
+    SRC |> summarizewindows(clock(1000), 5000, [Count(), Sum(:qty)];
+        key = :sym))
+SUITE["windows"]["refold"] = @benchmarkable load(CTX,
+    SRC |> summarizewindows(clock(1000), 5000, [Min(:qty), Max(:qty)]))
+
 # One group per window algorithm: all-group summarizers slide running
 # states, all-monoid sets fold from a segment tree, and an unstructured
 # summarizer forces the re-fold baseline (see src/rolling.jl).

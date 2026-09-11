@@ -55,6 +55,7 @@ frame = load(Context(DateTime(2026, 1, 1), DateTime(2026, 2, 1)), p)
 | `summarize(ss; key)` | transform | summarize the whole window into rows at time `stop` |
 | `summarizecycles(ss; key)` | transform | summarize each unique timestamp independently |
 | `intervalize(clock, ss; key, closelast)` | transform | summarize over the intervals `[bₖ, bₖ₊₁)` a `clock` pipeline's times define, each emitted at its end time |
+| `summarizewindows(clock, lookback, ss; key)` | transform | at each tick `τ` of a `clock` pipeline, summarize the trailing window `[τ - lookback, τ)`; one row per tick, or per key with rows in its window (plus one empty row when a key's window empties) |
 | `addsummarycolumns(ss; key)` | transform | append running summary values after each row |
 | `addrollingcolumns(windows, ss; key, from)` | transform | append summaries over named trailing windows, columns prefixed `{window}_` |
 | `asofjoin(right; key, tolerance, ...)` | transform | append the most recent right-pipeline row at or before each row's time |

@@ -192,6 +192,15 @@ design rationale and performance constraints behind each module.
   pulls clock boundaries into a concrete `Vector{T}` per chunk (the pull is the
   only dynamism; the per-row kernel stays dispatch-free), reusing `SummaryFold`
   whole; `closelast` closes the trailing partial at `stop`
+- `src/windows.jl` — `summarizewindows`, the clock-sampled trailing window
+  (`[τ - lookback, τ)` at each tick): `intervalize`'s driver (`IntervalCursor`,
+  a concrete tick vector per chunk) over `addrollingcolumns`' row buffer and
+  eviction head. Running mode (`RunningGroup`s, update!/downdate!) for
+  invertible group sets, re-fold through a `GroupTable` pool otherwise — no
+  tree mode, since windows are queried per tick rather than per row. Keyed
+  output is sparse plus one *vanish* row of empty values when a key's window
+  empties, decided against the previous tick's *emitted* keys; that row is what
+  stops a per-key as-of consumer (`applymodels`) from using a stale summary
 - `src/acausal.jl` — the `Acausal` submodule (`futurejoin`, `lead`, `settime`),
   reached only through `using CausalFrames.Acausal` and never re-exported, so
   acausality is always an explicit opt-in. `settime` goes further and is not in

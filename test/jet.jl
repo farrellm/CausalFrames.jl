@@ -178,6 +178,32 @@ end
     JET.@test_opt CausalFrames.lastsegment!(index, slots, nt, Val((:sym,)))
 end
 
+@testset "summarizewindows kernels" begin
+    # both window algorithms, keyed (with the vanish-row merge) and keyless
+    # (the grid over the empty key), over a String key so the key is non-isbits
+    protos, requested = CausalFrames.prototypes(
+        CausalFrames.tosummarizers([Count(), Sum(:x), Mean(:x)]), [:k])
+    outs = Val(requested)
+    types = (time = Int, k = String, x = Float64)
+    states = CausalFrames.newstates(protos, types)
+    S = typeof(states)
+    R = CausalFrames.storerowtype(types)
+    V = CausalFrames.promotedvaluetype(S, protos, outs)
+    emptyrow = convert(V, CausalFrames.emptyvalues(protos, outs))
+    nt = (time = [1, 3, 6], k = ["a", "b", "a"], x = [1.0, 2.0, 3.0])
+    ticks = [0, 5, 10]
+    for (kn, grid) in ((Val((:k,)), Val(false)), (Val(()), Val(true)))
+        K = CausalFrames.storekeytype(types, kn)
+        RT = CausalFrames.windowrowtype(Int, K, V)
+        G = CausalFrames.RunningGroup{S}
+        JET.@test_opt CausalFrames.windowrunning!(RT[], R[], 1, nt, ticks,
+            Dict{K,G}(), states, Pair{K,G}[], K[], 5, kn, outs, emptyrow, grid)
+        JET.@test_opt CausalFrames.windowrefold!(RT[], R[], 1, nt, ticks,
+            CausalFrames.GroupTable{K,S}(), states, K[], 5, kn, outs, emptyrow,
+            grid)
+    end
+end
+
 @testset "forwardfill kernels" begin
     # the same non-isbits carried value the mutable cells exist for
     C = CausalFrames.FillCell{String,Int}
