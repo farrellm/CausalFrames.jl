@@ -42,20 +42,25 @@ explicitly *not* design law.
 ## Adding an operator or summarizer
 
 A new source or transform touches, in the same commit: `src/CausalFrames.jl`
-(include + export), `docs/src/api.md` (register the docstring or the docs job
-fails), `DESIGN.md` (module table, export list, semantics), `src/precompile.jl`
-(a workload path — the parquet and MLJ operators are the only exceptions, see
-`ext/CLAUDE.md`), `test/runtests.jl` (include the new test file), and
-`README.md`'s operator table. Nothing enforces that last row — no test, no CI
-job — so it is the one that silently drifts; check it before you call the
-commit done.
+(include + export), its category page under `docs/src/api/` (its own
+`` ## `name` `` header plus a `@docs` block — an unregistered docstring fails
+the docs job), a link in `docs/src/api/index.md`, `DESIGN.md` (module table,
+export list, semantics), `src/precompile.jl` (a workload path — the parquet and
+MLJ operators are the only exceptions, see `ext/CLAUDE.md`), `test/runtests.jl`
+(include the new test file), and the matching `README.md` operator table, the
+name linking to that header.
 
 A new summarizer instead touches `src/summarizers.jl` (the type, its state, and
 which structured subtype it claims — a performance decision, not a taxonomy
-one), `docs/src/api.md`, `DESIGN.md`'s "Summarizers" section and export list,
-`test/summarizers.jl`, and `README.md`'s summarizer paragraph. That paragraph is
-prose rather than a table, so it drifts even more quietly than the operator
-table — check that every exported summarizer still appears there.
+one), `docs/src/api/summarizers.md` (again its own header),
+`docs/src/api/index.md`, `DESIGN.md`'s "Summarizers" section and export list,
+`test/summarizers.jl`, and `README.md`'s summarizer table.
+
+The `## `name`` header, the overview link and the README link are checked by
+`checkapilinks` in `docs/make.jl`: a missing one, or a README link naming the
+wrong API page, fails the docs build. That is the only thing holding the README
+tables in sync, so keep the convention — one code-span `##` header per operator
+or summarizer, prose headers for everything else.
 
 ## Invariants and conventions
 
