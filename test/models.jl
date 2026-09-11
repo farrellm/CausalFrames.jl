@@ -38,6 +38,14 @@ MMI.fit(::ToyMean, verbosity::Int, X, y) =
 MMI.predict(::ToyMean, μ, Xnew) = fill((mean = μ, spread = 1.0), tablerows(Xnew))
 MMI.predict_mean(::ToyMean, μ, Xnew) = fill(μ, tablerows(Xnew))
 
+# A model with nothing to report, as many real ones are: its fit report is an
+# empty NamedTuple, which MLJ's report normalization — and so `report(mach)` —
+# turns into `nothing`.
+mutable struct Quiet <: MMI.Deterministic end
+MMI.fit(::Quiet, verbosity::Int, X, y) =
+    (sum(y) / length(y), nothing, NamedTuple())
+MMI.predict(::Quiet, μ, Xnew) = fill(μ, tablerows(Xnew))
+
 # A fitresult standing in for a foreign resource: `save` swaps the handle for a
 # plain number and `restore` rebuilds it, so a round trip skipping either would
 # hand predict a Float64 where it needs a Handle. The counters prove both ran.
@@ -374,6 +382,16 @@ end
         DataFrame(load(ctx, fits |> modelreports())))
     @test isequal(reduce(vcat, DataFrame.(stream(ctx, fits |> modelreports()))),
         DataFrame(load(ctx, fits |> modelreports())))
+
+    # a model with nothing to report gives `nothing`, exactly as `report(mach)`
+    # does — not the empty NamedTuple its fit returned
+    qreps = DataFrame(
+        load(ctx,
+            data |> summarizewindows(clock(10), 10, FitModel(Quiet(), :x, :y)) |>
+            modelreports()),
+    ).report
+    @test count(!ismissing, qreps) > 0
+    @test all(isnothing, skipmissing(qreps))
 
     @test_throws ArgumentError modelreports(; column = :time)
     @test_throws ArgumentError modelreports(; name = :time)

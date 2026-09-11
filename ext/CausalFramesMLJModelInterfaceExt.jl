@@ -11,9 +11,13 @@ using MLJModelInterface: MLJModelInterface as MMI
 
 CausalFrames.ismodel(::MMI.Model) = true
 
+# The report is normalized exactly as MLJBase's `report(mach)` normalizes a
+# freshly fit machine's — `MMI.report` over the fit report alone — so
+# `modelreports` and `report(mach)` agree: an empty report becomes `nothing`,
+# and a model overloading `report` is honoured.
 function CausalFrames.fitmodel(model::MMI.Model, verbosity::Int, X, y)
     fitresult, _, report = MMI.fit(model, verbosity, MMI.reformat(model, X, y)...)
-    return fitresult, report
+    return fitresult, MMI.report(model, Dict{Symbol,Any}(:fit => report))
 end
 
 # The operation is validated against CausalFrames.PREDICTOPS at construction;

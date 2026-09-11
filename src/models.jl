@@ -264,8 +264,8 @@ addpredictions(p::CausalPipeline, clk::CausalPipeline, lookback, model,
 
 A row-wise transform over a pipeline of models, replacing its `column` of
 [`FittedModel`](@ref)s with a column `name` holding each model's fit report —
-the diagnostics MLJ's `fit` returned alongside the fitresult, which MLJ's
-`report(mach)` gives for a machine. A `missing` cell stays `missing`. The time
+exactly what MLJ's `report(mach)` returns for a machine just after `fit!`, so a
+model with nothing to report gives `nothing`. A `missing` cell stays `missing`. The time
 column, keys and every other column pass through, so the result is a pipeline
 of diagnostics per tick (and key).
 

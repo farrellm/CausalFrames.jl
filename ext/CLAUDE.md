@@ -102,7 +102,11 @@ it, so loading any model loads the extension.
   - `ismodel` → `true`. `FitModel`'s constructor consults it eagerly, and uses
     `Base.get_extension` to tell "extension not loaded" from "not a model"
   - `fitmodel` → `(fitresult, report)`, from `MMI.fit` over
-    `MMI.reformat(model, X, y)...`. The report is kept, for `modelreports`
+    `MMI.reformat(model, X, y)...`. The report is passed through
+    `MMI.report(model, Dict(:fit => report))`, which is exactly how MLJBase's
+    `report(mach)` builds a freshly fit machine's; that is what makes
+    `modelreports` agree with `report(mach)` (the raw fit report does not: an
+    empty one is `NamedTuple()` there, `nothing` in `report(mach)`)
   - `predictmodel` → the operation (mapped from its symbol by `predictop`)
     over `MMI.reformat(model, X)...`
   - `savefitresult`/`restorefitresult` → `MMI.save`/`MMI.restore`, but only

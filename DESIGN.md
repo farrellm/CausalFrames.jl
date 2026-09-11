@@ -1061,9 +1061,14 @@ looking ahead (`Acausal.lead`) makes the whole construction look ahead, and is
 the caller's explicit opt-in. The pipeline runs twice, once to fit and once to
 predict, as a self-join does.
 
-**`modelreports`** replaces the model column with each fit's report — the third
-value `MMI.fit` returns, which MLJ's `report(mach)` gives for a machine. It is
-row-wise and stateless, and a `missing` cell stays `missing`. The report stays
+**`modelreports`** replaces the model column with each fit's report. It is the
+third value `MMI.fit` returns, normalized as MLJBase's `report(mach)`
+normalizes a freshly fit machine's — `MLJModelInterface.report` over the fit
+report alone, which lives in MLJModelInterface itself — so the two agree
+exactly: an empty report becomes `nothing`, and a model overloading `report` is
+honoured. (A machine's report also merges the reports of operations run since,
+which a fit-time table cannot hold.) It is row-wise and stateless, and a
+`missing` cell stays `missing`. The report stays
 one column. Splatting its fields into columns was rejected: a chunk's column
 names must be fixed before its rows go out, and the fields are unknown until a
 model has been fit, so a keyless stream opening on empty windows would have
