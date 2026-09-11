@@ -105,6 +105,12 @@ time,sym,qty
     @test df.count == [3, 1]
     @test df.qty_sum == [80, 20]
 
+    # a string key is one column name, not one name per character
+    @test DataFrame(
+        load(Context(0, 9),
+            readcsv(path; types = tt) |> summarize([Count(), Sum(:qty)]; key = "sym")),
+    ) == df
+
     # multi-column key
     df = DataFrame(
         load(Context(0, 9),
