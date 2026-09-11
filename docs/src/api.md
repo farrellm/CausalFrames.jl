@@ -28,6 +28,7 @@ Base.merge(::CausalPipeline, ::CausalPipeline...)
 clock
 readcsv
 readparquet
+readjls
 ```
 
 ## Sinks
@@ -35,6 +36,7 @@ readparquet
 ```@docs
 writecsv
 writeparquet
+writejls
 ```
 
 ## Row-wise transforms

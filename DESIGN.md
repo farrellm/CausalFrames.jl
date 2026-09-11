@@ -122,6 +122,8 @@ Two kinds, both compatible with the chaining operator `|>`:
 | `writecsv(path; queue, ...)` | transform | transparent pass-through sink: writes each chunk to `path` as it flows by and yields it downstream unchanged (see "CSV output") |
 | `readparquet(path; time, rename, backend)` | source | parquet file, read through DuckDB or Parquet2 (either backend suffices; DuckDB preferred); column types come from the file itself; the time column (named `:time`, or chosen by `time` as a column name or a per-row function) must be sorted; `rename` maps column names first; rows clipped to `[start, stop)`; read one chunk at a time — a DuckDB result chunk, or a Parquet2 row group — with the window used to skip what cannot be in it (see "Parquet I/O") |
 | `writeparquet(path; queue, rowgroupsize, backend, ...)` | transform | transparent pass-through sink through Parquet2 or DuckDB (either suffices; Parquet2 preferred): buffers chunks until `rowgroupsize` rows are pending and writes them as one row group, yielding every chunk downstream unchanged; the file is valid only once finalized (see "Parquet I/O") |
+| `readjls(path)` | source | a file written by `writejls`, one chunk per record; rows clipped to `[start, stop)`; read a record at a time, stopping as soon as a time `>= stop` is seen (see "JLS I/O") |
+| `writejls(path; queue)` | transform | transparent pass-through sink through the `Serialization` stdlib: serializes each chunk as it flows by, so columns of any Julia type round-trip (see "JLS I/O") |
 | `filterrows(pred)` | transform | keep rows where `pred(row)` is `true` |
 | `addcolumns(f)` | transform | `f(row)` returns a `NamedTuple` of new column values for that row; may **not** contain a `time` key (this preserves the time invariant without re-validation) |
 | `selectcolumns(selectors...)` | transform | keep only the matching columns, in the input's own order (see "Column selectors") |
@@ -258,6 +260,42 @@ file. Keyword arguments pass through to `Parquet2.FileWriter`, where
 statistics the readers skip by; the DuckDB sink understands `compression_codec`
 (mapped onto `COPY`'s `COMPRESSION`, and it records statistics of its own) and
 rejects the other, Parquet2-specific options rather than silently dropping them.
+
+## JLS I/O
+
+`writejls` and `readjls` persist a stream through Julia's `Serialization`
+stdlib. They exist because the other two formats are *typed*: CSV writes a
+value's printed form and parquet encodes only its own column types, so a column
+holding arbitrary Julia values — a fitted model, a `NamedTuple` — has no round
+trip through either. A JLS file stores whatever the chunks hold. `Serialization`
+is a stdlib already in the sysimage, so this costs no dependency weight.
+
+The format is a header record `(format = :CausalFramesJLS, version = 1)`
+followed by one serialized `DataFrame` per chunk. Each record is its own
+`serialize` call, so records carry no back-references to one another and the
+reader can `deserialize` them one at a time. The header is a `NamedTuple` of
+isbits values, which serializes identically across Julia versions, so a foreign
+file or a future format version is reported as such rather than as an opaque
+deserialization failure.
+
+The sink is the shared `ChunkSink` whole — background task, bounded queue,
+first-chunk column check, the `copycols = false` hand-off — with a write loop
+that serializes and flushes each chunk. Like `writecsv`, and unlike the parquet
+sinks, it therefore has a usable prefix mid-run; a stream with no rows leaves a
+header-only file, which reads back as an empty stream. The source is a
+`CSVProducer`-shaped `JLSProducer` that deserializes one record per pull and
+hands it to the shared `clipchunk!` (no `time` or `rename` — the file was
+written from a stream, so its `:time` is already resolved), stopping at the
+first time `>= stop`. There is no index to seek by, so a read costs the file's
+prefix up to `stop`, as CSV's does.
+
+Three caveats, all of them `Serialization`'s: a file is readable only by a
+compatible Julia and compatible versions of the packages whose types it holds;
+deserialization can construct arbitrary types, so a file must be trusted; and
+an interrupted run leaves every complete record readable while its torn last
+record is reported as an `ArgumentError` rather than a bare `EOFError`. JLS is a
+persistence format for a pipeline's own outputs, not an interchange format —
+`writecsv` and `writeparquet` remain that.
 
 ## Column selectors
 
@@ -1518,6 +1556,7 @@ the second.
 | `src/parquet.jl` | the parquet operators, their docstrings, and backend selection |
 | `ext/CausalFramesDuckDBExt.jl` | the DuckDB backend: the preferred reader, the fallback writer |
 | `ext/CausalFramesParquet2Ext.jl` | the Parquet2 backend: the preferred writer, the fallback reader |
+| `src/jls.jl` | the `Serialization`-backed persistence pair (`writejls`, `readjls`) |
 | `src/summarizers.jl` | `Summarizer`/`SummarizerState` interface and the concrete summarizers |
 | `src/summarize.jl` | folding kernels and the summarization transforms |
 | `src/join.jl` | the as-of join transform (`asofjoin`) |
@@ -1531,7 +1570,7 @@ the second.
 
 Exports: `Context`, `CausalFrame`, `CausalPipeline`, `load`, `stream`,
 `scan`, `context`, `timetype`, `emptyframe`, `concatenate`, `clock`, `readcsv`, `writecsv`, `readparquet`,
-`writeparquet`, `filterrows`,
+`writeparquet`, `readjls`, `writejls`, `filterrows`,
 `addcolumns`, `selectcolumns`, `dropcolumns`, `reordercolumns`, `Summarizer`, `MonoidSummarizer`, `GroupSummarizer`,
 `SummarizerState`, `Count`, `CountDistinct`, `Sum`, `SumPower`,
 `Moment`, `Product`, `DotProduct`, `Mean`, `Variance`, `Std`, `Covariance`,
@@ -1549,9 +1588,9 @@ through `using CausalFrames.Acausal`, so acausality is always an explicit
 opt-in. The submodule's `settime` is not exported from the submodule either, so
 that `using CausalFrames.Acausal` cannot shadow the causal one.
 
-Dependencies: DataFrames, CSV, Tables, LinearAlgebra, PrecompileTools; weak
-dependencies DuckDB and Parquet2, each behind a package extension
-(see "Parquet I/O").
+Dependencies: DataFrames, CSV, Tables, LinearAlgebra, PrecompileTools, and the
+`Serialization` stdlib (see "JLS I/O"); weak dependencies DuckDB and Parquet2,
+each behind a package extension (see "Parquet I/O").
 
 Package infrastructure: `test/` runs the unit tests plus an Aqua.jl quality
 testset; `benchmark/benchmarks.jl` is a PkgBenchmark-compatible suite over

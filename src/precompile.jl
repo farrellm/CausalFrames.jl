@@ -127,6 +127,9 @@
         DataFrame(load(ctx, p |> Acausal.settime(r -> r.time - 1)))
         foreach(DataFrame, stream(ctx, clock(1) |> summarize(Count())))
         scan(ctx, p |> writecsv(joinpath(dir, "precompile-out.csv")))
+        jls = joinpath(dir, "precompile.jls")
+        scan(ctx, p |> writejls(jls))
+        DataFrame(load(ctx, readjls(jls)))
         DataFrame(load(ctx, emptyframe()))
     end
 end

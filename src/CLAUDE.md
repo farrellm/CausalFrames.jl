@@ -62,6 +62,13 @@ design rationale and performance constraints behind each module.
   so results never depend on it. `backend = :duckdb`/`:parquet2` forces the
   choice, which is how the tests cover all four combinations in one process;
   working on parquet means loading `DuckDB`/`Parquet2` in the session first
+- `src/jls.jl` — `writejls`/`readjls`, the untyped persistence pair: a header
+  record then one `serialize`d DataFrame per chunk, each its own `serialize`
+  call so records are independent. The sink is `ChunkSink` with a serializing
+  write loop; the source is a `CSVProducer`-shaped `JLSProducer` over
+  `clipchunk!`. It exists for columns CSV and parquet cannot encode (fitted
+  models), so the file is Julia/package-version-fragile by design — not an
+  interchange format
 - `src/summarizers.jl` — `Summarizer` (immutable config, output column name in
   a type parameter) and `SummarizerState` (running state, typed from the input
   schema), plus their unexported interface: `emptyvalue`, `fresh`, `fresh!`,

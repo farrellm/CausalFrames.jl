@@ -4,6 +4,7 @@ using DataFrames
 using Dates
 using DuckDB
 using Parquet2
+using Serialization
 using Tables
 using Test
 
@@ -18,6 +19,7 @@ include("fixtures.jl")
     include("frame.jl")
     include("operators.jl")
     include("parquet.jl")
+    include("jls.jl")
     include("stream.jl")
     include("merge.jl")
     include("join.jl")

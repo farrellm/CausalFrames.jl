@@ -45,6 +45,8 @@ frame = load(Context(DateTime(2026, 1, 1), DateTime(2026, 2, 1)), p)
 | `writecsv(path; queue, ...)` | transform | pass-through sink: writes each chunk to `path` as it flows by, on a background task, and yields it downstream unchanged |
 | `readparquet(path; time, rename, backend)` | source | parquet file (needs `using DuckDB` or `using Parquet2`); types come from the file; the context window skips row groups that cannot be in it; `time` and `rename` as for `readcsv` |
 | `writeparquet(path; queue, rowgroupsize, backend, ...)` | transform | pass-through sink (needs `using Parquet2` or `using DuckDB`): writes row groups of `rowgroupsize` rows as the stream flows by; the file is valid only once the stream is exhausted |
+| `readjls(path)` | source | read back a file written by `writejls`, a record at a time, clipped to `[start, stop)` |
+| `writejls(path; queue)` | transform | pass-through sink through Julia's `Serialization` stdlib: one record per chunk, so columns CSV and parquet cannot encode (fitted models, `NamedTuple`s) round-trip; tied to the Julia and package versions that wrote it |
 | `filterrows(pred)` | transform | keep rows where `pred(row)` |
 | `addcolumns(f)` | transform | `f(row)::NamedTuple` of new column values |
 | `selectcolumns(sel...)` | transform | keep the columns matching a name, `Regex`, name predicate, or collection of those (`:time` always kept) |
