@@ -13,6 +13,8 @@ tosummarizers(ss) = collect(Summarizer, ss)
 
 tokeycolumns(::Nothing) = Symbol[]
 tokeycolumns(k::Symbol) = Symbol[k]
+# A string is one name, never iterated as a collection of one-character names.
+tokeycolumns(k::AbstractString) = Symbol[Symbol(k)]
 tokeycolumns(ks) = collect(Symbol, ks)
 
 # Expand the requested summarizers into the full set to fold — each one's

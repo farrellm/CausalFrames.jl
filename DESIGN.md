@@ -122,6 +122,8 @@ Two kinds, both compatible with the chaining operator `|>`:
 | `writecsv(path; queue, ...)` | transform | transparent pass-through sink: writes each chunk to `path` as it flows by and yields it downstream unchanged (see "CSV output") |
 | `readparquet(path; time, rename, backend)` | source | parquet file, read through DuckDB or Parquet2 (either backend suffices; DuckDB preferred); column types come from the file itself; the time column (named `:time`, or chosen by `time` as a column name or a per-row function) must be sorted; `rename` maps column names first; rows clipped to `[start, stop)`; read one chunk at a time — a DuckDB result chunk, or a Parquet2 row group — with the window used to skip what cannot be in it (see "Parquet I/O") |
 | `writeparquet(path; queue, rowgroupsize, backend, ...)` | transform | transparent pass-through sink through Parquet2 or DuckDB (either suffices; Parquet2 preferred): buffers chunks until `rowgroupsize` rows are pending and writes them as one row group, yielding every chunk downstream unchanged; the file is valid only once finalized (see "Parquet I/O") |
+| `readjls(path)` | source | a file written by `writejls`, one chunk per record; rows clipped to `[start, stop)`; read a record at a time, stopping as soon as a time `>= stop` is seen (see "JLS I/O") |
+| `writejls(path; queue)` | transform | transparent pass-through sink through the `Serialization` stdlib: serializes each chunk as it flows by, so columns of any Julia type round-trip (see "JLS I/O") |
 | `filterrows(pred)` | transform | keep rows where `pred(row)` is `true` |
 | `addcolumns(f)` | transform | `f(row)` returns a `NamedTuple` of new column values for that row; may **not** contain a `time` key (this preserves the time invariant without re-validation) |
 | `selectcolumns(selectors...)` | transform | keep only the matching columns, in the input's own order (see "Column selectors") |
@@ -130,6 +132,7 @@ Two kinds, both compatible with the chaining operator `|>`:
 | `summarize(ss; key)` | transform | summarize the whole context into rows at time `stop`; drops input columns |
 | `summarizecycles(ss; key)` | transform | summarize each cycle (maximal run of rows sharing a timestamp) independently; drops input columns |
 | `intervalize(clock, ss; key, closelast)` | transform | summarize over the intervals a clock pipeline defines (`[bₖ, bₖ₊₁)`, timestamped at `bₖ₊₁`); keyless is a regular grid, keyed is sparse (see "Interval summarization") |
+| `summarizewindows(clock, lookback, ss; key)` | transform | at each tick `τ` of a clock pipeline, summarize the trailing window `[τ - lookback, τ)` at `τ`; keyless is a regular grid, keyed is sparse plus one empty row when a key's window empties (see "Window summarization") |
 | `addsummarycolumns(ss; key)` | transform | keep input columns, append the running summary value after each row |
 | `addrollingcolumns(windows, ss; key, from)` | transform | keep input columns, append each summarizer's value over each named trailing window, prefixed `"{window}_"` (see "Rolling windows") |
 | `asofjoin(right; key, tolerance, strict, leftprefix, rightprefix, righttime)` | transform | left as-of join: append the most recent right row with time `<= time` (`strict`: `<`), per key; `missing` where none qualifies (see "As-of join") |
@@ -139,6 +142,9 @@ Two kinds, both compatible with the chaining operator `|>`:
 | `lastrow(; key)` | transform | emit each key's last row, retimed to `stop`; keyless emits the stream's last row (see "Last row") |
 | `forwardfill(selectors...; key, tolerance)` | transform | replace `missing` in the selected columns (see "Column selectors") with that column's last non-missing value, per key, while not older than `tolerance` (see "Filling") |
 | `fillmissing(specs...)` | transform | replace `missing` with a per-column constant, given as `name => value` pairs or a `NamedTuple`; the column's element type narrows (see "Filling") |
+| `applymodels(models; column, key, tolerance, strict, name, operation)` | transform | as-of match each row to the latest `FittedModel` row of a models pipeline (per key), and append that model's prediction; `missing` where there is none (see "Model fitting (MLJ)") |
+| `addpredictions(clock, lookback, model, predictors, response; key, name, operation)` | transform | `summarizewindows` over a `FitModel` feeding `applymodels`: refit at every tick on `[τ - lookback, τ)`, predict each row from the latest tick at or before it (see "Model fitting (MLJ)") |
+| `modelreports(; column, name)` | transform | over a models pipeline, replace each `FittedModel` with its fit report; row-wise (see "Model fitting (MLJ)") |
 
 Row functions (`pred`, `f`) receive a map-like row object supporting
 `row.name` and `row[:name]` access (Tables.jl row semantics), including
@@ -258,6 +264,42 @@ file. Keyword arguments pass through to `Parquet2.FileWriter`, where
 statistics the readers skip by; the DuckDB sink understands `compression_codec`
 (mapped onto `COPY`'s `COMPRESSION`, and it records statistics of its own) and
 rejects the other, Parquet2-specific options rather than silently dropping them.
+
+## JLS I/O
+
+`writejls` and `readjls` persist a stream through Julia's `Serialization`
+stdlib. They exist because the other two formats are *typed*: CSV writes a
+value's printed form and parquet encodes only its own column types, so a column
+holding arbitrary Julia values — a fitted model, a `NamedTuple` — has no round
+trip through either. A JLS file stores whatever the chunks hold. `Serialization`
+is a stdlib already in the sysimage, so this costs no dependency weight.
+
+The format is a header record `(format = :CausalFramesJLS, version = 1)`
+followed by one serialized `DataFrame` per chunk. Each record is its own
+`serialize` call, so records carry no back-references to one another and the
+reader can `deserialize` them one at a time. The header is a `NamedTuple` of
+isbits values, which serializes identically across Julia versions, so a foreign
+file or a future format version is reported as such rather than as an opaque
+deserialization failure.
+
+The sink is the shared `ChunkSink` whole — background task, bounded queue,
+first-chunk column check, the `copycols = false` hand-off — with a write loop
+that serializes and flushes each chunk. Like `writecsv`, and unlike the parquet
+sinks, it therefore has a usable prefix mid-run; a stream with no rows leaves a
+header-only file, which reads back as an empty stream. The source is a
+`CSVProducer`-shaped `JLSProducer` that deserializes one record per pull and
+hands it to the shared `clipchunk!` (no `time` or `rename` — the file was
+written from a stream, so its `:time` is already resolved), stopping at the
+first time `>= stop`. There is no index to seek by, so a read costs the file's
+prefix up to `stop`, as CSV's does.
+
+Three caveats, all of them `Serialization`'s: a file is readable only by a
+compatible Julia and compatible versions of the packages whose types it holds;
+deserialization can construct arbitrary types, so a file must be trusted; and
+an interrupted run leaves every complete record readable while its torn last
+record is reported as an `ArgumentError` rather than a bare `EOFError`. JLS is a
+persistence format for a pipeline's own outputs, not an interchange format —
+`writecsv` and `writeparquet` remain that.
 
 ## Column selectors
 
@@ -863,6 +905,203 @@ reused whole (schema promotion, state building and widening — a widening
 carries the open interval's accumulated state, exactly as `summarizecycles`
 does across a cycle boundary).
 
+## Window summarization
+
+`summarizewindows(clock, lookback, ss; key)` separates *when* a summary is
+taken from *what* it covers: a clock pipeline supplies the ticks, and at each
+tick `τ` the rows in the trailing window `[τ - lookback, τ)` are summarized and
+emitted at `τ`, dropping the input columns. It sits between two neighbours.
+`intervalize` samples at ticks but covers only the gap since the previous tick;
+a look-back equal to a regular clock's spacing reproduces it at every tick
+after the first. `addrollingcolumns` covers a trailing window but emits a row
+per row of the stream it augments, and its keys must be present on both sides,
+which a bare clock cannot supply. Per-key windows sampled at clock ticks were
+the gap — fitting a model per key at every tick is the motivating case (see
+"Model fitting (MLJ)").
+
+- **Windows** are half-open: they include `τ - lookback` and exclude `τ`
+  itself. That is `intervalize`'s convention, and it is what makes a summary
+  emitted at `τ` fold only rows strictly before it. (`addrollingcolumns`'
+  windows include their own row's time instead, because there the row *is* the
+  observation being annotated.) The input runs over `[start - lookback, stop)`,
+  so the first tick already sees a full window — the `rollingcontext` widening,
+  with the same generic non-negativity check — and the clock over
+  `[start, stop)`.
+- **Keyless is a regular grid.** Every tick emits one row; an empty window
+  emits the summarizers' empty values, so element types widen through the
+  shared `promotedvaluetype`. No data at all still emits the whole grid, typed
+  from the configs.
+- **Keyed is sparse, with a vanish row.** Each tick emits one row per key with
+  rows in its window, sorted by key, plus one row of empty values for every key
+  that had rows at the previous tick and has none now. The key is then
+  forgotten until it returns. Pure sparsity (`intervalize`'s rule) would leave
+  a consumer that tracks the latest row per key — an `asofjoin`, or
+  `applymodels` — holding that key's last summary forever. The vanish row is
+  the one extra row that lets it see the summary go empty, without the
+  ticks × keys cost of emitting every key ever seen at every tick. "Present at
+  the previous tick" is decided from what was *emitted*, not from what was
+  admitted, so a key whose rows arrive and age out between two ticks (a
+  look-back shorter than the spacing) emits nothing at all.
+
+The mechanism is `intervalize`'s driver over `addrollingcolumns`' bookkeeping.
+A `chunkmap` over the data stream pulls ticks on demand through
+`intervalize.jl`'s `IntervalCursor`. Before each chunk it fills a concrete
+`Vector{T}` of pending ticks up to just past the chunk's last time, so the
+per-row kernel never touches the clock. For each row at time `s`, every pending
+tick `τ ≤ s` is closed first — the row belongs to no window of a tick at or
+before it — and then the row is admitted into a buffer of concretely typed
+rows (`storerowtype`, `rowat`) with an eviction head. Closing `τ` advances the
+head past the rows with `τ - time > lookback`. Flush drains the clock and
+closes the remaining ticks against the buffer as it stands.
+
+There are three window algorithms. As in `addrollingcolumns`, the choice is made
+from the expanded prototype tuple and re-derived whenever the states are built
+or widened:
+
+- **Running**, for an all-`GroupSummarizer` set whose realized states are all
+  `isinvertible`. Per-key `RunningGroup`s live in a `Dict` (keyless is the key
+  `(;)`, the `rolling.jl` precedent); they are `update!`ed on admission and
+  `downdate!`ed on eviction, and a group is deleted with its last row, so
+  presence means rows in the window. Cost: O(1) amortized per row, plus a key
+  sort per tick into a reused scratch vector.
+- **Tree**, for an all-`MonoidSummarizer` set (group summarizers mixed with
+  monoid-only ones included). Rows append to per-key segment trees
+  (`segtree.jl`, the `addrollingcolumns` structure), and at each tick every
+  tree binary-searches its window start with the exact membership predicate
+  and folds the window from O(log n) partial combinations, order-preserved for
+  `First`/`Last`. What differs from `addrollingcolumns` is *when* a tree
+  recombines. There a window is queried after every row, so each append
+  updates its O(log n) ancestors at once. Here nothing reads a tree between
+  ticks, so rows append as bare leaves (`treeappend!`), and at the tick each
+  tree recombines the ancestors of all its new leaves together, level by level
+  (`treesync!`): O(new leaves + log n), about one `combine!` per row. An eager
+  tree would pay log₂(window) combines per row (about sixteen at a 20,000-row
+  window), against re-fold's one update per row per overlapping tick. A tree
+  whose window empties is dropped, so presence means rows in the window, as in
+  running mode. Cost: O(1) amortized per row plus O(log n) per key per tick.
+  Measured over the benchmark's million rows with `[Min, Max]`, a 5,000-unit
+  look-back and 1,000-unit ticks (five-fold overlap), tree beats re-fold
+  56 ms to 75 ms keyless and 117 ms to 152 ms keyed over 100 keys; at a
+  50,000-unit look-back (fifty-fold) it is 198 ms to 687 ms. The price is
+  memory, as for rolling's trees: a tree holds between two and eight state
+  tuples per live row, each state its own heap object, where re-fold holds
+  only the rows. Growing to the 20,000-row window allocates about 350,000
+  states (25 MiB) once, though nothing per row in the steady state.
+- **Re-fold** otherwise. At each tick the live rows are folded into per-key
+  states drawn from a `GroupTable`'s pool, emitted, and retired back —
+  `closecycle!`'s protocol — at O(window) per tick. This is the path `FitModel`
+  takes, and the differential-test oracle for the running one.
+
+A widening that defeats `isinvertible` demotes running to the tree mid-stream,
+as in `addrollingcolumns`: the buffer's live rows replay into trees, which own
+their rows from then on. A widening within tree mode replays each tree's live
+rows (`replaytrees!`), and one that stays running replays the live rows into
+fresh groups (`replaygroups!`). Re-fold keeps nothing but the buffer, so a
+widening there rebuilds only the states.
+
+`summarizewindows` is **causal**: a row emitted at `τ` folds only rows with time
+`< τ`. It is **stateful** in the usual sense, so streaming equals loading,
+while split contexts do not compose: ticks realign to each context's start,
+and the vanish rule depends on the previous tick.
+
+## Model fitting (MLJ)
+
+Four exports put MLJ models inside pipelines:
+
+- `FitModel`, a summarizer that fits a model to the rows it folds and emits a
+  `FittedModel`;
+- `applymodels`, which predicts a stream from a table of fitted models;
+- `addpredictions`, the two composed over a rolling window;
+- `modelreports`, which turns a table of models into a table of their fit
+  reports.
+
+**The dependency.** MLJ is reached through MLJModelInterface alone, a weak
+dependency behind `ext/CausalFramesMLJModelInterfaceExt.jl` (see
+`ext/CLAUDE.md`). It is the interface every model package implements, so
+loading any MLJ model loads the extension, and it is small and pure Julia
+(ScientificTypesBase and StatisticalTraits beyond stdlibs): measured on Julia
+1.12, `using MLJModelInterface` after `using CausalFrames` — the package and
+the extension together — takes about 0.01 s, against about 1 s for
+CausalFrames itself. MLJBase was
+rejected: machines bring Distributions, CategoricalArrays and dozens more
+packages, and the model-level API (`fit`, `predict`, the data front-end
+`reformat`, `save`/`restore`) needs none of them. Model *implementations*
+generally do need MLJBase, for `MLJModelInterface.matrix` and friends, which is
+why users load `using MLJ` — but that weight is theirs to choose. One naming
+consequence: MLJ (like MLJModelInterface) exports the scientific type `Count`,
+so alongside it the summarizer is written `CausalFrames.Count()`; renaming an
+existing export to dodge a downstream package was not worth the breakage. As with
+parquet, `src/models.jl` names no MLJ type: the extension implements five hooks
+whose fallbacks live there (`ismodel`, `fitmodel`, `predictmodel`,
+`savefitresult`, `restorefitresult`).
+
+**`FitModel`** buffers the rows it folds — one concretely typed vector per
+predictor and one for the response, typed from the input schema as every state
+is — and fits at `value` time. A fit's cost therefore follows the host: once
+per window under `summarize`, per interval under `intervalize`, per tick and
+key under `summarizewindows`.
+- Its output name, predictors and response are type parameters, and `value`
+  builds a `NamedTuple{(N,),Tuple{FittedModel{P,M}}}` explicitly. The column
+  type is thus concrete even though the fit is opaque. A `FittedModel`'s
+  `fitresult` and `report` are `Any`, but they are touched once per fit and
+  once per prediction group, never per row.
+- It is a plain `Summarizer`, neither monoid nor group — a fit neither combines
+  nor inverts — so windowed transforms re-fold for it.
+- `fresh!` empties the buffers in place, keeping their capacity for the next
+  window. That is safe only because `value` hands the model *copies*: a model
+  that keeps its training table (a nearest-neighbour model, say) would
+  otherwise see it overwritten by the next window. The copy is O(window) per
+  fit, which the fit dwarfs.
+
+**`applymodels`** is `asofjoin`'s machinery with a different assembly. The
+models pipeline, narrowed to its model and key columns, is the right side of
+the as-of store: `AsofJoinState`, `pullright!` and `joinsegment!` are
+unchanged, and `AsofJoinConfig` carries the operator's name for error messages.
+- Once a chunk's matches are known, its rows are grouped by model identity (an
+  `IdDict` typed at a function barrier), and each distinct model is applied
+  once, to views of its rows' predictor columns — one dynamic call per model
+  per chunk.
+- The results are scattered into one `Union{Missing, E}` column, with `E`
+  promoted across the groups.
+- The predictor names come from the `FittedModel`'s type, so a model table read
+  back from disk is self-describing.
+- One deliberate departure from `asofjoin`: a models stream with no rows still
+  appends the prediction column, all `missing`, because the caller names that
+  column rather than the data supplying it.
+
+**`addpredictions`** is `p |> summarizewindows(clock, lookback, FitModel(...);
+key)` feeding `applymodels(...; strict = false)`, and its causality argument is
+the composition's. A model emitted at tick `τ` was fit on rows in
+`[τ - lookback, τ)`, and a row at `t ≥ τ` uses it, so every training row is
+strictly earlier than every row it predicts. That is why the windows are
+half-open, and why the match need not be strict. Keyed, the vanish row of
+`summarizewindows` carries a `missing` model, so a key with no rows in its
+latest window is predicted `missing` rather than by a stale model; keyless, an
+empty window's `missing` summary does the same. One thing causality cannot
+check: the response must be observable at its row's time. A response built by
+looking ahead (`Acausal.lead`) makes the whole construction look ahead, and is
+the caller's explicit opt-in. The pipeline runs twice, once to fit and once to
+predict, as a self-join does.
+
+**`modelreports`** replaces the model column with each fit's report. It is the
+third value `MMI.fit` returns, normalized as MLJBase's `report(mach)`
+normalizes a freshly fit machine's — `MLJModelInterface.report` over the fit
+report alone, which lives in MLJModelInterface itself — so the two agree
+exactly: an empty report becomes `nothing`, and a model overloading `report` is
+honoured. (A machine's report also merges the reports of operations run since,
+which a fit-time table cannot hold.) It is row-wise and stateless, and a
+`missing` cell stays `missing`. The report stays
+one column. Splatting its fields into columns was rejected: a chunk's column
+names must be fixed before its rows go out, and the fields are unknown until a
+model has been fit, so a keyless stream opening on empty windows would have
+nothing to name them from. `addcolumns` extracts fields.
+
+**Persistence.** `FittedModel` defines `serialize`/`deserialize` on its own type
+(so not piracy) that route the fitresult through `savefitresult` and
+`restorefitresult` — MLJ's `save`/`restore`. Models wrapping foreign resources
+therefore survive `writejls`, and a model table read back with `readjls` feeds
+`applymodels` and `modelreports` directly.
+
 ## Last row
 
 `lastrow(; key)` folds the whole window the way `summarize` does — one pass per
@@ -1073,6 +1312,12 @@ Concrete summarizers provided, for an input column of element type `T`:
 | `Max(column)` | `:x_max` | `T` | `missing` |
 | `First(column)` | `:x_first` | `T` | `missing` |
 | `Last(column)` | `:x_last` | `T` | `missing` |
+| `FitModel(model, predictors, response; name)` | `:model`, or `name` | `FittedModel{P,M}` | `missing` |
+
+`FitModel` is the one summarizer whose value is not a statistic but an object:
+an MLJ model fit to the rows folded, buffered at the input's own types and fit
+when the summary is emitted. It needs the MLJ extension, and its design is in
+"Model fitting (MLJ)".
 
 `LinearRegression` is the only summarizer emitting a whole block of columns, so
 its contract is spelled out here. For `K` predictors it produces `2K + 5`
@@ -1250,8 +1495,11 @@ Three structures own reusable scratch rather than allocating it per use:
 - a `SegTree` holds the two order-preserving accumulators its range queries
   fold into, so `treequery`'s result is **borrowed** — valid until that tree's
   next query, which is all its callers need, since they read it straight
-  through `summaryvalues`. It also reuses its node vector and compacts its row
-  buffers in place across rebuilds, which matters because a window short enough
+  through `summaryvalues`. It also compacts its row buffers in place across
+  rebuilds and, at an unchanged capacity, keeps its node vector by moving the
+  live leaves' state tuples to the front by reference — nothing is re-zeroed
+  or re-folded, a swapped-out tuple being zeroed only by the append that claims
+  its slot — which matters because a window short enough
   to expire rows as fast as they arrive keeps the capacity at its floor and
   rebuilds every few appends;
 - the re-fold window kernel threads one state tuple through its window
@@ -1492,7 +1740,12 @@ across augmented chunk boundaries. `head` and `lastrow` join that list:
 [Truncation](#truncation)), and `lastrow`'s per-key store does, emitting once
 at `stop` exactly as `summarize` does (see [Last row](#last-row)). So does
 `forwardfill`, whose carried value per key and column spans the window (see
-[Filling](#filling)); `fillmissing`, having no state at all, does not.
+[Filling](#filling)); `fillmissing`, having no state at all, does not. So does
+`summarizewindows`, whose buffer of live rows, pending ticks and previous
+tick's keys all span the window (see
+[Window summarization](#window-summarization)), and `applymodels`, whose as-of
+store of latest models is `asofjoin`'s — hence `addpredictions`, their
+composition. `modelreports` is row-wise and stateless.
 Consequently concatenating the frames
 of `stream(ctx, p)` always equals `load(ctx, p)`, even for stateful
 operators — but the chunk-concatenation property over *split contexts*
@@ -1518,25 +1771,31 @@ the second.
 | `src/parquet.jl` | the parquet operators, their docstrings, and backend selection |
 | `ext/CausalFramesDuckDBExt.jl` | the DuckDB backend: the preferred reader, the fallback writer |
 | `ext/CausalFramesParquet2Ext.jl` | the Parquet2 backend: the preferred writer, the fallback reader |
+| `src/jls.jl` | the `Serialization`-backed persistence pair (`writejls`, `readjls`) |
 | `src/summarizers.jl` | `Summarizer`/`SummarizerState` interface and the concrete summarizers |
 | `src/summarize.jl` | folding kernels and the summarization transforms |
 | `src/join.jl` | the as-of join transform (`asofjoin`) |
 | `src/lastrow.jl` | the last-row-per-key transform (`lastrow`), over the join's store |
 | `src/fill.jl` | the missing-value fills: the stateful `forwardfill` and the row-wise `fillmissing` |
-| `src/segtree.jl` | the monoid segment tree behind the rolling tree mode |
+| `src/segtree.jl` | the monoid segment tree behind the rolling and window tree modes |
 | `src/rolling.jl` | the rolling-window summarization transform (`addrollingcolumns`) |
 | `src/intervalize.jl` | the interval-summarization transform (`intervalize`) |
+| `src/windows.jl` | the clock-sampled trailing-window summarization transform (`summarizewindows`) |
+| `src/models.jl` | the MLJ operators (`applymodels`, `addpredictions`, `modelreports`), the extension hooks and their fallbacks, and `FittedModel`'s serializer |
+| `ext/CausalFramesMLJModelInterfaceExt.jl` | the MLJ hooks for `MLJModelInterface.Model`: fit, predict, save/restore |
 | `src/acausal.jl` | the `Acausal` submodule: the forward join (`futurejoin`), the acausal time shift (`lead`), and the permissive retiming (`settime`, not exported even from the submodule) |
 | `src/precompile.jl` | PrecompileTools workload covering the main pipeline paths |
 
 Exports: `Context`, `CausalFrame`, `CausalPipeline`, `load`, `stream`,
 `scan`, `context`, `timetype`, `emptyframe`, `concatenate`, `clock`, `readcsv`, `writecsv`, `readparquet`,
-`writeparquet`, `filterrows`,
+`writeparquet`, `readjls`, `writejls`, `filterrows`,
 `addcolumns`, `selectcolumns`, `dropcolumns`, `reordercolumns`, `Summarizer`, `MonoidSummarizer`, `GroupSummarizer`,
 `SummarizerState`, `Count`, `CountDistinct`, `Sum`, `SumPower`,
 `Moment`, `Product`, `DotProduct`, `Mean`, `Variance`, `Std`, `Covariance`,
-`Correlation`, `LinearRegression`, `Min`, `Max`, `First`, `Last`, `summarize`,
-`summarizecycles`, `intervalize`, `addsummarycolumns`, `addrollingcolumns`,
+`Correlation`, `LinearRegression`, `Min`, `Max`, `First`, `Last`, `FitModel`,
+`FittedModel`, `applymodels`, `addpredictions`, `modelreports`, `summarize`,
+`summarizecycles`, `intervalize`, `summarizewindows`, `addsummarycolumns`,
+`addrollingcolumns`,
 `asofjoin`, `lag`, `settime`, `head`, `lastrow`, `forwardfill`, `fillmissing`.
 
 `merge` is not in that list either: it is `Base.merge`, extended for
@@ -1549,9 +1808,10 @@ through `using CausalFrames.Acausal`, so acausality is always an explicit
 opt-in. The submodule's `settime` is not exported from the submodule either, so
 that `using CausalFrames.Acausal` cannot shadow the causal one.
 
-Dependencies: DataFrames, CSV, Tables, LinearAlgebra, PrecompileTools; weak
-dependencies DuckDB and Parquet2, each behind a package extension
-(see "Parquet I/O").
+Dependencies: DataFrames, CSV, Tables, LinearAlgebra, PrecompileTools, and the
+`Serialization` stdlib (see "JLS I/O"); weak dependencies DuckDB and Parquet2,
+each behind a package extension (see "Parquet I/O"), and MLJModelInterface,
+behind the MLJ extension (see "Model fitting (MLJ)").
 
 Package infrastructure: `test/` runs the unit tests plus an Aqua.jl quality
 testset; `benchmark/benchmarks.jl` is a PkgBenchmark-compatible suite over

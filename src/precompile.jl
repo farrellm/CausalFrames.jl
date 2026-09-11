@@ -79,6 +79,15 @@
         )
         DataFrame(load(ctx, p |> intervalize(clock(2), [Count(), Sum(:v)];
             key = :sym)))
+        # the running window mode keyless, the tree mode (Min is a monoid
+        # only) keyed, which also takes the vanish-row path
+        DataFrame(
+            load(ctx, p |> summarizewindows(clock(2), 3,
+                [Count(), Sum(:v), Mean(:v)])),
+        )
+        DataFrame(
+            load(ctx, p |> summarizewindows(clock(2), 3, Min(:v); key = :sym)),
+        )
         DataFrame(load(ctx, p |> addsummarycolumns([First(:v), Last(:v)])))
         # all-group summarizers take the running window mode, the mixed
         # group/monoid set the tree mode; the re-fold mode is reachable
@@ -127,6 +136,9 @@
         DataFrame(load(ctx, p |> Acausal.settime(r -> r.time - 1)))
         foreach(DataFrame, stream(ctx, clock(1) |> summarize(Count())))
         scan(ctx, p |> writecsv(joinpath(dir, "precompile-out.csv")))
+        jls = joinpath(dir, "precompile.jls")
+        scan(ctx, p |> writejls(jls))
+        DataFrame(load(ctx, readjls(jls)))
         DataFrame(load(ctx, emptyframe()))
     end
 end

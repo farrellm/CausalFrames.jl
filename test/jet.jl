@@ -123,6 +123,10 @@ end
     tr = CausalFrames.newsegtree(states, typeof(row), Int)
     JET.@test_opt CausalFrames.treepush!(tr, states, row)
     CausalFrames.treepush!(tr, states, row)
+    JET.@test_opt CausalFrames.treeappend!(tr, states, row)
+    CausalFrames.treeappend!(tr, states, row)
+    JET.@test_opt CausalFrames.treesync!(tr)
+    CausalFrames.treesync!(tr)
     JET.@test_opt CausalFrames.treequery(tr, 1, 1)
     JET.@test_opt CausalFrames.windowstart(tr.times, tr.head, 1, 0)
 end
@@ -176,6 +180,55 @@ end
     slots = V[]
     nt = (time = [1, 2], sym = ["a", "b"], y = [1.0, 2.0])
     JET.@test_opt CausalFrames.lastsegment!(index, slots, nt, Val((:sym,)))
+end
+
+@testset "summarizewindows kernels" begin
+    # both window algorithms, keyed (with the vanish-row merge) and keyless
+    # (the grid over the empty key), over a String key so the key is non-isbits
+    protos, requested = CausalFrames.prototypes(
+        CausalFrames.tosummarizers([Count(), Sum(:x), Mean(:x)]), [:k])
+    outs = Val(requested)
+    types = (time = Int, k = String, x = Float64)
+    states = CausalFrames.newstates(protos, types)
+    S = typeof(states)
+    R = CausalFrames.storerowtype(types)
+    V = CausalFrames.promotedvaluetype(S, protos, outs)
+    emptyrow = convert(V, CausalFrames.emptyvalues(protos, outs))
+    nt = (time = [1, 3, 6], k = ["a", "b", "a"], x = [1.0, 2.0, 3.0])
+    ticks = [0, 5, 10]
+    for (kn, grid) in ((Val((:k,)), Val(false)), (Val(()), Val(true)))
+        K = CausalFrames.storekeytype(types, kn)
+        RT = CausalFrames.windowrowtype(Int, K, V)
+        G = CausalFrames.RunningGroup{S}
+        JET.@test_opt CausalFrames.windowrunning!(RT[], R[], 1, nt, ticks,
+            Dict{K,G}(), states, Pair{K,G}[], K[], 5, kn, outs, emptyrow, grid)
+        JET.@test_opt CausalFrames.windowrefold!(RT[], R[], 1, nt, ticks,
+            CausalFrames.GroupTable{K,S}(), states, K[], 5, kn, outs, emptyrow,
+            grid)
+        TR = CausalFrames.SegTree{S,R,Int}
+        JET.@test_opt CausalFrames.windowtree!(RT[], nt, ticks, Dict{K,TR}(),
+            states, Pair{K,TR}[], K[], 5, kn, outs, emptyrow, grid)
+        JET.@test_opt CausalFrames.flushtree!(RT[], ticks, Dict{K,TR}(),
+            Pair{K,TR}[], K[], 5, outs, emptyrow, grid)
+    end
+end
+
+# A FitModel fold is a typed push per column (the fit itself is opaque and runs
+# once per emitted summary, not per row), and once the buffers have capacity a
+# fold allocates nothing — the property `fresh!` keeping capacity exists for.
+foldallocs(st, row) = @allocated CausalFrames.update!(st, row)
+@testset "FitModel fold" begin
+    st = CausalFrames.fresh(FitModel(ToyOLS(), [:x, :z], :y),
+        (time = Int, x = Float64, z = Int, y = Float64))
+    row = (time = 1, x = 1.0, z = 2, y = 3.0)
+    JET.@test_opt CausalFrames.update!(st, row)
+    JET.@test_opt CausalFrames.fresh!(st)
+    for _ in 1:100
+        CausalFrames.update!(st, row)
+    end
+    CausalFrames.fresh!(st)
+    foldallocs(st, row)
+    @test foldallocs(st, row) == 0
 end
 
 @testset "forwardfill kernels" begin

@@ -28,6 +28,7 @@ Base.merge(::CausalPipeline, ::CausalPipeline...)
 clock
 readcsv
 readparquet
+readjls
 ```
 
 ## Sinks
@@ -35,6 +36,7 @@ readparquet
 ```@docs
 writecsv
 writeparquet
+writejls
 ```
 
 ## Row-wise transforms
@@ -120,6 +122,7 @@ CausalFrames.Acausal.settime
 summarize
 summarizecycles
 intervalize
+summarizewindows
 addsummarycolumns
 addrollingcolumns
 Count
@@ -139,6 +142,20 @@ Min
 Max
 First
 Last
+FitModel
+```
+
+## Model fitting (MLJ)
+
+With an MLJ model package loaded (`using MLJ`), [`FitModel`](@ref) fits a model
+inside any summarization transform, emitting [`FittedModel`](@ref)s; these
+operators apply such models to a stream and read their diagnostics.
+
+```@docs
+FittedModel
+applymodels
+addpredictions
+modelreports
 ```
 
 ## Summarizer interface

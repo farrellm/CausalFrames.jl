@@ -34,8 +34,8 @@ with any API or semantics change.**
 
 Per-module design rationale lives in `src/CLAUDE.md` (loaded when working
 under `src/`); DESIGN.md's "Module layout" table is the canonical index.
-The parquet backends live in `ext/` behind weak deps, with the backend
-contract in `ext/CLAUDE.md`. `notes/` holds investigation records —
+The parquet backends and the MLJ model hooks live in `ext/` behind weak deps,
+with their contracts in `ext/CLAUDE.md`. `notes/` holds investigation records —
 measurements and rejected designs, kept so they aren't re-derived, and
 explicitly *not* design law.
 
@@ -44,7 +44,7 @@ explicitly *not* design law.
 A new source or transform touches, in the same commit: `src/CausalFrames.jl`
 (include + export), `docs/src/api.md` (register the docstring or the docs job
 fails), `DESIGN.md` (module table, export list, semantics), `src/precompile.jl`
-(a workload path — the parquet operators are the sole exception, see
+(a workload path — the parquet and MLJ operators are the only exceptions, see
 `ext/CLAUDE.md`), `test/runtests.jl` (include the new test file), and
 `README.md`'s operator table. Nothing enforces that last row — no test, no CI
 job — so it is the one that silently drifts; check it before you call the

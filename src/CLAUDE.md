@@ -62,6 +62,13 @@ design rationale and performance constraints behind each module.
   so results never depend on it. `backend = :duckdb`/`:parquet2` forces the
   choice, which is how the tests cover all four combinations in one process;
   working on parquet means loading `DuckDB`/`Parquet2` in the session first
+- `src/jls.jl` — `writejls`/`readjls`, the untyped persistence pair: a header
+  record then one `serialize`d DataFrame per chunk, each its own `serialize`
+  call so records are independent. The sink is `ChunkSink` with a serializing
+  write loop; the source is a `CSVProducer`-shaped `JLSProducer` over
+  `clipchunk!`. It exists for columns CSV and parquet cannot encode (fitted
+  models), so the file is Julia/package-version-fragile by design — not an
+  interchange format
 - `src/summarizers.jl` — `Summarizer` (immutable config, output column name in
   a type parameter) and `SummarizerState` (running state, typed from the input
   schema), plus their unexported interface: `emptyvalue`, `fresh`, `fresh!`,
@@ -109,6 +116,13 @@ design rationale and performance constraints behind each module.
     running path. `BigFloat` is excluded on purpose: compensation buys nothing
     at arbitrary precision, and a non-isbits `Compensated` would allocate per
     row
+  - `FitModel` (MLJ) is the one summarizer whose value is an object: its state
+    buffers the folded rows in concretely typed vectors and fits at `value`
+    time through the `fitmodel` hook (src/models.jl), building the
+    `NamedTuple{(N,),Tuple{FittedModel{P,M}}}` from type parameters so the
+    column is concrete though the fit is opaque. It is plain `Summarizer`
+    (re-fold everywhere). `fresh!` empties the buffers keeping capacity, which
+    is only safe because `value` hands the model copies
   - a `Missing`-admitting accumulator type gets the flat `Optional*` counting
     states over the non-missing type, counting `missing` terms exactly as the
     compensated states count nonfinites, so the accumulator stays invertible —
@@ -158,15 +172,21 @@ design rationale and performance constraints behind each module.
   replacement column, which folds the write out of the unrolled kernel.
   `tolerance` widens the input context as `asofjoin` does, so `clipstart!` has
   to drop the pre-`start` rows the fill was allowed to see
-- `src/segtree.jl` — the monoid segment tree behind the rolling tree mode:
-  implicit array tree of `combine!`d partial state tuples, append-only rows,
-  logical front expiry (`head`), amortized rebuilds, order-preserving
-  two-accumulator range queries (`treepush!`, `treequery`, `windowstart`).
-  The tree owns its two query accumulators and its node vector: `treequery`
-  returns **borrowed** scratch, valid only until that tree's next query, and
-  `rebuild!` reuses the nodes and compacts the rows in place whenever the
-  capacity has not moved — the steady state under a short window, where
-  rebuilds fire every few appends rather than amortizing away
+- `src/segtree.jl` — the monoid segment tree behind the rolling and window
+  tree modes: implicit array tree of `combine!`d partial state tuples,
+  append-only rows, logical front expiry (`head`), amortized rebuilds,
+  order-preserving two-accumulator range queries (`treequery`,
+  `windowstart`). Appending (`treeappend!`, a bare leaf) and recombining
+  (`treesync!`, the ancestors of every leaf since the last sync) are separate,
+  so a per-tick caller pays about one combine per row; `treepush!` is the two
+  together, for rolling's per-row queries. Only nodes over appended leaves are
+  maintained: the sync combines the right edge with the tree's `ident`, so
+  nothing past the end ever needs zeroing. The tree owns its two query
+  accumulators and its node vector: `treequery` returns **borrowed** scratch,
+  valid only until that tree's next query, and `rebuild!` at an unchanged
+  capacity just swaps the live leaves' tuples to the front by reference — the
+  steady state under a short window, where rebuilds fire every few appends
+  rather than amortizing away
 - `src/rolling.jl` — `addrollingcolumns` picks its window algorithm from the
   expanded prototype tuple's structure: all-group → per-key running states
   with per-window eviction heads, O(1)/row (`rollsegmentrunning!`);
@@ -185,6 +205,32 @@ design rationale and performance constraints behind each module.
   pulls clock boundaries into a concrete `Vector{T}` per chunk (the pull is the
   only dynamism; the per-row kernel stays dispatch-free), reusing `SummaryFold`
   whole; `closelast` closes the trailing partial at `stop`
+- `src/windows.jl` — `summarizewindows`, the clock-sampled trailing window
+  (`[τ - lookback, τ)` at each tick): `intervalize`'s driver (`IntervalCursor`,
+  a concrete tick vector per chunk) over `addrollingcolumns`' row buffer and
+  eviction head. Running mode (`RunningGroup`s, update!/downdate!) for
+  invertible group sets; per-key segment trees for monoid sets, with rows
+  appended as bare leaves and synced once per tick — windows are queried per
+  tick, not per row, so rolling's eager per-append ancestor update (log₂ of
+  the window in combines per row) would squander that; re-fold through a
+  `GroupTable` pool otherwise. Keyed
+  output is sparse plus one *vanish* row of empty values when a key's window
+  empties, decided against the previous tick's *emitted* keys; that row is what
+  stops a per-key as-of consumer (`applymodels`) from using a stale summary
+- `src/models.jl` — the MLJ operators (`applymodels`, `addpredictions`,
+  `modelreports`) and the five hooks the extension implements (`ismodel`,
+  `fitmodel`, `predictmodel`, `savefitresult`, `restorefitresult`). It names no
+  MLJ type, the `parquet.jl` split.
+  - `applymodels` is `asofjoin`'s store and kernel unchanged
+    (`AsofJoinConfig.op` names it in errors), plus a predict step: matched rows
+    are grouped by model identity behind a function barrier, each distinct
+    model gets one `predictmodel` call per chunk over views, and the results
+    are scattered into one promoted `Union{Missing,E}` column.
+  - `addpredictions` is pure composition — `summarizewindows` into
+    `applymodels(strict = false)`, which is sound because the windows are
+    half-open.
+  - `FittedModel`'s custom serializer routes fitresults through MLJ's
+    save/restore.
 - `src/acausal.jl` — the `Acausal` submodule (`futurejoin`, `lead`, `settime`),
   reached only through `using CausalFrames.Acausal` and never re-exported, so
   acausality is always an explicit opt-in. `settime` goes further and is not in

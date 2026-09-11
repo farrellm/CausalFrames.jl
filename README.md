@@ -45,6 +45,8 @@ frame = load(Context(DateTime(2026, 1, 1), DateTime(2026, 2, 1)), p)
 | `writecsv(path; queue, ...)` | transform | pass-through sink: writes each chunk to `path` as it flows by, on a background task, and yields it downstream unchanged |
 | `readparquet(path; time, rename, backend)` | source | parquet file (needs `using DuckDB` or `using Parquet2`); types come from the file; the context window skips row groups that cannot be in it; `time` and `rename` as for `readcsv` |
 | `writeparquet(path; queue, rowgroupsize, backend, ...)` | transform | pass-through sink (needs `using Parquet2` or `using DuckDB`): writes row groups of `rowgroupsize` rows as the stream flows by; the file is valid only once the stream is exhausted |
+| `readjls(path)` | source | read back a file written by `writejls`, a record at a time, clipped to `[start, stop)` |
+| `writejls(path; queue)` | transform | pass-through sink through Julia's `Serialization` stdlib: one record per chunk, so columns CSV and parquet cannot encode (fitted models, `NamedTuple`s) round-trip; tied to the Julia and package versions that wrote it |
 | `filterrows(pred)` | transform | keep rows where `pred(row)` |
 | `addcolumns(f)` | transform | `f(row)::NamedTuple` of new column values |
 | `selectcolumns(sel...)` | transform | keep the columns matching a name, `Regex`, name predicate, or collection of those (`:time` always kept) |
@@ -53,6 +55,7 @@ frame = load(Context(DateTime(2026, 1, 1), DateTime(2026, 2, 1)), p)
 | `summarize(ss; key)` | transform | summarize the whole window into rows at time `stop` |
 | `summarizecycles(ss; key)` | transform | summarize each unique timestamp independently |
 | `intervalize(clock, ss; key, closelast)` | transform | summarize over the intervals `[bₖ, bₖ₊₁)` a `clock` pipeline's times define, each emitted at its end time |
+| `summarizewindows(clock, lookback, ss; key)` | transform | at each tick `τ` of a `clock` pipeline, summarize the trailing window `[τ - lookback, τ)`; one row per tick, or per key with rows in its window (plus one empty row when a key's window empties) |
 | `addsummarycolumns(ss; key)` | transform | append running summary values after each row |
 | `addrollingcolumns(windows, ss; key, from)` | transform | append summaries over named trailing windows, columns prefixed `{window}_` |
 | `asofjoin(right; key, tolerance, ...)` | transform | append the most recent right-pipeline row at or before each row's time |
@@ -62,6 +65,9 @@ frame = load(Context(DateTime(2026, 1, 1), DateTime(2026, 2, 1)), p)
 | `lastrow(; key)` | transform | emit the last row, or one per key, retimed to the window's `stop` |
 | `forwardfill(sel...; key, tolerance)` | transform | replace `missing` in the selected columns with that column's last non-missing value, per key, while not older than `tolerance` |
 | `fillmissing(specs...)` | transform | replace `missing` with a per-column constant, given as `name => value` pairs or a `NamedTuple` |
+| `applymodels(models; column, key, tolerance, strict, name, operation)` | transform | append each row's prediction from the latest fitted model at or before it (per key), given a pipeline of `FitModel` outputs (needs `using MLJ`) |
+| `addpredictions(clock, lookback, model, predictors, response; key, ...)` | transform | refit an MLJ model at every clock tick `τ` over `[τ - lookback, τ)`, per key, and append each row's prediction from the latest model — training rows always precede the rows they predict |
+| `modelreports(; column, name)` | transform | over a pipeline of fitted models: replace each model with its fit report |
 
 Each transform also has an uncurried, pipeline-first form — `filterrows(p, pred)`,
 `addcolumns(p, f)`, `summarize(p, ss; key)` — equivalent to the `|>` chain
@@ -101,6 +107,12 @@ summary per unique key value. Output columns are named by suffix:
 `Sum(:mid)` produces `:mid_sum`, `Min(:mid)` produces `:mid_min`, and
 `SumPower(:mid, 2)` produces `:mid_sumpower_2`. `LinearRegression` is the
 exception, emitting a block of columns under an optional `name` prefix.
+`FitModel(model, predictors, response)` is the other: with an MLJ model package
+loaded (`using MLJ`), it fits `model` to the rows it summarizes and emits the
+fitted model itself in a `:model` column — applied to a stream by
+`applymodels`, refit on a rolling window by `addpredictions`, and persisted by
+`writejls`. (MLJ exports a scientific type named `Count`, so alongside
+`using MLJ` the summarizer is `CausalFrames.Count()`.)
 
 ```julia
 p = readcsv("ticks.csv";
@@ -153,8 +165,8 @@ summarize. The summarized pipeline runs over a context widened backward by
 the longest look-back, so the first row already sees a full window; an
 empty window yields the summarizer's identity or `missing` as above.
 
-Rolling windows pick their algorithm from the summarizers' declared
-structure: `GroupSummarizer`s (`Sum`, `Mean`, …) slide a running state in
+Rolling windows, and the clock-sampled windows of `summarizewindows`, pick
+their algorithm from the summarizers' declared structure: `GroupSummarizer`s (`Sum`, `Mean`, …) slide a running state in
 O(1) per row by subtracting exiting rows, `MonoidSummarizer`s (`Min`,
 `Product`, …) fold each window from a segment tree of partial combinations
 in O(log window), and summarizers declaring neither re-fold each window
