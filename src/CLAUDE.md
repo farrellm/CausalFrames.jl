@@ -116,6 +116,13 @@ design rationale and performance constraints behind each module.
     running path. `BigFloat` is excluded on purpose: compensation buys nothing
     at arbitrary precision, and a non-isbits `Compensated` would allocate per
     row
+  - `FitModel` (MLJ) is the one summarizer whose value is an object: its state
+    buffers the folded rows in concretely typed vectors and fits at `value`
+    time through the `fitmodel` hook (src/models.jl), building the
+    `NamedTuple{(N,),Tuple{FittedModel{P,M}}}` from type parameters so the
+    column is concrete though the fit is opaque. It is plain `Summarizer`
+    (re-fold everywhere). `fresh!` empties the buffers keeping capacity, which
+    is only safe because `value` hands the model copies
   - a `Missing`-admitting accumulator type gets the flat `Optional*` counting
     states over the non-missing type, counting `missing` terms exactly as the
     compensated states count nonfinites, so the accumulator stays invertible —
@@ -201,6 +208,20 @@ design rationale and performance constraints behind each module.
   output is sparse plus one *vanish* row of empty values when a key's window
   empties, decided against the previous tick's *emitted* keys; that row is what
   stops a per-key as-of consumer (`applymodels`) from using a stale summary
+- `src/models.jl` — the MLJ operators (`applymodels`, `addpredictions`,
+  `modelreports`) and the five hooks the extension implements (`ismodel`,
+  `fitmodel`, `predictmodel`, `savefitresult`, `restorefitresult`). It names no
+  MLJ type, the `parquet.jl` split.
+  - `applymodels` is `asofjoin`'s store and kernel unchanged
+    (`AsofJoinConfig.op` names it in errors), plus a predict step: matched rows
+    are grouped by model identity behind a function barrier, each distinct
+    model gets one `predictmodel` call per chunk over views, and the results
+    are scattered into one promoted `Union{Missing,E}` column.
+  - `addpredictions` is pure composition — `summarizewindows` into
+    `applymodels(strict = false)`, which is sound because the windows are
+    half-open.
+  - `FittedModel`'s custom serializer routes fitresults through MLJ's
+    save/restore.
 - `src/acausal.jl` — the `Acausal` submodule (`futurejoin`, `lead`, `settime`),
   reached only through `using CausalFrames.Acausal` and never re-exported, so
   acausality is always an explicit opt-in. `settime` goes further and is not in

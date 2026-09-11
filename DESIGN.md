@@ -142,6 +142,9 @@ Two kinds, both compatible with the chaining operator `|>`:
 | `lastrow(; key)` | transform | emit each key's last row, retimed to `stop`; keyless emits the stream's last row (see "Last row") |
 | `forwardfill(selectors...; key, tolerance)` | transform | replace `missing` in the selected columns (see "Column selectors") with that column's last non-missing value, per key, while not older than `tolerance` (see "Filling") |
 | `fillmissing(specs...)` | transform | replace `missing` with a per-column constant, given as `name => value` pairs or a `NamedTuple`; the column's element type narrows (see "Filling") |
+| `applymodels(models; column, key, tolerance, strict, name, operation)` | transform | as-of match each row to the latest `FittedModel` row of a models pipeline (per key), and append that model's prediction; `missing` where there is none (see "Model fitting (MLJ)") |
+| `addpredictions(clock, lookback, model, predictors, response; key, name, operation)` | transform | `summarizewindows` over a `FitModel` feeding `applymodels`: refit at every tick on `[τ - lookback, τ)`, predict each row from the latest tick at or before it (see "Model fitting (MLJ)") |
+| `modelreports(; column, name)` | transform | over a models pipeline, replace each `FittedModel` with its fit report; row-wise (see "Model fitting (MLJ)") |
 
 Row functions (`pred`, `f`) receive a map-like row object supporting
 `row.name` and `row[:name]` access (Tables.jl row semantics), including
@@ -979,6 +982,99 @@ nothing. A widening that stays running replays the live rows into fresh groups
 while split contexts do not compose: ticks realign to each context's start,
 and the vanish rule depends on the previous tick.
 
+## Model fitting (MLJ)
+
+Four exports put MLJ models inside pipelines:
+
+- `FitModel`, a summarizer that fits a model to the rows it folds and emits a
+  `FittedModel`;
+- `applymodels`, which predicts a stream from a table of fitted models;
+- `addpredictions`, the two composed over a rolling window;
+- `modelreports`, which turns a table of models into a table of their fit
+  reports.
+
+**The dependency.** MLJ is reached through MLJModelInterface alone, a weak
+dependency behind `ext/CausalFramesMLJModelInterfaceExt.jl` (see
+`ext/CLAUDE.md`). It is the interface every model package implements, so
+loading any MLJ model loads the extension, and it is small and pure Julia
+(ScientificTypesBase and StatisticalTraits beyond stdlibs): measured on Julia
+1.12, `using MLJModelInterface` after `using CausalFrames` — the package and
+the extension together — takes about 0.01 s, against about 1 s for
+CausalFrames itself. MLJBase was
+rejected: machines bring Distributions, CategoricalArrays and dozens more
+packages, and the model-level API (`fit`, `predict`, the data front-end
+`reformat`, `save`/`restore`) needs none of them. Model *implementations*
+generally do need MLJBase, for `MLJModelInterface.matrix` and friends, which is
+why users load `using MLJ` — but that weight is theirs to choose. One naming
+consequence: MLJ (like MLJModelInterface) exports the scientific type `Count`,
+so alongside it the summarizer is written `CausalFrames.Count()`; renaming an
+existing export to dodge a downstream package was not worth the breakage. As with
+parquet, `src/models.jl` names no MLJ type: the extension implements five hooks
+whose fallbacks live there (`ismodel`, `fitmodel`, `predictmodel`,
+`savefitresult`, `restorefitresult`).
+
+**`FitModel`** buffers the rows it folds — one concretely typed vector per
+predictor and one for the response, typed from the input schema as every state
+is — and fits at `value` time. A fit's cost therefore follows the host: once
+per window under `summarize`, per interval under `intervalize`, per tick and
+key under `summarizewindows`.
+- Its output name, predictors and response are type parameters, and `value`
+  builds a `NamedTuple{(N,),Tuple{FittedModel{P,M}}}` explicitly. The column
+  type is thus concrete even though the fit is opaque. A `FittedModel`'s
+  `fitresult` and `report` are `Any`, but they are touched once per fit and
+  once per prediction group, never per row.
+- It is a plain `Summarizer`, neither monoid nor group — a fit neither combines
+  nor inverts — so windowed transforms re-fold for it.
+- `fresh!` empties the buffers in place, keeping their capacity for the next
+  window. That is safe only because `value` hands the model *copies*: a model
+  that keeps its training table (a nearest-neighbour model, say) would
+  otherwise see it overwritten by the next window. The copy is O(window) per
+  fit, which the fit dwarfs.
+
+**`applymodels`** is `asofjoin`'s machinery with a different assembly. The
+models pipeline, narrowed to its model and key columns, is the right side of
+the as-of store: `AsofJoinState`, `pullright!` and `joinsegment!` are
+unchanged, and `AsofJoinConfig` carries the operator's name for error messages.
+- Once a chunk's matches are known, its rows are grouped by model identity (an
+  `IdDict` typed at a function barrier), and each distinct model is applied
+  once, to views of its rows' predictor columns — one dynamic call per model
+  per chunk.
+- The results are scattered into one `Union{Missing, E}` column, with `E`
+  promoted across the groups.
+- The predictor names come from the `FittedModel`'s type, so a model table read
+  back from disk is self-describing.
+- One deliberate departure from `asofjoin`: a models stream with no rows still
+  appends the prediction column, all `missing`, because the caller names that
+  column rather than the data supplying it.
+
+**`addpredictions`** is `p |> summarizewindows(clock, lookback, FitModel(...);
+key)` feeding `applymodels(...; strict = false)`, and its causality argument is
+the composition's. A model emitted at tick `τ` was fit on rows in
+`[τ - lookback, τ)`, and a row at `t ≥ τ` uses it, so every training row is
+strictly earlier than every row it predicts. That is why the windows are
+half-open, and why the match need not be strict. Keyed, the vanish row of
+`summarizewindows` carries a `missing` model, so a key with no rows in its
+latest window is predicted `missing` rather than by a stale model; keyless, an
+empty window's `missing` summary does the same. One thing causality cannot
+check: the response must be observable at its row's time. A response built by
+looking ahead (`Acausal.lead`) makes the whole construction look ahead, and is
+the caller's explicit opt-in. The pipeline runs twice, once to fit and once to
+predict, as a self-join does.
+
+**`modelreports`** replaces the model column with each fit's report — the third
+value `MMI.fit` returns, which MLJ's `report(mach)` gives for a machine. It is
+row-wise and stateless, and a `missing` cell stays `missing`. The report stays
+one column. Splatting its fields into columns was rejected: a chunk's column
+names must be fixed before its rows go out, and the fields are unknown until a
+model has been fit, so a keyless stream opening on empty windows would have
+nothing to name them from. `addcolumns` extracts fields.
+
+**Persistence.** `FittedModel` defines `serialize`/`deserialize` on its own type
+(so not piracy) that route the fitresult through `savefitresult` and
+`restorefitresult` — MLJ's `save`/`restore`. Models wrapping foreign resources
+therefore survive `writejls`, and a model table read back with `readjls` feeds
+`applymodels` and `modelreports` directly.
+
 ## Last row
 
 `lastrow(; key)` folds the whole window the way `summarize` does — one pass per
@@ -1189,6 +1285,12 @@ Concrete summarizers provided, for an input column of element type `T`:
 | `Max(column)` | `:x_max` | `T` | `missing` |
 | `First(column)` | `:x_first` | `T` | `missing` |
 | `Last(column)` | `:x_last` | `T` | `missing` |
+| `FitModel(model, predictors, response; name)` | `:model`, or `name` | `FittedModel{P,M}` | `missing` |
+
+`FitModel` is the one summarizer whose value is not a statistic but an object:
+an MLJ model fit to the rows folded, buffered at the input's own types and fit
+when the summary is emitted. It needs the MLJ extension, and its design is in
+"Model fitting (MLJ)".
 
 `LinearRegression` is the only summarizer emitting a whole block of columns, so
 its contract is spelled out here. For `K` predictors it produces `2K + 5`
@@ -1611,7 +1713,9 @@ at `stop` exactly as `summarize` does (see [Last row](#last-row)). So does
 [Filling](#filling)); `fillmissing`, having no state at all, does not. So does
 `summarizewindows`, whose buffer of live rows, pending ticks and previous
 tick's keys all span the window (see
-[Window summarization](#window-summarization)).
+[Window summarization](#window-summarization)), and `applymodels`, whose as-of
+store of latest models is `asofjoin`'s — hence `addpredictions`, their
+composition. `modelreports` is row-wise and stateless.
 Consequently concatenating the frames
 of `stream(ctx, p)` always equals `load(ctx, p)`, even for stateful
 operators — but the chunk-concatenation property over *split contexts*
@@ -1647,6 +1751,8 @@ the second.
 | `src/rolling.jl` | the rolling-window summarization transform (`addrollingcolumns`) |
 | `src/intervalize.jl` | the interval-summarization transform (`intervalize`) |
 | `src/windows.jl` | the clock-sampled trailing-window summarization transform (`summarizewindows`) |
+| `src/models.jl` | the MLJ operators (`applymodels`, `addpredictions`, `modelreports`), the extension hooks and their fallbacks, and `FittedModel`'s serializer |
+| `ext/CausalFramesMLJModelInterfaceExt.jl` | the MLJ hooks for `MLJModelInterface.Model`: fit, predict, save/restore |
 | `src/acausal.jl` | the `Acausal` submodule: the forward join (`futurejoin`), the acausal time shift (`lead`), and the permissive retiming (`settime`, not exported even from the submodule) |
 | `src/precompile.jl` | PrecompileTools workload covering the main pipeline paths |
 
@@ -1656,7 +1762,8 @@ Exports: `Context`, `CausalFrame`, `CausalPipeline`, `load`, `stream`,
 `addcolumns`, `selectcolumns`, `dropcolumns`, `reordercolumns`, `Summarizer`, `MonoidSummarizer`, `GroupSummarizer`,
 `SummarizerState`, `Count`, `CountDistinct`, `Sum`, `SumPower`,
 `Moment`, `Product`, `DotProduct`, `Mean`, `Variance`, `Std`, `Covariance`,
-`Correlation`, `LinearRegression`, `Min`, `Max`, `First`, `Last`, `summarize`,
+`Correlation`, `LinearRegression`, `Min`, `Max`, `First`, `Last`, `FitModel`,
+`FittedModel`, `applymodels`, `addpredictions`, `modelreports`, `summarize`,
 `summarizecycles`, `intervalize`, `summarizewindows`, `addsummarycolumns`,
 `addrollingcolumns`,
 `asofjoin`, `lag`, `settime`, `head`, `lastrow`, `forwardfill`, `fillmissing`.
@@ -1673,7 +1780,8 @@ that `using CausalFrames.Acausal` cannot shadow the causal one.
 
 Dependencies: DataFrames, CSV, Tables, LinearAlgebra, PrecompileTools, and the
 `Serialization` stdlib (see "JLS I/O"); weak dependencies DuckDB and Parquet2,
-each behind a package extension (see "Parquet I/O").
+each behind a package extension (see "Parquet I/O"), and MLJModelInterface,
+behind the MLJ extension (see "Model fitting (MLJ)").
 
 Package infrastructure: `test/` runs the unit tests plus an Aqua.jl quality
 testset; `benchmark/benchmarks.jl` is a PkgBenchmark-compatible suite over

@@ -3,6 +3,9 @@ using CausalFrames
 using DataFrames
 using Dates
 using DuckDB
+# Imported, not used: MLJModelInterface re-exports the scientific types, and
+# its `Count` would clash with the summarizer (as MLJ's does for users).
+import MLJModelInterface
 using Parquet2
 using Serialization
 using Tables
@@ -32,6 +35,7 @@ include("fixtures.jl")
     include("windows.jl")
     include("summarize.jl")
     include("summarizers.jl")
+    include("models.jl")
 
     # JET can lag pre-release Julia; the checks are the same on every
     # released version, so skipping them there loses nothing.

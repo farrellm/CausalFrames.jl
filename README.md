@@ -65,6 +65,9 @@ frame = load(Context(DateTime(2026, 1, 1), DateTime(2026, 2, 1)), p)
 | `lastrow(; key)` | transform | emit the last row, or one per key, retimed to the window's `stop` |
 | `forwardfill(sel...; key, tolerance)` | transform | replace `missing` in the selected columns with that column's last non-missing value, per key, while not older than `tolerance` |
 | `fillmissing(specs...)` | transform | replace `missing` with a per-column constant, given as `name => value` pairs or a `NamedTuple` |
+| `applymodels(models; column, key, tolerance, strict, name, operation)` | transform | append each row's prediction from the latest fitted model at or before it (per key), given a pipeline of `FitModel` outputs (needs `using MLJ`) |
+| `addpredictions(clock, lookback, model, predictors, response; key, ...)` | transform | refit an MLJ model at every clock tick `τ` over `[τ - lookback, τ)`, per key, and append each row's prediction from the latest model — training rows always precede the rows they predict |
+| `modelreports(; column, name)` | transform | over a pipeline of fitted models: replace each model with its fit report |
 
 Each transform also has an uncurried, pipeline-first form — `filterrows(p, pred)`,
 `addcolumns(p, f)`, `summarize(p, ss; key)` — equivalent to the `|>` chain
@@ -104,6 +107,12 @@ summary per unique key value. Output columns are named by suffix:
 `Sum(:mid)` produces `:mid_sum`, `Min(:mid)` produces `:mid_min`, and
 `SumPower(:mid, 2)` produces `:mid_sumpower_2`. `LinearRegression` is the
 exception, emitting a block of columns under an optional `name` prefix.
+`FitModel(model, predictors, response)` is the other: with an MLJ model package
+loaded (`using MLJ`), it fits `model` to the rows it summarizes and emits the
+fitted model itself in a `:model` column — applied to a stream by
+`applymodels`, refit on a rolling window by `addpredictions`, and persisted by
+`writejls`. (MLJ exports a scientific type named `Count`, so alongside
+`using MLJ` the summarizer is `CausalFrames.Count()`.)
 
 ```julia
 p = readcsv("ticks.csv";

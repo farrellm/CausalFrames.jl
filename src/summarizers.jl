@@ -1565,3 +1565,134 @@ Last(column::Symbol) = Last{column}()
 emptyvalue(::Last{C}) where {C} = NamedTuple{(Symbol(C, :_last),)}((missing,))
 fresh(::Last{C}, intypes::NamedTuple) where {C} =
     TrackState{C,Symbol(C, :_last),intypes[C],typeof(keeplast)}()
+
+"""
+    FittedModel{P,M}
+
+A fitted MLJ model, as [`FitModel`](@ref) emits it: the `model` (its
+hyperparameters, of type `M`), the `fitresult` its `fit` returned — everything
+prediction needs — and the fit's `report` of diagnostics (see
+[`modelreports`](@ref)). `P` is the tuple of predictor column names it was fit
+on, which is how [`applymodels`](@ref) finds the columns to predict from, so a
+table of fitted models is self-describing. Serializing one, as
+[`writejls`](@ref) does, routes the fitresult through MLJ's `save`/`restore`,
+so models wrapping foreign resources survive the round trip.
+"""
+struct FittedModel{P,M}
+    model::M
+    fitresult::Any
+    report::Any
+end
+
+# Compact, so a frame of models prints as a table rather than as a dump of
+# every fitresult.
+Base.show(io::IO, fm::FittedModel{P}) where {P} =
+    print(io, "FittedModel(", nameof(typeof(fm.model)), ", ", P, ")")
+
+"""
+    FitModel(model, predictors, response; name = :model,
+             verbosity = 0) -> Summarizer
+
+Fits an MLJ `model` — any `MLJModelInterface.Model`, so anything in MLJ's model
+registry — regressing `response` on `predictors` (a column name or a collection
+of them) over the rows it folds. Produces one output column, `name`, holding a
+[`FittedModel`](@ref); the summary of no rows is `missing`. Needs
+MLJModelInterface loaded — `using MLJ`, or any MLJ model package; most model
+implementations also need MLJBase, which `using MLJ` loads.
+
+The folded rows are buffered and the model is fit when a summary is emitted, so
+a fit's cost follows the host transform: once per window under
+[`summarize`](@ref), per interval under [`intervalize`](@ref), per tick (and
+key) under [`summarizewindows`](@ref) — the natural hosts. Under
+[`addsummarycolumns`](@ref) it refits after every row, over everything seen so
+far, which is quadratic. `verbosity` is passed to the model's `fit`.
+
+The predictors reach the model as a column table of the input's own element
+types, with no scientific-type coercion — coerce upstream with
+[`addcolumns`](@ref) where a model needs it — and `missing` values are passed
+through as they are. The model is handed its own copy of the rows, so a fitted
+model that keeps its training data is never disturbed by later fits.
+
+A fit neither combines nor inverts, so `FitModel` is a plain `Summarizer`:
+windowed transforms re-fold each window for it. [`addpredictions`](@ref) fits
+and applies models over a rolling window in one step.
+
+MLJ exports the scientific type `Count`, so with both `using MLJ` and
+`using CausalFrames` the [`Count`](@ref) summarizer must be written
+`CausalFrames.Count()`.
+"""
+struct FitModel{N,P,Y,M} <: Summarizer
+    model::M
+    verbosity::Int
+end
+
+function FitModel(model, predictors, response::Symbol; name::Symbol = :model,
+    verbosity::Integer = 0)
+    ismodel(model) || throw(
+        ArgumentError(
+            mljloaded() ?
+            "FitModel needs an MLJ model; got a $(typeof(model))" : MLJHINT,
+        ),
+    )
+    ps = Tuple(Symbol(p) for p in predictors)
+    isempty(ps) && throw(ArgumentError("FitModel needs at least one predictor"))
+    allunique(ps) || throw(ArgumentError(
+        "FitModel predictors must be distinct, got $ps"))
+    response in ps && throw(ArgumentError(
+        "FitModel response $response is also a predictor"))
+    return FitModel{name,ps,response,typeof(model)}(model, Int(verbosity))
+end
+FitModel(model, predictor::Symbol, response::Symbol; kwargs...) =
+    FitModel(model, (predictor,), response; kwargs...)
+
+# The folded rows: one concretely typed vector per predictor plus one for the
+# response, typed from the input schema like every other state. `fresh!`
+# empties them in place, keeping their capacity — the re-fold windows zero a
+# state per window — which is safe only because `value` fits on copies.
+mutable struct FitModelState{N,P,Y,M,C<:NamedTuple,V<:AbstractVector} <:
+               SummarizerState
+    const model::M
+    const verbosity::Int
+    cols::C
+    y::V
+end
+
+emptyvalue(::FitModel{N}) where {N} = NamedTuple{(N,)}((missing,))
+function fresh(s::FitModel{N,P,Y,M}, intypes::NamedTuple) where {N,P,Y,M}
+    cols = NamedTuple{P}(map(p -> Vector{intypes[p]}(), P))
+    y = Vector{intypes[Y]}()
+    return FitModelState{N,P,Y,M,typeof(cols),typeof(y)}(s.model, s.verbosity,
+        cols, y)
+end
+fresh(st::FitModelState{N,P,Y,M,C,V}) where {N,P,Y,M,C,V} =
+    FitModelState{N,P,Y,M,C,V}(st.model, st.verbosity,
+        map(v -> similar(v, 0), st.cols), similar(st.y, 0))
+@inline function fresh!(st::FitModelState)
+    map(empty!, values(st.cols))
+    empty!(st.y)
+    return st
+end
+# `P` is a type parameter, so the map over it unrolls into one statically
+# typed push per predictor column.
+@inline function update!(st::FitModelState{N,P,Y}, row) where {N,P,Y}
+    map(push!, values(st.cols), map(p -> getproperty(row, p), P))
+    push!(st.y, getproperty(row, Y))
+    return nothing
+end
+# The fit is opaque (an extension hook, returning Any), but the value's type is
+# built from the type parameters, so the output column is concrete regardless.
+function value(st::FitModelState{N,P,Y,M}) where {N,P,Y,M}
+    fitresult, report = fitmodel(st.model, st.verbosity, map(copy, st.cols),
+        copy(st.y))
+    return NamedTuple{(N,),Tuple{FittedModel{P,M}}}((
+        FittedModel{P,M}(st.model,
+            fitresult, report),
+    ))
+end
+function widenstate(st::FitModelState{N,P,Y,M},
+    intypes::NamedTuple) where {N,P,Y,M}
+    cols = NamedTuple{P}(map(p -> convert(Vector{intypes[p]}, st.cols[p]), P))
+    y = convert(Vector{intypes[Y]}, st.y)
+    return FitModelState{N,P,Y,M,typeof(cols),typeof(y)}(st.model, st.verbosity,
+        cols, y)
+end

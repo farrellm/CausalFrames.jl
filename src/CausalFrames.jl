@@ -18,8 +18,9 @@ export Context, CausalFrame, CausalPipeline, load, stream, scan, context,
     Count, CountDistinct, Sum, SumPower, Moment, Product,
     DotProduct, Mean, Variance, Std, Covariance, Correlation,
     LinearRegression, Min, Max,
-    First, Last, summarize, summarizecycles, addsummarycolumns,
-    addrollingcolumns, asofjoin, intervalize, summarizewindows
+    First, Last, FitModel, FittedModel, summarize, summarizecycles,
+    addsummarycolumns, addrollingcolumns, asofjoin, intervalize,
+    summarizewindows, applymodels, addpredictions, modelreports
 
 include("context.jl")
 include("frame.jl")
@@ -38,6 +39,7 @@ include("segtree.jl")
 include("rolling.jl")
 include("intervalize.jl")
 include("windows.jl")
+include("models.jl")
 include("acausal.jl")
 include("precompile.jl")
 

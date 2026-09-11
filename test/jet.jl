@@ -204,6 +204,24 @@ end
     end
 end
 
+# A FitModel fold is a typed push per column (the fit itself is opaque and runs
+# once per emitted summary, not per row), and once the buffers have capacity a
+# fold allocates nothing — the property `fresh!` keeping capacity exists for.
+foldallocs(st, row) = @allocated CausalFrames.update!(st, row)
+@testset "FitModel fold" begin
+    st = CausalFrames.fresh(FitModel(ToyOLS(), [:x, :z], :y),
+        (time = Int, x = Float64, z = Int, y = Float64))
+    row = (time = 1, x = 1.0, z = 2, y = 3.0)
+    JET.@test_opt CausalFrames.update!(st, row)
+    JET.@test_opt CausalFrames.fresh!(st)
+    for _ in 1:100
+        CausalFrames.update!(st, row)
+    end
+    CausalFrames.fresh!(st)
+    foldallocs(st, row)
+    @test foldallocs(st, row) == 0
+end
+
 @testset "forwardfill kernels" begin
     # the same non-isbits carried value the mutable cells exist for
     C = CausalFrames.FillCell{String,Int}

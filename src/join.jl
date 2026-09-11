@@ -65,7 +65,7 @@ function asofjoin(right::CausalPipeline; key = nothing, tolerance = nothing,
     return function (left::CausalPipeline)
         return CausalPipeline() do ctx::Context
             cfg = AsofJoinConfig(keycols, Val(Tuple(keycols)), tolerance,
-                strict ? (<) : (<=), lp, rp, righttime)
+                strict ? (<) : (<=), lp, rp, righttime, "asofjoin")
             js = AsofJoinState(right.run(rightcontext(ctx, tolerance)))
             return chunkmap(c -> joinchunk!(js, cfg, c), left.run(ctx))
         end
@@ -80,16 +80,19 @@ normprefix(p::Union{Symbol,AbstractString}) = String(p)
 prefixed(::Nothing, n::Symbol) = n
 prefixed(p::String, n::Symbol) = Symbol(p, '_', n)
 
-rightcontext(ctx::Context, ::Nothing) = ctx
-function rightcontext(ctx::Context, tolerance)
+# `op` names the operator in the error: applymodels widens its models' context
+# through here too.
+rightcontext(ctx::Context, ::Nothing, op::String = "asofjoin") = ctx
+function rightcontext(ctx::Context, tolerance, op::String = "asofjoin")
     start = ctx.start - tolerance
     start <= ctx.start || throw(ArgumentError(
-        "asofjoin tolerance must be non-negative, got $tolerance"))
+        "$op tolerance must be non-negative, got $tolerance"))
     return Context(start, ctx.stop)
 end
 
 # strict and tolerance ride in type parameters (`before` is `<` or `<=`), so
-# the kernel specializes and neither costs a per-row branch.
+# the kernel specializes and neither costs a per-row branch. `op` names the
+# operator in error messages, since applymodels drives the same store.
 struct AsofJoinConfig{KN,Tol,B}
     keycols::Vector{Symbol}
     keynames::Val{KN}
@@ -98,6 +101,7 @@ struct AsofJoinConfig{KN,Tol,B}
     leftprefix::Union{Nothing,String}
     rightprefix::Union{Nothing,String}
     righttime::Union{Nothing,Symbol}
+    op::String
 end
 
 # Per-run mutable state, in fields rather than reassigned closure captures
@@ -144,10 +148,11 @@ function convertmatches(::Type{V2}, matches::Vector,
     return out
 end
 
-function checkkeys(keycols::Vector{Symbol}, c::DataFrame, side::String)
+function checkkeys(keycols::Vector{Symbol}, c::DataFrame, side::String,
+    op::String = "asofjoin")
     for k in keycols
         String(k) in names(c) || throw(ArgumentError(
-            "asofjoin key column $k not found in $side input"))
+            "$op key column $k not found in $side input"))
     end
     return nothing
 end
@@ -168,7 +173,7 @@ function pullright!(js::AsofJoinState, cfg::AsofJoinConfig)
     end
     chunk, js.rstate = next
     if js.rvaluenames === nothing
-        checkkeys(cfg.keycols, chunk, "right")
+        checkkeys(cfg.keycols, chunk, "right", cfg.op)
         js.rvaluenames = Symbol[n for n in propertynames(chunk)
                      if n !== :time && !(n in cfg.keycols)]
     end
