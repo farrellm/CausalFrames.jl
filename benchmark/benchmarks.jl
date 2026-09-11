@@ -178,17 +178,25 @@ SUITE["intervalize"]["closelast"] = @benchmarkable load(CTX,
     SRC |> intervalize(clock(1000), [Count(), Sum(:qty)]; closelast = true))
 
 # The same ~1000 ticks, each now summarizing a trailing 5000 time units (about
-# 20,000 rows, five tick spacings, so windows overlap five-fold). The running
-# mode slides per-key states once per row; the re-fold mode (Min/Max are
-# monoids only) folds every window at its tick, paying the overlap.
+# 20,000 rows, five tick spacings, so windows overlap five-fold). One entry per
+# window algorithm: the running mode slides per-key states once per row; the
+# tree mode (Min/Max are monoids only) appends each row to a segment tree and
+# recombines a tick's rows together at the tick; the re-fold baseline folds
+# every window at its tick, paying the overlap.
 SUITE["windows"] = BenchmarkGroup()
 SUITE["windows"]["running"] = @benchmarkable load(CTX,
     SRC |> summarizewindows(clock(1000), 5000, [Count(), Sum(:qty), Mean(:qty)]))
 SUITE["windows"]["running-keyed"] = @benchmarkable load(CTX,
     SRC |> summarizewindows(clock(1000), 5000, [Count(), Sum(:qty)];
         key = :sym))
-SUITE["windows"]["refold"] = @benchmarkable load(CTX,
+SUITE["windows"]["tree"] = @benchmarkable load(CTX,
     SRC |> summarizewindows(clock(1000), 5000, [Min(:qty), Max(:qty)]))
+SUITE["windows"]["tree-keyed"] = @benchmarkable load(CTX,
+    SRC |> summarizewindows(clock(1000), 5000, [Min(:qty), Max(:qty)];
+        key = :sym))
+SUITE["windows"]["refold"] = @benchmarkable load(CTX,
+    SRC |> summarizewindows(clock(1000), 5000,
+        [RefoldWrap(Min(:qty)), RefoldWrap(Max(:qty))]))
 
 # One group per window algorithm: all-group summarizers slide running
 # states, all-monoid sets fold from a segment tree, and an unstructured

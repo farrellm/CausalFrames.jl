@@ -123,6 +123,10 @@ end
     tr = CausalFrames.newsegtree(states, typeof(row), Int)
     JET.@test_opt CausalFrames.treepush!(tr, states, row)
     CausalFrames.treepush!(tr, states, row)
+    JET.@test_opt CausalFrames.treeappend!(tr, states, row)
+    CausalFrames.treeappend!(tr, states, row)
+    JET.@test_opt CausalFrames.treesync!(tr)
+    CausalFrames.treesync!(tr)
     JET.@test_opt CausalFrames.treequery(tr, 1, 1)
     JET.@test_opt CausalFrames.windowstart(tr.times, tr.head, 1, 0)
 end
@@ -201,6 +205,11 @@ end
         JET.@test_opt CausalFrames.windowrefold!(RT[], R[], 1, nt, ticks,
             CausalFrames.GroupTable{K,S}(), states, K[], 5, kn, outs, emptyrow,
             grid)
+        TR = CausalFrames.SegTree{S,R,Int}
+        JET.@test_opt CausalFrames.windowtree!(RT[], nt, ticks, Dict{K,TR}(),
+            states, Pair{K,TR}[], K[], 5, kn, outs, emptyrow, grid)
+        JET.@test_opt CausalFrames.flushtree!(RT[], ticks, Dict{K,TR}(),
+            Pair{K,TR}[], K[], 5, outs, emptyrow, grid)
     end
 end
 

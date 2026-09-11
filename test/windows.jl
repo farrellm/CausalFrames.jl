@@ -1,7 +1,7 @@
 # A group summarizer whose state reports itself non-invertible once its column
 # widens to Float64. Every built-in accumulator stays invertible under
-# widening, so this is the only way to drive summarizewindows' running ->
-# re-fold demotion. The output name rides in a type parameter, as the
+# widening, so this is the only way to drive summarizewindows' running -> tree
+# demotion. The output name rides in a type parameter, as the
 # interface requires for `value` to infer.
 struct FragileSum{C} <: GroupSummarizer end
 FragileSum(column::Symbol) = FragileSum{column}()
@@ -204,7 +204,19 @@ end
         end
     end
 
-    @testset "widening, and demotion from running to re-fold" begin
+    @testset "tree agrees with re-fold" begin
+        # L = 40 spans eight ticks, so trees grow, rebuild and slide; the mixed
+        # set is all monoid (Sum is a group, hence a monoid) and takes the tree
+        mixedset = [Sum(:x), Min(:x), Last(:x)]
+        for x in (intx, floatx), ss in (monoidset, mixedset), L in (3, 11, 40),
+            key in (nothing, :k)
+
+            windowsagree(windowed(mkdata(x), L, ss; key),
+                windowed(mkdata(x), L, map(Opaque, ss); key))
+        end
+    end
+
+    @testset "widening, and demotion from running to tree" begin
         # x arrives Int in the first chunk and Float64 afterwards
         mixed = CausalPipeline(
             ctx -> [
@@ -213,7 +225,10 @@ end
                 for r in ranges
             ])
         whole = frame(Float64.(xs))
-        for ss in ([Sum(:x), Mean(:x)], [FragileSum(:x), Count()]),
+        # running stays running, running demotes to tree, tree widens within
+        # tree, re-fold widens within re-fold
+        for ss in ([Sum(:x), Mean(:x)], [FragileSum(:x), Count()],
+                [Min(:x), Last(:x)], [Sum(:x), TestVar(:x)]),
             key in (nothing, :k)
 
             windowsagree(windowed(mixed, 11, ss; key),

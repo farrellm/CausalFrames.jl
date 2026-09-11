@@ -954,7 +954,7 @@ rows (`storerowtype`, `rowat`) with an eviction head. Closing `τ` advances the
 head past the rows with `τ - time > lookback`. Flush drains the clock and
 closes the remaining ticks against the buffer as it stands.
 
-There are two window algorithms. As in `addrollingcolumns`, the choice is made
+There are three window algorithms. As in `addrollingcolumns`, the choice is made
 from the expanded prototype tuple and re-derived whenever the states are built
 or widened:
 
@@ -964,18 +964,40 @@ or widened:
   `downdate!`ed on eviction, and a group is deleted with its last row, so
   presence means rows in the window. Cost: O(1) amortized per row, plus a key
   sort per tick into a reused scratch vector.
+- **Tree**, for an all-`MonoidSummarizer` set (group summarizers mixed with
+  monoid-only ones included). Rows append to per-key segment trees
+  (`segtree.jl`, the `addrollingcolumns` structure), and at each tick every
+  tree binary-searches its window start with the exact membership predicate
+  and folds the window from O(log n) partial combinations, order-preserved for
+  `First`/`Last`. What differs from `addrollingcolumns` is *when* a tree
+  recombines. There a window is queried after every row, so each append
+  updates its O(log n) ancestors at once. Here nothing reads a tree between
+  ticks, so rows append as bare leaves (`treeappend!`), and at the tick each
+  tree recombines the ancestors of all its new leaves together, level by level
+  (`treesync!`): O(new leaves + log n), about one `combine!` per row. An eager
+  tree would pay log₂(window) combines per row (about sixteen at a 20,000-row
+  window), against re-fold's one update per row per overlapping tick. A tree
+  whose window empties is dropped, so presence means rows in the window, as in
+  running mode. Cost: O(1) amortized per row plus O(log n) per key per tick.
+  Measured over the benchmark's million rows with `[Min, Max]`, a 5,000-unit
+  look-back and 1,000-unit ticks (five-fold overlap), tree beats re-fold
+  56 ms to 75 ms keyless and 117 ms to 152 ms keyed over 100 keys; at a
+  50,000-unit look-back (fifty-fold) it is 198 ms to 687 ms. The price is
+  memory, as for rolling's trees: a tree holds between two and eight state
+  tuples per live row, each state its own heap object, where re-fold holds
+  only the rows. Growing to the 20,000-row window allocates about 350,000
+  states (25 MiB) once, though nothing per row in the steady state.
 - **Re-fold** otherwise. At each tick the live rows are folded into per-key
   states drawn from a `GroupTable`'s pool, emitted, and retired back —
   `closecycle!`'s protocol — at O(window) per tick. This is the path `FitModel`
   takes, and the differential-test oracle for the running one.
 
-There is no tree mode. `addrollingcolumns` queries a window per *row*, which is
-where a segment tree's O(log n) pays; here a window is queried per *tick*,
-typically far more rarely, so the monoid-only sets that would use a tree
-re-fold for now. A widening that defeats `isinvertible` demotes running to
-re-fold mid-stream; the buffer is common to both modes, so demotion rebuilds
-nothing. A widening that stays running replays the live rows into fresh groups
-(`replaygroups!`).
+A widening that defeats `isinvertible` demotes running to the tree mid-stream,
+as in `addrollingcolumns`: the buffer's live rows replay into trees, which own
+their rows from then on. A widening within tree mode replays each tree's live
+rows (`replaytrees!`), and one that stays running replays the live rows into
+fresh groups (`replaygroups!`). Re-fold keeps nothing but the buffer, so a
+widening there rebuilds only the states.
 
 `summarizewindows` is **causal**: a row emitted at `τ` folds only rows with time
 `< τ`. It is **stateful** in the usual sense, so streaming equals loading,
@@ -1473,8 +1495,11 @@ Three structures own reusable scratch rather than allocating it per use:
 - a `SegTree` holds the two order-preserving accumulators its range queries
   fold into, so `treequery`'s result is **borrowed** — valid until that tree's
   next query, which is all its callers need, since they read it straight
-  through `summaryvalues`. It also reuses its node vector and compacts its row
-  buffers in place across rebuilds, which matters because a window short enough
+  through `summaryvalues`. It also compacts its row buffers in place across
+  rebuilds and, at an unchanged capacity, keeps its node vector by moving the
+  live leaves' state tuples to the front by reference — nothing is re-zeroed
+  or re-folded, a swapped-out tuple being zeroed only by the append that claims
+  its slot — which matters because a window short enough
   to expire rows as fast as they arrive keeps the capacity at its floor and
   rebuilds every few appends;
 - the re-fold window kernel threads one state tuple through its window
@@ -1752,7 +1777,7 @@ the second.
 | `src/join.jl` | the as-of join transform (`asofjoin`) |
 | `src/lastrow.jl` | the last-row-per-key transform (`lastrow`), over the join's store |
 | `src/fill.jl` | the missing-value fills: the stateful `forwardfill` and the row-wise `fillmissing` |
-| `src/segtree.jl` | the monoid segment tree behind the rolling tree mode |
+| `src/segtree.jl` | the monoid segment tree behind the rolling and window tree modes |
 | `src/rolling.jl` | the rolling-window summarization transform (`addrollingcolumns`) |
 | `src/intervalize.jl` | the interval-summarization transform (`intervalize`) |
 | `src/windows.jl` | the clock-sampled trailing-window summarization transform (`summarizewindows`) |

@@ -79,7 +79,7 @@
         )
         DataFrame(load(ctx, p |> intervalize(clock(2), [Count(), Sum(:v)];
             key = :sym)))
-        # the running window mode keyless, the re-fold mode (Min is a monoid
+        # the running window mode keyless, the tree mode (Min is a monoid
         # only) keyed, which also takes the vanish-row path
         DataFrame(
             load(ctx, p |> summarizewindows(clock(2), 3,

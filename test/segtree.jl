@@ -73,6 +73,40 @@
     @test tr.head == 1 && dropped == 59
     @test queryvals(tr, 1, length(tr.rows)) == naive(rows[(dropped+1):end])
 
+    # The batched protocol summarizewindows uses: runs of bare appends, one sync,
+    # then queries. The head stays put for the first steps, so capacity grows
+    # through reallocating rebuilds; then it slides as a window would, keeping
+    # the live rows few, so rebuilds recur at an unchanged capacity (the
+    # swapping path). Odd lengths put the last parent's right child past the
+    # end, where the sync combines with the identity, and a head slid past the
+    # first unsynced leaf starts the sync at the head.
+    runs = lcgsequence(17, 80, 9)
+    ahead = lcgsequence(19, 80, 5)
+    tr = CausalFrames.newsegtree(stateprotos, R, Int64)
+    rows = R[]
+    swapped = 0
+    for step in 1:80
+        before, nodes0 = length(tr.rows), tr.nodes
+        k = runs[step] + 1
+        for _ in 1:k
+            t += 1
+            row = (time = t, x = xs[1+t%100])
+            push!(rows, row)
+            CausalFrames.treeappend!(tr, stateprotos, row)
+        end
+        length(tr.rows) < before + k && (swapped += tr.nodes === nodes0)
+        n = length(tr.rows)
+        step > 20 && (tr.head = max(tr.head, n - ahead[step]))
+        CausalFrames.treesync!(tr)
+        off = length(rows) - n
+        for lo in tr.head:n
+            @test queryvals(tr, lo, n) == naive(rows[(off+lo):end])
+            @test queryvals(tr, tr.head, lo) ==
+                  naive(rows[(off+tr.head):(off+lo)])
+        end
+    end
+    @test swapped > 0
+
     # windowstart uses the kernel's exact membership predicate
     times = [1, 2, 2, 3, 5]
     @test CausalFrames.windowstart(times, 1, 5, 3) == 2

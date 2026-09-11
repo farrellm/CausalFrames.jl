@@ -6,14 +6,20 @@
 # rather than at every row. Keyless output is a grid (one row per tick); keyed
 # output is sparse, with one empty row marking a key whose window has emptied.
 #
-# Two window algorithms, chosen from the summarizers' structure like
+# Three window algorithms, chosen from the summarizers' structure like
 # rolling.jl's: all GroupSummarizers slide per-key running states (update! on
-# admission, downdate! on eviction, O(1) amortized per row); anything else
-# re-folds each window at its tick, O(window) per tick. A widening that defeats
-# downdate! (isinvertible) demotes running to re-fold, which needs nothing but
-# the buffer both modes keep. Per the summarize.jl conventions, the
-# type-unstable setup happens once per chunk and the kernels take concretely
-# typed arguments behind function barriers.
+# admission, downdate! on eviction, O(1) amortized per row); all
+# MonoidSummarizers append rows to per-key segment trees and fold each window
+# from O(log window) partial combinations at its tick; anything else re-folds
+# each window at its tick, O(window) per tick. The tree differs from rolling's
+# in when it recombines: rolling queries after every row, so each append
+# updates its ancestors, while here nothing reads a tree between ticks, so a
+# tick's rows are appended as bare leaves and their ancestors recombined
+# together at the tick (`treesync!`) — about one combine per row instead of
+# log(window). A widening that defeats downdate! (isinvertible) demotes running
+# to the tree, rebuilt from the running mode's buffer. Per the summarize.jl
+# conventions, the type-unstable setup happens once per chunk and the kernels
+# take concretely typed arguments behind function barriers.
 
 """
     summarizewindows(clock, lookback, summarizers;
@@ -49,7 +55,10 @@ rather than keep its stale value; the key is then not emitted again until its
 window holds rows.
 
 Windows over [`GroupSummarizer`](@ref)s slide in O(1) per row, subtracting rows
-as they leave; anything else is re-folded over each window, O(window) per tick.
+as they leave. Windows over [`MonoidSummarizer`](@ref)s (`Min`, `First`, …) fold
+from a segment tree of partial combinations, O(1) amortized per row plus
+O(log window) per key per tick. Anything else is re-folded over each window,
+O(window) per tick.
 
 The curried form composes with `|>`; the uncurried form applies directly, so
 `summarizewindows(p, clock, lookback, ss; key)` is equivalent to
@@ -66,8 +75,7 @@ function summarizewindows(clk::CausalPipeline, lookback, summarizers;
     )
     protos, requested = prototypes(tosummarizers(summarizers), keycols)
     cfg = WindowConfig(keycols, Val(Tuple(keycols)), lookback, protos,
-        Val(requested), Val(isempty(keycols)),
-        candidatemode(protos) isa RunningMode ? RunningMode() : RefoldMode())
+        Val(requested), Val(isempty(keycols)), candidatemode(protos))
     return function (p::CausalPipeline)
         return CausalPipeline() do ctx::Context
             T = timetype(ctx)
@@ -113,11 +121,11 @@ mutable struct WindowState{T}
     doneticks::Bool     # the clock is exhausted
     types::Union{Nothing,NamedTuple}  # promotion of every input schema seen
     stateprotos::Any    # state tuple template
-    buffer::Any         # Vector{R}: admitted rows, time-ordered
+    buffer::Any         # Vector{R}: admitted rows, time-ordered; empty in tree mode
     head::Int           # first buffered row not yet evicted
     mode::RollMode      # effective algorithm for the realized state types
-    groups::Any         # running: Dict{K,RunningGroup{S}}; re-fold: GroupTable{K,S}
-    scratch::Any        # running: Vector{Pair{K,RunningGroup{S}}}, the sort buffer
+    groups::Any         # by mode: Dict{K,RunningGroup{S}}, Dict{K,SegTree}, GroupTable{K,S}
+    scratch::Any        # running, tree: Vector{Pair{K,V}} over groups, the sort buffer
     prevkeys::Any       # Vector{K}: keys emitted with rows at the previous tick
     checked::Bool       # key columns validated against the input
     WindowState{T}(cur) where {T} = new{T}(cur, T[], false, nothing, nothing,
@@ -143,17 +151,14 @@ function drainticks!(st::WindowState)
     return nothing
 end
 
-# The running mode needs every state invertible for the realized types; the
-# tree mode rolling.jl would use for monoid-only sets is not implemented here,
-# so anything short of that re-folds.
-windowmode(::RefoldMode, ::Tuple) = RefoldMode()
-windowmode(::RunningMode, stateprotos::Tuple) =
-    all(isinvertible, stateprotos) ? RunningMode() : RefoldMode()
-
 # Build the states, buffer and mode structures for the first realized schema,
-# or rebuild them for a widened one. The running groups are replayed from the
-# live rows (rolling.jl's `replaygroups!`), which is correct for every
-# transition, demotion to re-fold included.
+# or rebuild them for a widened one, always from the live rows — correct for
+# every transition. The mode is rolling.jl's `effectivemode`, so running
+# demotes to the tree when a widening defeats `isinvertible`. Running groups
+# replay the buffer (rolling.jl's `replaygroups!`). Trees replay it too on a
+# first build or a demotion, after which they own the rows and the buffer stays
+# empty; a widening within tree mode replays the old trees' live rows instead
+# (`replaytrees!`, as in rolling.jl's `widenmode!`).
 function preparewindows!(st::WindowState, cfg::WindowConfig, types::NamedTuple)
     if st.stateprotos === nothing
         st.stateprotos = newstates(cfg.protos, types)
@@ -167,11 +172,27 @@ function preparewindows!(st::WindowState, cfg::WindowConfig, types::NamedTuple)
     st.prevkeys =
         st.prevkeys === nothing ? K[] : convert(Vector{K}, st.prevkeys)
     S = typeof(st.stateprotos)
-    st.mode = windowmode(cfg.candidate, st.stateprotos)
+    oldmode = st.mode
+    st.mode = effectivemode(cfg.candidate, st.stateprotos)
     if st.mode isa RunningMode
         st.groups = replaygroups!(Dict{K,RunningGroup{S}}(), st.buffer,
             st.head, st.stateprotos, cfg.keynames)
         st.scratch = Pair{K,RunningGroup{S}}[]
+    elseif st.mode isa TreeMode
+        trees = newtrees(st.stateprotos, K, storerowtype(types), types.time)
+        if oldmode isa TreeMode
+            for (_, old) in st.groups
+                replaytrees!(trees, old.rows, old.head, st.stateprotos,
+                    cfg.keynames)
+            end
+        else
+            replaytrees!(trees, st.buffer, st.head, st.stateprotos,
+                cfg.keynames)
+            empty!(st.buffer)
+            st.head = 1
+        end
+        st.groups = trees
+        st.scratch = Pair{K,valtype(trees)}[]
     else
         st.groups = GroupTable{K,S}()
         st.scratch = nothing
@@ -211,14 +232,19 @@ function windowstep!(st::WindowState{T}, cfg::WindowConfig,
     fillticks!(st, last(nt.time))
     RT, emptyrow = windowtypes(st, cfg)
     rows = RT[]
-    st.head, closed =
-        st.mode isa RunningMode ?
-        windowrunning!(rows, st.buffer, st.head, nt, st.ticks, st.groups,
-            st.stateprotos, st.scratch, st.prevkeys, cfg.lookback,
-            cfg.keynames, cfg.outs, emptyrow, cfg.grid) :
-        windowrefold!(rows, st.buffer, st.head, nt, st.ticks, st.groups,
-            st.stateprotos, st.prevkeys, cfg.lookback, cfg.keynames, cfg.outs,
+    if st.mode isa RunningMode
+        st.head, closed = windowrunning!(rows, st.buffer, st.head, nt,
+            st.ticks, st.groups, st.stateprotos, st.scratch, st.prevkeys,
+            cfg.lookback, cfg.keynames, cfg.outs, emptyrow, cfg.grid)
+    elseif st.mode isa TreeMode
+        closed = windowtree!(rows, nt, st.ticks, st.groups, st.stateprotos,
+            st.scratch, st.prevkeys, cfg.lookback, cfg.keynames, cfg.outs,
             emptyrow, cfg.grid)
+    else
+        st.head, closed = windowrefold!(rows, st.buffer, st.head, nt,
+            st.ticks, st.groups, st.stateprotos, st.prevkeys, cfg.lookback,
+            cfg.keynames, cfg.outs, emptyrow, cfg.grid)
+    end
     deleteat!(st.ticks, 1:closed)
     st.head = compact!(st.buffer, st.head)
     return isempty(rows) ? nothing : DataFrame(rows)
@@ -237,14 +263,18 @@ function windowflush!(st::WindowState{T}, cfg::WindowConfig) where {T}
     end
     RT, emptyrow = windowtypes(st, cfg)
     rows = RT[]
-    st.head =
-        st.mode isa RunningMode ?
-        flushrunning!(rows, st.buffer, st.head, st.ticks, st.groups, st.scratch,
-            st.prevkeys, cfg.lookback, cfg.keynames, cfg.outs, emptyrow,
-            cfg.grid) :
-        flushrefold!(rows, st.buffer, st.head, st.ticks, st.groups,
+    if st.mode isa RunningMode
+        st.head = flushrunning!(rows, st.buffer, st.head, st.ticks, st.groups,
+            st.scratch, st.prevkeys, cfg.lookback, cfg.keynames, cfg.outs,
+            emptyrow, cfg.grid)
+    elseif st.mode isa TreeMode
+        flushtree!(rows, st.ticks, st.groups, st.scratch, st.prevkeys,
+            cfg.lookback, cfg.outs, emptyrow, cfg.grid)
+    else
+        st.head = flushrefold!(rows, st.buffer, st.head, st.ticks, st.groups,
             st.stateprotos, st.prevkeys, cfg.lookback, cfg.keynames, cfg.outs,
             emptyrow, cfg.grid)
+    end
     empty!(st.ticks)
     return isempty(rows) ? nothing : DataFrame(rows)
 end
@@ -253,8 +283,10 @@ end
 #
 # Called with concretely typed arguments. For each row at time s, every
 # pending tick τ <= s is closed first — the window is half-open, so the row is
-# in no window of a tick at or before it — and then the row is admitted. Both
-# return (head, closed): the eviction head and how many ticks were closed.
+# in no window of a tick at or before it — and then the row is admitted. The
+# running and re-fold kernels return (head, closed): the eviction head and how
+# many ticks were closed. The tree kernel returns only `closed`, since its
+# trees own their rows and heads.
 
 function windowrunning!(rows::Vector{RT}, buffer::Vector{R}, head::Int,
     nt::NamedTuple, ticks::Vector{T}, groups::Dict{K,RunningGroup{S}},
@@ -372,8 +404,63 @@ end
     return head
 end
 
+function windowtree!(rows::Vector{RT}, nt::NamedTuple, ticks::Vector{T},
+    trees::Dict{K,SegTree{S,R,TT}}, stateprotos::S,
+    scratch::Vector{Pair{K,SegTree{S,R,TT}}}, prevkeys::Vector{K}, lookback,
+    keynames::Val, outs::Val, emptyrow,
+    grid::Val) where {RT,T,K,S<:Tuple,R,TT}
+    bi = 1
+    nb = length(ticks)
+    for i in eachindex(nt.time)
+        s = @inbounds nt.time[i]
+        while bi <= nb && @inbounds(ticks[bi]) <= s
+            closetree!(rows, @inbounds(ticks[bi]), trees, scratch, prevkeys,
+                lookback, outs, emptyrow, grid)
+            bi += 1
+        end
+        row = rowat(R, nt, i)
+        tr = get!(() -> newsegtree(stateprotos, R, TT), trees,
+            keyvalues(row, keynames))
+        treeappend!(tr, stateprotos, row)
+    end
+    return bi - 1
+end
+
+function flushtree!(rows::Vector{RT}, ticks::Vector, trees::Dict{K,V},
+    scratch::Vector{Pair{K,V}}, prevkeys::Vector{K}, lookback, outs::Val,
+    emptyrow, grid::Val) where {RT,K,V<:SegTree}
+    for τ in ticks
+        closetree!(rows, τ, trees, scratch, prevkeys, lookback, outs, emptyrow,
+            grid)
+    end
+    return nothing
+end
+
+# Move each tree's head to τ's window start and emit. Every admitted row is
+# before τ, so the window is head:length(rows). A tree whose window has emptied
+# is dropped: ticks only advance, so its rows are expired for good, and an
+# absent key means an empty window, as in the running mode. The survivors sync
+# the leaves appended since the last tick, once, before their one query.
+@inline function closetree!(rows::Vector, τ, trees::Dict{K,V},
+    scratch::Vector{Pair{K,V}}, prevkeys::Vector{K}, lookback, outs::Val,
+    emptyrow, grid::Val) where {K,V<:SegTree}
+    filter!(trees) do (_, tr)
+        tr.head = windowstart(tr.times, tr.head, τ, lookback)
+        live = tr.head <= length(tr.rows)
+        live && treesync!(tr)
+        return live
+    end
+    empty!(scratch)
+    append!(scratch, trees)
+    sort!(scratch; by = groupkey)
+    emitwindow!(rows, τ, scratch, prevkeys, outs, emptyrow, grid)
+    return nothing
+end
+
 @inline windowstates(g::RunningGroup) = g.states
 @inline windowstates(states::Tuple) = states
+# Borrowed scratch (see `treequery`), read once per tick through summaryvalues.
+@inline windowstates(tr::SegTree) = treequery(tr, tr.head, length(tr.rows))
 
 # Emit one tick. Keyless (grid): exactly one row, the summary or the empty
 # values. Keyed: the present keys in key order, merged with an empty row for

@@ -172,15 +172,21 @@ design rationale and performance constraints behind each module.
   replacement column, which folds the write out of the unrolled kernel.
   `tolerance` widens the input context as `asofjoin` does, so `clipstart!` has
   to drop the pre-`start` rows the fill was allowed to see
-- `src/segtree.jl` — the monoid segment tree behind the rolling tree mode:
-  implicit array tree of `combine!`d partial state tuples, append-only rows,
-  logical front expiry (`head`), amortized rebuilds, order-preserving
-  two-accumulator range queries (`treepush!`, `treequery`, `windowstart`).
-  The tree owns its two query accumulators and its node vector: `treequery`
-  returns **borrowed** scratch, valid only until that tree's next query, and
-  `rebuild!` reuses the nodes and compacts the rows in place whenever the
-  capacity has not moved — the steady state under a short window, where
-  rebuilds fire every few appends rather than amortizing away
+- `src/segtree.jl` — the monoid segment tree behind the rolling and window
+  tree modes: implicit array tree of `combine!`d partial state tuples,
+  append-only rows, logical front expiry (`head`), amortized rebuilds,
+  order-preserving two-accumulator range queries (`treequery`,
+  `windowstart`). Appending (`treeappend!`, a bare leaf) and recombining
+  (`treesync!`, the ancestors of every leaf since the last sync) are separate,
+  so a per-tick caller pays about one combine per row; `treepush!` is the two
+  together, for rolling's per-row queries. Only nodes over appended leaves are
+  maintained: the sync combines the right edge with the tree's `ident`, so
+  nothing past the end ever needs zeroing. The tree owns its two query
+  accumulators and its node vector: `treequery` returns **borrowed** scratch,
+  valid only until that tree's next query, and `rebuild!` at an unchanged
+  capacity just swaps the live leaves' tuples to the front by reference — the
+  steady state under a short window, where rebuilds fire every few appends
+  rather than amortizing away
 - `src/rolling.jl` — `addrollingcolumns` picks its window algorithm from the
   expanded prototype tuple's structure: all-group → per-key running states
   with per-window eviction heads, O(1)/row (`rollsegmentrunning!`);
@@ -203,8 +209,11 @@ design rationale and performance constraints behind each module.
   (`[τ - lookback, τ)` at each tick): `intervalize`'s driver (`IntervalCursor`,
   a concrete tick vector per chunk) over `addrollingcolumns`' row buffer and
   eviction head. Running mode (`RunningGroup`s, update!/downdate!) for
-  invertible group sets, re-fold through a `GroupTable` pool otherwise — no
-  tree mode, since windows are queried per tick rather than per row. Keyed
+  invertible group sets; per-key segment trees for monoid sets, with rows
+  appended as bare leaves and synced once per tick — windows are queried per
+  tick, not per row, so rolling's eager per-append ancestor update (log₂ of
+  the window in combines per row) would squander that; re-fold through a
+  `GroupTable` pool otherwise. Keyed
   output is sparse plus one *vanish* row of empty values when a key's window
   empties, decided against the previous tick's *emitted* keys; that row is what
   stops a per-key as-of consumer (`applymodels`) from using a stale summary

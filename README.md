@@ -165,8 +165,8 @@ summarize. The summarized pipeline runs over a context widened backward by
 the longest look-back, so the first row already sees a full window; an
 empty window yields the summarizer's identity or `missing` as above.
 
-Rolling windows pick their algorithm from the summarizers' declared
-structure: `GroupSummarizer`s (`Sum`, `Mean`, …) slide a running state in
+Rolling windows, and the clock-sampled windows of `summarizewindows`, pick
+their algorithm from the summarizers' declared structure: `GroupSummarizer`s (`Sum`, `Mean`, …) slide a running state in
 O(1) per row by subtracting exiting rows, `MonoidSummarizer`s (`Min`,
 `Product`, …) fold each window from a segment tree of partial combinations
 in O(log window), and summarizers declaring neither re-fold each window
