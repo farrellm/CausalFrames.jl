@@ -116,6 +116,9 @@ predsame(x, y) =
             p |> summarize(FitModel(ToyOLS(), :x, :y; name = :fit))))
         @test names(df) == ["time", "fit"]
         @test only(df.fit).fitresult ≈ olsfit(xs, ys)
+
+        # a string is one predictor name, not one name per character
+        @test FitModel(ToyOLS(), "price", :y) isa FitModel{:model,(:price,)}
     end
 
     @testset "one fit per interval, per key" begin

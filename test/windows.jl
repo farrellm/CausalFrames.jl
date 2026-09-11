@@ -122,6 +122,27 @@ end
         @test df.x_sum == [0, 0, 99]
     end
 
+    @testset "rows past the clock's last tick are released" begin
+        # the clock ends at 10 while the data runs on: the second chunk falls in
+        # no window and is dropped, in the running and the tree modes alike
+        p = CausalPipeline(
+            ctx -> [DataFrame(time = [2, 7, 12], x = [1, 2, 3]),
+                DataFrame(time = [20, 30], x = [4, 5])],
+        )
+        ticks = CausalPipeline(ctx -> [DataFrame(time = [5, 10])])
+        for ss in ([Count(), Sum(:x)], Min(:x))
+            df = DataFrame(load(Context(0, 40),
+                p |> summarizewindows(ticks, 5, ss)))
+            @test df.time == [5, 10]
+            @test df[!, end] == [1, 2]
+        end
+        none = CausalPipeline(ctx -> DataFrame[])
+        @test nrow(
+            DataFrame(load(Context(0, 40),
+                p |> summarizewindows(none, 5, Sum(:x)))),
+        ) == 0
+    end
+
     @testset "the first tick sees a full window from before start" begin
         p = clipped([DataFrame(time = [3, 7, 8, 12], x = [1, 2, 3, 4])])
         df = DataFrame(load(Context(10, 20),

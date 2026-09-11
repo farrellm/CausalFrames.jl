@@ -224,6 +224,9 @@ function windowstep!(st::WindowState{T}, cfg::WindowConfig,
         end
         st.checked = true
     end
+    # The clock is exhausted and every tick closed, so no row from here on can
+    # fall in any window: drop the chunk rather than admit rows nothing evicts.
+    st.doneticks && isempty(st.ticks) && return nothing
     types = promotetypes(st.types, chunktypes(c))
     moved = st.types === nothing || types != st.types
     st.types = types
@@ -246,8 +249,22 @@ function windowstep!(st::WindowState{T}, cfg::WindowConfig,
             cfg.keynames, cfg.outs, emptyrow, cfg.grid)
     end
     deleteat!(st.ticks, 1:closed)
-    st.head = compact!(st.buffer, st.head)
+    if st.doneticks && isempty(st.ticks)
+        releasewindows!(st)
+    else
+        st.head = compact!(st.buffer, st.head)
+    end
     return isempty(rows) ? nothing : DataFrame(rows)
+end
+
+# Past the clock's last tick nothing is emitted again, so the live rows — the
+# buffer, and in tree mode the trees, which own theirs — are released rather
+# than held to the end of the stream, as intervalize drops its trailing rows.
+function releasewindows!(st::WindowState)
+    empty!(st.buffer)
+    st.head = 1
+    st.groups isa AbstractDict && empty!(st.groups)
+    return nothing
 end
 
 function windowflush!(st::WindowState{T}, cfg::WindowConfig) where {T}

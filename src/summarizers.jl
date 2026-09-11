@@ -1642,8 +1642,10 @@ function FitModel(model, predictors, response::Symbol; name::Symbol = :model,
         "FitModel response $response is also a predictor"))
     return FitModel{name,ps,response,typeof(model)}(model, Int(verbosity))
 end
-FitModel(model, predictor::Symbol, response::Symbol; kwargs...) =
-    FitModel(model, (predictor,), response; kwargs...)
+# A lone name. A string is one name too, never iterated as a collection of
+# one-character names.
+FitModel(model, predictor::Union{Symbol,AbstractString}, response::Symbol;
+    kwargs...) = FitModel(model, (Symbol(predictor),), response; kwargs...)
 
 # The folded rows: one concretely typed vector per predictor plus one for the
 # response, typed from the input schema like every other state. `fresh!`
