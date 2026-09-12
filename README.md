@@ -46,26 +46,29 @@ Row functions receive a map-like row object: `row.time`, `row.price`,
 
 ### Sources
 
+A source starts a pipeline, constructing or combining streams without touching
+a file.
+
 | Operator | Semantics |
 |---|---|
 | [`emptyframe()`](https://farrellm.github.io/CausalFrames.jl/dev/api/sources/#emptyframe) | zero rows, just a `:time` column |
 | [`concatenate(ps...)`](https://farrellm.github.io/CausalFrames.jl/dev/api/sources/#concatenate) | run the pipelines one after another, emitting their chunks end to end; they must be passed in time order and produce identical column names |
 | [`merge(ps...; batchsize)`](https://farrellm.github.io/CausalFrames.jl/dev/api/sources/#merge) | run the pipelines concurrently and interleave their rows by time; the output carries the union of their columns, `missing` where a pipeline lacks one, ties broken by argument order |
 | [`clock(interval)`](https://farrellm.github.io/CausalFrames.jl/dev/api/sources/#clock) | one row per `interval` in `[start, stop)` |
-| [`readcsv(path; types, time, rename, delim)`](https://farrellm.github.io/CausalFrames.jl/dev/api/sources/#readcsv) | CSV read as `String` columns (`types` opts columns into concrete types); `time` picks the time column by name or a per-row function; clipped to `[start, stop)`, read incrementally |
-| [`readparquet(path; time, rename, backend)`](https://farrellm.github.io/CausalFrames.jl/dev/api/sources/#readparquet) | parquet file (needs `using DuckDB` or `using Parquet2`); types come from the file; the context window skips row groups that cannot be in it; `time` and `rename` as for `readcsv` |
-| [`readjls(path)`](https://farrellm.github.io/CausalFrames.jl/dev/api/sources/#readjls) | read back a file written by `writejls`, a record at a time, clipped to `[start, stop)` |
 
-### Sinks
+### File I/O
 
-Every sink is a pass-through transform: it writes each chunk as it flows by and
-yields it downstream unchanged.
+Reading starts a pipeline; writing does not end one — every writer is a
+pass-through transform, so a sink can sit in the middle of a chain.
 
 | Operator | Semantics |
 |---|---|
-| [`writecsv(path; queue, ...)`](https://farrellm.github.io/CausalFrames.jl/dev/api/sinks/#writecsv) | writes each chunk to `path` as it flows by, on a background task |
-| [`writeparquet(path; queue, rowgroupsize, backend, ...)`](https://farrellm.github.io/CausalFrames.jl/dev/api/sinks/#writeparquet) | needs `using Parquet2` or `using DuckDB`: writes row groups of `rowgroupsize` rows as the stream flows by; the file is valid only once the stream is exhausted |
-| [`writejls(path; queue)`](https://farrellm.github.io/CausalFrames.jl/dev/api/sinks/#writejls) | through Julia's `Serialization` stdlib: one record per chunk, so columns CSV and parquet cannot encode (fitted models, `NamedTuple`s) round-trip; tied to the Julia and package versions that wrote it |
+| [`readcsv(path; types, time, rename, delim)`](https://farrellm.github.io/CausalFrames.jl/dev/api/io/#readcsv) | CSV read as `String` columns (`types` opts columns into concrete types); `time` picks the time column by name or a per-row function; clipped to `[start, stop)`, read incrementally |
+| [`readparquet(path; time, rename, backend)`](https://farrellm.github.io/CausalFrames.jl/dev/api/io/#readparquet) | parquet file (needs `using DuckDB` or `using Parquet2`); types come from the file; the context window skips row groups that cannot be in it; `time` and `rename` as for `readcsv` |
+| [`readjls(path)`](https://farrellm.github.io/CausalFrames.jl/dev/api/io/#readjls) | read back a file written by `writejls`, a record at a time, clipped to `[start, stop)` |
+| [`writecsv(path; queue, ...)`](https://farrellm.github.io/CausalFrames.jl/dev/api/io/#writecsv) | writes each chunk to `path` as it flows by, on a background task |
+| [`writeparquet(path; queue, rowgroupsize, backend, ...)`](https://farrellm.github.io/CausalFrames.jl/dev/api/io/#writeparquet) | needs `using Parquet2` or `using DuckDB`: writes row groups of `rowgroupsize` rows as the stream flows by; the file is valid only once the stream is exhausted |
+| [`writejls(path; queue)`](https://farrellm.github.io/CausalFrames.jl/dev/api/io/#writejls) | through Julia's `Serialization` stdlib: one record per chunk, so columns CSV and parquet cannot encode (fitted models, `NamedTuple`s) round-trip; tied to the Julia and package versions that wrote it |
 
 Parquet support is optional, through two backends: either `using DuckDB` or
 `using Parquet2` enables both operators. Reading prefers DuckDB (it pushes the
@@ -84,35 +87,39 @@ readcsv("ticks.csv"; types = Dict(:time => Int, :bid => Float64)) |>
     scan(Context(0, 10^6))
 ```
 
-### Row-wise transforms
+### Row transformations
+
+Driven by one row at a time: testing a row, computing values from it, and
+selecting or retiming rows.
 
 | Operator | Semantics |
 |---|---|
-| [`filterrows(pred)`](https://farrellm.github.io/CausalFrames.jl/dev/api/rowwise/#filterrows) | keep rows where `pred(row)` |
-| [`addcolumns(f)`](https://farrellm.github.io/CausalFrames.jl/dev/api/rowwise/#addcolumns) | `f(row)::NamedTuple` of new column values |
-| [`selectcolumns(sel...)`](https://farrellm.github.io/CausalFrames.jl/dev/api/rowwise/#selectcolumns) | keep the columns matching a name, `Regex`, name predicate, or collection of those (`:time` always kept) |
-| [`dropcolumns(sel...)`](https://farrellm.github.io/CausalFrames.jl/dev/api/rowwise/#dropcolumns) | drop the columns matching the same selector forms (`:time` never dropped) |
-| [`reordercolumns(sel...)`](https://farrellm.github.io/CausalFrames.jl/dev/api/rowwise/#reordercolumns) | move the matching columns to the front, in the selectors' order, the rest following in the input's order (`:time` always first) |
+| [`filterrows(pred)`](https://farrellm.github.io/CausalFrames.jl/dev/api/rows/#filterrows) | keep rows where `pred(row)` |
+| [`addcolumns(f)`](https://farrellm.github.io/CausalFrames.jl/dev/api/rows/#addcolumns) | `f(row)::NamedTuple` of new column values |
+| [`head(n)`](https://farrellm.github.io/CausalFrames.jl/dev/api/rows/#head) | emit the first up to `n` rows, then stop pulling the source — it genuinely stops, so a `readcsv` behind `head(10)` reads one file chunk |
+| [`lastrow(; key)`](https://farrellm.github.io/CausalFrames.jl/dev/api/rows/#lastrow) | emit the last row, or one per key, retimed to the window's `stop` |
+| [`lag(offset)`](https://farrellm.github.io/CausalFrames.jl/dev/api/rows/#lag) | shift every row `offset` later in time, so time `t` carries what the input had at `t - offset`; only `:time` changes and `offset` must be non-negative |
+| [`settime(spec)`](https://farrellm.github.io/CausalFrames.jl/dev/api/rows/#settime) | recompute `:time` from a column name or a per-row function; rows may only move later, and the result is re-clipped to `[start, stop)` |
 
-### Filling and truncation
+The forward-looking counterparts — `lead`, and a permissive `settime` — live in
+the `Acausal` submodule, under "Causality" below.
 
-| Operator | Semantics |
-|---|---|
-| [`forwardfill(sel...; key, tolerance)`](https://farrellm.github.io/CausalFrames.jl/dev/api/filling/#forwardfill) | replace `missing` in the selected columns with that column's last non-missing value, per key, while not older than `tolerance` |
-| [`fillmissing(specs...)`](https://farrellm.github.io/CausalFrames.jl/dev/api/filling/#fillmissing) | replace `missing` with a per-column constant, given as `name => value` pairs or a `NamedTuple` |
-| [`head(n)`](https://farrellm.github.io/CausalFrames.jl/dev/api/filling/#head) | emit the first up to `n` rows, then stop pulling the source — it genuinely stops, so a `readcsv` behind `head(10)` reads one file chunk |
-| [`lastrow(; key)`](https://farrellm.github.io/CausalFrames.jl/dev/api/filling/#lastrow) | emit the last row, or one per key, retimed to the window's `stop` |
+### Column transformations
 
-### Joins and time shifts
+The column set itself: which columns exist and in what order, and filling or
+joining values into them. Rows pass through one for one.
 
 | Operator | Semantics |
 |---|---|
-| [`asofjoin(right; key, tolerance, ...)`](https://farrellm.github.io/CausalFrames.jl/dev/api/time/#asofjoin) | append the most recent right-pipeline row at or before each row's time |
-| [`lag(offset)`](https://farrellm.github.io/CausalFrames.jl/dev/api/time/#lag) | shift every row `offset` later in time, so time `t` carries what the input had at `t - offset`; only `:time` changes and `offset` must be non-negative |
-| [`settime(spec)`](https://farrellm.github.io/CausalFrames.jl/dev/api/time/#settime) | recompute `:time` from a column name or a per-row function; rows may only move later, and the result is re-clipped to `[start, stop)` |
+| [`selectcolumns(sel...)`](https://farrellm.github.io/CausalFrames.jl/dev/api/columns/#selectcolumns) | keep the columns matching a name, `Regex`, name predicate, or collection of those (`:time` always kept) |
+| [`dropcolumns(sel...)`](https://farrellm.github.io/CausalFrames.jl/dev/api/columns/#dropcolumns) | drop the columns matching the same selector forms (`:time` never dropped) |
+| [`reordercolumns(sel...)`](https://farrellm.github.io/CausalFrames.jl/dev/api/columns/#reordercolumns) | move the matching columns to the front, in the selectors' order, the rest following in the input's order (`:time` always first) |
+| [`forwardfill(sel...; key, tolerance)`](https://farrellm.github.io/CausalFrames.jl/dev/api/columns/#forwardfill) | replace `missing` in the selected columns with that column's last non-missing value, per key, while not older than `tolerance` |
+| [`fillmissing(specs...)`](https://farrellm.github.io/CausalFrames.jl/dev/api/columns/#fillmissing) | replace `missing` with a per-column constant, given as `name => value` pairs or a `NamedTuple` |
+| [`asofjoin(right; key, tolerance, ...)`](https://farrellm.github.io/CausalFrames.jl/dev/api/columns/#asofjoin) | append the most recent right-pipeline row at or before each row's time |
 
-The forward-looking counterparts — `futurejoin`, `lead`, and a permissive
-`settime` — live in the `Acausal` submodule, under "Causality" below.
+The forward-looking `futurejoin` lives in the `Acausal` submodule, under
+"Causality" below.
 
 ### Summarizing transforms
 
@@ -260,12 +267,12 @@ The permissive `settime` is the one exception to the submodule's export rule:
 it is reached only as `CausalFrames.Acausal.settime`, never unqualified, so
 that `using CausalFrames.Acausal` leaves the causal `settime` usable.
 
-[`futurejoin`](https://farrellm.github.io/CausalFrames.jl/dev/api/time/#Acausal.futurejoin)
+[`futurejoin`](https://farrellm.github.io/CausalFrames.jl/dev/api/columns/#Acausal.futurejoin)
 mirrors `asofjoin` with the match direction inverted — the **earliest** right
 row whose time is not before the left row's, `missing` where none qualifies —
-and [`lead`](https://farrellm.github.io/CausalFrames.jl/dev/api/time/#Acausal.lead)
+and [`lead`](https://farrellm.github.io/CausalFrames.jl/dev/api/rows/#Acausal.lead)
 mirrors `lag`; the permissive
-[`settime`](https://farrellm.github.io/CausalFrames.jl/dev/api/time/#Acausal.settime)
+[`settime`](https://farrellm.github.io/CausalFrames.jl/dev/api/rows/#Acausal.settime)
 mirrors the causal one. One cost worth knowing before
 reaching for it: because `futurejoin` matches the earliest qualifying row, it
 buffers right rows per key until a left row consumes or outruns them, and
