@@ -98,6 +98,21 @@ SUITE["sources"]["readcsv"] = @benchmarkable load(Context(0, 300_000),
 SUITE["sources"]["drain"] = @benchmarkable scan(CTX, SRC)
 SUITE["sources"]["drain-load"] = @benchmarkable load(CTX, SRC)
 
+# The in-memory source over one million-row table, as a DataFrame (resolved
+# once, when readtable is called), as a NamedTuple of the same vectors (the
+# generic path, resolved per run), and as a loaded frame (whole-window chunks
+# shared, not copied) — each over the whole window and over a 1% window. The
+# pipelines are built outside the timed expression, as a user reusing one would.
+const TABLE = reduce(vcat, CHUNKS)
+const TABLENT = NamedTuple{Tuple(propertynames(TABLE))}(Tuple(eachcol(TABLE)))
+const TABLEFRAME = load(CTX, SRC)
+const NARROW = Context(100_000, 102_500)
+for (name, p) in (("dataframe", readtable(TABLE)), ("columntable", readtable(TABLENT)),
+    ("frame", readtable(TABLEFRAME)))
+    SUITE["sources"]["readtable-$name"] = @benchmarkable load(CTX, $p)
+    SUITE["sources"]["readtable-$name-narrow"] = @benchmarkable load(NARROW, $p)
+end
+
 SUITE["rowwise"] = BenchmarkGroup()
 SUITE["rowwise"]["filterrows"] =
     @benchmarkable load(CTX, SRC |> filterrows(r -> r.qty > 3.0))

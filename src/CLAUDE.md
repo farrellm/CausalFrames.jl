@@ -69,6 +69,17 @@ design rationale and performance constraints behind each module.
   `clipchunk!`. It exists for columns CSV and parquet cannot encode (fitted
   models), so the file is Julia/package-version-fragile by design — not an
   interchange format
+- `src/table.jl` — `readtable`, the in-memory source, on three paths sharing the
+  `windowbounds` clip. A generic Tables.jl table is resolved per run and per
+  partition by a `CSVProducer`-shaped `TableProducer`, with `tablerows` the typed
+  barrier and only in-window rows copied. An `AbstractDataFrame` is resolved once
+  at construction into a private index over the caller's vectors and then read
+  by the frame path with `share = false` — every run slices, so a loaded frame
+  never aliases the caller — until a sort has made owned copies. A `CausalFrame`
+  is read by `framepipeline`: a binary search over chunk bounds, whole-window
+  chunks handed on as `copycols = false` indexes over the frame's own vectors
+  (sound by the `writecsv` hand-off argument). The frame-context check and the
+  auto-`closed` rule live there too; see DESIGN.md's "Tables as sources"
 - `src/summarizers.jl` — `Summarizer` (immutable config, output column name in
   a type parameter) and `SummarizerState` (running state, typed from the input
   schema), plus their unexported interface: `emptyvalue`, `fresh`, `fresh!`,
