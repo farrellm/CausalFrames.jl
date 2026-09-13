@@ -118,6 +118,7 @@ Two kinds, both compatible with the chaining operator `|>`:
 | `concatenate(ps...)` | source | run the pipelines one after another over the same context and emit their chunks end to end; they must be passed in time order and have identical columns (see "Concatenation") |
 | `merge(ps...; batchsize)` | source | run the pipelines concurrently over the same context and interleave their rows by time; columns may differ (the output is their union, `missing` where a pipeline lacks one) and ties break by argument order (see "Merging") |
 | `clock(interval; batchsize)` | source | rows at `start, start + interval, …` while `< stop`; no other columns; generated lazily in chunks of `batchsize` rows |
+| `readtable(table; time, checkorder, sort, closed)` / `readtable(frame; closed, checkcontext)` | source | an in-memory Tables.jl table, `DataFrame` or `CausalFrame`; the time column chosen as for `readcsv`, checked for order (`checkorder`) or stably sorted (`sort`); rows clipped to `[start, stop)`, or `[start, stop]` with `closed`; only in-window rows are copied, and a frame's whole-window chunks not even those; a frame refuses a context outside its own unless `checkcontext = false`, and closes the window by default when the stops match (see "Tables as sources") |
 | `readcsv(path; types, time, rename, delim, chunkbytes)` | source | CSV file, every column read as `String` unless `types` opts it into a concrete type; the time column (named `:time`, or chosen by `time` as a column name or a per-row function) must be typed and sorted; `rename` maps column names first; rows clipped to `[start, stop)`; read incrementally in chunks of roughly `chunkbytes` bytes — never all at once — stopping as soon as a time `>= stop` is seen |
 | `writecsv(path; queue, ...)` | transform | transparent pass-through sink: writes each chunk to `path` as it flows by and yields it downstream unchanged (see "CSV output") |
 | `readparquet(path; time, rename, backend)` | source | parquet file, read through DuckDB or Parquet2 (either backend suffices; DuckDB preferred); column types come from the file itself; the time column (named `:time`, or chosen by `time` as a column name or a per-row function) must be sorted; `rename` maps column names first; rows clipped to `[start, stop)`; read one chunk at a time — a DuckDB result chunk, or a Parquet2 row group — with the window used to skip what cannot be in it (see "Parquet I/O") |
@@ -300,6 +301,65 @@ an interrupted run leaves every complete record readable while its torn last
 record is reported as an `ArgumentError` rather than a bare `EOFError`. JLS is a
 persistence format for a pipeline's own outputs, not an interchange format —
 `writecsv` and `writeparquet` remain that.
+
+## Tables as sources
+
+`readtable` lifts in-memory data into a pipeline. It is a source like any other
+— each run clips to the context's `[start, stop)` and converts `:time` to the
+context's time type — on three paths that share one clip rule (`windowbounds`)
+and differ in *when* the per-table work runs and in what is copied.
+
+- **Any Tables.jl table.** Each run walks `Tables.partitions(table)` through a
+  `CSVProducer`-shaped `TableProducer`, one chunk per partition. Per partition,
+  `tabletimes` resolves the time — `time` works as for `readcsv`: `:time`, a
+  column renamed where it stands, or a per-row function behind `maptime` — and
+  `tablerows`, the function barrier typed on the time vector and the context's
+  time type, checks the order (within the partition and against the previous
+  one's last time), binary-searches the window, and returns the rows to keep.
+  Only those rows are copied, one column at a time, so a narrow window over a
+  large table costs the window rather than the table, and a loaded frame never
+  aliases the caller's vectors — which the caller may still mutate, since a
+  pipeline is lazy and may run more than once. As for the file sources, reading
+  stops at the first partition holding a time past the window.
+- **An `AbstractDataFrame`.** The same resolution, done once when `readtable` is
+  called, into a private column index over the caller's vectors
+  (`DataFrame(df; copycols = false)` — O(ncols), and the rename never reaches
+  `df`). A run is then the frame path over that one chunk: two binary searches
+  and one `getindex`, with no per-run order scan, time function or `Tables.jl`
+  dispatch, which matters most for pipelines run many times (a self join, a
+  `stream`, `addrollingcolumns(; from)`). Errors the generic path raises at run
+  time are raised by `readtable` itself. The copy rule survives: while the chunk
+  aliases the caller's vectors every run slices, even over the whole window, and
+  only once a `sort` has permuted the rows into copies of its own do
+  whole-window runs share them. The price of resolving eagerly is that mutating
+  the DataFrame's values while the pipeline is in use is unsupported — the order
+  check has already run.
+- **A `CausalFrame`.** Its chunks already satisfy every invariant, so nothing is
+  resolved or checked. A binary search over the chunks' first and last times
+  picks those that meet the window, and `clipframechunk` hands each on — a chunk
+  wholly inside as `DataFrame(c; copycols = false)`, a private index over the
+  frame's own vectors, a partial one as a slice. Sharing is sound for the reason
+  the CSV sink's hand-off is: consumers may mutate a chunk's column index, but no
+  operator mutates a column vector in place, and the frame never exposes its
+  chunks. The frame method accepts only `closed` and `checkcontext`; `time`,
+  `sort` and `checkorder` would have nothing to act on.
+
+Two rules are particular to frames. A frame knows its rows only over its own
+context: outside it the data is *unknown*, not absent, and yielding no rows
+there would pass missing data off as an empty stretch — so a run over a context
+not within `context(frame)` is an `ArgumentError`, and `checkcontext = false`
+clips to whatever the frame holds instead. And a frame may hold rows exactly at
+its `stop` (`summarize` emits there), which the half-open clip would drop:
+`closed = nothing`, the frame default, closes the window exactly when the run's
+`stop` equals the frame's, so `load(context(f), readtable(f))` reproduces `f`,
+while every narrower window stays half-open and so still tiles.
+
+`closed = true` is the one source-level opt-in to `[start, stop]`, legal because
+frames tolerate the closed interval. `sort = true` sorts stably (rows sharing a
+timestamp are a cycle, and their order within it is data); a partitioned table is
+concatenated to sort it, and a table already in order skips the permutation.
+`checkorder = false` skips the order scans: the caller vouches for the order, and
+`load`'s O(1) `checkchunk` guards are all that remain.
 
 ## Column selectors
 
@@ -1676,7 +1736,9 @@ rolling transform just keeps its re-fold path for any tuple containing one.
 
 - **Sources** clip to the half-open interval `[start, stop)`. Adjacent
   contexts therefore tile without overlap, which is what makes chunked and
-  streaming evaluation sound.
+  streaming evaluation sound. The one opt-out is `readtable`'s `closed`, which
+  a frame read back over its own context takes by default (see "Tables as
+  sources").
 - **Frames** tolerate the closed interval `[start, stop]`: intermediate
   operators may legitimately emit a row exactly at `stop` — `summarize`
   does exactly this when closing its window.
@@ -1772,6 +1834,7 @@ the second.
 | `ext/CausalFramesDuckDBExt.jl` | the DuckDB backend: the preferred reader, the fallback writer |
 | `ext/CausalFramesParquet2Ext.jl` | the Parquet2 backend: the preferred writer, the fallback reader |
 | `src/jls.jl` | the `Serialization`-backed persistence pair (`writejls`, `readjls`) |
+| `src/table.jl` | the in-memory source (`readtable`): the generic Tables.jl path, the eagerly resolved DataFrame path, and the frame path |
 | `src/summarizers.jl` | `Summarizer`/`SummarizerState` interface and the concrete summarizers |
 | `src/summarize.jl` | folding kernels and the summarization transforms |
 | `src/join.jl` | the as-of join transform (`asofjoin`) |
@@ -1788,7 +1851,7 @@ the second.
 
 Exports: `Context`, `CausalFrame`, `CausalPipeline`, `load`, `stream`,
 `scan`, `context`, `timetype`, `emptyframe`, `concatenate`, `clock`, `readcsv`, `writecsv`, `readparquet`,
-`writeparquet`, `readjls`, `writejls`, `filterrows`,
+`writeparquet`, `readjls`, `writejls`, `readtable`, `filterrows`,
 `addcolumns`, `selectcolumns`, `dropcolumns`, `reordercolumns`, `Summarizer`, `MonoidSummarizer`, `GroupSummarizer`,
 `SummarizerState`, `Count`, `CountDistinct`, `Sum`, `SumPower`,
 `Moment`, `Product`, `DotProduct`, `Mean`, `Variance`, `Std`, `Covariance`,

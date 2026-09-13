@@ -46,8 +46,8 @@ Row functions receive a map-like row object: `row.time`, `row.price`,
 
 ### Sources
 
-A source starts a pipeline, constructing or combining streams without touching
-a file.
+A source starts a pipeline, constructing or combining streams, or lifting an
+in-memory table, without touching a file.
 
 | Operator | Semantics |
 |---|---|
@@ -55,6 +55,7 @@ a file.
 | [`concatenate(ps...)`](https://farrellm.github.io/CausalFrames.jl/dev/api/sources/#concatenate) | run the pipelines one after another, emitting their chunks end to end; they must be passed in time order and produce identical column names |
 | [`merge(ps...; batchsize)`](https://farrellm.github.io/CausalFrames.jl/dev/api/sources/#merge) | run the pipelines concurrently and interleave their rows by time; the output carries the union of their columns, `missing` where a pipeline lacks one, ties broken by argument order |
 | [`clock(interval)`](https://farrellm.github.io/CausalFrames.jl/dev/api/sources/#clock) | one row per `interval` in `[start, stop)` |
+| [`readtable(table; time, checkorder, sort, closed)`](https://farrellm.github.io/CausalFrames.jl/dev/api/sources/#readtable) | any Tables.jl table — a `DataFrame`, a `NamedTuple` of vectors, a loaded `CausalFrame` — clipped to `[start, stop)` (`closed` keeps rows at `stop`); `time` as for `readcsv`, `sort` orders the rows by time first; only in-window rows are copied, and a frame's whole-window chunks not even those; a frame refuses a context outside its own unless `checkcontext = false` |
 
 ### File I/O
 

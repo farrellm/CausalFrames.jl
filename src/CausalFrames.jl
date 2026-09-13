@@ -10,7 +10,7 @@ using Tables
 export Context, CausalFrame, CausalPipeline, load, stream, scan, context,
     timetype,
     emptyframe, concatenate, clock, readcsv, writecsv, readparquet,
-    writeparquet, readjls, writejls,
+    writeparquet, readjls, writejls, readtable,
     filterrows, addcolumns,
     selectcolumns, dropcolumns, reordercolumns, lag, head, settime, lastrow,
     forwardfill, fillmissing,
@@ -30,6 +30,7 @@ include("operators.jl")
 include("merge.jl")
 include("parquet.jl")
 include("jls.jl")
+include("table.jl")
 include("summarizers.jl")
 include("summarize.jl")
 include("join.jl")

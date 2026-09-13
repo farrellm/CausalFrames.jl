@@ -139,6 +139,13 @@
         jls = joinpath(dir, "precompile.jls")
         scan(ctx, p |> writejls(jls))
         DataFrame(load(ctx, readjls(jls)))
+        # readtable's three paths: a DataFrame plain and renamed-and-sorted, the
+        # generic path over a NamedTuple of vectors, and a frame read back
+        tdf = DataFrame(ts = [3, 1, 2], x = [1.0, 2.0, 3.0])
+        DataFrame(load(ctx, readtable(tdf; time = :ts, sort = true)))
+        DataFrame(load(ctx, readtable(DataFrame(time = [1, 2, 3], x = [1.0, 2.0, 3.0]))))
+        DataFrame(load(ctx, readtable((time = [1, 2, 3], x = [1.0, 2.0, 3.0]))))
+        DataFrame(load(ctx, readtable(load(ctx, p))))
         DataFrame(load(ctx, emptyframe()))
     end
 end
