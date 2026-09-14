@@ -99,6 +99,7 @@ selecting or retiming rows.
 | [`addcolumns(f)`](https://farrellm.github.io/CausalFrames.jl/dev/api/rows/#addcolumns) | `f(row)::NamedTuple` of new column values |
 | [`head(n)`](https://farrellm.github.io/CausalFrames.jl/dev/api/rows/#head) | emit the first up to `n` rows, then stop pulling the source — it genuinely stops, so a `readcsv` behind `head(10)` reads one file chunk |
 | [`lastrow(; key)`](https://farrellm.github.io/CausalFrames.jl/dev/api/rows/#lastrow) | emit the last row, or one per key, retimed to the window's `stop` |
+| [`sortcycles(by; rev)`](https://farrellm.github.io/CausalFrames.jl/dev/api/rows/#sortcycles) | stably reorder the rows sharing each timestamp by a column, a list of columns, or a per-row key function; the time order is untouched |
 | [`lag(offset)`](https://farrellm.github.io/CausalFrames.jl/dev/api/rows/#lag) | shift every row `offset` later in time, so time `t` carries what the input had at `t - offset`; only `:time` changes and `offset` must be non-negative |
 | [`settime(spec)`](https://farrellm.github.io/CausalFrames.jl/dev/api/rows/#settime) | recompute `:time` from a column name or a per-row function; rows may only move later, and the result is re-clipped to `[start, stop)` |
 

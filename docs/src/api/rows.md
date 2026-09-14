@@ -35,6 +35,15 @@ head
 lastrow
 ```
 
+## `sortcycles`
+
+`sortcycles` reorders rows without moving any of them in time: only rows sharing
+a timestamp change places, so it holds back just the latest cycle.
+
+```@docs
+sortcycles
+```
+
 ## `lag`
 
 ```@docs

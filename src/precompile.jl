@@ -50,6 +50,9 @@
         )
         DataFrame(load(ctx, p |> lastrow()))
         DataFrame(load(ctx, p |> lastrow(; key = :sym)))
+        # the fixture's cycle at time 2 arrives as (b, a), so both forms reorder
+        DataFrame(load(ctx, p |> sortcycles(:sym)))
+        DataFrame(load(ctx, p |> sortcycles(r -> r.qty; rev = true)))
         # the fills need a Missing-admitting column, which nothing else here has
         pm = p |> addcolumns(r -> (; m = isodd(r.time) ? missing : r.qty))
         DataFrame(load(ctx, pm |> forwardfill(:m)))

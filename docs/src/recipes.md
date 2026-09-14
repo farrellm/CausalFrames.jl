@@ -18,25 +18,25 @@ That ordinal counts in **stream order**, which is time order, so what it gives
 you directly is `row_number() OVER (PARTITION BY symbol ORDER BY time)`. An
 arbitrary `ORDER BY` is available wherever the row order within a group is free
 — which is exactly when the partition column is `:time` itself, since rows
-sharing a timestamp may arrive in any order. Sorting them at the source turns
-the same count into a rank by whatever you sorted on:
+sharing a timestamp may arrive in any order. [`sortcycles`](@ref) orders them,
+turning the same count into a rank by whatever you sorted on:
 
 ```julia
-# rows arrive sorted (year, votes descending), and :time is the year
+# :time is the year; within a year, votes descending, ties by id
 readparquet("films.parquet"; time = :year) |>
+    sortcycles(r -> (-r.votes, r.id)) |>
     addsummarycolumns(Count(); key = :time) |>
     filterrows(r -> r.count <= 250)       # the 250 most-voted films of each year
 ```
 
-The `ORDER BY` half is always the source's job. CausalFrames has no sort
-operator, deliberately: monotone time is the invariant that makes streaming
-sound, and a sort is not streaming. The sources can do the time half of it —
-`sort = true` on [`readparquet`](@ref), [`readcsv`](@ref) or
-[`readtable`](@ref) stably sorts a file or table not stored in time order — but
-a stable sort keeps rows sharing a timestamp in the order they were stored, so
-the order *within* a year is still whatever the file holds. So the rank is only ever as meaningful as
-the order the rows arrived in — which is worth asserting on if the source is not
-under your control.
+The two halves of that `ORDER BY year, votes DESC, id` live in different places.
+The time half belongs to the source — `sort = true` on [`readparquet`](@ref),
+[`readcsv`](@ref) or [`readtable`](@ref) stably sorts a file or table not stored
+in time order — because monotone time is the invariant that makes streaming
+sound, and a sort across time cannot stream. The within-timestamp half can go
+anywhere in the pipeline: `sortcycles` never moves a row in time, so it streams,
+holding back only the latest cycle. Without it the rank is only as meaningful as
+the order the rows arrived in.
 
 ## Joining a reference table
 
