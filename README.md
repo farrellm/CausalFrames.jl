@@ -130,9 +130,9 @@ Each folds one or more [summarizers](https://farrellm.github.io/CausalFrames.jl/
 | Operator | Semantics |
 |---|---|
 | [`summarize(ss; key)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizing/#summarize) | summarize the whole window into rows at time `stop` |
-| [`summarizecycles(ss; key)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizing/#summarizecycles) | summarize each unique timestamp independently |
-| [`intervalize(clock, ss; key, closelast)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizing/#intervalize) | summarize over the intervals `[bₖ, bₖ₊₁)` a `clock` pipeline's times define, each emitted at its end time |
-| [`summarizewindows(clock, lookback, ss; key)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizing/#summarizewindows) | at each tick `τ` of a `clock` pipeline, summarize the trailing window `[τ - lookback, τ)`; one row per tick, or per key with rows in its window (plus one empty row when a key's window empties) |
+| [`summarizecycles(ss; key, keyset)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizing/#summarizecycles) | summarize each unique timestamp independently; a declared `keyset` emits every key in every cycle |
+| [`intervalize(clock, ss; key, keyset, closelast)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizing/#intervalize) | summarize over the intervals `[bₖ, bₖ₊₁)` a `clock` pipeline's times define, each emitted at its end time; a declared `keyset` emits every key in every interval |
+| [`summarizewindows(clock, lookback, ss; key, keyset)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizing/#summarizewindows) | at each tick `τ` of a `clock` pipeline, summarize the trailing window `[τ - lookback, τ)`; one row per tick, or per key with rows in its window (plus one empty row when a key's window empties), or per declared `keyset` key |
 | [`addsummarycolumns(ss; key)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizing/#addsummarycolumns) | append running summary values after each row |
 | [`addrollingcolumns(windows, ss; key, from)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizing/#addrollingcolumns) | append summaries over named trailing windows, columns prefixed `{window}_` |
 

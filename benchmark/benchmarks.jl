@@ -201,6 +201,14 @@ SUITE["intervalize"]["keyed"] = @benchmarkable load(CTX,
     SRC |> intervalize(clock(1000), [Count(), Sum(:qty)]; key = :sym))
 SUITE["intervalize"]["closelast"] = @benchmarkable load(CTX,
     SRC |> intervalize(clock(1000), [Count(), Sum(:qty)]; closelast = true))
+# Every symbol declared, so each of the ~1000 intervals emits a row per symbol,
+# empty ones included: 100,000 rows where the sparse keyed entry emits ~25,000.
+# (There is no dense summarizecycles entry: 250k cycles × 100 symbols is 25M
+# output rows, which would time DataFrame construction rather than the fold.)
+const SYMS = ["s" * string(k) for k in 0:99]
+SUITE["intervalize"]["dense"] = @benchmarkable load(CTX,
+    SRC |> intervalize(clock(1000), [Count(), Sum(:qty)]; key = :sym,
+        keyset = SYMS))
 
 # The same ~1000 ticks, each now summarizing a trailing 5000 time units (about
 # 20,000 rows, five tick spacings, so windows overlap five-fold). One entry per
@@ -214,6 +222,11 @@ SUITE["windows"]["running"] = @benchmarkable load(CTX,
 SUITE["windows"]["running-keyed"] = @benchmarkable load(CTX,
     SRC |> summarizewindows(clock(1000), 5000, [Count(), Sum(:qty)];
         key = :sym))
+# The same with every symbol declared: a row per symbol per tick, looked up in
+# declared order instead of sorted from the live groups.
+SUITE["windows"]["running-dense"] = @benchmarkable load(CTX,
+    SRC |> summarizewindows(clock(1000), 5000, [Count(), Sum(:qty)];
+        key = :sym, keyset = SYMS))
 SUITE["windows"]["tree"] = @benchmarkable load(CTX,
     SRC |> summarizewindows(clock(1000), 5000, [Min(:qty), Max(:qty)]))
 SUITE["windows"]["tree-keyed"] = @benchmarkable load(CTX,

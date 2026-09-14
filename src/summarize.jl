@@ -17,6 +17,77 @@ tokeycolumns(k::Symbol) = Symbol[k]
 tokeycolumns(k::AbstractString) = Symbol[Symbol(k)]
 tokeycolumns(ks) = collect(Symbol, ks)
 
+# A missing key column would otherwise surface as a getproperty error deep in a
+# kernel; the transforms that check call this on their first chunk.
+function checkkeycolumns(keycols::Vector{Symbol}, c::DataFrame, op::String)
+    for k in keycols
+        String(k) in names(c) ||
+            throw(ArgumentError("$op key column $k not found in the input"))
+    end
+    return nothing
+end
+
+# A declared key set (`keyset`), which makes a keyed transform dense: every
+# close emits one row per declared key, in declared order. The keys are built
+# once, at construction, as NamedTuples over the key columns, so the output key
+# type is fixed by the declaration rather than by the data. A data row's key may
+# be a different but `isequal` type (an `Int` against a declared `Float64`): a
+# Dict lookup hashes and compares without converting, so `index` answers it
+# type-stably all the same. `op` names the transform in errors.
+struct KeySet{K<:NamedTuple}
+    keys::Vector{K}
+    index::Dict{K,Int}
+    op::String
+end
+
+tokeyset(::Nothing, keycols::Vector{Symbol}, op::String) = nothing
+function tokeyset(keyset, keycols::Vector{Symbol}, op::String)
+    isempty(keycols) && throw(ArgumentError("$op keyset requires key"))
+    KN = Tuple(keycols)
+    tuples = map(v -> keysettuple(v, KN, op), collect(keyset))
+    # `map` narrows each column to the typejoin of its values, so an ordinary
+    # declaration gives a concrete key type
+    cols = ntuple(j -> map(t -> t[j], tuples), length(KN))
+    K = NamedTuple{KN,Tuple{map(eltype, cols)...}}
+    keys = K[K(map(col -> col[i], cols)) for i in eachindex(tuples)]
+    allunique(keys) || throw(ArgumentError("$op keyset values must be unique"))
+    return KeySet{K}(keys, Dict{K,Int}(k => i for (i, k) in enumerate(keys)), op)
+end
+
+# One declared key as a tuple of column values: the value itself for a single
+# key column, otherwise a tuple of that many values or a NamedTuple naming
+# exactly the key columns.
+function keysettuple(v, KN::Tuple{Vararg{Symbol}}, op::String)
+    length(KN) == 1 && return (v,)
+    if v isa NamedTuple
+        (length(v) == length(KN) && all(in(keys(v)), KN)) &&
+            return Tuple(NamedTuple{KN}(v))
+    elseif v isa Tuple
+        length(v) == length(KN) && return v
+    end
+    throw(
+        ArgumentError(
+            "$op keyset element $(repr(v)) must be a tuple or named tuple of " *
+            "values for the key columns $(join(KN, ", "))"),
+    )
+end
+
+# The declared slot of a row's key, or an error for a key outside the set.
+@inline function keyindex(ks::KeySet, k)
+    i = get(ks.index, k, 0)
+    i == 0 && throwundeclared(ks, k)
+    return i
+end
+@noinline throwundeclared(ks::KeySet, k) =
+    throw(ArgumentError("$(ks.op) key $k is not in the declared keyset"))
+
+# Membership only, for the window kernels, whose groups are not slot-indexed.
+# The `Nothing` method is the undeclared (sparse or keyless) path, and compiles
+# away.
+@inline checkdeclared(::Nothing, row, keynames::Val) = nothing
+@inline checkdeclared(ks::KeySet, row, keynames::Val) =
+    (keyindex(ks, keyvalues(row, keynames)); nothing)
+
 # Expand the requested summarizers into the full set to fold — each one's
 # dependencies recursively, deduplicated by output-name tuple (identical
 # configurations collapse to one shared instance) and ordered topologically by
@@ -209,6 +280,71 @@ function promotedvaluetype(::Type{S}, protos::Tuple, outs::Val) where {S}
         }}
 end
 
+# A keyed grid row — `:time`, the key, then the values — and its type, for the
+# paths that emit empty values beside summaries (the windows and the dense
+# declared-key transforms), where the row type is the promoted one.
+gridrow(t, k, v) = merge((; time = t), k, v)
+gridrowtype(::Type{T}, ::Type{K}, ::Type{V}) where {T,K,V} =
+    Base.promote_op(gridrow, T, K, V)
+
+# --- dense (declared-key) groups -------------------------------------------
+#
+# The per-key state tuples of a dense transform, one slot per declared key in
+# `KeySet` order. Every slot is built up front, so a row costs the one Dict
+# lookup that finds its slot (what the sparse `GroupTable` pays too) and a
+# close is an indexed walk over the slots: no sort, no table churn, no pool.
+# `folded` marks the slots that took a row since the last close; only those
+# need zeroing.
+struct DenseGroups{S<:Tuple}
+    states::Vector{S}
+    folded::Vector{Bool}
+end
+
+densegroups(stateprotos::S, n::Int) where {S<:Tuple} =
+    DenseGroups{S}(S[map(fresh, stateprotos) for _ in 1:n], fill(false, n))
+
+# `stateprotos` must already be widened: it fixes the new slot type, which a
+# comprehension over no slots could not (the `widengroups` reasoning).
+widendense(dg::DenseGroups, stateprotos::S, intypes::NamedTuple) where {S} =
+    DenseGroups{S}(S[widenstates(gs, intypes) for gs in dg.states], dg.folded)
+
+# The dense row type and empty row, from the realized states: the summary values
+# promoted with the empty values (both are emitted), behind `:time` and the
+# declared key type. Type-unstable setup, run once per chunk.
+function densetypes(::Type{T}, stateprotos::S, protos::Tuple, ::KeySet{K},
+    outs::Val) where {T,S,K}
+    V = promotedvaluetype(S, protos, outs)
+    return gridrowtype(T, K, V), convert(V, emptyvalues(protos, outs))
+end
+
+@inline function densefold!(dg::DenseGroups, ks::KeySet, row, keynames::Val)
+    i = keyindex(ks, keyvalues(row, keynames))
+    updateall!(@inbounds(dg.states[i]), row)
+    @inbounds dg.folded[i] = true
+    return nothing
+end
+
+# Emit one row per declared key at `t` — the summary for a slot that folded
+# rows, the empty values otherwise — then zero the folded slots. `summaryvalues`
+# has copied their values out by then, which is the `closecycle!` protocol; a
+# close allocates only the rows it pushes.
+function closedense!(rows::Vector{RT}, dg::DenseGroups, ks::KeySet, t, r::Val,
+    emptyrow) where {RT}
+    states, folded = dg.states, dg.folded
+    for i in eachindex(ks.keys, states, folded)
+        k = @inbounds ks.keys[i]
+        if @inbounds folded[i]
+            gs = @inbounds states[i]
+            push!(rows, convert(RT, gridrow(t, k, summaryvalues(gs, r))))
+            @inbounds states[i] = freshall!(gs)
+            @inbounds folded[i] = false
+        else
+            push!(rows, convert(RT, gridrow(t, k, emptyrow)))
+        end
+    end
+    return rows
+end
+
 # Per-run mutable state shared by the three transforms. It lives in fields
 # rather than in the step/flush closures' captured locals because captured
 # variables that are reassigned get boxed. The dynamically typed fields are
@@ -228,22 +364,33 @@ SummaryFold() = SummaryFold(nothing, false, nothing, nothing, nothing, nothing,
     false)
 
 # Per-chunk setup shared by the transforms: promote the schema, then build the
-# states on the first chunk or widen them when the promotion has moved.
-# Returns the chunk as a column table for the kernels.
+# states on the first chunk or widen them when the promotion has moved. A
+# declared `keyset` keeps the groups as `DenseGroups` rather than a
+# `GroupTable`. Returns the chunk as a column table for the kernels.
 function preparechunk!(fold::SummaryFold, protos::Tuple, keyed::Bool,
-    keynames::Val, c::DataFrame)
+    keynames::Val, c::DataFrame; keyset::Union{Nothing,KeySet} = nothing)
     types = promotetypes(fold.types, chunktypes(c))
     fold.widened = fold.types !== nothing && types != fold.types
     fold.types = types
     nt = Tables.columntable(c)
     if fold.stateprotos === nothing
         fold.stateprotos = newstates(protos, types)
-        keyed ? (fold.groups = newgroups(fold.stateprotos, nt, keynames)) :
-        (fold.states = map(fresh, fold.stateprotos))
+        if keyset !== nothing
+            fold.groups = densegroups(fold.stateprotos, length(keyset.keys))
+        elseif keyed
+            fold.groups = newgroups(fold.stateprotos, nt, keynames)
+        else
+            fold.states = map(fresh, fold.stateprotos)
+        end
     elseif fold.widened
         fold.stateprotos = widenstates(fold.stateprotos, types)
-        keyed ? (fold.groups = widengroups(fold.groups, fold.stateprotos, types)) :
-        (fold.states = widenstates(fold.states, types))
+        if keyset !== nothing
+            fold.groups = widendense(fold.groups, fold.stateprotos, types)
+        elseif keyed
+            fold.groups = widengroups(fold.groups, fold.stateprotos, types)
+        else
+            fold.states = widenstates(fold.states, types)
+        end
     end
     return nt
 end
@@ -322,6 +469,24 @@ function closecycle!(rows, gt::GroupTable, t, r::Val)
     end
     empty!(gt.table)
     return rows
+end
+
+# The declared-key cycle fold: `foldcyclesgrouped!` over dense slots, so every
+# cycle closes with one row per declared key. Pushes into the caller's typed
+# `rows` (the promoted row type needs the empty values) and returns the open
+# cycle's time.
+function foldcyclesdense!(rows::Vector{RT}, dg::DenseGroups, ks::KeySet,
+    nt::NamedTuple, cycletime, keynames::Val, r::Val, emptyrow) where {RT}
+    for row in Tables.rows(nt)
+        t = row.time
+        if cycletime === nothing || t != cycletime
+            cycletime === nothing ||
+                closedense!(rows, dg, ks, something(cycletime), r, emptyrow)
+            cycletime = t
+        end
+        densefold!(dg, ks, row, keynames)
+    end
+    return cycletime
 end
 
 function foldrunning!(states::S, nt::NamedTuple, n::Int,
@@ -404,8 +569,10 @@ summarize(p::CausalPipeline, summarizers; kwargs...) =
     summarize(summarizers; kwargs...)(p)
 
 """
-    summarizecycles(summarizers; key = nothing) -> (CausalPipeline -> CausalPipeline)
-    summarizecycles(p::CausalPipeline, summarizers; key = nothing) -> CausalPipeline
+    summarizecycles(summarizers; key = nothing,
+                    keyset = nothing) -> (CausalPipeline -> CausalPipeline)
+    summarizecycles(p::CausalPipeline, summarizers; key = nothing,
+                    keyset = nothing) -> CausalPipeline
 
 A transform summarizing each *cycle* — a maximal run of rows sharing one
 timestamp — independently, with fresh state per cycle. For every cycle one
@@ -413,10 +580,21 @@ row is emitted at the cycle's time (per unique key value, sorted by key, when
 `key` is given), dropping the input columns. A cycle spanning a chunk
 boundary is summarized as a single cycle.
 
+When the key values are known up front, `keyset` (which requires `key`)
+declares them and makes the keyed output **dense**: every cycle emits exactly
+one row per declared key, in declared order, a key with no rows in the cycle
+included with the summarizers' empty values (`count = 0`, `mean = missing`), so
+element types widen to admit them. With one key column `keyset` is a collection
+of its values; with several, a collection of tuples (or named tuples) of them.
+The output key columns take their element types from `keyset`, and a row whose
+key is not in `keyset` throws an `ArgumentError`. An empty input still emits
+nothing, having no cycles.
+
 The curried form composes with `|>`; the uncurried form applies directly, so
 `summarizecycles(p, ss; key)` is equivalent to `p |> summarizecycles(ss; key)`.
 """
-function summarizecycles(summarizers; key = nothing)
+function summarizecycles(summarizers; key = nothing, keyset = nothing)
+    ks = tokeyset(keyset, tokeycolumns(key), "summarizecycles")
     return function (p::CausalPipeline)
         return CausalPipeline() do ctx::Context
             keycols = tokeycolumns(key)
@@ -426,8 +604,15 @@ function summarizecycles(summarizers; key = nothing)
             keyed = !isempty(keycols)
             fold = SummaryFold()
             step = function (c)
-                nt = preparechunk!(fold, protos, keyed, keynames, c)
-                rows = if keyed
+                nt = preparechunk!(fold, protos, keyed, keynames, c; keyset = ks)
+                rows = if ks !== nothing
+                    RT, emptyrow = densetypes(eltype(nt.time), fold.stateprotos,
+                        protos, ks, outs)
+                    rs = RT[]
+                    fold.cycletime = foldcyclesdense!(rs, fold.groups, ks, nt,
+                        fold.cycletime, keynames, outs, emptyrow)
+                    rs
+                elseif keyed
                     rs, fold.cycletime = foldcyclesgrouped!(
                         fold.groups, fold.stateprotos, nt, fold.cycletime,
                         keynames, outs)
@@ -441,6 +626,13 @@ function summarizecycles(summarizers; key = nothing)
             end
             flush = function ()
                 fold.cycletime === nothing && return nothing
+                if ks !== nothing
+                    RT, emptyrow = densetypes(typeof(fold.cycletime),
+                        fold.stateprotos, protos, ks, outs)
+                    drows = closedense!(RT[], fold.groups, ks, fold.cycletime,
+                        outs, emptyrow)
+                    return isempty(drows) ? nothing : DataFrame(drows)
+                end
                 rows =
                     keyed ?
                     closecycle!(

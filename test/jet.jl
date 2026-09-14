@@ -152,6 +152,20 @@ end
     RT = CausalFrames.rowtype(Int, keytype(groups), valtype(groups), outs)
     JET.@test_opt CausalFrames.flushintervalsgrouped!(groups, bounds, 2, RT, 10,
         true, outs)
+
+    # the declared-key (dense) kernels, shared with summarizecycles; the keyset
+    # is declared Float64 against the Int key column, so the slot lookup crosses
+    # key types as a real declaration may
+    ks = CausalFrames.tokeyset([2.0, 1.0], [:k], "intervalize")
+    dg = CausalFrames.densegroups(states, 2)
+    DRT, emptyrow = CausalFrames.densetypes(Int, states, protos, ks, outs)
+    JET.@test_opt CausalFrames.foldintervalsdense!(DRT[], dg, ks, nt, bounds, 2,
+        keynames, true, outs, emptyrow)
+    JET.@test_opt CausalFrames.flushintervalsdense!(DRT[], dg, ks, bounds, 2, 10,
+        true, outs, emptyrow)
+    JET.@test_opt CausalFrames.closedense!(DRT[], dg, ks, 5, outs, emptyrow)
+    JET.@test_opt CausalFrames.foldcyclesdense!(DRT[], dg, ks, nt, nothing,
+        keynames, outs, emptyrow)
 end
 
 @testset "asofjoin kernel" begin
@@ -211,20 +225,25 @@ end
     emptyrow = convert(V, CausalFrames.emptyvalues(protos, outs))
     nt = (time = [1, 3, 6], k = ["a", "b", "a"], x = [1.0, 2.0, 3.0])
     ticks = [0, 5, 10]
-    for (kn, grid) in ((Val((:k,)), Val(false)), (Val(()), Val(true)))
+    # the third case declares the keys, taking the dense emission and the
+    # admission-time keyset checks
+    declared = CausalFrames.tokeyset(["b", "a"], [:k], "summarizewindows")
+    for (kn, grid, ks) in ((Val((:k,)), Val(false), nothing),
+        (Val(()), Val(true), nothing), (Val((:k,)), Val(false), declared))
         K = CausalFrames.storekeytype(types, kn)
-        RT = CausalFrames.windowrowtype(Int, K, V)
+        RT = CausalFrames.gridrowtype(Int, K, V)
         G = CausalFrames.RunningGroup{S}
         JET.@test_opt CausalFrames.windowrunning!(RT[], R[], 1, nt, ticks,
-            Dict{K,G}(), states, Pair{K,G}[], K[], 5, kn, outs, emptyrow, grid)
+            Dict{K,G}(), states, Pair{K,G}[], K[], 5, kn, outs, emptyrow, grid,
+            ks)
         JET.@test_opt CausalFrames.windowrefold!(RT[], R[], 1, nt, ticks,
             CausalFrames.GroupTable{K,S}(), states, K[], 5, kn, outs, emptyrow,
-            grid)
+            grid, ks)
         TR = CausalFrames.SegTree{S,R,Int}
         JET.@test_opt CausalFrames.windowtree!(RT[], nt, ticks, Dict{K,TR}(),
-            states, Pair{K,TR}[], K[], 5, kn, outs, emptyrow, grid)
+            states, Pair{K,TR}[], K[], 5, kn, outs, emptyrow, grid, ks)
         JET.@test_opt CausalFrames.flushtree!(RT[], ticks, Dict{K,TR}(),
-            Pair{K,TR}[], K[], 5, outs, emptyrow, grid)
+            Pair{K,TR}[], K[], 5, outs, emptyrow, grid, ks)
     end
 end
 

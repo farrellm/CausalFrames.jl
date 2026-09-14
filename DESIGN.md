@@ -131,9 +131,9 @@ Two kinds, both compatible with the chaining operator `|>`:
 | `dropcolumns(selectors...)` | transform | keep only the non-matching columns, in the input's own order (see "Column selectors") |
 | `reordercolumns(selectors...)` | transform | move the matching columns to the front, in the selectors' own order, the rest following in the input's order (see "Column selectors") |
 | `summarize(ss; key)` | transform | summarize the whole context into rows at time `stop`; drops input columns |
-| `summarizecycles(ss; key)` | transform | summarize each cycle (maximal run of rows sharing a timestamp) independently; drops input columns |
-| `intervalize(clock, ss; key, closelast)` | transform | summarize over the intervals a clock pipeline defines (`[bₖ, bₖ₊₁)`, timestamped at `bₖ₊₁`); keyless is a regular grid, keyed is sparse (see "Interval summarization") |
-| `summarizewindows(clock, lookback, ss; key)` | transform | at each tick `τ` of a clock pipeline, summarize the trailing window `[τ - lookback, τ)` at `τ`; keyless is a regular grid, keyed is sparse plus one empty row when a key's window empties (see "Window summarization") |
+| `summarizecycles(ss; key, keyset)` | transform | summarize each cycle (maximal run of rows sharing a timestamp) independently; drops input columns; a declared `keyset` makes keyed output dense (see "Declared key sets") |
+| `intervalize(clock, ss; key, keyset, closelast)` | transform | summarize over the intervals a clock pipeline defines (`[bₖ, bₖ₊₁)`, timestamped at `bₖ₊₁`); keyless is a regular grid, keyed is sparse, keyed with a declared `keyset` is dense (see "Interval summarization") |
+| `summarizewindows(clock, lookback, ss; key, keyset)` | transform | at each tick `τ` of a clock pipeline, summarize the trailing window `[τ - lookback, τ)` at `τ`; keyless is a regular grid, keyed is sparse plus one empty row when a key's window empties, keyed with a declared `keyset` is dense (see "Window summarization") |
 | `addsummarycolumns(ss; key)` | transform | keep input columns, append the running summary value after each row |
 | `addrollingcolumns(windows, ss; key, from)` | transform | keep input columns, append each summarizer's value over each named trailing window, prefixed `"{window}_"` (see "Rolling windows") |
 | `asofjoin(right; key, tolerance, strict, leftprefix, rightprefix, righttime)` | transform | left as-of join: append the most recent right row with time `<= time` (`strict`: `<`), per key; `missing` where none qualifies (see "As-of join") |
@@ -987,6 +987,10 @@ changed" to "a clock boundary was crossed".
   interval emits one row per key present in it, sorted by key (the
   `summarizecycles` / `closecycle!` convention); an empty interval emits
   nothing.
+- **Keyed with a declared `keyset` is dense.** Every complete interval emits
+  every declared key, in declared order, the keys without rows with the empty
+  values — the keyless grid once per key, a data stream with no chunks
+  included (see "Declared key sets").
 - **The trailing partial** `[b_K, stop)` after the final boundary is emitted
   only when `closelast` (timestamped at `stop`, which frames tolerate);
   otherwise its rows are dropped. An empty clock produces no output.
@@ -1040,6 +1044,11 @@ the gap — fitting a model per key at every tick is the motivating case (see
   the previous tick" is decided from what was *emitted*, not from what was
   admitted, so a key whose rows arrive and age out between two ticks (a
   look-back shorter than the spacing) emits nothing at all.
+- **Keyed with a declared `keyset` is dense.** Every tick emits every declared
+  key, in declared order, a key with an empty window with the empty values. That
+  makes the vanish row redundant, and the previous tick's keys go untracked;
+  a data stream with no chunks still emits the ticks × keys grid (see
+  "Declared key sets").
 
 The mechanism is `intervalize`'s driver over `addrollingcolumns`' bookkeeping.
 A `chunkmap` over the data stream pulls ticks on demand through
@@ -1101,6 +1110,52 @@ widening there rebuilds only the states.
 `< τ`. It is **stateful** in the usual sense, so streaming equals loading,
 while split contexts do not compose: ticks realign to each context's start,
 and the vanish rule depends on the previous tick.
+
+## Declared key sets
+
+Keyed output from `summarizecycles`, `intervalize` and `summarizewindows` is
+sparse by necessity — a causal operator cannot emit a key it has not seen yet —
+but the key set is often known up front, and the consumer wants a cell per
+close and key, empty cells included: SQL's `keys LEFT JOIN data`. Without a
+declaration that took one upstream pipeline per key, `merge`d back together.
+`keyset` declares the keys and makes keyed output **dense**.
+
+- **Every close emits every declared key, in declared order** — every cycle,
+  complete interval (and the `closelast` partial), or tick. A key with no rows
+  gets the summarizers' empty values, so element types widen through
+  `promotedvaluetype` exactly as on the keyless grid: dense keyed output is
+  that grid once per key. Declared order rather than key order leaves the order
+  to the caller and skips a per-close sort; a sorted declaration reproduces the
+  sparse order.
+- **The declaration fixes the key type.** The key columns take their element
+  types from `keyset` (a value per key for a single key column, a tuple or
+  named tuple per key for several), not from the data, which is what lets a
+  data stream with no chunks still emit the whole grid (`intervalize`,
+  `summarizewindows`; `summarizecycles` then has no cycles and emits nothing).
+  Data keys are matched by `isequal` and `hash`, so an `Int` key column matches
+  a `Float64` declaration.
+- **An undeclared key is an error.** A row the transform folds whose key is not
+  in `keyset` throws an `ArgumentError`. Dropping it would let a typo in the
+  declaration lose data silently (`filterrows` first drops on purpose), and
+  emitting it sparsely would make the key type data-dependent again. Rows the
+  transform discards regardless — before the first boundary, past the clock's
+  last tick, in a trailing interval without `closelast` — are not checked.
+- **No vanish row.** `summarizewindows` emits every declared key at every tick,
+  so the row marking a key's window going empty is redundant, and the previous
+  tick's keys go untracked.
+
+`summarizecycles` and `intervalize` keep a `DenseGroups` in place of the
+`GroupTable`: a state tuple per declared slot, built once, and a `folded` flag
+per slot. A row pays one lookup in the `KeySet`'s `Dict{K,Int}`, what the
+sparse table's lookup costs, and a close (`closedense!`) is an indexed walk over
+the slots that emits them all and zeroes only the folded ones — no sort, no
+table churn, no pool. `summarizewindows` keeps its three modes' structures,
+whose presence-means-rows-in-the-window invariant is exactly what the dense
+emission reads (`emitdense!`, a lookup per declared key per tick). The running
+and tree modes check the declaration only where a key's group or tree is made,
+so a key's later rows pay nothing for it; re-fold groups only at ticks, so it
+checks each admitted row. The undeclared paths pass `nothing` for the key set,
+and the checks dispatch away.
 
 ## Model fitting (MLJ)
 
@@ -1646,9 +1701,10 @@ once per chunk. States are small mutable structs, so building one per cycle or
 per row is a heap allocation per summarizer on the hottest paths there are:
 `summarizecycles` closes a cycle per timestamp, `intervalize` an interval per
 boundary, and `addrollingcolumns` queries a window per row per window. `fresh!`
-is what makes that free, and the four places that use it are `foldcycles!`,
-`foldintervals!`/`flushintervals!`, the segment tree, and the re-fold window
-kernel.
+is what makes that free, and the five places that use it are `foldcycles!`,
+`foldintervals!`/`flushintervals!`, `closedense!` (the declared-key cycle and
+interval close, which zeroes only the slots that folded rows), the segment tree,
+and the re-fold window kernel.
 
 Three structures own reusable scratch rather than allocating it per use:
 
@@ -1675,7 +1731,9 @@ by then `summaryvalues` has copied the values it held into the emitted row.
 
 The three summarization functions take one summarizer or a collection of
 them, plus an optional `key` (one or more column names) to produce a separate
-summary per unique key value (key groups are emitted sorted by key value).
+summary per unique key value (key groups are emitted sorted by key value;
+`summarizecycles` also takes a declared `keyset`, which emits every declared
+key per cycle in declared order instead — see "Declared key sets").
 The functions treat the given summarizers as *prototypes*: they only ever
 mutate `fresh` copies, one per key group (and, for `summarizecycles`, per
 cycle). Before running, prototypes are **deduplicated by output-name tuple** —

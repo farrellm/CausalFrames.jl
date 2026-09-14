@@ -309,6 +309,72 @@ time,sym,qty
     # empty input yields no rows
     @test nrow(load(Context(0, 9), emptyframe() |> summarizecycles(Count()))) == 0
 
+    # a declared keyset makes every cycle dense, in declared order, with the
+    # empty values (and widened element types) for keys absent from a cycle
+    df = DataFrame(
+        load(Context(0, 9),
+            readcsv(path; types = tt) |>
+            summarizecycles([Count(), Sum(:qty), Min(:qty)]; key = :sym,
+                keyset = ["b", "a"])),
+    )
+    @test names(df) == ["time", "sym", "count", "qty_sum", "qty_min"]
+    @test df.time == [1, 1, 2, 2, 4, 4]
+    @test df.sym == ["b", "a", "b", "a", "b", "a"]
+    @test df.count == [0, 1, 1, 1, 0, 1]
+    @test df.qty_sum == [0, 10, 20, 30, 0, 40]
+    @test isequal(df.qty_min, [missing, 10, 20, 30, missing, 40])
+    @test eltype(df.qty_min) == Union{Missing,Int}
+    # a dense cycle spanning chunks, widening inside it
+    widening = CausalPipeline(
+        ctx -> [
+            DataFrame(time = [1, 2, 2], sym = ["a", "b", "a"], qty = [1, 2, 3]),
+            DataFrame(time = [2, 3, 5], sym = ["b", "b", "a"],
+                qty = [4.5, 5.0, 6.0]),
+        ],
+    )
+    df = DataFrame(
+        load(Context(0, 9),
+            widening |> summarizecycles(Sum(:qty); key = :sym, keyset = ["a", "b"])),
+    )
+    @test df.time == [1, 1, 2, 2, 3, 3, 5, 5]
+    @test df.sym == ["a", "b", "a", "b", "a", "b", "a", "b"]
+    @test df.qty_sum == [1, 0, 3, 6.5, 0, 5, 6, 0]
+    # no cycles, no rows; keyset needs key; undeclared keys throw
+    @test nrow(
+        load(Context(0, 9),
+            emptyframe() |> summarizecycles(Count(); key = :sym, keyset = ["a"])),
+    ) == 0
+    @test_throws ArgumentError summarizecycles(Count(); keyset = ["a"])
+    @test_throws ArgumentError load(Context(0, 9),
+        readcsv(path; types = tt) |>
+        summarizecycles(Count(); key = :sym, keyset = ["a"]))
+
+    # dense against sparse over many cycles and a churning key set: with the
+    # keyset sorted, the dense rows holding data are exactly the sparse output
+    let times = Int[], syms = String[], qtys = Int[]
+        for t in 1:40, k in 0:(t%4)
+            push!(times, t)
+            push!(syms, "k" * string((t * 5 + k) % 6))
+            push!(qtys, t * 10 + k)
+        end
+        src() = CausalPipeline(
+            ctx -> [
+                DataFrame(time = times[r], sym = syms[r], qty = qtys[r])
+                for r in (1:29, 30:61, 62:length(times))
+            ],
+        )
+        ss = [Count(), Sum(:qty), Min(:qty), Last(:qty)]
+        declared = ["k" * string(i) for i in 0:5]
+        sparse = DataFrame(load(Context(0, 99),
+            src() |> summarizecycles(ss; key = :sym)))
+        dense = DataFrame(
+            load(Context(0, 99),
+                src() |> summarizecycles(ss; key = :sym, keyset = declared)),
+        )
+        @test nrow(dense) == length(declared) * length(unique(times))
+        @test isequal(dense[dense.count .> 0, :], sparse)
+    end
+
     # State tuples are recycled between cycles rather than rebuilt, so a key
     # that reappears after an absence must start from zero and must not carry
     # anything over from whichever key last used that tuple. Min/Max/First/Last
