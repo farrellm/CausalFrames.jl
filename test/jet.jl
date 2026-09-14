@@ -182,6 +182,21 @@ end
     JET.@test_opt CausalFrames.lastsegment!(index, slots, nt, Val((:sym,)))
 end
 
+@testset "sortcycles kernel" begin
+    # a mixed isbits/String key tuple over column views (what the operator
+    # passes), a tuple-valued function key, and both orderings — the Ordering
+    # is a type, so neither direction may split
+    rows = 2:7
+    times = view([0, 1, 1, 1, 2, 3, 3], rows)
+    keys = (view([0, 2, 1, 2, 9, 1, 1], rows),
+        view(["", "b", "a", "c", "z", "b", "a"], rows))
+    for order in (Base.Order.Forward, Base.Order.Reverse)
+        JET.@test_opt CausalFrames.cycleperm!(Int[], keys, times, order)
+    end
+    fkeys = ([(-2, "b"), (-1, "a"), (-2, "c"), (-9, "z"), (-1, "b"), (-1, "a")],)
+    JET.@test_opt CausalFrames.cycleperm!(Int[], fkeys, times, Base.Order.Forward)
+end
+
 @testset "summarizewindows kernels" begin
     # both window algorithms, keyed (with the vanish-row merge) and keyless
     # (the grid over the empty key), over a String key so the key is non-isbits

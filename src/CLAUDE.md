@@ -173,6 +173,19 @@ design rationale and performance constraints behind each module.
   the store entirely — the chunk's last row is the last row so far, so it costs
   nothing per row. Output schema is the input's exactly, `:time` overwritten
   with `stop` via `merge`, which preserves the column position
+- `src/sortcycles.jl` — `sortcycles`, the within-timestamp stable sort. A
+  `chunkmap` whose only state is the open cycle, held as a `Vector{DataFrame}`
+  of pieces and concatenated once when a later time (or flush) closes it, so a
+  cycle spread over many chunks stays O(rows). Each chunk emits the cycle it
+  closes plus its own complete cycles and holds back the trailing one (a chunk
+  that is all one cycle is held uncopied). The emitted rows are sorted *views*
+  materialized in one copy — never concatenate the tail onto the whole chunk,
+  which copied every chunk twice (over the benchmark's million rows, 51 MiB
+  down to 31 reordering and 23 already in order). `cycleperm!`
+  is the typed barrier over a tuple of key views and a concrete `Ordering`
+  (resolved from `rev` at construction, not per comparison): per cycle an
+  `issorted` pass over the index range, then a stable `sort!` of that stretch of
+  a permutation allocated only once some cycle is out of order
 - `src/fill.jl` — the two missing-value fills. `fillmissing` is row-wise and
   stateless (a constant per column, so `fillcolumn` is the whole hot path, and
   the output eltype narrows — the one place in the package that does, via

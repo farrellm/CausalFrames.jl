@@ -149,6 +149,16 @@ SUITE["rowwise"]["settime-column"] = @benchmarkable load(CTX,
     SRC |> addcolumns(r -> (; t2 = r.time + 1)) |> settime(:t2))
 SUITE["rowwise"]["settime-function"] =
     @benchmarkable load(CTX, SRC |> settime(r -> r.time + 1))
+# sortcycles over SRC's four-row cycles, one hold-back per chunk. `qty` rises
+# within most cycles, so the reversed column and the negating function reorder
+# nearly every one of them; `sorted` keys on `:time`, which ties throughout, so
+# it reads the issorted check and the prefix copy alone.
+SUITE["rowwise"]["sortcycles-column"] =
+    @benchmarkable load(CTX, SRC |> sortcycles(:qty; rev = true))
+SUITE["rowwise"]["sortcycles-function"] =
+    @benchmarkable load(CTX, SRC |> sortcycles(r -> -r.qty))
+SUITE["rowwise"]["sortcycles-sorted"] =
+    @benchmarkable load(CTX, SRC |> sortcycles(:time))
 
 # One hash and one inline row store per row on the keyed path, directly
 # comparable to summarize/keyed over the same source and keys; keyless does

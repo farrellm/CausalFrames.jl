@@ -141,6 +141,7 @@ Two kinds, both compatible with the chaining operator `|>`:
 | `settime(spec)` | transform | recompute `:time` from a column name or a per-row function; times may only move later, and the result is re-clipped to `[start, stop)` (see "Retiming") |
 | `head(n)` | transform | emit the first up to `n` rows and stop pulling upstream (see "Truncation") |
 | `lastrow(; key)` | transform | emit each key's last row, retimed to `stop`; keyless emits the stream's last row (see "Last row") |
+| `sortcycles(by; rev)` | transform | stably reorder the rows sharing each timestamp by a column name, a collection of names, or a per-row key function; the time order is untouched and the latest cycle is held back until it closes (see "Sorting within a cycle") |
 | `forwardfill(selectors...; key, tolerance)` | transform | replace `missing` in the selected columns (see "Column selectors") with that column's last non-missing value, per key, while not older than `tolerance` (see "Filling") |
 | `fillmissing(specs...)` | transform | replace `missing` with a per-column constant, given as `name => value` pairs or a `NamedTuple`; the column's element type narrows (see "Filling") |
 | `applymodels(models; column, key, tolerance, strict, name, operation)` | transform | as-of match each row to the latest `FittedModel` row of a models pipeline (per key), and append that model's prediction; `missing` where there is none (see "Model fitting (MLJ)") |
@@ -299,7 +300,9 @@ under a sort a group at or past `stop` no longer ends the scan.
 
 A `sort = true` read raises no order error, and none is checked separately: the
 output is sorted by construction. The within-timestamp half of an `ORDER BY` —
-secondary sort keys — is not offered, here or in `readtable`.
+secondary sort keys — is not a source option, here or in `readtable`: it needs no
+source, since reordering rows that share a timestamp never moves one in time, and
+so it is the transform `sortcycles` (see "Sorting within a cycle").
 
 ## JLS I/O
 
@@ -1253,6 +1256,68 @@ per row for no benefit, so the fold branches on the key tuple's emptiness the wa
 (its stream is a single frame over `[start, stop]`), while split contexts do not
 compose, since each half emits its own last row per key.
 
+## Sorting within a cycle
+
+`sortcycles(by; rev)` stably reorders the rows of each cycle — a maximal run of
+rows sharing one timestamp — and nothing else: every row keeps its time, so the
+output is non-decreasing by construction and needs no order check. It is the
+within-timestamp half of an SQL `ORDER BY time, ...`, the half the sources'
+`sort` deliberately does not take (see "Sorting a file source"), and what makes
+a keyed `Count` over `key = :time` a rank.
+
+- **Keys.** `by` is a column name (`Symbol` or `AbstractString`), a collection of
+  names compared lexicographically, or a per-row function returning the key (a
+  tuple compares lexicographically). Names are normalized to a tuple of `Symbol`s
+  at construction, where an empty collection or anything that is neither a name,
+  a name collection nor a function is an `ArgumentError`; a named column the data
+  lacks is an `ArgumentError` at run time. `:time` is not special-cased — keying
+  on it reorders nothing.
+- **Order.** Stable, so equal keys keep stream order, and by `isless`, so
+  `missing` sorts last. `rev` reverses the whole order, `missing` first included;
+  a mixed direction is a function negating a numeric key. Per-key `rev` pairs
+  were left out: the function form already covers the numeric case, and a
+  descending text key is rare enough not to justify a second spelling.
+
+The mechanism is a `chunkmap` whose one piece of state is the **open cycle**: the
+trailing cycle of the last chunk is held back, because the rest of it may be in
+the next one. Each chunk then emits every cycle known to be complete — its prefix
+before its own trailing cycle, prefixed by the held-back pieces when the chunk
+closes them. A chunk whose last time equals the open time is entirely that cycle
+and is appended as a piece, uncopied. The pieces are a `Vector{DataFrame}`,
+concatenated once when the cycle closes, so a cycle spread over many chunks costs
+O(rows) — `sortgathered`'s idiom — where re-concatenating per chunk would be
+quadratic. Their column names must match, checked per piece, since a moved schema
+cannot be concatenated into one cycle; element types promote on concatenation.
+Flush emits the last cycle.
+
+Nearly every chunk closes the cycle the previous one held back, so the emission
+is built without concatenating the held-back tail onto the chunk, which would
+copy every chunk twice. The closed cycle (the held-back pieces plus the chunk's
+leading rows at that time, concatenated — a cycle's worth of rows) and the
+chunk's own complete cycles are each sorted into a `SubDataFrame` view — over the
+range when already in order, through the permutation otherwise — and the one or
+two views are materialized together, one copy per emitted row. That copy is
+unavoidable: the held-back tail means the emitted chunk is never the input chunk.
+
+The keys are resolved once per sorted range — views of the named columns, or
+`maptime`'s one pass of the function over views of the range, so the held-back
+cycle is not keyed twice — and handed with a view of the time column to
+`cycleperm!`, the function barrier. It walks the cycles of the range and, for
+each longer than one row, first checks it for order (one pass over the index
+range) and only then sorts that stretch of the permutation with Base's stable
+algorithm, comparing key tuples read straight from the columns. The permutation
+is allocated only when a cycle is found out of order, so an in-order stream
+allocates nothing there; measured, Base's stable sort allocates no scratch either,
+for four-row cycles or a single 100,000-row one. `rev` is resolved into a
+concrete `Base.Order` at construction, so the comparison specializes on the
+direction rather than branching on a `Bool`.
+
+`sortcycles` is **causal** — a cycle is reordered using only its own rows, all at
+its own time — and **stateful** across chunks, so streaming equals loading. It is
+the one stateful operator that keeps the chunk-concatenation property over split
+contexts: a split at `b` sends every row at `b` to the later half, so no cycle is
+ever divided between two evaluations.
+
 ## Filling
 
 `missing` enters a pipeline from three places — the schema union `merge`
@@ -1842,7 +1907,10 @@ at `stop` exactly as `summarize` does (see [Last row](#last-row)). So does
 tick's keys all span the window (see
 [Window summarization](#window-summarization)), and `applymodels`, whose as-of
 store of latest models is `asofjoin`'s — hence `addpredictions`, their
-composition. `modelreports` is row-wise and stateless.
+composition. `modelreports` is row-wise and stateless. `sortcycles` holds back
+the open cycle across chunk boundaries (see
+[Sorting within a cycle](#sorting-within-a-cycle)), though unlike the rest of this
+list it keeps the chunk-concatenation property over split contexts too.
 Consequently concatenating the frames
 of `stream(ctx, p)` always equals `load(ctx, p)`, even for stateful
 operators — but the chunk-concatenation property over *split contexts*
@@ -1874,6 +1942,7 @@ the second.
 | `src/summarize.jl` | folding kernels and the summarization transforms |
 | `src/join.jl` | the as-of join transform (`asofjoin`) |
 | `src/lastrow.jl` | the last-row-per-key transform (`lastrow`), over the join's store |
+| `src/sortcycles.jl` | the within-timestamp stable sort (`sortcycles`) and its `cycleperm!` barrier |
 | `src/fill.jl` | the missing-value fills: the stateful `forwardfill` and the row-wise `fillmissing` |
 | `src/segtree.jl` | the monoid segment tree behind the rolling and window tree modes |
 | `src/rolling.jl` | the rolling-window summarization transform (`addrollingcolumns`) |
@@ -1894,7 +1963,8 @@ Exports: `Context`, `CausalFrame`, `CausalPipeline`, `load`, `stream`,
 `FittedModel`, `applymodels`, `addpredictions`, `modelreports`, `summarize`,
 `summarizecycles`, `intervalize`, `summarizewindows`, `addsummarycolumns`,
 `addrollingcolumns`,
-`asofjoin`, `lag`, `settime`, `head`, `lastrow`, `forwardfill`, `fillmissing`.
+`asofjoin`, `lag`, `settime`, `head`, `lastrow`, `sortcycles`, `forwardfill`,
+`fillmissing`.
 
 `merge` is not in that list either: it is `Base.merge`, extended for
 `CausalPipeline` arguments rather than exported under a name of our own, so
