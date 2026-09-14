@@ -43,11 +43,21 @@ the order the rows arrived in.
 [`asofjoin`](@ref) matches the most recent right row at or before each left
 row's time. Give every right row the *same* time and that degenerates into a
 plain keyed lookup: there is only one row per key, and it is always at or before
-whatever the left row's time is. A dimension table, joined by key alone:
+whatever the left row's time is. A dimension table already in memory, lifted
+with [`readtable`](@ref) and joined by key alone:
 
 ```julia
-dim = readcsv("dim.csv"; types = Dict(:id => String), time = _ -> WINDOW_START)
+dim = readtable(df; time = _ -> ctx.start)
 facts |> asofjoin(dim; key = :id)
+```
+
+A `time` function overwrites any `:time` column the table has, so `df` needs
+none. A table kept on disk takes the same `time` function through
+[`readcsv`](@ref), which reads every column as `String` unless `types` says
+otherwise:
+
+```julia
+dim = readcsv("dim.csv"; types = Dict(:id => String), time = _ -> ctx.start)
 ```
 
 Memory is O(keys), as for any `asofjoin`.
@@ -65,14 +75,24 @@ rows at the window's own `start`.
 The recipe above needs constant-timed rows, and a stream that already carries
 real times cannot be retimed backward: [`settime`](@ref) may only move rows
 later. So to look up against something the pipeline itself derived, materialize
-it and read it back at a constant time. [`writecsv`](@ref) is a pass-through
-sink built for exactly this, and [`scan`](@ref) drives the pipeline for the side
-effect alone:
+it and read it back at a constant time. [`load`](@ref) it and hand the rows to
+`readtable`:
+
+```julia
+ids = DataFrame(load(ctx, derived |> selectcolumns(:id)))
+lookup = readtable(ids; time = _ -> ctx.start)
+facts |> asofjoin(lookup; key = :id)
+```
+
+The loaded `:time` is simply overwritten by the constant. A derived stream too
+large to hold goes through a file instead: [`writecsv`](@ref) is a pass-through
+sink, [`scan`](@ref) drives the pipeline for that side effect alone, and
+`readcsv` reads it back. The file, unlike the frame, forgets column types:
 
 ```julia
 derived |> selectcolumns(:id) |> writecsv(path) |> scan(ctx)
 
-lookup = readcsv(path; types = Dict(:id => String), time = _ -> WINDOW_START)
+lookup = readcsv(path; types = Dict(:id => String), time = _ -> ctx.start)
 facts |> asofjoin(lookup; key = :id)
 ```
 
