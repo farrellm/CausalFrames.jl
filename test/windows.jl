@@ -28,8 +28,11 @@ CausalFrames.isinvertible(::FragileSumState{C,N,Float64}) where {C,N} = false
 
 # The brute-force oracle: at each tick τ, `summarize` the rows in [τ - L, τ)
 # alone, then apply the keyed vanish rule — an empty row for every key present
-# at the previous tick and absent now — and sort each tick's rows by key.
-function windowsoracle(df::DataFrame, ticks, L, ss; key = nothing)
+# at the previous tick and absent now — and sort each tick's rows by key. With
+# a declared `keyset` there is no vanish rule: each tick is one row per declared
+# key, in declared order, its summary or the empty values.
+function windowsoracle(df::DataFrame, ticks, L, ss; key = nothing,
+    keyset = nothing)
     keycols = CausalFrames.tokeycolumns(key)
     protos, requested = CausalFrames.prototypes(
         CausalFrames.tosummarizers(ss), keycols)
@@ -40,7 +43,21 @@ function windowsoracle(df::DataFrame, ticks, L, ss; key = nothing)
         w = df[(τ-L .<= df.time) .& (df.time .< τ), :]
         src = CausalPipeline(ctx -> nrow(w) > 0 ? [copy(w)] : DataFrame[])
         got = DataFrame(load(Context(τ - L, τ), src |> summarize(ss; key)))
-        if !isempty(keycols)
+        if keyset !== nothing
+            kn = Tuple(keycols)
+            at = Dict(
+                NamedTuple{kn}(Tuple(r[k] for k in keycols)) => i
+                for (i, r) in enumerate(eachrow(got))
+            )
+            declared = [NamedTuple{kn}(v isa Tuple ? v : (v,)) for v in keyset]
+            got = reduce(vcat,
+                [
+                    DataFrame([
+                        haskey(at, d) ? copy(got[at[d], :]) :
+                        merge((; time = τ), d, empty),
+                    ]) for d in declared
+                ])
+        elseif !isempty(keycols)
             present = [
                 NamedTuple{Tuple(keycols)}(Tuple(r[k] for k in keycols))
                 for r in eachrow(got)
@@ -177,6 +194,43 @@ end
         @test df.count == [1, 1, 1, 0, 1]
     end
 
+    @testset "declared keyset is dense" begin
+        # the sparse test's stream: every tick now emits both declared keys, in
+        # declared order, and there is no separate vanish row
+        p = onechunk(time = [1, 1, 12], k = ["a", "b", "b"], x = [1, 2, 3])
+        df = DataFrame(
+            load(Context(5, 25),
+                p |> summarizewindows(clock(5), 5, [Count(), Min(:x)]; key = :k,
+                    keyset = ["b", "a"])),
+        )
+        @test names(df) == ["time", "k", "count", "x_min"]
+        @test df.time == [5, 5, 10, 10, 15, 15, 20, 20]
+        @test df.k == ["b", "a", "b", "a", "b", "a", "b", "a"]
+        @test df.count == [1, 1, 0, 0, 1, 0, 0, 0]
+        @test isequal(df.x_min,
+            [2, 1, missing, missing, 3, missing, missing, missing])
+        @test eltype(df.x_min) == Union{Missing,Int}
+
+        # no data: the ticks × keys grid of empty rows, typed from the configs
+        df = DataFrame(
+            load(Context(0, 15),
+                emptyframe() |> summarizewindows(clock(5), 5, [Count(), Mean(:x)];
+                    key = :k, keyset = ["a", "b"])),
+        )
+        @test df.time == [0, 0, 5, 5, 10, 10]
+        @test df.k == ["a", "b", "a", "b", "a", "b"]
+        @test df.count == zeros(Int, 6)
+        @test all(ismissing, df.x_mean)
+
+        # an undeclared key throws in every window mode: running, tree, re-fold
+        for ss in ([Count(), Sum(:x)], Min(:x), Opaque(Sum(:x)))
+            @test_throws ArgumentError load(Context(5, 25),
+                p |> summarizewindows(clock(5), 5, ss; key = :k, keyset = ["a"]))
+        end
+        @test_throws ArgumentError summarizewindows(clock(5), 5, Count();
+            keyset = ["a"])
+    end
+
     @testset "a look-back equal to the spacing reproduces intervalize" begin
         times = cumsum(lcgsequence(11, 200, 3))
         xs = lcgsequence(12, 200, 9)
@@ -209,19 +263,22 @@ end
     windowed(p, L, ss; kwargs...) = DataFrame(load(ctx,
         p |> summarizewindows(clock(5), L, ss; kwargs...)))
 
+    # keyless, sparse keyed, and dense keyed with an unsorted declaration
+    layouts = ((;), (; key = :k), (; key = :k, keyset = ["c", "a", "b"]))
+
     @testset "differential against the brute-force oracle" begin
         for x in (intx, floatx), ss in (groupset, monoidset, plainset),
-            L in (3, 11), key in (nothing, :k)
+            L in (3, 11), opts in layouts
 
-            windowsagree(windowed(mkdata(x), L, ss; key),
-                windowsoracle(frame(x), ticks, L, ss; key))
+            windowsagree(windowed(mkdata(x), L, ss; opts...),
+                windowsoracle(frame(x), ticks, L, ss; opts...))
         end
     end
 
     @testset "running agrees with re-fold" begin
-        for x in (intx, floatx), key in (nothing, :k)
-            windowsagree(windowed(mkdata(x), 11, groupset; key),
-                windowed(mkdata(x), 11, map(Opaque, groupset); key))
+        for x in (intx, floatx), opts in layouts
+            windowsagree(windowed(mkdata(x), 11, groupset; opts...),
+                windowed(mkdata(x), 11, map(Opaque, groupset); opts...))
         end
     end
 
@@ -230,10 +287,10 @@ end
         # set is all monoid (Sum is a group, hence a monoid) and takes the tree
         mixedset = [Sum(:x), Min(:x), Last(:x)]
         for x in (intx, floatx), ss in (monoidset, mixedset), L in (3, 11, 40),
-            key in (nothing, :k)
+            opts in layouts
 
-            windowsagree(windowed(mkdata(x), L, ss; key),
-                windowed(mkdata(x), L, map(Opaque, ss); key))
+            windowsagree(windowed(mkdata(x), L, ss; opts...),
+                windowed(mkdata(x), L, map(Opaque, ss); opts...))
         end
     end
 
@@ -250,16 +307,16 @@ end
         # tree, re-fold widens within re-fold
         for ss in ([Sum(:x), Mean(:x)], [FragileSum(:x), Count()],
                 [Min(:x), Last(:x)], [Sum(:x), TestVar(:x)]),
-            key in (nothing, :k)
+            opts in layouts
 
-            windowsagree(windowed(mixed, 11, ss; key),
-                windowsoracle(whole, ticks, 11, ss; key))
+            windowsagree(windowed(mixed, 11, ss; opts...),
+                windowsoracle(whole, ticks, 11, ss; opts...))
         end
     end
 
     @testset "streaming agrees with loading" begin
-        for ss in (groupset, monoidset), key in (nothing, :k)
-            t = summarizewindows(clock(5), 11, ss; key)
+        for ss in (groupset, monoidset), opts in layouts
+            t = summarizewindows(clock(5), 11, ss; opts...)
             loaded = DataFrame(load(ctx, mkdata(intx) |> t))
             streamed = reduce(vcat, DataFrame.(stream(ctx, mkdata(intx) |> t)))
             @test isequal(streamed, loaded)

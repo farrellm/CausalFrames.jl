@@ -153,7 +153,15 @@ design rationale and performance constraints behind each module.
   also carries the reused emission buffer and the pool of retired state
   tuples `closecycle!` retires into and `groupstates!` zeroes back out of —
   the keyed cycle fold closes a table per timestamp, so rebuilding one per
-  cycle was the package's heaviest allocation site
+  cycle was the package's heaviest allocation site. A declared `keyset` (a
+  `KeySet`: the declared keys plus a `Dict{K,Int}` slot index, built at
+  construction so the output key type is the declaration's) swaps the table
+  for `DenseGroups`, a state tuple per slot plus a `folded` flag. Dense output
+  closes *every* key every time, so there is nothing for the table's Dict,
+  sort and pool to save; `closedense!` just walks the slots. The slot lookup is
+  also the undeclared-key check, which is why it costs the dense fold nothing
+  over the sparse one. Data keys are looked up without conversion, so the
+  declared key type need only be `isequal` to the data's
 - `src/join.jl` — `asofjoin`, the binary as-of join transform: a chunkmap
   over the left stream pulls right chunks on demand (two-pointer merge, per
   left row) into a concretely typed per-key store; `tolerance` widens the
@@ -245,7 +253,14 @@ design rationale and performance constraints behind each module.
   `GroupTable` pool otherwise. Keyed
   output is sparse plus one *vanish* row of empty values when a key's window
   empties, decided against the previous tick's *emitted* keys; that row is what
-  stops a per-key as-of consumer (`applymodels`) from using a stale summary
+  stops a per-key as-of consumer (`applymodels`) from using a stale summary.
+  A declared `keyset` rides in `WindowConfig`'s type (`Nothing` otherwise) and
+  replaces the sort and vanish merge with `emitdense!`, a lookup per declared key
+  per tick in whichever structure the mode keeps. The modes keep their
+  structures rather than going slot-indexed, because presence already means
+  rows in the window in all three. The declaration is checked where a group or
+  tree is made (a key's first row); re-fold groups only at ticks, so it checks
+  on admission instead
 - `src/models.jl` — the MLJ operators (`applymodels`, `addpredictions`,
   `modelreports`) and the five hooks the extension implements (`ismodel`,
   `fitmodel`, `predictmodel`, `savefitresult`, `restorefitresult`). It names no

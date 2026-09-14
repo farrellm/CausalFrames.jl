@@ -104,6 +104,120 @@
         @test dfc.k == ["a", "a", "b", "c"]        # trailing {c} at stop
     end
 
+    @testset "declared keyset is dense" begin
+        p = onechunk(time = [2, 7, 7, 12], k = ["a", "b", "a", "c"],
+            x = [10, 20, 30, 40])
+        run(ss; kwargs...) = DataFrame(
+            load(Context(0, 15),
+                p |> intervalize(clock(5), ss; key = :k, kwargs...)),
+        )
+        # every interval emits every declared key, in declared order, empty
+        # values included; t = 12 (c) is trailing and dropped
+        df = run([Count(), Sum(:x), Min(:x)]; keyset = ["c", "a", "b"])
+        @test names(df) == ["time", "k", "count", "x_sum", "x_min"]
+        @test df.time == [5, 5, 5, 10, 10, 10]
+        @test df.k == ["c", "a", "b", "c", "a", "b"]
+        @test df.count == [0, 1, 0, 0, 1, 1]
+        @test df.x_sum == [0, 10, 0, 0, 30, 20]
+        @test isequal(df.x_min, [missing, 10, missing, missing, 30, 20])
+        @test eltype(df.x_min) == Union{Missing,Int}
+
+        # closelast closes the trailing interval over every key too
+        df = run(Count(); keyset = ["a", "b", "c"], closelast = true)
+        @test df.time == [5, 5, 5, 10, 10, 10, 15, 15, 15]
+        @test df.count == [1, 0, 0, 1, 1, 0, 0, 0, 1]
+
+        # an interval spanning chunks, a widening inside it, and an empty
+        # interval closed by a row that lands past the last boundary
+        q = multichunk([DataFrame(time = [1, 6], k = ["a", "b"], x = [1, 2]),
+            DataFrame(time = [8, 16], k = ["b", "a"], x = [2.5, 4.0])])
+        df = DataFrame(
+            load(Context(0, 20),
+                q |> intervalize(clock(5), [Count(), Sum(:x)]; key = :k,
+                    keyset = ["a", "b"])),
+        )
+        @test df.time == [5, 5, 10, 10, 15, 15]
+        @test df.count == [1, 0, 0, 2, 0, 0]
+        @test df.x_sum == [1.0, 0.0, 0.0, 4.5, 0.0, 0.0]
+
+        # the key column takes the declared type, matching isequal data keys
+        r = onechunk(time = [1], k = [2], x = [1])
+        df = DataFrame(
+            load(Context(0, 10),
+                r |> intervalize(clock(5), Count(); key = :k, keyset = [1.0, 2.0])),
+        )
+        @test df.k == [1.0, 2.0]
+        @test eltype(df.k) == Float64
+        @test df.count == [0, 1]
+
+        # no data still emits the whole grid, typed from the configs
+        empty = CausalPipeline(ctx -> DataFrame[])
+        df = DataFrame(
+            load(Context(0, 15),
+                empty |> intervalize(clock(5), [Count(), Mean(:x)]; key = :k,
+                    keyset = ["b", "a"], closelast = true)),
+        )
+        @test df.time == [5, 5, 10, 10, 15, 15]
+        @test df.k == ["b", "a", "b", "a", "b", "a"]
+        @test df.count == zeros(Int, 6)
+        @test all(ismissing, df.x_mean)
+
+        # several key columns, declared as tuples or as named tuples (in any
+        # field order)
+        m = onechunk(time = [1, 2], k = ["a", "b"], j = [1, 2], x = [1, 2])
+        for declared in ([("a", 1), ("b", 1), ("b", 2)],
+            [(j = 1, k = "a"), (k = "b", j = 1), (k = "b", j = 2)])
+            df = DataFrame(
+                load(Context(0, 10),
+                    m |> intervalize(clock(5), Count(); key = [:k, :j],
+                        keyset = declared)),
+            )
+            @test names(df) == ["time", "k", "j", "count"]
+            @test df.k == ["a", "b", "b"]
+            @test df.j == [1, 1, 2]
+            @test df.count == [1, 0, 1]
+        end
+
+        # with a sorted keyset, the dense rows holding data are exactly the
+        # sparse output, over many intervals, empty ones and chunk boundaries
+        times = cumsum(lcgsequence(21, 200, 3))
+        labels = map(v -> ("a", "b", "c", "d")[v+1], lcgsequence(22, 200, 4))
+        xs = lcgsequence(23, 200, 9)
+        big = CausalPipeline(
+            ctx -> [
+                DataFrame(time = times[r], k = labels[r], x = xs[r])
+                for r in (1:70, 71:140, 141:200)
+            ],
+        )
+        ss = [Count(), Sum(:x), Max(:x)]
+        ctx = Context(0, last(times) + 7)
+        for closelast in (false, true)
+            sparse = DataFrame(load(ctx,
+                big |> intervalize(clock(10), ss; key = :k, closelast)))
+            dense = DataFrame(
+                load(ctx,
+                    big |> intervalize(clock(10), ss; key = :k,
+                        keyset = ["a", "b", "c", "d"], closelast)),
+            )
+            @test nrow(dense) == 4 * length(unique(dense.time))
+            @test isequal(dense[dense.count .> 0, :], sparse)
+        end
+
+        # errors: keyset without key, duplicate or malformed declarations, and
+        # a folded row whose key was not declared
+        @test_throws ArgumentError intervalize(clock(5), Count(); keyset = ["a"])
+        @test_throws ArgumentError intervalize(clock(5), Count(); key = :k,
+            keyset = ["a", "a"])
+        @test_throws ArgumentError intervalize(clock(5), Count(); key = [:k, :j],
+            keyset = [("a",)])
+        @test_throws ArgumentError intervalize(clock(5), Count(); key = [:k, :j],
+            keyset = [(k = "a", i = 1)])
+        @test_throws ArgumentError intervalize(clock(5), Count(); key = [:k, :j],
+            keyset = ["a"])
+        @test_throws ArgumentError load(Context(0, 15),
+            p |> intervalize(clock(5), Count(); key = :k, keyset = ["a"]))
+    end
+
     @testset "intervals and cycles span chunk boundaries" begin
         # the interval [5, 10) is split across two chunks (t = 7 and t = 8)
         p = multichunk([DataFrame(time = [2, 7], x = [10, 20]),

@@ -92,6 +92,22 @@
         DataFrame(
             load(ctx, p |> summarizewindows(clock(2), 3, Min(:v); key = :sym)),
         )
+        # the declared-key (dense) paths: the slot fold shared by cycles and
+        # intervals, and the running window mode's dense emission
+        DataFrame(
+            load(ctx,
+                p |> summarizecycles(Sum(:v); key = :sym, keyset = ["a", "b"])),
+        )
+        DataFrame(
+            load(ctx,
+                p |> intervalize(clock(2), [Count(), Sum(:v)]; key = :sym,
+                    keyset = ["a", "b"])),
+        )
+        DataFrame(
+            load(ctx,
+                p |> summarizewindows(clock(2), 3, [Count(), Sum(:v)];
+                    key = :sym, keyset = ["a", "b"])),
+        )
         DataFrame(load(ctx, p |> addsummarycolumns([First(:v), Last(:v)])))
         # all-group summarizers take the running window mode, the mixed
         # group/monoid set the tree mode; the re-fold mode is reachable

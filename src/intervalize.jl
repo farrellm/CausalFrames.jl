@@ -10,10 +10,10 @@
 # typed boundary vector, so the per-row work stays dispatch-free.
 
 """
-    intervalize(clock, summarizers; key = nothing,
+    intervalize(clock, summarizers; key = nothing, keyset = nothing,
                 closelast = false) -> (CausalPipeline -> CausalPipeline)
     intervalize(p::CausalPipeline, clock, summarizers; key = nothing,
-                closelast = false) -> CausalPipeline
+                keyset = nothing, closelast = false) -> CausalPipeline
 
 A transform summarizing the data stream over the intervals defined by a
 **clock** pipeline: the clock's `:time` column supplies boundaries
@@ -35,6 +35,16 @@ collection of column names) the output is **sparse**: unseen keys cannot be
 emitted causally, so each interval emits one row per key present in it, sorted
 by key, and an interval with no rows emits nothing.
 
+When the key values are known up front, `keyset` (which requires `key`)
+declares them and makes the keyed output **dense**: every complete interval
+emits exactly one row per declared key, in declared order, a key with no rows in
+the interval included with the empty values, so element types widen as for the
+keyless grid. With one key column `keyset` is a collection of its values; with
+several, a collection of tuples (or named tuples) of them. The output key
+columns take their element types from `keyset`, a data stream producing no
+chunks still emits the whole grid, and a row falling in an interval whose key
+is not in `keyset` throws an `ArgumentError`.
+
 The trailing partial interval `[b_K, stop)` after the final boundary is
 emitted only when `closelast = true`, timestamped at the context end `stop`;
 otherwise it is dropped. An empty clock produces no output.
@@ -43,7 +53,7 @@ The curried form composes with `|>`; the uncurried form applies directly, so
 `intervalize(p, clock, ss; …)` is equivalent to `p |> intervalize(clock, ss; …)`.
 """
 function intervalize(clk::CausalPipeline, summarizers; key = nothing,
-    closelast::Bool = false)
+    keyset = nothing, closelast::Bool = false)
     keycols = tokeycolumns(key)
     allunique(keycols) ||
         throw(ArgumentError("intervalize key columns must be unique"))
@@ -52,6 +62,7 @@ function intervalize(clk::CausalPipeline, summarizers; key = nothing,
             "time is the interval dimension and may not be an intervalize key"),
     )
     protos, requested = prototypes(tosummarizers(summarizers), keycols)
+    ks = tokeyset(keyset, keycols, "intervalize")
     keynames = Val(Tuple(keycols))
     outs = Val(requested)
     keyed = !isempty(keycols)
@@ -61,7 +72,10 @@ function intervalize(clk::CausalPipeline, summarizers; key = nothing,
             st = IntervalizeState{T}(IntervalCursor{T}(clk.run(ctx)), T[], 2,
                 false, SummaryFold(), false, false)
             step = function (c)
-                if keyed
+                if ks !== nothing
+                    intervalstepdense!(st, protos, ks, keycols, keynames, outs,
+                        closelast, c)
+                elseif keyed
                     intervalstepgrouped!(st, protos, keycols, keynames, outs,
                         closelast, c)
                 else
@@ -69,6 +83,9 @@ function intervalize(clk::CausalPipeline, summarizers; key = nothing,
                 end
             end
             flush =
+                ks !== nothing ?
+                (() -> intervalflushdense!(st, protos, ks, ctx.stop, closelast,
+                    outs)) :
                 keyed ?
                 (() -> intervalflushgrouped!(st, ctx.stop, closelast, outs)) :
                 (() -> intervalflush!(st, protos, ctx.stop, closelast, outs))
@@ -284,10 +301,7 @@ function intervalstepgrouped!(st::IntervalizeState, protos::Tuple,
     keycols::Vector{Symbol}, keynames::Val, outs::Val,
     closelast::Bool, c::DataFrame)
     if !st.checked
-        for k in keycols
-            String(k) in names(c) || throw(ArgumentError(
-                "intervalize key column $k not found in the input"))
-        end
+        checkkeycolumns(keycols, c, "intervalize")
         st.checked = true
     end
     nt = preparechunk!(st.fold, protos, true, keynames, c)
@@ -345,4 +359,89 @@ function flushintervalsgrouped!(groups::GroupTable{K,S}, bounds::Vector{T},
         closecycle!(rows, groups, stop, r)
     end
     return rows
+end
+
+# --- declared-key (dense) path ---------------------------------------------
+
+function intervalstepdense!(st::IntervalizeState{T}, protos::Tuple, ks::KeySet,
+    keycols::Vector{Symbol}, keynames::Val, outs::Val, closelast::Bool,
+    c::DataFrame) where {T}
+    if !st.checked
+        checkkeycolumns(keycols, c, "intervalize")
+        st.checked = true
+    end
+    nt = preparechunk!(st.fold, protos, true, keynames, c; keyset = ks)
+    fillbounds!(st, last(nt.time))
+    RT, emptyrow = densetypes(T, st.fold.stateprotos, protos, ks, outs)
+    rows = RT[]
+    st.bi = foldintervalsdense!(rows, st.fold.groups, ks, nt, st.bounds, st.bi,
+        keynames, closelast, outs, emptyrow)
+    trimbounds!(st)
+    return isempty(rows) ? nothing : DataFrame(rows)
+end
+
+# The keyless grid's fold over declared-key slots: every crossed boundary
+# closes all of them (closedense!), so an empty interval still emits a row per
+# key. Rows before the first boundary, and trailing rows closelast will not
+# emit, are skipped before their key is looked up. Returns the interval index.
+function foldintervalsdense!(rows::Vector{RT}, dg::DenseGroups, ks::KeySet,
+    nt::NamedTuple, bounds::Vector{T}, bi::Int, keynames::Val,
+    closelast::Bool, r::Val, emptyrow) where {RT,T}
+    nb = length(bounds)
+    nb == 0 && return bi
+    for row in Tables.rows(nt)
+        t = row.time
+        t < @inbounds(bounds[1]) && continue
+        while bi <= nb && t >= @inbounds(bounds[bi])
+            closedense!(rows, dg, ks, @inbounds(bounds[bi]), r, emptyrow)
+            bi += 1
+        end
+        (bi > nb && !closelast) && continue
+        densefold!(dg, ks, row, keynames)
+    end
+    return bi
+end
+
+function intervalflushdense!(st::IntervalizeState{T}, protos::Tuple,
+    ks::KeySet, stop::T, closelast::Bool, outs::Val) where {T}
+    drainbounds!(st)
+    isempty(st.bounds) && return nothing
+    st.fold.stateprotos === nothing &&
+        return flushemptygrid!(st, protos, ks, stop, closelast, outs)
+    RT, emptyrow = densetypes(T, st.fold.stateprotos, protos, ks, outs)
+    rows = flushintervalsdense!(RT[], st.fold.groups, ks, st.bounds, st.bi,
+        stop, closelast, outs, emptyrow)
+    return isempty(rows) ? nothing : DataFrame(rows)
+end
+
+# `flushintervals!` over the slots: the current interval, every remaining
+# complete one (each empty), then the trailing partial at stop when closelast.
+function flushintervalsdense!(rows::Vector{RT}, dg::DenseGroups, ks::KeySet,
+    bounds::Vector{T}, bi::Int, stop::T, closelast::Bool, r::Val,
+    emptyrow) where {RT,T}
+    nb = length(bounds)
+    while bi <= nb
+        closedense!(rows, dg, ks, @inbounds(bounds[bi]), r, emptyrow)
+        bi += 1
+    end
+    closelast && closedense!(rows, dg, ks, stop, r, emptyrow)
+    return rows
+end
+
+# The no-data dense grid: an empty row per complete interval per declared key
+# (and the trailing partial when closelast), typed from the configs alone.
+function flushemptygrid!(st::IntervalizeState{T}, protos::Tuple,
+    ks::KeySet{K}, stop::T, closelast::Bool, r::Val) where {T,K}
+    e = emptyvalues(protos, r)
+    RT = gridrowtype(T, K, typeof(e))
+    rows = RT[]
+    for i in 2:length(st.bounds), k in ks.keys
+        push!(rows, convert(RT, gridrow(@inbounds(st.bounds[i]), k, e)))
+    end
+    if closelast
+        for k in ks.keys
+            push!(rows, convert(RT, gridrow(stop, k, e)))
+        end
+    end
+    return isempty(rows) ? nothing : DataFrame(rows)
 end
