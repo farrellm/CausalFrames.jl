@@ -510,6 +510,64 @@ end
     @test_throws ArgumentError readcsv(path; types = it, chunkbytes = 0)
 end
 
+@testset "readcsv sort" begin
+    dir = mktempdir()
+    # disorder throughout, across file chunks too, with ties everywhere
+    path = joinpath(dir, "scrambled.csv")
+    n = 60
+    ts = [(i * 7) % 11 for i in 1:n]
+    open(path, "w") do io
+        println(io, "time,x")
+        for i in 1:n
+            println(io, "$(ts[i]),$i")
+        end
+    end
+    it = Dict(:time => Int, :x => Int)
+    perm = sortperm(ts; alg = Base.Sort.DEFAULT_STABLE)
+
+    @test_throws ArgumentError load(Context(0, 100), readcsv(path; types = it))
+    for chunkbytes in (64, 4 * 1024 * 1024)
+        p = readcsv(path; types = it, sort = true, chunkbytes)
+        df = DataFrame(load(Context(0, 100), p))
+        @test df.time == ts[perm]
+        @test df.x == perm                       # ties keep file order
+        @test DataFrame(load(Context(3, 7), p)).x == filter(i -> 3 <= ts[i] < 7, perm)
+        @test length(collect(stream(Context(0, 100), p))) == 1
+        @test nrow(load(Context(50, 60), p)) == 0
+        @test eltype(DataFrame(load(Context(0.0, 100.0), p)).time) == Float64
+    end
+
+    # an already sorted file reads the same with or without the sort
+    sorted = joinpath(dir, "sorted.csv")
+    write(sorted, "time,x\n1,a\n2,b\n2,c\n4,d\n")
+    @test DataFrame(
+        load(Context(0, 3),
+            readcsv(sorted; types = Dict(:time => Int), sort = true)),
+    ) ==
+          DataFrame(load(Context(0, 3), readcsv(sorted; types = Dict(:time => Int))))
+
+    # the time column by name, and by a function over renamed columns
+    named = joinpath(dir, "named.csv")
+    write(named, "ts,x\n3,a\n1,b\n3,c\n2,d\n")
+    df = DataFrame(
+        load(Context(0, 10),
+            readcsv(named; time = :ts, types = Dict(:ts => Int), sort = true)),
+    )
+    @test names(df) == ["time", "x"]
+    @test df.time == [1, 2, 3, 3]
+    @test df.x == ["b", "d", "a", "c"]
+    df = DataFrame(
+        load(Context(0, 10),
+            readcsv(named; rename = Dict("ts" => "stamp"),
+                time = r -> parse(Int, r.stamp), sort = true)),
+    )
+    @test df.time == [1, 2, 3, 3]
+    @test df.x == ["b", "d", "a", "c"]
+
+    # the time column must still be typed
+    @test_throws ArgumentError readcsv(named; time = :ts, sort = true)
+end
+
 @testset "lag" begin
     ctx = Context(0, 10)
     # clock clips to the context; carry the (pre-shift) time as a value column

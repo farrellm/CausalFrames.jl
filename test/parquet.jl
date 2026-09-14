@@ -225,6 +225,104 @@ end
         readparquet(notime; backend = :parquet2))
 end
 
+@testset "readparquet sort" begin
+    dir = mktempdir()
+    function ingroups(path, groups; stats = ["time"])
+        open(path, "w") do io
+            fw = Parquet2.FileWriter(io, path; compute_statistics = stats)
+            foreach(g -> Parquet2.writetable!(fw, g), groups)
+            Parquet2.finalize!(fw)
+        end
+        return path
+    end
+
+    # row groups out of time order, with ties within and across groups; the
+    # first group lies wholly past the narrow window below, ahead of the groups
+    # inside it, so ending the scan there would lose them
+    groups = [DataFrame(time = [30, 25, 20], x = [1, 2, 3]),
+        DataFrame(time = [5, 1, 5], x = [4, 5, 6]),
+        DataFrame(time = [10, 5, 12], x = [7, 8, 9])]
+    path = ingroups(joinpath(dir, "scrambled.parquet"), groups)
+    plain = ingroups(joinpath(dir, "plain.parquet"), groups; stats = String[])
+    for backend in (:duckdb, :parquet2), file in (path, plain)
+        @test_throws ArgumentError load(Context(0, 100), readparquet(file; backend))
+        got = DataFrame(load(Context(0, 100), readparquet(file; backend, sort = true)))
+        @test got.time == [1, 5, 5, 5, 10, 12, 20, 25, 30]
+        @test got.x == [5, 4, 6, 8, 7, 9, 3, 2, 1]   # ties in file order
+        @test DataFrame(load(Context(0, 11),
+            readparquet(file; backend, sort = true))).x == [5, 4, 6, 8, 7]
+        @test DataFrame(load(Context(20, 26),
+            readparquet(file; backend, sort = true))).x == [3, 2]
+        @test nrow(load(Context(40, 50), readparquet(file; backend, sort = true))) == 0
+        @test eltype(
+            DataFrame(load(Context(0.0, 100.0),
+                readparquet(file; backend, sort = true))).time,
+        ) == Float64
+    end
+
+    # enough rows, and ties, for DuckDB to sort in parallel and stream the result
+    # in several chunks: the file_row_number tiebreak is what keeps it stable
+    n = 20_000
+    ts = [(i * 7919) % 13 for i in 1:n]
+    rows = DataFrame(time = ts, x = 1:n)
+    big = ingroups(joinpath(dir, "big.parquet"),
+        [rows[r, :] for r in Iterators.partition(1:n, 2_000)])
+    perm = sortperm(ts; alg = Base.Sort.DEFAULT_STABLE)
+    ctx = Context(2, 11)
+    keep = filter(i -> 2 <= ts[i] < 11, perm)
+    for backend in (:duckdb, :parquet2)
+        got = DataFrame(load(ctx, readparquet(big; backend, sort = true)))
+        @test got.time == ts[keep]
+        @test got.x == keep
+    end
+    @test length(collect(stream(ctx, readparquet(big; backend = :duckdb,
+        sort = true)))) > 1
+    @test length(
+        collect(stream(ctx, readparquet(big; backend = :parquet2,
+            sort = true))),
+    ) == 1
+
+    # every way of naming the time column, including a function, which DuckDB
+    # cannot sort in SQL and so sorts in Julia
+    variants = (
+        (; time = row -> row.time * 2),
+        (; rename = Dict("time" => "t"), time = :t),
+        (; rename = n -> uppercase(String(n)), time = :TIME),
+    )
+    for kw in variants
+        d = DataFrame(
+            load(Context(0, 100),
+                readparquet(path; backend = :duckdb, sort = true, kw...)),
+        )
+        p = DataFrame(
+            load(Context(0, 100),
+                readparquet(path; backend = :parquet2, sort = true, kw...)),
+        )
+        @test isequal(d, p)
+        @test d[!, 2] == [5, 4, 6, 8, 7, 9, 3, 2, 1]   # x, whatever its name
+    end
+
+    # a file column named file_row_number shadows DuckDB's own, so it cannot be
+    # the tiebreak: here it runs against file order within the tie
+    shadow = ingroups(joinpath(dir, "shadow.parquet"),
+        [DataFrame(time = [3, 1, 1], file_row_number = [0, 9, 8])])
+    for backend in (:duckdb, :parquet2)
+        got = DataFrame(load(Context(0, 10), readparquet(shadow; backend, sort = true)))
+        @test got.time == [1, 1, 3]
+        @test got.file_row_number == [9, 8, 0]
+    end
+
+    # a DateTime time column, sorted through both backends
+    stamps = DateTime(2026, 1, 1) .+ Hour.([5, 2, 9, 2, 0])
+    dt = ingroups(joinpath(dir, "dt.parquet"),
+        [DataFrame(ts = stamps, x = 1:5)]; stats = ["ts"])
+    dtctx = Context(DateTime(2026, 1, 1, 1), DateTime(2026, 1, 1, 9))
+    for backend in (:duckdb, :parquet2)
+        got = DataFrame(load(dtctx, readparquet(dt; backend, time = :ts, sort = true)))
+        @test got.x == [2, 4, 1]
+    end
+end
+
 @testset "writeparquet backends agree" begin
     dir = mktempdir()
     src = writeparquetfile(joinpath(dir, "src.parquet"),

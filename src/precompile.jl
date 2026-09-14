@@ -24,6 +24,7 @@
                     Correlation(:v, :qty)]),
             ),
         )
+        DataFrame(load(ctx, readcsv(csv; types = csvtypes, sort = true)))
         # The regressions get a workload of their own rather than joining the
         # list above: they expand to a dependency apiece per cross product, and
         # a prototype tuple much past 32 falls off Julia's inference cliff. Both

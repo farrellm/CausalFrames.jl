@@ -30,7 +30,11 @@ readparquet("films.parquet"; time = :year) |>
 
 The `ORDER BY` half is always the source's job. CausalFrames has no sort
 operator, deliberately: monotone time is the invariant that makes streaming
-sound, and a sort is not streaming. So the rank is only ever as meaningful as
+sound, and a sort is not streaming. The sources can do the time half of it —
+`sort = true` on [`readparquet`](@ref), [`readcsv`](@ref) or
+[`readtable`](@ref) stably sorts a file or table not stored in time order — but
+a stable sort keeps rows sharing a timestamp in the order they were stored, so
+the order *within* a year is still whatever the file holds. So the rank is only ever as meaningful as
 the order the rows arrived in — which is worth asserting on if the source is not
 under your control.
 

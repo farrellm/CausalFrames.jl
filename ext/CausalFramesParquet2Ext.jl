@@ -10,7 +10,9 @@ using CausalFrames
 using DataFrames
 using Parquet2
 
-using CausalFrames: ChunkSink, Context, clipchunk!, timesourcename, timetype
+using CausalFrames:
+    ChunkSink, Context, clipchunk!, gatherchunk!, sortgathered,
+    timesourcename, timetype
 
 CausalFrames.backendloaded(::Val{:parquet2}) = true
 
@@ -67,25 +69,27 @@ mutable struct RowGroupProducer{T}
     const stop::T
     const time::Any     # Nothing | Symbol (column name) | Function (row -> time)
     const rename::Any   # Nothing | AbstractDict/map | Function (name -> name)
+    const sort::Bool
     dataset::Any        # Parquet2.Dataset, opened on first pull
     timecol::Any        # file-level name of the time column, or nothing
     index::Int          # next row group
     prevtime::Any       # last raw time seen, for cross-chunk sortedness
     usestats::Bool      # statistics comparable with this context's times
     done::Bool
-    RowGroupProducer{T}(path, start, stop, time, rename) where {T} =
-        new{T}(path, start, stop, time, rename, nothing, nothing, 1, nothing,
-            true, false)
+    RowGroupProducer{T}(path, start, stop, time, rename, sort) where {T} =
+        new{T}(path, start, stop, time, rename, sort, nothing, nothing, 1,
+            nothing, true, false)
 end
 
 CausalFrames.parquetproducer(::Val{:parquet2}, ctx::Context,
-    path::AbstractString, time, rename) =
+    path::AbstractString, time, rename, sort::Bool) =
     RowGroupProducer{timetype(ctx)}(String(path), ctx.start, ctx.stop, time,
-        rename)
+        rename, sort)
 
 function (p::RowGroupProducer{T})() where {T}
     p.done && return nothing
     p.dataset === nothing && open!(p)
+    p.sort && return sortedread!(p)
     while p.index <= Parquet2.nrowgroups(p.dataset)
         rg = p.index
         p.index += 1
@@ -101,6 +105,21 @@ function (p::RowGroupProducer{T})() where {T}
     end
     p.done = true
     return nothing
+end
+
+# The `sort = true` read: a file out of time order has no row group after which
+# nothing more can be in the window, so every group is visited — statistics
+# still skip the ones wholly outside it, on either side — and the in-window rows
+# are sorted once, into the stream's single chunk.
+function sortedread!(p::RowGroupProducer{T}) where {T}
+    p.done = true
+    kept = DataFrame[]
+    for rg in 1:Parquet2.nrowgroups(p.dataset)
+        rowgroupwindow(p, rg) === :overlaps || continue
+        gatherchunk!(kept, DataFrame(p.dataset[rg]), p.time, p.rename, p.path,
+            "parquet file", p.start, p.stop)
+    end
+    return sortgathered(kept, T)
 end
 
 function open!(p::RowGroupProducer)

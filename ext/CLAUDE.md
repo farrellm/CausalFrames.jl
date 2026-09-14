@@ -15,8 +15,8 @@ fallbacks in `src/parquet.jl` throw the `READHINT`/`WRITEHINT` message:
   discovers the extension. It runs eagerly at operator construction *and*
   again per run, so a missing backend is reported where the user typed the
   operator, while one loaded afterwards still counts
-- `parquetproducer(::Val{:name}, ctx, path, time, rename)` → a zero-argument
-  callable returning the next chunk, or `nothing` at the end
+- `parquetproducer(::Val{:name}, ctx, path, time, rename, sort)` → a
+  zero-argument callable returning the next chunk, or `nothing` at the end
 - `parquetsink(::Val{:name}, path, queue, rowgroupsize, opts)` → a `ChunkSink`
   wrapping a `chan -> writeloop(chan, ...)`. Translate options *here*, on the
   pipeline's own task, so an unsupported one is reported when the run starts
@@ -36,6 +36,14 @@ fallbacks in `src/parquet.jl` throw the `READHINT`/`WRITEHINT` message:
   on `sawstop`, a time `>= stop` having been seen
 - Every chunk is clipped on arrival whether or not the window was pushed down,
   which is what makes skipping a pure optimization
+- Under `sort = true` the file's order promises nothing, so a producer that
+  cannot sort at the source uses `gatherchunk!` (same arguments, minus
+  `prevtime`, pushing in-window rows onto a `Vector{DataFrame}`) over *every*
+  chunk and returns `sortgathered(kept, T)` as its one chunk. Nothing may end
+  the scan early: Parquet2's `:after` row groups are skipped, not terminal.
+  DuckDB instead sorts in SQL, tie-broken by the virtual `file_row_number`,
+  and gathers only when that is impossible (a `time` function, an untraceable
+  `rename`, or a real column shadowing `file_row_number`)
 
 ## Skipping never fails a read
 
