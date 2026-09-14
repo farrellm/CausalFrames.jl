@@ -119,9 +119,9 @@ Two kinds, both compatible with the chaining operator `|>`:
 | `merge(ps...; batchsize)` | source | run the pipelines concurrently over the same context and interleave their rows by time; columns may differ (the output is their union, `missing` where a pipeline lacks one) and ties break by argument order (see "Merging") |
 | `clock(interval; batchsize)` | source | rows at `start, start + interval, …` while `< stop`; no other columns; generated lazily in chunks of `batchsize` rows |
 | `readtable(table; time, checkorder, sort, closed)` / `readtable(frame; closed, checkcontext)` | source | an in-memory Tables.jl table, `DataFrame` or `CausalFrame`; the time column chosen as for `readcsv`, checked for order (`checkorder`) or stably sorted (`sort`); rows clipped to `[start, stop)`, or `[start, stop]` with `closed`; only in-window rows are copied, and a frame's whole-window chunks not even those; a frame refuses a context outside its own unless `checkcontext = false`, and closes the window by default when the stops match (see "Tables as sources") |
-| `readcsv(path; types, time, rename, delim, chunkbytes)` | source | CSV file, every column read as `String` unless `types` opts it into a concrete type; the time column (named `:time`, or chosen by `time` as a column name or a per-row function) must be typed and sorted; `rename` maps column names first; rows clipped to `[start, stop)`; read incrementally in chunks of roughly `chunkbytes` bytes — never all at once — stopping as soon as a time `>= stop` is seen |
+| `readcsv(path; types, time, rename, delim, sort, chunkbytes)` | source | CSV file, every column read as `String` unless `types` opts it into a concrete type; the time column (named `:time`, or chosen by `time` as a column name or a per-row function) must be typed and sorted — or, with `sort`, is stably sorted, the whole file scanned and the in-window rows emitted as one chunk (see "Sorting a file source"); `rename` maps column names first; rows clipped to `[start, stop)`; read incrementally in chunks of roughly `chunkbytes` bytes — never all at once — stopping as soon as a time `>= stop` is seen |
 | `writecsv(path; queue, ...)` | transform | transparent pass-through sink: writes each chunk to `path` as it flows by and yields it downstream unchanged (see "CSV output") |
-| `readparquet(path; time, rename, backend)` | source | parquet file, read through DuckDB or Parquet2 (either backend suffices; DuckDB preferred); column types come from the file itself; the time column (named `:time`, or chosen by `time` as a column name or a per-row function) must be sorted; `rename` maps column names first; rows clipped to `[start, stop)`; read one chunk at a time — a DuckDB result chunk, or a Parquet2 row group — with the window used to skip what cannot be in it (see "Parquet I/O") |
+| `readparquet(path; time, rename, sort, backend)` | source | parquet file, read through DuckDB or Parquet2 (either backend suffices; DuckDB preferred); column types come from the file itself; the time column (named `:time`, or chosen by `time` as a column name or a per-row function) must be sorted — or, with `sort`, is stably sorted, in the query under DuckDB and in memory otherwise (see "Sorting a file source"); `rename` maps column names first; rows clipped to `[start, stop)`; read one chunk at a time — a DuckDB result chunk, or a Parquet2 row group — with the window used to skip what cannot be in it (see "Parquet I/O") |
 | `writeparquet(path; queue, rowgroupsize, backend, ...)` | transform | transparent pass-through sink through Parquet2 or DuckDB (either suffices; Parquet2 preferred): buffers chunks until `rowgroupsize` rows are pending and writes them as one row group, yielding every chunk downstream unchanged; the file is valid only once finalized (see "Parquet I/O") |
 | `readjls(path)` | source | a file written by `writejls`, one chunk per record; rows clipped to `[start, stop)`; read a record at a time, stopping as soon as a time `>= stop` is seen (see "JLS I/O") |
 | `writejls(path; queue)` | transform | transparent pass-through sink through the `Serialization` stdlib: serializes each chunk as it flows by, so columns of any Julia type round-trip (see "JLS I/O") |
@@ -265,6 +265,41 @@ file. Keyword arguments pass through to `Parquet2.FileWriter`, where
 statistics the readers skip by; the DuckDB sink understands `compression_codec`
 (mapped onto `COPY`'s `COMPRESSION`, and it records statistics of its own) and
 rejects the other, Parquet2-specific options rather than silently dropping them.
+
+## Sorting a file source
+
+`readcsv` and `readparquet` take `sort = true` for files not stored in time
+order — a parquet file written by a query without `ORDER BY` is the usual case.
+It has `readtable`'s meaning: a stable sort by time, since rows sharing a
+timestamp form a cycle and their order within it is data, applied at the source
+where it costs no causality. The source's output obeys every invariant; only the
+reading changes.
+
+A sort cannot stream, so everything that relies on the file's order is dropped
+from that read: the order check, the binary-searched clip and the early stop at
+the first time `>= stop`. `gatherchunk!` is `clipchunk!`'s counterpart for it —
+the same `renamecolumns!`/`resolvetime!`, then a scan (`windowrows`, typed on the
+raw time vector) keeping the in-window rows of each file chunk. Once the file is
+exhausted, `sortgathered` concatenates them, applies `stableperm` unless they are
+already in order, and emits the lot as **one chunk**. Memory therefore scales
+with the rows in the window, plus one file chunk, never with the file. Chunks
+are gathered in file order, so stability across them is file order too.
+
+Where a reader can do better, it does. DuckDB takes the sort into the query as
+`ORDER BY <time>, file_row_number` beside the window's `WHERE`, and the sorted
+result streams through the ordinary `clipchunk!` loop, early stop included;
+DuckDB spills a large sort to disk itself. `file_row_number` is there because
+DuckDB's `ORDER BY` is not stable: it is the reader's virtual column, left out of
+`*`, and the tiebreak that makes the order the file's. Pushdown needs a nameable
+time column and that tiebreak, so a `time` function, an untraceable `rename`, or
+a file with a column of its own named `file_row_number` (which shadows the
+virtual one) sends DuckDB down the gather-and-sort path instead. Parquet2 always
+gathers; its statistics still skip row groups wholly outside the window, but
+under a sort a group at or past `stop` no longer ends the scan.
+
+A `sort = true` read raises no order error, and none is checked separately: the
+output is sorted by construction. The within-timestamp half of an `ORDER BY` —
+secondary sort keys — is not offered, here or in `readtable`.
 
 ## JLS I/O
 

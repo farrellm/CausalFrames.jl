@@ -152,15 +152,16 @@ end
 
 """
     readcsv(path; types = nothing, time = nothing, rename = nothing,
-            delim = nothing, chunkbytes = 4 * 1024 * 1024) -> CausalPipeline
+            delim = nothing, sort = false, chunkbytes = 4 * 1024 * 1024)
+        -> CausalPipeline
 
 A source that reads the CSV file at `path` and clips it to the context's
 half-open interval `[start, stop)`. Every column is read as `String` — types
 are **not** inferred — unless `types` opts a column into a concrete type.
 
 The resulting time column, whatever its source, is materialized as `:time`,
-must be sorted in non-decreasing order, and is converted to the context's
-time type. It is chosen by `time`:
+must be sorted in non-decreasing order (unless `sort = true`), and is converted
+to the context's time type. It is chosen by `time`:
 
 - `time = nothing` (default): the column already named `:time`.
 - `time = :name` (a `Symbol`): the column named `:name` (after `rename`),
@@ -184,13 +185,19 @@ Keyword arguments:
   is resolved.
 - `delim`: the field delimiter, passed through to `CSV.Chunks` (a `Char` or
   `String`); defaults to CSV.jl's own detection.
+- `sort`: sort the rows by time, for a file not stored in time order. The sort
+  is stable, so rows sharing a timestamp keep their file order. A sort cannot
+  stream: the whole file is read (still one chunk at a time), its in-window
+  rows are kept, and they are sorted and emitted as a single chunk — memory
+  scales with the rows in the window, not with the file.
 - `chunkbytes`: the file is read incrementally in chunks of roughly this many
-  bytes — never all at once — and reading stops as soon as a time `>= stop`
-  is seen. Consequently a sortedness violation is only detected when the
-  offending chunk is actually read.
+  bytes — never all at once — and, without `sort`, reading stops as soon as a
+  time `>= stop` is seen. Consequently a sortedness violation is only detected
+  when the offending chunk is actually read.
 """
 function readcsv(path::AbstractString; types = nothing, time = nothing,
-    rename = nothing, delim = nothing, chunkbytes::Integer = 4 * 1024 * 1024)
+    rename = nothing, delim = nothing, sort::Bool = false,
+    chunkbytes::Integer = 4 * 1024 * 1024)
     chunkbytes > 0 ||
         throw(ArgumentError("readcsv chunkbytes must be positive, got $chunkbytes"))
     # Eager error where the time column is provably untyped: no `types` at all,
@@ -213,7 +220,7 @@ function readcsv(path::AbstractString; types = nothing, time = nothing,
     return CausalPipeline() do ctx::Context
         return ChunkSource(
             CSVProducer{timetype(ctx)}(String(path), Int(chunkbytes),
-                ctx.start, ctx.stop, types, time, rename, delim),
+                ctx.start, ctx.stop, types, time, rename, delim, sort),
         )
     end
 end
@@ -232,14 +239,15 @@ mutable struct CSVProducer{T}
     const time::Any     # Nothing | Symbol (column name) | Function (row -> time)
     const rename::Any   # Nothing | AbstractDict/map | Function (name -> name)
     const delim::Any    # CSV.Chunks `delim` argument, or nothing
+    const sort::Bool
     chunks::Any         # file-chunk iterator, created on first pull
     state::Any          # its iteration state
     started::Bool
     prevtime::Any       # last raw time seen, for cross-chunk sortedness
     done::Bool
     CSVProducer{T}(path, chunkbytes, start, stop, types, time, rename,
-        delim) where {T} =
-        new{T}(path, chunkbytes, start, stop, types, time, rename, delim,
+        delim, sort) where {T} =
+        new{T}(path, chunkbytes, start, stop, types, time, rename, delim, sort,
             nothing, nothing, false, nothing, false)
 end
 
@@ -284,6 +292,16 @@ function (p::CSVProducer{T})() where {T}
     p.done && return nothing
     p.chunks === nothing &&
         (p.chunks = csvchunks(p.path, p.chunkbytes, p.types, p.delim))
+    if p.sort
+        p.done = true
+        kept = DataFrame[]
+        for filechunk in p.chunks
+            df = filechunk isa DataFrame ? filechunk : DataFrame(filechunk)
+            gatherchunk!(kept, df, p.time, p.rename, p.path, "CSV file", p.start,
+                p.stop)
+        end
+        return sortgathered(kept, T)
+    end
     while true
         next = p.started ? iterate(p.chunks, p.state) : iterate(p.chunks)
         if next === nothing
@@ -326,6 +344,40 @@ function clipchunk!(df::DataFrame, time, rename, path::String, what::String,
     clipped = lo == 1 && hi == nrow(df) ? df : df[lo:hi, :]
     clipped[!, :time] = convert(Vector{T}, clipped.time)
     return (clipped, sawstop, prevtime)
+end
+
+# `clipchunk!`'s counterpart for a source asked to `sort`, shared by readcsv and
+# readparquet: the same rename and time resolution, but the chunk's order is
+# not the file's promise, so there is no order check, no binary search and no
+# early stop — the in-window rows are found by a scan and pushed onto `kept`
+# (when there are any), to be sorted once the file is exhausted.
+function gatherchunk!(kept::Vector{DataFrame}, df::DataFrame, time, rename,
+    path::String, what::String, start, stop)
+    renamecolumns!(df, rename)
+    resolvetime!(df, time, path, what)
+    rows = windowrows(df.time, start, stop)
+    if length(rows) == nrow(df)
+        push!(kept, df)    # freshly materialized and owned, as in clipchunk!
+    elseif !isempty(rows)
+        push!(kept, df[rows, :])
+    end
+    return nothing
+end
+
+# Function barrier, typed on the raw time vector: the indices of the rows in
+# `[start, stop)`, in file order.
+windowrows(times::AbstractVector, start, stop) =
+    findall(t -> start <= t && t < stop, times)
+
+# The gathered rows as one stably time-sorted chunk (nothing when none were in
+# the window), `:time` converted to the context's time type. Chunks are gathered
+# in file order, so stability across them is file order too.
+function sortgathered(kept::Vector{DataFrame}, ::Type{T}) where {T}
+    isempty(kept) && return nothing
+    df = length(kept) == 1 ? only(kept) : reduce(vcat, kept)
+    issorted(df.time) || (df = df[stableperm(df.time), :])
+    df[!, :time] = convert(Vector{T}, df.time)
+    return df
 end
 
 # A time column that arrived as text cannot be ordered against the window. Only

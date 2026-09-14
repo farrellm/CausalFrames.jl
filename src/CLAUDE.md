@@ -61,7 +61,12 @@ design rationale and performance constraints behind each module.
   Skipping is always an optimization — chunks are clipped again on arrival,
   so results never depend on it. `backend = :duckdb`/`:parquet2` forces the
   choice, which is how the tests cover all four combinations in one process;
-  working on parquet means loading `DuckDB`/`Parquet2` in the session first
+  working on parquet means loading `DuckDB`/`Parquet2` in the session first.
+  `sort = true` (here and on `readcsv`) cannot stream, so its read path is
+  `gatherchunk!`/`sortgathered` in `operators.jl` — scan every chunk for
+  in-window rows, stable-sort once, emit one chunk — except that DuckDB pushes
+  the sort into SQL, tie-broken by its virtual `file_row_number` (its `ORDER
+  BY` is unstable); see DESIGN.md's "Sorting a file source"
 - `src/jls.jl` — `writejls`/`readjls`, the untyped persistence pair: a header
   record then one `serialize`d DataFrame per chunk, each its own `serialize`
   call so records are independent. The sink is `ChunkSink` with a serializing

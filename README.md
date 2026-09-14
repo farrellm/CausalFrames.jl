@@ -64,8 +64,8 @@ pass-through transform, so a sink can sit in the middle of a chain.
 
 | Operator | Semantics |
 |---|---|
-| [`readcsv(path; types, time, rename, delim)`](https://farrellm.github.io/CausalFrames.jl/dev/api/io/#readcsv) | CSV read as `String` columns (`types` opts columns into concrete types); `time` picks the time column by name or a per-row function; clipped to `[start, stop)`, read incrementally |
-| [`readparquet(path; time, rename, backend)`](https://farrellm.github.io/CausalFrames.jl/dev/api/io/#readparquet) | parquet file (needs `using DuckDB` or `using Parquet2`); types come from the file; the context window skips row groups that cannot be in it; `time` and `rename` as for `readcsv` |
+| [`readcsv(path; types, time, rename, delim, sort)`](https://farrellm.github.io/CausalFrames.jl/dev/api/io/#readcsv) | CSV read as `String` columns (`types` opts columns into concrete types); `time` picks the time column by name or a per-row function; clipped to `[start, stop)`, read incrementally; `sort` orders a file not stored in time order, holding the window in memory |
+| [`readparquet(path; time, rename, sort, backend)`](https://farrellm.github.io/CausalFrames.jl/dev/api/io/#readparquet) | parquet file (needs `using DuckDB` or `using Parquet2`); types come from the file; the context window skips row groups that cannot be in it; `time`, `rename` and `sort` as for `readcsv`, DuckDB sorting in the query |
 | [`readjls(path)`](https://farrellm.github.io/CausalFrames.jl/dev/api/io/#readjls) | read back a file written by `writejls`, a record at a time, clipped to `[start, stop)` |
 | [`writecsv(path; queue, ...)`](https://farrellm.github.io/CausalFrames.jl/dev/api/io/#writecsv) | writes each chunk to `path` as it flows by, on a background task |
 | [`writeparquet(path; queue, rowgroupsize, backend, ...)`](https://farrellm.github.io/CausalFrames.jl/dev/api/io/#writeparquet) | needs `using Parquet2` or `using DuckDB`: writes row groups of `rowgroupsize` rows as the stream flows by; the file is valid only once the stream is exhausted |

@@ -41,13 +41,13 @@ end
 
 # Backend hooks. The extensions' methods are more specific than these, so the
 # fallbacks only ever run when the backend is not loaded.
-parquetproducer(::Val, ::Any, ::Any, ::Any, ::Any) =
+parquetproducer(::Val, ::Any, ::Any, ::Any, ::Any, ::Any) =
     throw(ArgumentError(READHINT))
 parquetsink(::Val, ::Any, ::Any, ::Any, ::Any) = throw(ArgumentError(WRITEHINT))
 
 """
-    readparquet(path; time = nothing, rename = nothing, backend = :auto) ->
-        CausalPipeline
+    readparquet(path; time = nothing, rename = nothing, sort = false,
+                backend = :auto) -> CausalPipeline
 
 A source that reads the parquet file at `path` and clips it to the context's
 half-open interval `[start, stop)`. Needs one of the two parquet backends
@@ -63,8 +63,8 @@ window is used to skip data that cannot be in it:
 | `:parquet2` | one row group | row groups whose recorded time statistics fall outside the window are skipped undecoded |
 
 The resulting time column, whatever its source, is materialized as `:time`,
-must be sorted in non-decreasing order, and is converted to the context's time
-type. It is chosen by `time`:
+must be sorted in non-decreasing order (unless `sort = true`), and is converted
+to the context's time type. It is chosen by `time`:
 
 - `time = nothing` (default): the column already named `:time`.
 - `time = :name` (a `Symbol`): the column named `:name` (after `rename`),
@@ -77,6 +77,9 @@ Keyword arguments:
 - `rename`: an `AbstractDict`/map (over the file's own names) or a
   `name -> name` function applied to the column names **before** `time` is
   resolved.
+- `sort`: sort the rows by time, for a file not stored in time order (one
+  written by a query without `ORDER BY`, say). The sort is stable, so rows
+  sharing a timestamp keep their file order. See below for what it costs.
 - `backend`: `:auto` (default), `:duckdb` or `:parquet2`. Naming a backend that
   is not loaded is an `ArgumentError`.
 
@@ -86,14 +89,26 @@ still stops as soon as a time `>= stop` is seen). It never changes results —
 the rows are clipped again on arrival — so a file whose writer recorded no
 statistics simply reads more of itself. Consequently, as with [`readcsv`](@ref),
 a sortedness violation is only detected in the chunks actually read.
+
+With `sort = true` the window still skips what cannot be in it, but how the sort
+happens depends on the backend:
+
+| `backend` | Sort |
+|---|---|
+| `:duckdb` | pushed into the query (`ORDER BY` the time column, ties in file order), so the sorted window still streams out chunk by chunk; DuckDB spills a large sort to disk |
+| `:parquet2` | every row group is read (those outside the window still skipped), the in-window rows kept, sorted and emitted as a single chunk |
+
+A `time` function, or a `rename` that leaves the time column unidentifiable,
+cannot be sorted in SQL either, so DuckDB then takes the Parquet2 route: a full
+scan whose in-window rows are sorted in memory.
 """
 function readparquet(path::AbstractString; time = nothing, rename = nothing,
-    backend::Symbol = :auto)
+    sort::Bool = false, backend::Symbol = :auto)
     resolvebackend(backend, :duckdb, READHINT)   # eager: fail at the call site
     return CausalPipeline() do ctx::Context
         return ChunkSource(
             parquetproducer(resolvebackend(backend, :duckdb,
-                READHINT), ctx, String(path), time, rename),
+                READHINT), ctx, String(path), time, rename, sort),
         )
     end
 end
