@@ -109,7 +109,8 @@ the `Acausal` submodule, under "Causality" below.
 ### Column transformations
 
 The column set itself: which columns exist and in what order, and filling or
-joining values into them. Rows pass through one for one.
+joining values into them. Rows pass through one for one, unless `lookupjoin` is
+asked to drop unmatched ones.
 
 | Operator | Semantics |
 |---|---|
@@ -119,6 +120,7 @@ joining values into them. Rows pass through one for one.
 | [`forwardfill(sel...; key, tolerance)`](https://farrellm.github.io/CausalFrames.jl/dev/api/columns/#forwardfill) | replace `missing` in the selected columns with that column's last non-missing value, per key, while not older than `tolerance` |
 | [`fillmissing(specs...)`](https://farrellm.github.io/CausalFrames.jl/dev/api/columns/#fillmissing) | replace `missing` with a per-column constant, given as `name => value` pairs or a `NamedTuple` |
 | [`asofjoin(right; key, tolerance, ...)`](https://farrellm.github.io/CausalFrames.jl/dev/api/columns/#asofjoin) | append the most recent right-pipeline row at or before each row's time |
+| [`lookupjoin(table; key, unmatched, ...)`](https://farrellm.github.io/CausalFrames.jl/dev/api/columns/#lookupjoin) | append the row with the same key from an in-memory table that has no time column; an unmatched row gets `missing`, raises, or is dropped |
 
 The forward-looking `futurejoin` lives in the `Acausal` submodule, under
 "Causality" below.

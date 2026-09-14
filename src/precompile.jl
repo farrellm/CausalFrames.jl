@@ -152,6 +152,11 @@
                     key = :sym, rightprefix = "r", righttime = :rt),
             ),
         )
+        # a timeless table with a String value column, in the default mode and
+        # the row-dropping one
+        dim = (sym = ["a"], sector = ["tech"])
+        DataFrame(load(ctx, p |> lookupjoin(dim; key = :sym)))
+        DataFrame(load(ctx, p |> lookupjoin(dim; key = :sym, unmatched = :drop)))
         DataFrame(load(ctx, p |> Acausal.lead(1)))
         DataFrame(load(ctx, p |> Acausal.settime(r -> r.time - 1)))
         foreach(DataFrame, stream(ctx, clock(1) |> summarize(Count())))

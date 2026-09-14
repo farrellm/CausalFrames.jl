@@ -173,6 +173,18 @@ design rationale and performance constraints behind each module.
   isbits, so a `String` or `Missing`-admitting right column cost one box per
   left row. See DESIGN.md's "Representing a match"; the two zero-allocation
   kernel tests are what stop it regressing
+- `src/lookupjoin.jl` — `lookupjoin`, the key-only join against a timeless
+  in-memory table. Not a stream: the table is copied and indexed once, at
+  construction, into a `LookupJoin` (a `Dict{K,Int}` of table rows plus the value
+  columns as a concrete NamedTuple, captured by the closures so each chunk's call
+  is statically dispatched), and the transform is a stateless `chunkmap` — so,
+  unlike the as-of joins, it keeps chunk concatenation over split contexts. Per
+  chunk `lookuprows!` fills a `Vector{Int}` of rows (0 = unmatched; `Int`s so a
+  `String` key costs nothing per row — the zero-allocation test pins it), then
+  each value column is gathered. `unmatched` is a singleton mode type picked at
+  construction: `:missing` gathers `Union{Missing,T}` (`gathermissing`),
+  `:error`/`:drop` keep `T`, so the schema is the keyword's, never the data's.
+  Shares `prefixleft!`'s field form with `asofjoin`
 - `src/lastrow.jl` — `lastrow`, the last-row-per-key transform: `summarize`'s
   fold-and-flush-at-`stop` shape over `join.jl`'s store rather than a
   `GroupTable`, since it keeps whole rows and a `Dict{K,V}` would box one per

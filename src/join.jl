@@ -36,9 +36,8 @@ in particular a self join (`p |> asofjoin(p)`) needs a prefix. A right
 stream producing no chunks passes left chunks through unchanged (no right
 columns, no `righttime`), except for the `leftprefix` rename.
 
-A right pipeline whose rows all share one time is a plain keyed lookup; see the
-manual's Recipes page, which also covers the way that fails when the time falls
-outside the window.
+To join a table that has no time column by key alone, use
+[`lookupjoin`](@ref).
 
 The curried form composes with `|>`; the uncurried form applies directly, so
 `asofjoin(left, right; ...)` is equivalent to `left |> asofjoin(right; ...)`.
@@ -285,12 +284,16 @@ end
 # --- output assembly -------------------------------------------------------
 
 # One rename! over every pair, not one call per column: each call rebuilds the
-# chunk's column index, which made this O(ncols^2) per chunk.
-function prefixleft!(cfg::AsofJoinConfig, c::DataFrame)
-    cfg.leftprefix === nothing && return c
+# chunk's column index, which made this O(ncols^2) per chunk. The field form is
+# shared with lookupjoin.
+prefixleft!(cfg::AsofJoinConfig, c::DataFrame) =
+    prefixleft!(cfg.leftprefix, cfg.keycols, c)
+function prefixleft!(leftprefix::Union{Nothing,String}, keycols::Vector{Symbol},
+    c::DataFrame)
+    leftprefix === nothing && return c
     pairs = [
-        n => prefixed(cfg.leftprefix, n) for n in propertynames(c)
-        if n !== :time && !(n in cfg.keycols)
+        n => prefixed(leftprefix, n) for n in propertynames(c)
+        if n !== :time && !(n in keycols)
     ]
     isempty(pairs) || rename!(c, pairs)
     return c
