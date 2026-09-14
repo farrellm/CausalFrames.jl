@@ -40,72 +40,59 @@ the order the rows arrived in.
 
 ## Joining a reference table
 
-[`asofjoin`](@ref) matches the most recent right row at or before each left
-row's time. Give every right row the *same* time and that degenerates into a
-plain keyed lookup: there is only one row per key, and it is always at or before
-whatever the left row's time is. A dimension table already in memory, lifted
-with [`readtable`](@ref) and joined by key alone:
+[`lookupjoin`](@ref) appends the columns of a table that has no time column — a
+dimension table, a symbol master — to every row with the same key:
 
 ```julia
-dim = readtable(df; time = _ -> ctx.start)
-facts |> asofjoin(dim; key = :id)
+dim = DataFrame(id = ["a", "b"], sector = ["tech", "energy"])
+facts |> lookupjoin(dim; key = :id)
 ```
 
-A `time` function overwrites any `:time` column the table has, so `df` needs
-none. A table kept on disk takes the same `time` function through
-[`readcsv`](@ref), which reads every column as `String` unless `types` says
-otherwise:
+Any Tables.jl table works, so a table kept on disk can be read with CSV.jl
+directly, types inferred. It never passes through a source, so nothing clips it
+to the window:
 
 ```julia
-dim = readcsv("dim.csv"; types = Dict(:id => String), time = _ -> ctx.start)
+using CSV
+facts |> lookupjoin(CSV.File("dim.csv"); key = :id)
 ```
 
-Memory is O(keys), as for any `asofjoin`.
+A row whose key the table lacks gets `missing` in the new columns;
+`unmatched = :drop` drops it instead, and `unmatched = :error` insists every key
+is there. A table of keys alone with `unmatched = :drop` is a semi-join: it keeps
+the rows whose key is listed.
 
-The constant must fall inside the evaluation window. Sources clip to
-`[start, stop)`, so a right pipeline timed outside it yields no rows at all —
-and a right stream producing no chunks passes the left chunks through
-*unchanged*, meaning the right columns are *absent from the schema* rather than
-present and `missing`. The symptom is a confusing "column not found" from
-whatever reads them next, at some distance from the cause. Time the reference
-rows at the window's own `start`.
+A reference table that changes over time — a sector reassigned mid-window — is
+not a lookup. Give its rows the times they take effect and use
+[`asofjoin`](@ref), which picks the version in force at each row.
 
 ## Using a derived stream as a reference table
 
-The recipe above needs constant-timed rows, and a stream that already carries
-real times cannot be retimed backward: [`settime`](@ref) may only move rows
-later. So to look up against something the pipeline itself derived, materialize
-it and read it back at a constant time. [`load`](@ref) it and hand the rows to
-`readtable`:
+To look up against something a pipeline derived, materialize it and drop its
+`:time` column, which `lookupjoin` refuses. A stream usually repeats its keys,
+and a lookup table may not, so first decide which row stands for each key —
+[`lastrow`](@ref) keeps the latest:
 
 ```julia
-ids = DataFrame(load(ctx, derived |> selectcolumns(:id)))
-lookup = readtable(ids; time = _ -> ctx.start)
-facts |> asofjoin(lookup; key = :id)
+# yesterday's closing score per id, looked up by today's facts
+closing = load(yesterday, scores |> lastrow(; key = :id))
+facts |> lookupjoin(select(DataFrame(closing), Not(:time)); key = :id)
 ```
 
-The loaded `:time` is simply overwritten by the constant. A derived stream too
-large to hold goes through a file instead: [`writecsv`](@ref) is a pass-through
+The table goes through a file as easily: [`writecsv`](@ref) is a pass-through
 sink, [`scan`](@ref) drives the pipeline for that side effect alone, and
-`readcsv` reads it back. The file, unlike the frame, forgets column types:
+`CSV.File` can drop the time column as it reads:
 
 ```julia
-derived |> selectcolumns(:id) |> writecsv(path) |> scan(ctx)
-
-lookup = readcsv(path; types = Dict(:id => String), time = _ -> ctx.start)
-facts |> asofjoin(lookup; key = :id)
+scores |> lastrow(; key = :id) |> writecsv(path) |> scan(yesterday)
+facts |> lookupjoin(CSV.File(path; drop = [:time]); key = :id)
 ```
 
-Note that this is not a way around a pipeline being single-pass — it is not. A
-`CausalPipeline` is a lazy description of how to produce data, and `load`,
-`stream` and `scan` may each run it again; only the iterator produced by one
-such run is single-pass. Materializing here buys the *retiming*, not the second
-read.
-
-If you would rather move the rows than write them out,
-`CausalFrames.Acausal.settime` is the permissive form that may move rows
-earlier. It lives in the `Acausal` submodule because that is a genuine
-loss of causality, and it must be opted into by name.
+Derive the table from an *earlier* window, as here. Built from the same window
+as the facts, it would hand a row at time `t` a value computed from rows after
+`t` — the lookup cannot know, since the table carries no times. Within one
+window the causal form is an as-of join against the derived stream itself,
+`facts |> asofjoin(scores; key = :id)`.
 
 ## Fitting a model once and applying it later
 

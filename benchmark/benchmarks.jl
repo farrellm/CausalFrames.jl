@@ -263,6 +263,18 @@ SUITE["join"]["asof-keyed"] = @benchmarkable load(CTX,
 SUITE["join"]["future-keyed"] = @benchmarkable load(CTX,
     SRC |> futurejoin(SRC2; key = :sym, rightprefix = "r"))
 
+# The timeless lookup, against the keyed as-of join above: a static index, one
+# Int per row and a gather per column. "lookup-drop" lists half the keys, so
+# every chunk takes the row-dropping slice.
+const DIM = DataFrame(sym = ["s" * string(k) for k in 0:99],
+    lot = [Float64(k) for k in 0:99],
+    sector = ["sector" * string(k % 10) for k in 0:99])
+const HALFDIM = DIM[1:2:end, :]
+SUITE["join"]["lookup-keyed"] =
+    @benchmarkable load(CTX, SRC |> lookupjoin(DIM; key = :sym))
+SUITE["join"]["lookup-drop"] = @benchmarkable load(CTX,
+    SRC |> lookupjoin(HALFDIM; key = :sym, unmatched = :drop))
+
 # The n-ary merge over the same two sources. "interleaved" is the worst case
 # — the two streams share every timestamp, so blocks are cycle-sized and the
 # rows are copied; "shifted" moves one source a half-window later so long runs

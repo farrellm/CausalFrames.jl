@@ -185,6 +185,18 @@ end
     JET.@test_opt CausalFrames.matchcolumn(matches, found, Val(:y))
 end
 
+@testset "lookupjoin kernels" begin
+    # a String key, which only the Int row vector keeps from boxing per row, and
+    # the Missing-widening gather over a non-isbits and an isbits column
+    K = typeof((sym = "a",))
+    index = Dict{K,Int}((sym = "a",) => 1)
+    nt = (time = [1, 2], sym = ["a", "b"])
+    JET.@test_opt CausalFrames.lookuprows!(Vector{Int}(undef, 2), index, nt,
+        Val((:sym,)))
+    JET.@test_opt CausalFrames.gathermissing(["x"], [1, 0])
+    JET.@test_opt CausalFrames.gathermissing([1.0], [1, 0])
+end
+
 @testset "lastrow kernel" begin
     # the same non-isbits V the asofjoin store exists for: a Dict{K,V} would
     # answer every lookup as Union{Nothing,V} and box it once per row

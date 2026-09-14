@@ -137,6 +137,7 @@ Two kinds, both compatible with the chaining operator `|>`:
 | `addsummarycolumns(ss; key)` | transform | keep input columns, append the running summary value after each row |
 | `addrollingcolumns(windows, ss; key, from)` | transform | keep input columns, append each summarizer's value over each named trailing window, prefixed `"{window}_"` (see "Rolling windows") |
 | `asofjoin(right; key, tolerance, strict, leftprefix, rightprefix, righttime)` | transform | left as-of join: append the most recent right row with time `<= time` (`strict`: `<`), per key; `missing` where none qualifies (see "As-of join") |
+| `lookupjoin(table; key, unmatched, leftprefix, rightprefix)` | transform | join each row to the row with the same key in an in-memory table that has no time column; an unmatched row gets `missing`, raises, or is dropped (`unmatched`); stateless (see "Lookup join") |
 | `lag(offset)` | transform | shift every row `offset` later in time (`time -> time + offset`); the value at time `t` is the input's value at `t - offset` (see "Lead and lag") |
 | `settime(spec)` | transform | recompute `:time` from a column name or a per-row function; times may only move later, and the result is re-clipped to `[start, stop)` (see "Retiming") |
 | `head(n)` | transform | emit the first up to `n` rows and stop pulling upstream (see "Truncation") |
@@ -178,8 +179,9 @@ closes it with the exception and the pipeline task sees it at the next
 `put!` rather than deadlocking on a full queue.
 
 This is the one place chunk ownership is shared, and it needs care. A
-consumer owns the chunk it is handed, and three operators use that licence to
-mutate the chunk's *column index* in place (`asofjoin`'s `prefixleft!`,
+consumer owns the chunk it is handed, and four operators use that licence to
+mutate the chunk's *column index* in place (`asofjoin`'s `prefixleft!`, which
+`lookupjoin` shares,
 `addrollingcolumns`' `assembleempty`, `settime`'s symbol form, which drops the
 old `:time` and renames another column onto it) — which would race the writer reading
 the same DataFrame on another task. Column *vectors*, by contrast, are never
@@ -763,6 +765,54 @@ The rows must be *copied* into the match buffer rather than referenced by
 index: `asofjoin` overwrites a key's slot when a later right row arrives, and
 `futurejoin` compacts its per-key FIFOs, so an index recorded earlier in the
 chunk would silently change meaning.
+
+## Lookup join
+
+`lookupjoin(table; key, unmatched, leftprefix, rightprefix)` joins each row to
+the row of an in-memory Tables.jl table with the same key. The table has **no
+time column** — one is an `ArgumentError` pointing at `asofjoin`, and a
+`CausalFrame` is refused the same way — so it holds over every window: the join
+is causal at every row whatever the context, and nothing needs widening.
+
+This is what the constant-time `asofjoin` recipe used to approximate, and that
+approximation broke when the constant fell outside the window: the source
+clipped every reference row away, and an empty right stream passes left chunks
+through *without* the right columns. A lookup table is not a stream, so it is
+never clipped, and a table with no rows still has a schema to append.
+
+- **Keys.** `key` is required and must be present in both — the table's checked
+  at construction, each input chunk's on arrival. Keys match with `isequal`
+  and are not converted (the `KeySet` rule: an `Int` key finds a `Float64`
+  one, `missing` finds `missing`). Key columns appear once, from the input row.
+  A key repeated in the table is an `ArgumentError` at construction: a
+  many-to-one join keeps the output row for row with the input, and a duplicate
+  is far likelier a mistake than a request to multiply rows.
+- **Unmatched rows.** `unmatched = :missing` (default) appends `Union{Missing, T}`
+  columns. `:error` throws on the first unmatched key and `:drop` removes the
+  row; both keep the table's own `T`, since every emitted row has a match. The
+  element types follow from the keyword alone, never from whether a chunk
+  happened to match, so the schema stays data-independent.
+- **Prefixes.** `leftprefix` / `rightprefix` as for `asofjoin`, with the same
+  uniqueness rule: the table's output names are checked at construction, the
+  input's on every chunk.
+- **Copying.** Each table column is `collect`ed when `lookupjoin` is called.
+  `readtable`'s DataFrame path keeps a reference instead, but the index here is a
+  derived structure a caller's mutation would silently invalidate, and lookup
+  tables are small. Output columns are always new vectors.
+
+The implementation is a stateless `chunkmap`. Construction builds a
+`LookupJoin{K,C,KN,M}`, captured by the closures so each chunk's call is
+statically dispatched: a `Dict{K,Int}` from key to table row (`K` the table's key
+NamedTuple type), the value columns as a concrete NamedTuple, and `unmatched`
+resolved to a singleton mode type. Per chunk, `lookuprows!` fills a
+`Vector{Int}` of table rows, 0 for no match, behind a function barrier. Only
+`Int`s are stored, so a non-isbits key costs nothing per row, the lesson of
+"Representing a match". Each value column is then gathered in one typed pass
+(`gathermissing`, or plain `col[rows]` in the strict modes). `:drop` slices the
+chunk only when some row is unmatched.
+
+Having no state, `lookupjoin` keeps the chunk-concatenation property over split
+contexts, which neither as-of join does.
 
 ## Lead and lag
 
@@ -1999,6 +2049,7 @@ the second.
 | `src/summarizers.jl` | `Summarizer`/`SummarizerState` interface and the concrete summarizers |
 | `src/summarize.jl` | folding kernels and the summarization transforms |
 | `src/join.jl` | the as-of join transform (`asofjoin`) |
+| `src/lookupjoin.jl` | the key-only join against a timeless table (`lookupjoin`) |
 | `src/lastrow.jl` | the last-row-per-key transform (`lastrow`), over the join's store |
 | `src/sortcycles.jl` | the within-timestamp stable sort (`sortcycles`) and its `cycleperm!` barrier |
 | `src/fill.jl` | the missing-value fills: the stateful `forwardfill` and the row-wise `fillmissing` |
@@ -2021,7 +2072,7 @@ Exports: `Context`, `CausalFrame`, `CausalPipeline`, `load`, `stream`,
 `FittedModel`, `applymodels`, `addpredictions`, `modelreports`, `summarize`,
 `summarizecycles`, `intervalize`, `summarizewindows`, `addsummarycolumns`,
 `addrollingcolumns`,
-`asofjoin`, `lag`, `settime`, `head`, `lastrow`, `sortcycles`, `forwardfill`,
+`asofjoin`, `lookupjoin`, `lag`, `settime`, `head`, `lastrow`, `sortcycles`, `forwardfill`,
 `fillmissing`.
 
 `merge` is not in that list either: it is `Base.merge`, extended for
