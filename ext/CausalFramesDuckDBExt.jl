@@ -45,6 +45,7 @@ mutable struct ParquetProducer{T}
     const time::Any     # Nothing | Symbol (column name) | Function (row -> time)
     const rename::Any   # Nothing | AbstractDict/map | Function (name -> name)
     const sort::Bool
+    const closed::Bool
     gather::Bool        # sort in Julia, the query being unable to
     con::Any            # DuckDB connection, opened on first pull
     parts::Any          # result chunk iterator
@@ -52,15 +53,15 @@ mutable struct ParquetProducer{T}
     started::Bool
     prevtime::Any       # last raw time seen, for cross-chunk sortedness
     done::Bool
-    ParquetProducer{T}(path, start, stop, time, rename, sort) where {T} =
-        new{T}(path, start, stop, time, rename, sort, false, nothing, nothing,
-            nothing, false, nothing, false)
+    ParquetProducer{T}(path, start, stop, time, rename, sort, closed) where {T} =
+        new{T}(path, start, stop, time, rename, sort, closed, false, nothing,
+            nothing, nothing, false, nothing, false)
 end
 
 CausalFrames.parquetproducer(::Val{:duckdb}, ctx::Context, path::AbstractString,
-    time, rename, sort::Bool) =
+    time, rename, sort::Bool, closed::Bool) =
     ParquetProducer{timetype(ctx)}(String(path), ctx.start, ctx.stop, time, rename,
-        sort)
+        sort, closed)
 
 function (p::ParquetProducer{T})() where {T}
     p.done && return nothing
@@ -75,7 +76,8 @@ function (p::ParquetProducer{T})() where {T}
         chunk, p.state = next
         p.started = true
         clipped, sawstop, p.prevtime = clipchunk!(DataFrame(chunk), p.time,
-            p.rename, p.path, "parquet file", p.prevtime, p.start, p.stop)
+            p.rename, p.path, "parquet file", p.prevtime, p.closed, p.start,
+            p.stop)
         sawstop && (p.done = true)
         nrow(clipped) > 0 && return clipped
         p.done && return nothing
@@ -103,9 +105,10 @@ function startquery!(p::ParquetProducer)
     else
         col = "\"" * replace(src, "\"" => "\"\"") * "\""
         order = p.sort && !p.gather ? " ORDER BY $col, file_row_number" : ""
+        upper = p.closed ? "<=" : "<"
         try
             execstream(p.con,
-                "SELECT * FROM read_parquet(?) WHERE $col >= ? AND $col < ?$order",
+                "SELECT * FROM read_parquet(?) WHERE $col >= ? AND $col $upper ?$order",
                 Any[p.path, p.start, p.stop])
         catch
             # A time type DuckDB cannot bind, or cannot compare against this
@@ -125,7 +128,7 @@ function gatherread!(p::ParquetProducer{T}) where {T}
     kept = DataFrame[]
     for chunk in p.parts
         gatherchunk!(kept, DataFrame(chunk), p.time, p.rename, p.path,
-            "parquet file", p.start, p.stop)
+            "parquet file", p.closed, p.start, p.stop)
     end
     return sortgathered(kept, T)
 end

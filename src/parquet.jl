@@ -41,13 +41,13 @@ end
 
 # Backend hooks. The extensions' methods are more specific than these, so the
 # fallbacks only ever run when the backend is not loaded.
-parquetproducer(::Val, ::Any, ::Any, ::Any, ::Any, ::Any) =
+parquetproducer(::Val, ::Any, ::Any, ::Any, ::Any, ::Any, ::Any) =
     throw(ArgumentError(READHINT))
 parquetsink(::Val, ::Any, ::Any, ::Any, ::Any) = throw(ArgumentError(WRITEHINT))
 
 """
     readparquet(path; time = nothing, rename = nothing, sort = false,
-                backend = :auto) -> CausalPipeline
+                closed = false, backend = :auto) -> CausalPipeline
 
 A source that reads the parquet file at `path` and clips it to the context's
 half-open interval `[start, stop)`. Needs one of the two parquet backends
@@ -80,12 +80,14 @@ Keyword arguments:
 - `sort`: sort the rows by time, for a file not stored in time order (one
   written by a query without `ORDER BY`, say). The sort is stable, so rows
   sharing a timestamp keep their file order. See below for what it costs.
+- `closed`: clip to the closed interval `[start, stop]` instead, keeping the
+  rows at `stop` (which a frame tolerates); the skipping below follows suit.
 - `backend`: `:auto` (default), `:duckdb` or `:parquet2`. Naming a backend that
   is not loaded is an `ArgumentError`.
 
 Skipping applies only when the time values come from a real column: a `time`
 function is opaque to the reader, so such a file is scanned from the start (it
-still stops as soon as a time `>= stop` is seen). It never changes results —
+still stops as soon as a time past the window is seen). It never changes results —
 the rows are clipped again on arrival — so a file whose writer recorded no
 statistics simply reads more of itself. Consequently, as with [`readcsv`](@ref),
 a sortedness violation is only detected in the chunks actually read.
@@ -103,12 +105,12 @@ cannot be sorted in SQL either, so DuckDB then takes the Parquet2 route: a full
 scan whose in-window rows are sorted in memory.
 """
 function readparquet(path::AbstractString; time = nothing, rename = nothing,
-    sort::Bool = false, backend::Symbol = :auto)
+    sort::Bool = false, closed::Bool = false, backend::Symbol = :auto)
     resolvebackend(backend, :duckdb, READHINT)   # eager: fail at the call site
     return CausalPipeline() do ctx::Context
         return ChunkSource(
             parquetproducer(resolvebackend(backend, :duckdb,
-                READHINT), ctx, String(path), time, rename, sort),
+                READHINT), ctx, String(path), time, rename, sort, closed),
         )
     end
 end

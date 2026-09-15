@@ -119,11 +119,11 @@ Two kinds, both compatible with the chaining operator `|>`:
 | `merge(ps...; batchsize)` | source | run the pipelines concurrently over the same context and interleave their rows by time; columns may differ (the output is their union, `missing` where a pipeline lacks one) and ties break by argument order (see "Merging") |
 | `clock(interval; batchsize)` | source | rows at `start, start + interval, …` while `< stop`; no other columns; generated lazily in chunks of `batchsize` rows |
 | `readtable(table; time, checkorder, sort, closed)` / `readtable(frame; closed, checkcontext)` | source | an in-memory Tables.jl table, `DataFrame` or `CausalFrame`; the time column chosen as for `readcsv`, checked for order (`checkorder`) or stably sorted (`sort`); rows clipped to `[start, stop)`, or `[start, stop]` with `closed`; only in-window rows are copied, and a frame's whole-window chunks not even those; a frame refuses a context outside its own unless `checkcontext = false`, and closes the window by default when the stops match (see "Tables as sources") |
-| `readcsv(path; types, time, rename, delim, sort, chunkbytes)` | source | CSV file, every column read as `String` unless `types` opts it into a concrete type; the time column (named `:time`, or chosen by `time` as a column name or a per-row function) must be typed and sorted — or, with `sort`, is stably sorted, the whole file scanned and the in-window rows emitted as one chunk (see "Sorting a file source"); `rename` maps column names first; rows clipped to `[start, stop)`; read incrementally in chunks of roughly `chunkbytes` bytes — never all at once — stopping as soon as a time `>= stop` is seen |
+| `readcsv(path; types, time, rename, delim, sort, chunkbytes, closed)` | source | CSV file, every column read as `String` unless `types` opts it into a concrete type; the time column (named `:time`, or chosen by `time` as a column name or a per-row function) must be typed and sorted — or, with `sort`, is stably sorted, the whole file scanned and the in-window rows emitted as one chunk (see "Sorting a file source"); `rename` maps column names first; rows clipped to `[start, stop)`, or `[start, stop]` with `closed`; read incrementally in chunks of roughly `chunkbytes` bytes — never all at once — stopping as soon as a time past the window is seen |
 | `writecsv(path; queue, ...)` | transform | transparent pass-through sink: writes each chunk to `path` as it flows by and yields it downstream unchanged (see "CSV output") |
-| `readparquet(path; time, rename, sort, backend)` | source | parquet file, read through DuckDB or Parquet2 (either backend suffices; DuckDB preferred); column types come from the file itself; the time column (named `:time`, or chosen by `time` as a column name or a per-row function) must be sorted — or, with `sort`, is stably sorted, in the query under DuckDB and in memory otherwise (see "Sorting a file source"); `rename` maps column names first; rows clipped to `[start, stop)`; read one chunk at a time — a DuckDB result chunk, or a Parquet2 row group — with the window used to skip what cannot be in it (see "Parquet I/O") |
+| `readparquet(path; time, rename, sort, closed, backend)` | source | parquet file, read through DuckDB or Parquet2 (either backend suffices; DuckDB preferred); column types come from the file itself; the time column (named `:time`, or chosen by `time` as a column name or a per-row function) must be sorted — or, with `sort`, is stably sorted, in the query under DuckDB and in memory otherwise (see "Sorting a file source"); `rename` maps column names first; rows clipped to `[start, stop)`, or `[start, stop]` with `closed`; read one chunk at a time — a DuckDB result chunk, or a Parquet2 row group — with the window used to skip what cannot be in it (see "Parquet I/O") |
 | `writeparquet(path; queue, rowgroupsize, backend, ...)` | transform | transparent pass-through sink through Parquet2 or DuckDB (either suffices; Parquet2 preferred): buffers chunks until `rowgroupsize` rows are pending and writes them as one row group, yielding every chunk downstream unchanged; the file is valid only once finalized (see "Parquet I/O") |
-| `readjls(path)` | source | a file written by `writejls`, one chunk per record; rows clipped to `[start, stop)`; read a record at a time, stopping as soon as a time `>= stop` is seen (see "JLS I/O") |
+| `readjls(path; closed)` | source | a file written by `writejls`, one chunk per record; rows clipped to `[start, stop)`, or `[start, stop]` with `closed`; read a record at a time, stopping as soon as a time past the window is seen (see "JLS I/O") |
 | `writejls(path; queue)` | transform | transparent pass-through sink through the `Serialization` stdlib: serializes each chunk as it flows by, so columns of any Julia type round-trip (see "JLS I/O") |
 | `filterrows(pred)` | transform | keep rows where `pred(row)` is `true` |
 | `addcolumns(f)` | transform | `f(row)` returns a `NamedTuple` of new column values for that row; may **not** contain a `time` key (this preserves the time invariant without re-validation) |
@@ -232,10 +232,14 @@ again on arrival by the same `clipchunk!` the CSV source uses, so a file whose
 writer recorded no statistics, or one whose time column cannot be identified,
 simply reads more of itself. Two cases fall back to a full scan by
 construction: a `time` function, which is opaque to both readers (they still
-stop at the first time `>= stop`), and a `rename` that leaves no unique file
+stop at the first time past the window), and a `rename` that leaves no unique file
 column mapping to `:time` — `timesourcename` returns `nothing` rather than
 guess. As with `readcsv`, sortedness is only checked in the chunks actually
-read, so a violation inside a skipped row group goes unreported.
+read, so a violation inside a skipped row group goes unreported. With
+`closed = true` both skips move with the window: DuckDB's `WHERE` bounds the
+time with `<=` rather than `<`, and a Parquet2 row group starting exactly at
+`stop` is read rather than ending the scan — skipping it would be a wrong
+answer, not a slower one.
 
 Backend selection resolves twice: eagerly at construction, so a missing backend
 is reported where the operator was typed, and again inside `run(ctx)`, so a
@@ -331,7 +335,7 @@ header-only file, which reads back as an empty stream. The source is a
 `CSVProducer`-shaped `JLSProducer` that deserializes one record per pull and
 hands it to the shared `clipchunk!` (no `time` or `rename` — the file was
 written from a stream, so its `:time` is already resolved), stopping at the
-first time `>= stop`. There is no index to seek by, so a read costs the file's
+first time past the window. There is no index to seek by, so a read costs the file's
 prefix up to `stop`, as CSV's does.
 
 Three caveats, all of them `Serialization`'s: a file is readable only by a
@@ -394,8 +398,8 @@ its `stop` (`summarize` emits there), which the half-open clip would drop:
 `stop` equals the frame's, so `load(context(f), readtable(f))` reproduces `f`,
 while every narrower window stays half-open and so still tiles.
 
-`closed = true` is the one source-level opt-in to `[start, stop]`, legal because
-frames tolerate the closed interval. `sort = true` sorts stably (rows sharing a
+`closed = true` opts in to `[start, stop]`, as it does on the file sources (see
+"Interval semantics"), legal because frames tolerate the closed interval. `sort = true` sorts stably (rows sharing a
 timestamp are a cycle, and their order within it is data); a partitioned table is
 concatenated to sort it, and a table already in order skips the permutation.
 `checkorder = false` skips the order scans: the caller vouches for the order, and
@@ -1944,9 +1948,12 @@ rolling transform just keeps its re-fold path for any tuple containing one.
 
 - **Sources** clip to the half-open interval `[start, stop)`. Adjacent
   contexts therefore tile without overlap, which is what makes chunked and
-  streaming evaluation sound. The one opt-out is `readtable`'s `closed`, which
-  a frame read back over its own context takes by default (see "Tables as
-  sources").
+  streaming evaluation sound. The one opt-out is the `closed` keyword every
+  `read*` source takes (`readtable`, `readcsv`, `readparquet`, `readjls`),
+  which clips to `[start, stop]` instead; a file source defaults it to `false`,
+  while a frame read back over its own context takes it by default (see
+  "Tables as sources"). Closed windows over adjacent contexts overlap at the
+  shared boundary, so the tiling guarantee is the caller's to give up.
 - **Frames** tolerate the closed interval `[start, stop]`: intermediate
   operators may legitimately emit a row exactly at `stop` — `summarize`
   does exactly this when closing its window.

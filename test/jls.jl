@@ -49,6 +49,15 @@
         @test eltype(df.time) == Float64
         @test df.time == [1.0, 3.0, 5.0, 7.0]
 
+        # closed keeps the rows at stop, here a record's first row
+        @test DataFrame(load(Context(2, 5), readjls(out))).time == [3]
+        df = DataFrame(load(Context(2, 5), readjls(out; closed = true)))
+        @test df.time == [3, 5]
+        @test df.x == [2.5, 3.5]
+        @test DataFrame(load(Context(5, 5), readjls(out; closed = true))).time == [5]
+        @test DataFrame(load(Context(0, 7), readjls(out; closed = true))).time ==
+              [1, 3, 5, 7]
+
         ticks = joinpath(dir, "ticks.jls")
         dctx = Context(DateTime(2026, 1, 1), DateTime(2026, 1, 1, 1))
         scan(dctx, clock(Minute(10); batchsize = 2) |> writejls(ticks))
