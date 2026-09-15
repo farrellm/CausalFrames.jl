@@ -323,6 +323,48 @@ end
     end
 end
 
+@testset "readparquet closed" begin
+    dir = mktempdir()
+    function ingroups(path, groups; stats = ["time"])
+        open(path, "w") do io
+            fw = Parquet2.FileWriter(io, path; compute_statistics = stats)
+            foreach(g -> Parquet2.writetable!(fw, g), groups)
+            Parquet2.finalize!(fw)
+        end
+        return path
+    end
+
+    # the second row group starts exactly at the stop below, which a closed read
+    # must neither skip nor take as the end of the file
+    groups = [DataFrame(time = [1, 3, 5], x = [1, 2, 3]),
+        DataFrame(time = [5, 5, 8], x = [4, 5, 6]),
+        DataFrame(time = [9, 10], x = [7, 8])]
+    path = ingroups(joinpath(dir, "groups.parquet"), groups)
+    plain = ingroups(joinpath(dir, "plain.parquet"), groups; stats = String[])
+    scrambled = ingroups(joinpath(dir, "scrambled.parquet"),
+        [DataFrame(time = [10, 9], x = [8, 7]),
+            DataFrame(time = [8, 5, 5], x = [6, 5, 4]),
+            DataFrame(time = [5, 3, 1], x = [3, 2, 1])])
+    for backend in (:duckdb, :parquet2), file in (path, plain),
+        kw in ((;), (; time = row -> row.time))
+
+        got(ctx; closed) = DataFrame(load(ctx, readparquet(file; backend, closed, kw...)))
+        @test got(Context(0, 5); closed = false).x == [1, 2]
+        @test got(Context(0, 5); closed = true).x == [1, 2, 3, 4, 5]
+        @test got(Context(5, 5); closed = true).x == [3, 4, 5]
+        @test nrow(got(Context(5, 5); closed = false)) == 0
+        @test got(Context(5, 8); closed = true).x == [3, 4, 5, 6]
+        @test got(Context(0, 100); closed = true).x == 1:8
+    end
+    for backend in (:duckdb, :parquet2)
+        sorted(ctx; closed) =
+            DataFrame(load(ctx, readparquet(scrambled; backend, sort = true, closed)))
+        @test sorted(Context(0, 5); closed = true).x == [1, 2, 5, 4, 3]
+        @test sorted(Context(5, 8); closed = false).x == [5, 4, 3]
+        @test sorted(Context(5, 8); closed = true).x == [5, 4, 3, 6]
+    end
+end
+
 @testset "writeparquet backends agree" begin
     dir = mktempdir()
     src = writeparquetfile(joinpath(dir, "src.parquet"),

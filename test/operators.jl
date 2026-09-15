@@ -507,6 +507,31 @@ end
     @test_throws ArgumentError load(Context(0, 1000),
         readcsv(badtail; types = it, chunkbytes = 64))
 
+    # closed keeps the rows at stop, whole-file or chunked, sorted or not
+    for kw in ((;), (; chunkbytes = 64), (; sort = true),
+        (; sort = true, chunkbytes = 64))
+        q = readcsv(path; types = it, closed = true, kw...)
+        @test DataFrame(load(Context(10, 20), q)).time == 10:20
+        @test DataFrame(load(Context(20, 20), q)).time == [20]
+        @test nrow(load(Context(20, 20), readcsv(path; types = it, kw...))) == 0
+    end
+    # a run of ties at stop spanning file chunks: a chunk ending at stop must not
+    # end the read, and the early stop still fires past it
+    tiedstop = joinpath(dir, "tiedstop.csv")
+    open(tiedstop, "w") do io
+        println(io, "time,x")
+        foreach(t -> println(io, "$t,0"), 1:4)
+        foreach(_ -> println(io, "5,1"), 1:40)
+        foreach(_ -> println(io, "6,2"), 1:40)
+        println(io, "1,3")   # unsorted, far past the closed window
+    end
+    q = readcsv(tiedstop; types = it, chunkbytes = 64, closed = true)
+    @test length(collect(stream(Context(0, 5), q))) > 1
+    df = DataFrame(load(Context(0, 5), q))
+    @test df.time == [1:4; fill(5, 40)]
+    @test DataFrame(load(Context(0, 5),
+        readcsv(tiedstop; types = it, chunkbytes = 64))).time == 1:4
+
     @test_throws ArgumentError readcsv(path; types = it, chunkbytes = 0)
 end
 

@@ -64,8 +64,9 @@ or summarizer, prose headers for everything else.
 
 ## Invariants and conventions
 
-- Sources clip to the half-open interval `[start, stop)`; frames tolerate
-  the closed interval `[start, stop]` (intermediate ops may emit at `stop`).
+- Sources clip to the half-open interval `[start, stop)` unless a `read*`
+  source is passed `closed = true`; frames tolerate the closed interval
+  `[start, stop]` (intermediate ops may emit at `stop`).
 - Every operator must be *causal*: output at time `t` depends only on input
   rows with time `<= t`. This guarantees the chunk-concatenation property
   that streaming will rely on. The sole escape hatch is the `Acausal`

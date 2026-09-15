@@ -70,21 +70,22 @@ mutable struct RowGroupProducer{T}
     const time::Any     # Nothing | Symbol (column name) | Function (row -> time)
     const rename::Any   # Nothing | AbstractDict/map | Function (name -> name)
     const sort::Bool
+    const closed::Bool
     dataset::Any        # Parquet2.Dataset, opened on first pull
     timecol::Any        # file-level name of the time column, or nothing
     index::Int          # next row group
     prevtime::Any       # last raw time seen, for cross-chunk sortedness
     usestats::Bool      # statistics comparable with this context's times
     done::Bool
-    RowGroupProducer{T}(path, start, stop, time, rename, sort) where {T} =
-        new{T}(path, start, stop, time, rename, sort, nothing, nothing, 1,
-            nothing, true, false)
+    RowGroupProducer{T}(path, start, stop, time, rename, sort, closed) where {T} =
+        new{T}(path, start, stop, time, rename, sort, closed, nothing, nothing,
+            1, nothing, true, false)
 end
 
 CausalFrames.parquetproducer(::Val{:parquet2}, ctx::Context,
-    path::AbstractString, time, rename, sort::Bool) =
+    path::AbstractString, time, rename, sort::Bool, closed::Bool) =
     RowGroupProducer{timetype(ctx)}(String(path), ctx.start, ctx.stop, time,
-        rename, sort)
+        rename, sort, closed)
 
 function (p::RowGroupProducer{T})() where {T}
     p.done && return nothing
@@ -97,8 +98,8 @@ function (p::RowGroupProducer{T})() where {T}
         skip === :after && (p.done = true; return nothing)
         skip === :before && continue
         clipped, sawstop, p.prevtime = clipchunk!(DataFrame(p.dataset[rg]),
-            p.time, p.rename, p.path, "parquet file", p.prevtime, p.start,
-            p.stop)
+            p.time, p.rename, p.path, "parquet file", p.prevtime, p.closed,
+            p.start, p.stop)
         sawstop && (p.done = true)
         nrow(clipped) > 0 && return clipped
         p.done && return nothing
@@ -117,7 +118,7 @@ function sortedread!(p::RowGroupProducer{T}) where {T}
     for rg in 1:Parquet2.nrowgroups(p.dataset)
         rowgroupwindow(p, rg) === :overlaps || continue
         gatherchunk!(kept, DataFrame(p.dataset[rg]), p.time, p.rename, p.path,
-            "parquet file", p.start, p.stop)
+            "parquet file", p.closed, p.start, p.stop)
     end
     return sortgathered(kept, T)
 end
@@ -133,7 +134,7 @@ end
 # alone: `:before` (skippable), `:after` (so are all later ones, the file being
 # non-decreasing), or `:overlaps` — which is also the answer whenever the
 # statistics are missing or unusable, since skipping is only ever an
-# optimization.
+# optimization. A closed window keeps a group starting exactly at `stop`.
 function rowgroupwindow(p::RowGroupProducer, rg::Int)
     (p.usestats && p.timecol !== nothing) || return :overlaps
     stats = Parquet2.ColumnStatistics(Parquet2.Column(p.dataset, rg, p.timecol))
@@ -141,7 +142,7 @@ function rowgroupwindow(p::RowGroupProducer, rg::Int)
     (lo === nothing || hi === nothing) && return :overlaps
     try
         hi < p.start && return :before
-        lo >= p.stop && return :after
+        (p.closed ? lo > p.stop : lo >= p.stop) && return :after
     catch
         # Times this context cannot compare against: stop consulting statistics
         # for the rest of the run rather than failing over an optimization.

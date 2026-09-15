@@ -65,24 +65,28 @@ function jlswriteloop(chan::Channel{DataFrame}, path::String)
 end
 
 """
-    readjls(path) -> CausalPipeline
+    readjls(path; closed = false) -> CausalPipeline
 
 A source reading a file written by [`writejls`](@ref): one chunk per record,
-each clipped to the context's `[start, stop)`, with the time converted to the
-context's time type. Reading is incremental — a record at a time, never the
-whole file — and stops as soon as a time `>= stop` is seen, but there is no
-index to seek by, so a read costs the file's prefix up to `stop`. As for
-[`readcsv`](@ref), sortedness is checked in the records actually read.
+each clipped to the context's `[start, stop)` — or, with `closed = true`, to the
+closed interval `[start, stop]`, keeping the rows at `stop` — with the time
+converted to the context's time type. Reading is incremental — a record at a
+time, never the whole file — and stops as soon as a time past the window is
+seen, but there is no index to seek by, so a read costs the file's prefix up to
+`stop`. As for [`readcsv`](@ref), sortedness is checked in the records actually
+read.
 
 A file that was not written by `writejls` is an `ArgumentError`, as is one whose
 last record was cut short by an interrupted write (every record before it has
 already been emitted). Deserialization can construct arbitrary types, so read
 only files you trust.
 """
-function readjls(path::AbstractString)
+function readjls(path::AbstractString; closed::Bool = false)
     return CausalPipeline() do ctx::Context
-        return ChunkSource(JLSProducer{timetype(ctx)}(String(path), ctx.start,
-            ctx.stop))
+        return ChunkSource(
+            JLSProducer{timetype(ctx)}(String(path), closed,
+                ctx.start, ctx.stop),
+        )
     end
 end
 
@@ -92,13 +96,14 @@ end
 # per-chunk setup state; the per-row work is clipchunk!'s.
 mutable struct JLSProducer{T}
     const path::String
+    const closed::Bool
     const start::T
     const stop::T
     io::Union{Nothing,IOStream}   # opened on the first pull
     prevtime::Any                 # last raw time seen, for cross-chunk order
     done::Bool
-    JLSProducer{T}(path, start, stop) where {T} =
-        new{T}(path, start, stop, nothing, nothing, false)
+    JLSProducer{T}(path, closed, start, stop) where {T} =
+        new{T}(path, closed, start, stop, nothing, nothing, false)
 end
 
 function (p::JLSProducer{T})() where {T}
@@ -120,7 +125,7 @@ function (p::JLSProducer{T})() where {T}
             )
         )
         clipped, sawstop, p.prevtime = clipchunk!(df, nothing, nothing, p.path,
-            "jls file", p.prevtime, p.start, p.stop)
+            "jls file", p.prevtime, p.closed, p.start, p.stop)
         sawstop && finishjls!(p)
         nrow(clipped) > 0 && return clipped
         p.done && return nothing

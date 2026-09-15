@@ -15,7 +15,7 @@ fallbacks in `src/parquet.jl` throw the `READHINT`/`WRITEHINT` message:
   discovers the extension. It runs eagerly at operator construction *and*
   again per run, so a missing backend is reported where the user typed the
   operator, while one loaded afterwards still counts
-- `parquetproducer(::Val{:name}, ctx, path, time, rename, sort)` → a
+- `parquetproducer(::Val{:name}, ctx, path, time, rename, sort, closed)` → a
   zero-argument callable returning the next chunk, or `nothing` at the end
 - `parquetsink(::Val{:name}, path, queue, rowgroupsize, opts)` → a `ChunkSink`
   wrapping a `chan -> writeloop(chan, ...)`. Translate options *here*, on the
@@ -30,12 +30,16 @@ fallbacks in `src/parquet.jl` throw the `READHINT`/`WRITEHINT` message:
   captures (those get boxed). The dynamically typed fields (`time`, `rename`,
   the reader handle, `prevtime`) are per-chunk *setup* state; per-row work goes
   through `clipchunk!`, which puts it behind a function barrier
-- `clipchunk!(df, time, rename, path, "parquet file", prevtime, start, stop)`
-  returns `(clipped, sawstop, prevtime)`: carry `prevtime` to the next pull
-  (that is what catches a cross-chunk sortedness violation) and stop the stream
-  on `sawstop`, a time `>= stop` having been seen
+- `clipchunk!(df, time, rename, path, "parquet file", prevtime, closed, start,
+  stop)` returns `(clipped, sawstop, prevtime)`: carry `prevtime` to the next
+  pull (that is what catches a cross-chunk sortedness violation) and stop the
+  stream on `sawstop`, a time past the window having been seen
 - Every chunk is clipped on arrival whether or not the window was pushed down,
   which is what makes skipping a pure optimization
+- Skipping must honour `closed`, the one way it could be *wrong* rather than
+  slow: DuckDB's `WHERE` bounds the time with `<=`, and Parquet2's `:after`
+  needs a row group's minimum strictly past `stop`, since one starting exactly
+  there still holds window rows
 - Under `sort = true` the file's order promises nothing, so a producer that
   cannot sort at the source uses `gatherchunk!` (same arguments, minus
   `prevtime`, pushing in-window rows onto a `Vector{DataFrame}`) over *every*
