@@ -153,7 +153,7 @@ end
 """
     readcsv(path; types = nothing, time = nothing, rename = nothing,
             delim = nothing, sort = false, chunkbytes = 4 * 1024 * 1024,
-            closed = false) -> CausalPipeline
+            closed = false, skipmissing = false) -> CausalPipeline
 
 A source that reads the CSV file at `path` and clips it to the context's
 half-open interval `[start, stop)`. Every column is read as `String` — types
@@ -196,10 +196,15 @@ Keyword arguments:
   detected when the offending chunk is actually read.
 - `closed`: clip to the closed interval `[start, stop]` instead, keeping the
   rows at `stop` (which a frame tolerates).
+- `skipmissing`: drop the rows whose time is `missing` (a blank cell in a typed
+  time column, or a `time` function returning `missing`) before the order check
+  and the clip. Without it such a row is an `ArgumentError` — detected, like a
+  sortedness violation, only in the chunks actually read.
 """
 function readcsv(path::AbstractString; types = nothing, time = nothing,
     rename = nothing, delim = nothing, sort::Bool = false,
-    chunkbytes::Integer = 4 * 1024 * 1024, closed::Bool = false)
+    chunkbytes::Integer = 4 * 1024 * 1024, closed::Bool = false,
+    skipmissing::Bool = false)
     chunkbytes > 0 ||
         throw(ArgumentError("readcsv chunkbytes must be positive, got $chunkbytes"))
     # Eager error where the time column is provably untyped: no `types` at all,
@@ -222,7 +227,8 @@ function readcsv(path::AbstractString; types = nothing, time = nothing,
     return CausalPipeline() do ctx::Context
         return ChunkSource(
             CSVProducer{timetype(ctx)}(String(path), Int(chunkbytes),
-                ctx.start, ctx.stop, types, time, rename, delim, sort, closed),
+                ctx.start, ctx.stop, types, time, rename, delim, sort, closed,
+                skipmissing),
         )
     end
 end
@@ -243,15 +249,16 @@ mutable struct CSVProducer{T}
     const delim::Any    # CSV.Chunks `delim` argument, or nothing
     const sort::Bool
     const closed::Bool
+    const skipmissing::Bool
     chunks::Any         # file-chunk iterator, created on first pull
     state::Any          # its iteration state
     started::Bool
     prevtime::Any       # last raw time seen, for cross-chunk sortedness
     done::Bool
     CSVProducer{T}(path, chunkbytes, start, stop, types, time, rename,
-        delim, sort, closed) where {T} =
+        delim, sort, closed, skipmissing) where {T} =
         new{T}(path, chunkbytes, start, stop, types, time, rename, delim, sort,
-            closed, nothing, nothing, false, nothing, false)
+            closed, skipmissing, nothing, nothing, false, nothing, false)
 end
 
 # The user's `types` (or nothing) as a CSV.jl per-column `types` function that
@@ -301,7 +308,7 @@ function (p::CSVProducer{T})() where {T}
         for filechunk in p.chunks
             df = filechunk isa DataFrame ? filechunk : DataFrame(filechunk)
             gatherchunk!(kept, df, p.time, p.rename, p.path, "CSV file",
-                p.closed, p.start, p.stop)
+                p.closed, p.skipmissing, p.start, p.stop)
         end
         return sortgathered(kept, T)
     end
@@ -315,36 +322,42 @@ function (p::CSVProducer{T})() where {T}
         p.started = true
         df = filechunk isa DataFrame ? filechunk : DataFrame(filechunk)
         clipped, sawstop, p.prevtime = clipchunk!(df, p.time, p.rename, p.path,
-            "CSV file", p.prevtime, p.closed, p.start, p.stop)
+            "CSV file", p.prevtime, p.closed, p.skipmissing, p.start, p.stop)
         sawstop && (p.done = true)
         nrow(clipped) > 0 && return clipped
         p.done && return nothing
     end
 end
 
-# Shared by readcsv and readparquet: rename the columns, materialize `:time`,
-# check sortedness within the chunk and against the last time of the previous
-# one, clip to [start, stop) (or [start, stop] when closed), and convert `:time`
-# to the context's time type. `what` names the format in error messages. Returns
-# the clipped chunk (which may have no rows), whether a time past the window was
-# seen (the source is then done), and the last raw time of this chunk, to be
-# carried to the next call.
+# Shared by the file sources: rename the columns, materialize `:time`, drop (or
+# refuse) the rows whose time is missing, check sortedness within the chunk and
+# against the last time of the previous one, clip to [start, stop) (or
+# [start, stop] when closed), and convert `:time` to the context's time type.
+# `what` names the format in error messages. Returns the clipped chunk (which
+# may have no rows), whether a time past the window was seen (the source is then
+# done), and the last raw time of this chunk, to be carried to the next call.
 function clipchunk!(df::DataFrame, time, rename, path::String, what::String,
-    prevtime, closed::Bool, start::T, stop::T) where {T}
+    prevtime, closed::Bool, skipmissing::Bool, start::T, stop::T) where {T}
     renamecolumns!(df, rename)
     resolvetime!(df, time, path, what)
-    issorted(df.time) ||
+    # Missing rows are folded into the clip's row index rather than deleted
+    # first, so a chunk holding some costs one copy of its in-window rows.
+    present = presentrows(df.time, skipmissing, path)
+    times = present === nothing ? df.time : view(df.time, present)
+    issorted(times) ||
         throw(ArgumentError("time column in $path is not non-decreasing"))
-    if nrow(df) > 0
-        prevtime !== nothing && first(df.time) < prevtime &&
+    if !isempty(times)
+        prevtime !== nothing && first(times) < prevtime &&
             throw(ArgumentError("time column in $path is not non-decreasing"))
-        prevtime = last(df.time)
+        prevtime = last(times)
     end
-    lo, hi = windowbounds(df.time, closed, start, stop)
-    sawstop = hi < nrow(df)   # saw a time past the window
+    lo, hi = windowbounds(times, closed, start, stop)
+    sawstop = hi < length(times)   # saw a time past the window
     # The chunk is freshly materialized and owned, so a clip that keeps every
     # row needs no copy.
-    clipped = lo == 1 && hi == nrow(df) ? df : df[lo:hi, :]
+    clipped =
+        present !== nothing ? df[present[lo:hi], :] :
+        lo == 1 && hi == nrow(df) ? df : df[lo:hi, :]
     clipped[!, :time] = convert(Vector{T}, clipped.time)
     return (clipped, sawstop, prevtime)
 end
@@ -355,10 +368,13 @@ end
 # early stop — the in-window rows are found by a scan and pushed onto `kept`
 # (when there are any), to be sorted once the file is exhausted.
 function gatherchunk!(kept::Vector{DataFrame}, df::DataFrame, time, rename,
-    path::String, what::String, closed::Bool, start, stop)
+    path::String, what::String, closed::Bool, skipmissing::Bool, start, stop)
     renamecolumns!(df, rename)
     resolvetime!(df, time, path, what)
-    rows = windowrows(df.time, closed, start, stop)
+    present = presentrows(df.time, skipmissing, path)
+    rows =
+        present === nothing ? windowrows(df.time, closed, start, stop) :
+        present[windowrows(view(df.time, present), closed, start, stop)]
     if length(rows) == nrow(df)
         push!(kept, df)    # freshly materialized and owned, as in clipchunk!
     elseif !isempty(rows)
@@ -394,6 +410,14 @@ textualtime(path::String, what::String) =
     "time column in $path is textual; use a `time` function to produce a \
     usable time"
 
+# Text times, blank cells aside (a CSV text column with blanks is
+# `Union{Missing,String}`); an all-missing column is not text, whose
+# `nonmissingtype` is `Union{}`.
+function istextual(v::AbstractVector)
+    S = nonmissingtype(eltype(v))
+    return S !== Union{} && S <: AbstractString
+end
+
 # Rename columns before the time column is resolved. A map renames only the
 # columns it names; a function is applied to every column name.
 renamecolumns!(::DataFrame, ::Nothing) = nothing
@@ -426,8 +450,7 @@ function resolvetime!(df::DataFrame, time, path::String, what::String)
         end
         "time" in names(df) ||
             throw(ArgumentError("$what $path has no time column"))
-        eltype(df.time) <: AbstractString &&
-            throw(ArgumentError(textualtime(path, what)))
+        istextual(df.time) && throw(ArgumentError(textualtime(path, what)))
     end
     return nothing
 end

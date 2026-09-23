@@ -298,9 +298,12 @@ end
 
 @testset "readtable kernels" begin
     # the generic path's per-partition barrier, in both its range and its
-    # stable-sort forms, and the typed copy of the kept times
+    # stable-sort forms, the missing-time filter every source shares, and the
+    # typed copy of the kept times
     JET.@test_opt CausalFrames.tablerows([1, 2, 3], true, false, false, nothing, 0, 3)
     JET.@test_opt CausalFrames.tablerows([3, 1, 2], true, true, true, nothing, 0, 3)
+    JET.@test_opt CausalFrames.presentrows([1, missing, 3], true, "table")
+    JET.@test_opt CausalFrames.presentrows([1, 2, 3], false, "table")
     JET.@test_opt CausalFrames.copytimes(Float64, [1, 2, 3], 1:2)
     JET.@test_opt CausalFrames.copytimes(Int, [1, 2, 3], [3, 1])
 end

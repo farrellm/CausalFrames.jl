@@ -11,7 +11,7 @@
 
 """
     readtable(table; time = nothing, checkorder = true, sort = false,
-              closed = false) -> CausalPipeline
+              closed = false, skipmissing = false) -> CausalPipeline
     readtable(frame::CausalFrame; closed = nothing, checkcontext = true)
         -> CausalPipeline
 
@@ -41,6 +41,8 @@ Keyword arguments:
   to sort it.
 - `closed`: clip to the closed interval `[start, stop]` instead, keeping the
   rows at `stop` (which a frame tolerates).
+- `skipmissing`: drop the rows whose time is `missing` before the order check
+  and the clip. Without it such a row is an `ArgumentError`.
 
 Only the rows inside the window are copied, so a narrow window over a large
 table costs the window, and a loaded frame never shares memory with `table`. A
@@ -61,8 +63,8 @@ anyway. `closed = nothing` (the frame default) keeps the rows at `stop` exactly
 when the run's `stop` equals the frame's, so `load(context(frame),
 readtable(frame))` reproduces a frame holding rows at its stop — a
 [`summarize`](@ref) output, say; `true` or `false` forces the choice. `time`,
-`checkorder` and `sort` are not accepted for a frame, whose `:time` is already
-resolved and sorted.
+`checkorder`, `sort` and `skipmissing` are not accepted for a frame, whose
+`:time` is already resolved and sorted.
 
 ```julia
 df = DataFrame(ts = [3, 1, 2], bid = [1.0, 2.0, 3.0])
@@ -70,20 +72,20 @@ readtable(df; time = :ts, sort = true) |> filterrows(r -> r.bid > 1)
 ```
 """
 function readtable(table; time = nothing, checkorder::Bool = true,
-    sort::Bool = false, closed::Bool = false)
+    sort::Bool = false, closed::Bool = false, skipmissing::Bool = false)
     checktabletimespec(time)
     Tables.istable(table) ||
         throw(ArgumentError("readtable: a $(typeof(table)) is not a Tables.jl table"))
     return CausalPipeline() do ctx::Context
         return ChunkSource(
             TableProducer{timetype(ctx)}(table, time, checkorder,
-                sort, closed, ctx.start, ctx.stop),
+                sort, closed, skipmissing, ctx.start, ctx.stop),
         )
     end
 end
 
 function readtable(df::AbstractDataFrame; time = nothing, checkorder::Bool = true,
-    sort::Bool = false, closed::Bool = false)
+    sort::Bool = false, closed::Bool = false, skipmissing::Bool = false)
     checktabletimespec(time)
     # A private index over the caller's vectors: O(ncols), and the rename and
     # the :time assignment below never reach `df` itself.
@@ -94,9 +96,16 @@ function readtable(df::AbstractDataFrame; time = nothing, checkorder::Bool = tru
     elseif source !== :time
         rename!(wrapped, source => :time)
     end
-    # Until a sort has permuted the rows into copies of its own, the chunk
-    # aliases the caller's vectors, and every run must slice rather than share.
+    # Until a sort (or dropping the missing times) has put the rows into copies
+    # of its own, the chunk aliases the caller's vectors, and every run must
+    # slice rather than share.
     owned = false
+    present = presentrows(times, skipmissing, "table")
+    if present !== nothing
+        wrapped = wrapped[present, :]
+        times = wrapped.time
+        owned = true
+    end
     if sort
         if !issorted(times)
             wrapped = wrapped[stableperm(times), :]
@@ -127,6 +136,7 @@ mutable struct TableProducer{T,X}
     const checkorder::Bool
     const sort::Bool
     const closed::Bool
+    const skipmissing::Bool
     const start::T
     const stop::T
     parts::Any           # the partition iterator, created on the first pull
@@ -134,10 +144,10 @@ mutable struct TableProducer{T,X}
     started::Bool
     prevtime::Any        # last time of the previous partition, for its order
     done::Bool
-    TableProducer{T}(table::X, time, checkorder, sort, closed, start,
-        stop) where {T,X} =
-        new{T,X}(table, time, checkorder, sort, closed, start, stop, nothing,
-            nothing, false, nothing, false)
+    TableProducer{T}(table::X, time, checkorder, sort, closed, skipmissing,
+        start, stop) where {T,X} =
+        new{T,X}(table, time, checkorder, sort, closed, skipmissing, start,
+            stop, nothing, nothing, false, nothing, false)
 end
 
 function (p::TableProducer{T})() where {T}
@@ -152,7 +162,7 @@ function (p::TableProducer{T})() where {T}
         part, p.state = next
         p.started = true
         chunk, sawstop, p.prevtime = tablechunk(part, p.time, p.checkorder,
-            p.sort, p.closed, p.prevtime, p.start, p.stop)
+            p.sort, p.closed, p.skipmissing, p.prevtime, p.start, p.stop)
         sawstop && (p.done = true)
         chunk === nothing || return chunk
         p.done && return nothing
@@ -174,12 +184,20 @@ end
 # seen (the source is then done), and the last time, carried to the next
 # partition's order check.
 function tablechunk(part, time, checkorder::Bool, sort::Bool, closed::Bool,
-    prevtime, start::T, stop::T) where {T}
+    skipmissing::Bool, prevtime, start::T, stop::T) where {T}
     cols = Tables.columns(part)
     colnames = Tables.columnnames(cols)
     times, source = tabletimes(cols, colnames, time)
-    rows, sawstop, prevtime =
-        tablerows(times, checkorder, sort, closed, prevtime, start, stop)
+    present = presentrows(times, skipmissing, "table")
+    if present === nothing
+        rows, sawstop, prevtime =
+            tablerows(times, checkorder, sort, closed, prevtime, start, stop)
+    else
+        # the present rows' indices into the view, mapped back to the partition
+        kept, sawstop, prevtime = tablerows(view(times, present), checkorder,
+            sort, closed, prevtime, start, stop)
+        rows = present[kept]
+    end
     isempty(rows) && return (nothing, sawstop, prevtime)
     chunk = assemblechunk(cols, colnames, source, copytimes(T, times, rows), rows)
     return (chunk, sawstop, prevtime)
@@ -205,8 +223,7 @@ function tabletimes(cols, colnames, time::Union{Nothing,Symbol})
 end
 
 checktabletimes(v::AbstractVector) =
-    eltype(v) <: AbstractString ? throw(ArgumentError(textualtime("table", "table"))) :
-    v
+    istextual(v) ? throw(ArgumentError(textualtime("table", "table"))) : v
 
 # Function barrier, typed on the time vector and the context's time type: the
 # order check (within the partition, and against the previous partition's last
@@ -235,6 +252,20 @@ function tablerows(times::AbstractVector, checkorder::Bool, sort::Bool,
     end
     lo, hi = windowbounds(times, closed, start, stop)
     return (lo:hi, hi < lastindex(times), prevtime)
+end
+
+# Function barrier, typed on the raw time vector, shared by every source that
+# resolves its own times: `nothing` when no time is missing (settled by the
+# eltype alone when it admits no `Missing`), else the indices of the present
+# ones under `skipmissing`, and an error without it. `what` names the source.
+function presentrows(times::AbstractVector, skipmissing::Bool, what::String)
+    Missing <: eltype(times) || return nothing
+    any(ismissing, times) || return nothing
+    skipmissing || throw(
+        ArgumentError("time column in $what has missing values; pass \
+            skipmissing = true to drop those rows"),
+    )
+    return findall(.!ismissing.(times))   # via a BitVector: sized once
 end
 
 # Ties keep their row order: rows sharing a timestamp form a cycle, and their

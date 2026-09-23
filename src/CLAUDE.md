@@ -23,7 +23,8 @@ design rationale and performance constraints behind each module.
   curried (`filterrows(pred)` returns `CausalPipeline -> CausalPipeline`)
   so both chain with `|>`; row functions run over concretely typed column
   table rows behind a per-chunk function barrier, never `DataFrameRow`s;
-  `clipchunk!` (rename, resolve `:time`, sortedness, clip, convert) and the
+  `clipchunk!` (rename, resolve `:time`, missing times via `table.jl`'s
+  `presentrows` barrier, sortedness, clip, convert) and the
   `ChunkSink` background writer are shared with the parquet operators.
   The three column operators share one selector vocabulary and one per-run,
   schema-keyed resolution memo; `reordercolumns` is the only one that reads the

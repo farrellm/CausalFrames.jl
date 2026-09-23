@@ -593,6 +593,80 @@ end
     @test_throws ArgumentError readcsv(named; time = :ts, sort = true)
 end
 
+@testset "readcsv skipmissing" begin
+    dir = mktempdir()
+    it = Dict(:time => Int, :x => Int)
+    # blank times mid-file, in a run spanning file chunks (so some chunk holds
+    # nothing else), and at the end
+    path = joinpath(dir, "gaps.csv")
+    ts = Union{Missing,Int}[1:20; fill(missing, 30); 21:40; missing]
+    open(path, "w") do io
+        println(io, "time,x")
+        foreach(i -> println(io, coalesce(ts[i], ""), ",", i), eachindex(ts))
+    end
+    present = findall(!ismissing, ts)
+    for kw in ((;), (; chunkbytes = 64), (; sort = true),
+        (; sort = true, chunkbytes = 64))
+        err = try
+            load(Context(0, 100), readcsv(path; types = it, kw...))
+            nothing
+        catch e
+            e
+        end
+        @test err isa ArgumentError
+        @test occursin("skipmissing", sprint(showerror, err))
+
+        p = readcsv(path; types = it, skipmissing = true, kw...)
+        df = DataFrame(load(Context(0, 100), p))
+        @test df.time == ts[present]
+        @test df.x == present
+        @test eltype(df.time) == Int
+        @test DataFrame(load(Context(15, 25), p)).time == [15:20; 21:24]
+        @test DataFrame(
+            load(Context(15, 21),
+                readcsv(path; types = it, skipmissing = true, closed = true, kw...)),
+        ).time ==
+              15:21
+        @test eltype(DataFrame(load(Context(0.0, 100.0), p)).time) == Float64
+    end
+    # the early stop: a blank time past the window is never read
+    @test DataFrame(load(Context(0, 10),
+        readcsv(path; types = it, chunkbytes = 64))).time == 1:9
+
+    # a time function returning missing
+    df = DataFrame(
+        load(Context(0, 100),
+            readcsv(path; types = it, skipmissing = true,
+                time = r -> ismissing(r.time) ? missing : 2 * r.time)),
+    )
+    @test df.time == 2 .* ts[present]
+    @test_throws ArgumentError load(Context(0, 100),
+        readcsv(path; types = it, time = r -> ismissing(r.time) ? missing : r.time))
+
+    # a text time column with blanks is still text (an index-keyed `types`
+    # defers the check to the read), and an all-blank one is not
+    textual = joinpath(dir, "textual.csv")
+    write(textual, "stamp,x\n1,a\n,b\n3,c\n")
+    err = try
+        load(
+            Context(0, 10),
+            readcsv(textual; time = :stamp, types = Dict(2 => String),
+                skipmissing = true),
+        )
+        nothing
+    catch e
+        e
+    end
+    @test err isa ArgumentError
+    @test occursin("concrete type", sprint(showerror, err))
+    blank = joinpath(dir, "blank.csv")
+    write(blank, "time,x\n,a\n,b\n")
+    @test nrow(
+        load(Context(0, 10),
+            readcsv(blank; types = Dict(:time => Int), skipmissing = true)),
+    ) == 0
+end
+
 @testset "lag" begin
     ctx = Context(0, 10)
     # clock clips to the context; carry the (pre-shift) time as a value column
