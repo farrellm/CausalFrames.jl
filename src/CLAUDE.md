@@ -18,31 +18,44 @@ design rationale and performance constraints behind each module.
   DataFrame chunks`; the run function's type is a parameter, not an abstract
   `Function` field), `load` (drains into one frame without copying — the
   only operation that materializes the whole window), `stream` (one frame
-  per chunk)
+  per chunk), `scan` (drains for side effects such as `writecsv`, running
+  `load`'s O(1)-per-chunk `checkchunk` guards without building a frame)
 - `src/operators.jl` — sources return a `CausalPipeline`; transforms are
   curried (`filterrows(pred)` returns `CausalPipeline -> CausalPipeline`)
   so both chain with `|>`; row functions run over concretely typed column
-  table rows behind a per-chunk function barrier, never `DataFrameRow`s;
-  `clipchunk!` (rename, resolve `:time`, missing times via `table.jl`'s
-  `presentrows` barrier, sortedness, clip, convert) and the
-  `ChunkSink` background writer are shared with the parquet operators.
-  The three column operators share one selector vocabulary and one per-run,
-  schema-keyed resolution memo; `reordercolumns` is the only one that reads the
-  selectors as an *order*, which is why `foreachselector` exists beside
-  `foreachliteral` — matching can stop at the first hit and ignore pattern
-  leaves, ordering can do neither.
-  `readcsv` never infers types — every column is `String` unless `types`
-  opts it into a concrete one (`notes/readcsv-stringtype.md` records why
-  CSV.jl's own `stringtype` default stays out). `lag` shifts times via the
-  shared `shiftchunk!` and widens the context in `lagcontext`, the mirror
-  of `Acausal.lead`; `settime` is the general, per-row form of that shift,
-  sharing `settimechunk!` with `Acausal.settime` the same way, but it cannot
-  widen the context (the shift is data-dependent) and so needs three
-  independent order checks instead — see DESIGN.md's "Retiming". `head` is
-  the one transform not built on `chunkmap`, which cannot terminate early:
-  it drives the upstream iterator from a mutable `HeadProducer` behind a
-  `ChunkSource`, the `CSVProducer` shape. If a second early-exit operator
-  ever arrives, that is the point to extract a `chunks.jl` primitive
+  table rows behind a per-chunk function barrier, never `DataFrameRow`s.
+  - shared with the parquet and JLS operators: `clipchunk!` (rename, resolve
+    `:time`, missing times via `table.jl`'s `presentrows` barrier, sortedness,
+    clip, convert) and the `ChunkSink` background writer. `sinkchunk` queues
+    the chunk for the writer and passes downstream `DataFrame(c; copycols =
+    false)`, a private index over the same vectors: consumers may mutate a
+    chunk's column index, but no operator mutates a column vector in place, so
+    sharing the vectors is sound. That is the `writecsv` hand-off argument
+    other entries cite
+  - `CSVProducer` is the stateful-source shape (pull state in mutable fields
+    behind a `ChunkSource`) reused by `ConcatProducer`, `HeadProducer`,
+    `TableProducer` and `JLSProducer`. `concatenate` is sequential and checks
+    that its pipelines arrive in time order; `concatenate()` is `emptyframe()`.
+    `clock` is the timestamp-only tick source that `intervalize` and
+    `summarizewindows` sample on
+  - `readcsv` never infers types — every column is `String` unless `types`
+    opts it into a concrete one (`notes/readcsv-stringtype.md` records why
+    CSV.jl's own `stringtype` default stays out)
+  - the three column operators share one selector vocabulary and one per-run,
+    schema-keyed resolution memo; `reordercolumns` is the only one that reads
+    the selectors as an *order*, which is why `foreachselector` exists beside
+    `foreachliteral` — matching can stop at the first hit and ignore pattern
+    leaves, ordering can do neither
+  - `lag` shifts times via the shared `shiftchunk!` and widens the context in
+    `lagcontext`, the mirror of `Acausal.lead`; `settime` is the general,
+    per-row form of that shift, sharing `settimechunk!` with `Acausal.settime`
+    the same way, but it cannot widen the context (the shift is
+    data-dependent) and so needs three independent order checks instead — see
+    DESIGN.md's "Retiming"
+  - `head` is the one transform not built on `chunkmap`, which cannot
+    terminate early: it drives the upstream iterator from a mutable
+    `HeadProducer` behind a `ChunkSource`. If a second early-exit operator
+    ever arrives, that is the point to extract a `chunks.jl` primitive
 - `src/merge.jl` — `Base.merge(ps::CausalPipeline...)`, the n-ary
   time-interleaving source (extends Base rather than shadowing it; no
   zero-arg form, which would capture `merge()`): one `MergeCursor` per
@@ -201,8 +214,7 @@ design rationale and performance constraints behind each module.
   closes plus its own complete cycles and holds back the trailing one (a chunk
   that is all one cycle is held uncopied). The emitted rows are sorted *views*
   materialized in one copy — never concatenate the tail onto the whole chunk,
-  which copied every chunk twice (over the benchmark's million rows, 51 MiB
-  down to 31 reordering and 23 already in order). `cycleperm!`
+  which copied every chunk twice. `cycleperm!`
   is the typed barrier over a tuple of key views and a concrete `Ordering`
   (resolved from `rev` at construction, not per comparison): per cycle an
   `issorted` pass over the index range, then a stable `sort!` of that stretch of
