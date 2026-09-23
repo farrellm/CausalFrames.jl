@@ -124,8 +124,9 @@ function (p::JLSProducer{T})() where {T}
                 ),
             )
         )
+        # a written stream's times are never missing: no skipmissing to take
         clipped, sawstop, p.prevtime = clipchunk!(df, nothing, nothing, p.path,
-            "jls file", p.prevtime, p.closed, p.start, p.stop)
+            "jls file", p.prevtime, p.closed, false, p.start, p.stop)
         sawstop && finishjls!(p)
         nrow(clipped) > 0 && return clipped
         p.done && return nothing

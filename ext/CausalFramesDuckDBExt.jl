@@ -46,6 +46,7 @@ mutable struct ParquetProducer{T}
     const rename::Any   # Nothing | AbstractDict/map | Function (name -> name)
     const sort::Bool
     const closed::Bool
+    const skipmissing::Bool
     gather::Bool        # sort in Julia, the query being unable to
     con::Any            # DuckDB connection, opened on first pull
     parts::Any          # result chunk iterator
@@ -53,15 +54,16 @@ mutable struct ParquetProducer{T}
     started::Bool
     prevtime::Any       # last raw time seen, for cross-chunk sortedness
     done::Bool
-    ParquetProducer{T}(path, start, stop, time, rename, sort, closed) where {T} =
-        new{T}(path, start, stop, time, rename, sort, closed, false, nothing,
-            nothing, nothing, false, nothing, false)
+    ParquetProducer{T}(path, start, stop, time, rename, sort, closed,
+        skipmissing) where {T} =
+        new{T}(path, start, stop, time, rename, sort, closed, skipmissing, false,
+            nothing, nothing, nothing, false, nothing, false)
 end
 
 CausalFrames.parquetproducer(::Val{:duckdb}, ctx::Context, path::AbstractString,
-    time, rename, sort::Bool, closed::Bool) =
+    time, rename, sort::Bool, closed::Bool, skipmissing::Bool) =
     ParquetProducer{timetype(ctx)}(String(path), ctx.start, ctx.stop, time, rename,
-        sort, closed)
+        sort, closed, skipmissing)
 
 function (p::ParquetProducer{T})() where {T}
     p.done && return nothing
@@ -76,8 +78,8 @@ function (p::ParquetProducer{T})() where {T}
         chunk, p.state = next
         p.started = true
         clipped, sawstop, p.prevtime = clipchunk!(DataFrame(chunk), p.time,
-            p.rename, p.path, "parquet file", p.prevtime, p.closed, p.start,
-            p.stop)
+            p.rename, p.path, "parquet file", p.prevtime, p.closed,
+            p.skipmissing, p.start, p.stop)
         sawstop && (p.done = true)
         nrow(clipped) > 0 && return clipped
         p.done && return nothing
@@ -106,6 +108,10 @@ function startquery!(p::ParquetProducer)
         col = "\"" * replace(src, "\"" => "\"\"") * "\""
         order = p.sort && !p.gather ? " ORDER BY $col, file_row_number" : ""
         upper = p.closed ? "<=" : "<"
+        # The WHERE drops null times along with the rest of the outside, so
+        # without `skipmissing` they go unreported here. An `OR $col IS NULL`
+        # to surface them costs the row-group skip (see
+        # notes/duckdb-null-pushdown.md).
         try
             execstream(p.con,
                 "SELECT * FROM read_parquet(?) WHERE $col >= ? AND $col $upper ?$order",
@@ -128,7 +134,7 @@ function gatherread!(p::ParquetProducer{T}) where {T}
     kept = DataFrame[]
     for chunk in p.parts
         gatherchunk!(kept, DataFrame(chunk), p.time, p.rename, p.path,
-            "parquet file", p.closed, p.start, p.stop)
+            "parquet file", p.closed, p.skipmissing, p.start, p.stop)
     end
     return sortgathered(kept, T)
 end

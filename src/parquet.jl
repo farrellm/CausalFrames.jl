@@ -41,13 +41,14 @@ end
 
 # Backend hooks. The extensions' methods are more specific than these, so the
 # fallbacks only ever run when the backend is not loaded.
-parquetproducer(::Val, ::Any, ::Any, ::Any, ::Any, ::Any, ::Any) =
+parquetproducer(::Val, ::Any, ::Any, ::Any, ::Any, ::Any, ::Any, ::Any) =
     throw(ArgumentError(READHINT))
 parquetsink(::Val, ::Any, ::Any, ::Any, ::Any) = throw(ArgumentError(WRITEHINT))
 
 """
     readparquet(path; time = nothing, rename = nothing, sort = false,
-                closed = false, backend = :auto) -> CausalPipeline
+                closed = false, skipmissing = false, backend = :auto)
+        -> CausalPipeline
 
 A source that reads the parquet file at `path` and clips it to the context's
 half-open interval `[start, stop)`. Needs one of the two parquet backends
@@ -82,6 +83,11 @@ Keyword arguments:
   sharing a timestamp keep their file order. See below for what it costs.
 - `closed`: clip to the closed interval `[start, stop]` instead, keeping the
   rows at `stop` (which a frame tolerates); the skipping below follows suit.
+- `skipmissing`: drop the rows whose time is `missing` (a null in the file, or a
+  `time` function returning `missing`) before the order check and the clip.
+  Without it such a row is an `ArgumentError` — but only in the rows actually
+  read, and DuckDB's pushed-down window skips null times with everything else
+  outside it, so there a null in a named time column goes unreported.
 - `backend`: `:auto` (default), `:duckdb` or `:parquet2`. Naming a backend that
   is not loaded is an `ArgumentError`.
 
@@ -105,12 +111,14 @@ cannot be sorted in SQL either, so DuckDB then takes the Parquet2 route: a full
 scan whose in-window rows are sorted in memory.
 """
 function readparquet(path::AbstractString; time = nothing, rename = nothing,
-    sort::Bool = false, closed::Bool = false, backend::Symbol = :auto)
+    sort::Bool = false, closed::Bool = false, skipmissing::Bool = false,
+    backend::Symbol = :auto)
     resolvebackend(backend, :duckdb, READHINT)   # eager: fail at the call site
     return CausalPipeline() do ctx::Context
         return ChunkSource(
             parquetproducer(resolvebackend(backend, :duckdb,
-                READHINT), ctx, String(path), time, rename, sort, closed),
+                READHINT), ctx, String(path), time, rename, sort, closed,
+                skipmissing),
         )
     end
 end

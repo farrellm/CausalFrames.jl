@@ -105,6 +105,54 @@
               [0, 1, 2, 3, 4]
     end
 
+    @testset "missing times" begin
+        ts = [missing, 1, 2, missing, 3, missing]
+        src = DataFrame(time = ts, x = 1:6)
+        for t in (src, Tables.columntable(src),
+            Tables.partitioner([(time = ts[1:3], x = 1:3), (time = ts[4:6], x = 4:6)]))
+            err = try
+                load(Context(0, 10), readtable(t))
+                nothing
+            catch e
+                e
+            end
+            @test err isa ArgumentError
+            @test occursin("skipmissing", sprint(showerror, err))
+            for sort in (false, true)
+                p = readtable(t; skipmissing = true, sort)
+                df = DataFrame(load(Context(0, 10), p))
+                @test df.time == [1, 2, 3]
+                @test df.x == [2, 3, 5]
+                @test eltype(df.time) == Int
+                @test DataFrame(load(Context(2, 3), p)).x == [3]
+                @test DataFrame(
+                    load(Context(2, 3),
+                        readtable(t; skipmissing = true, closed = true)),
+                ).x == [3, 5]
+            end
+        end
+        # a time function returning missing, and a DataFrame left untouched
+        p = readtable(src; skipmissing = true,
+            time = r -> ismissing(r.time) ? missing : 10 * r.time)
+        @test DataFrame(load(Context(0, 100), p)).time == [10, 20, 30]
+        @test isequal(src.time, ts)
+        @test names(src) == ["time", "x"]
+        # the rows are private copies, so whole-window runs may share them
+        p = readtable(src; skipmissing = true)
+        @test only(load(Context(0, 10), p).chunks).x ===
+              only(load(Context(0, 10), p).chunks).x
+        # a column admitting missing with none in it needs no option
+        @test DataFrame(
+            load(Context(0, 10),
+                readtable((time = Union{Missing,Int}[1, 2], x = [1, 2]))),
+        ).time == [1, 2]
+        # an all-missing column is not text
+        @test nrow(
+            load(Context(0, 10),
+                readtable((time = [missing, missing], x = [1, 2]); skipmissing = true)),
+        ) == 0
+    end
+
     @testset "rows are copied, never aliased" begin
         src = DataFrame(time = [1, 2, 3], x = [1.0, 2.0, 3.0])
         for t in (src, Tables.columntable(src))

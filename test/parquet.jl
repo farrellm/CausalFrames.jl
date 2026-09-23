@@ -365,6 +365,52 @@ end
     end
 end
 
+@testset "readparquet skipmissing" begin
+    dir = mktempdir()
+    ts = [missing, 1, 3, missing, 5, 7, missing]
+    df = DataFrame(time = ts, x = 1:7)
+    path = writeparquetfile(joinpath(dir, "gaps.parquet"), df)
+    grouped = joinpath(dir, "grouped.parquet")
+    open(grouped, "w") do io
+        fw = Parquet2.FileWriter(io, grouped; compute_statistics = ["time"])
+        foreach(r -> Parquet2.writetable!(fw, df[r, :]), (1:3, 4:5, 6:7))
+        Parquet2.finalize!(fw)
+    end
+    for backend in (:duckdb, :parquet2), file in (path, grouped), sort in (false, true),
+        kw in ((;), (; time = row -> row.time))
+
+        p = readparquet(file; backend, sort, skipmissing = true, kw...)
+        got = DataFrame(load(Context(0, 100), p))
+        @test got.time == [1, 3, 5, 7]
+        @test got.x == [2, 3, 5, 6]
+        @test eltype(got.time) == Int
+        @test DataFrame(load(Context(3, 6), p)).x == [3, 5]
+        @test DataFrame(
+            load(Context(3, 5),
+                readparquet(file; backend, sort, skipmissing = true, closed = true,
+                    kw...)),
+        ).x == [3, 5]
+    end
+    # without it a missing time is an error wherever the rows are read: always
+    # under Parquet2, and under DuckDB when the window cannot be pushed down
+    for (backend, kw) in ((:parquet2, (;)), (:parquet2, (; time = row -> row.time)),
+        (:duckdb, (; time = row -> row.time)))
+        for sort in (false, true)
+            err = try
+                load(Context(0, 100), readparquet(path; backend, sort, kw...))
+                nothing
+            catch e
+                e
+            end
+            @test err isa ArgumentError
+            @test occursin("skipmissing", sprint(showerror, err))
+        end
+    end
+    # DuckDB's pushed-down window skips null times with the rest of the outside
+    @test DataFrame(load(Context(0, 100),
+        readparquet(path; backend = :duckdb))).x == [2, 3, 5, 6]
+end
+
 @testset "writeparquet backends agree" begin
     dir = mktempdir()
     src = writeparquetfile(joinpath(dir, "src.parquet"),

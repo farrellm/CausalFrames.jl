@@ -71,21 +71,24 @@ mutable struct RowGroupProducer{T}
     const rename::Any   # Nothing | AbstractDict/map | Function (name -> name)
     const sort::Bool
     const closed::Bool
+    const skipmissing::Bool
     dataset::Any        # Parquet2.Dataset, opened on first pull
     timecol::Any        # file-level name of the time column, or nothing
     index::Int          # next row group
     prevtime::Any       # last raw time seen, for cross-chunk sortedness
     usestats::Bool      # statistics comparable with this context's times
     done::Bool
-    RowGroupProducer{T}(path, start, stop, time, rename, sort, closed) where {T} =
-        new{T}(path, start, stop, time, rename, sort, closed, nothing, nothing,
-            1, nothing, true, false)
+    RowGroupProducer{T}(path, start, stop, time, rename, sort, closed,
+        skipmissing) where {T} =
+        new{T}(path, start, stop, time, rename, sort, closed, skipmissing,
+            nothing, nothing, 1, nothing, true, false)
 end
 
 CausalFrames.parquetproducer(::Val{:parquet2}, ctx::Context,
-    path::AbstractString, time, rename, sort::Bool, closed::Bool) =
+    path::AbstractString, time, rename, sort::Bool, closed::Bool,
+    skipmissing::Bool) =
     RowGroupProducer{timetype(ctx)}(String(path), ctx.start, ctx.stop, time,
-        rename, sort, closed)
+        rename, sort, closed, skipmissing)
 
 function (p::RowGroupProducer{T})() where {T}
     p.done && return nothing
@@ -99,7 +102,7 @@ function (p::RowGroupProducer{T})() where {T}
         skip === :before && continue
         clipped, sawstop, p.prevtime = clipchunk!(DataFrame(p.dataset[rg]),
             p.time, p.rename, p.path, "parquet file", p.prevtime, p.closed,
-            p.start, p.stop)
+            p.skipmissing, p.start, p.stop)
         sawstop && (p.done = true)
         nrow(clipped) > 0 && return clipped
         p.done && return nothing
@@ -118,7 +121,7 @@ function sortedread!(p::RowGroupProducer{T}) where {T}
     for rg in 1:Parquet2.nrowgroups(p.dataset)
         rowgroupwindow(p, rg) === :overlaps || continue
         gatherchunk!(kept, DataFrame(p.dataset[rg]), p.time, p.rename, p.path,
-            "parquet file", p.closed, p.start, p.stop)
+            "parquet file", p.closed, p.skipmissing, p.start, p.stop)
     end
     return sortgathered(kept, T)
 end

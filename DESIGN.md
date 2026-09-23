@@ -118,10 +118,10 @@ Two kinds, both compatible with the chaining operator `|>`:
 | `concatenate(ps...)` | source | run the pipelines one after another over the same context and emit their chunks end to end; they must be passed in time order and have identical columns (see "Concatenation") |
 | `merge(ps...; batchsize)` | source | run the pipelines concurrently over the same context and interleave their rows by time; columns may differ (the output is their union, `missing` where a pipeline lacks one) and ties break by argument order (see "Merging") |
 | `clock(interval; batchsize)` | source | rows at `start, start + interval, …` while `< stop`; no other columns; generated lazily in chunks of `batchsize` rows |
-| `readtable(table; time, checkorder, sort, closed)` / `readtable(frame; closed, checkcontext)` | source | an in-memory Tables.jl table, `DataFrame` or `CausalFrame`; the time column chosen as for `readcsv`, checked for order (`checkorder`) or stably sorted (`sort`); rows clipped to `[start, stop)`, or `[start, stop]` with `closed`; only in-window rows are copied, and a frame's whole-window chunks not even those; a frame refuses a context outside its own unless `checkcontext = false`, and closes the window by default when the stops match (see "Tables as sources") |
-| `readcsv(path; types, time, rename, delim, sort, chunkbytes, closed)` | source | CSV file, every column read as `String` unless `types` opts it into a concrete type; the time column (named `:time`, or chosen by `time` as a column name or a per-row function) must be typed and sorted — or, with `sort`, is stably sorted, the whole file scanned and the in-window rows emitted as one chunk (see "Sorting a file source"); `rename` maps column names first; rows clipped to `[start, stop)`, or `[start, stop]` with `closed`; read incrementally in chunks of roughly `chunkbytes` bytes — never all at once — stopping as soon as a time past the window is seen |
+| `readtable(table; time, checkorder, sort, closed, skipmissing)` / `readtable(frame; closed, checkcontext)` | source | an in-memory Tables.jl table, `DataFrame` or `CausalFrame`; the time column chosen as for `readcsv`, checked for order (`checkorder`) or stably sorted (`sort`); a missing time dropped with `skipmissing`, an error without it (see "Missing times"); rows clipped to `[start, stop)`, or `[start, stop]` with `closed`; only in-window rows are copied, and a frame's whole-window chunks not even those; a frame refuses a context outside its own unless `checkcontext = false`, and closes the window by default when the stops match (see "Tables as sources") |
+| `readcsv(path; types, time, rename, delim, sort, chunkbytes, closed, skipmissing)` | source | CSV file, every column read as `String` unless `types` opts it into a concrete type; the time column (named `:time`, or chosen by `time` as a column name or a per-row function) must be typed and sorted — or, with `sort`, is stably sorted, the whole file scanned and the in-window rows emitted as one chunk (see "Sorting a file source"); `rename` maps column names first; a missing time dropped with `skipmissing`, an error without it (see "Missing times"); rows clipped to `[start, stop)`, or `[start, stop]` with `closed`; read incrementally in chunks of roughly `chunkbytes` bytes — never all at once — stopping as soon as a time past the window is seen |
 | `writecsv(path; queue, ...)` | transform | transparent pass-through sink: writes each chunk to `path` as it flows by and yields it downstream unchanged (see "CSV output") |
-| `readparquet(path; time, rename, sort, closed, backend)` | source | parquet file, read through DuckDB or Parquet2 (either backend suffices; DuckDB preferred); column types come from the file itself; the time column (named `:time`, or chosen by `time` as a column name or a per-row function) must be sorted — or, with `sort`, is stably sorted, in the query under DuckDB and in memory otherwise (see "Sorting a file source"); `rename` maps column names first; rows clipped to `[start, stop)`, or `[start, stop]` with `closed`; read one chunk at a time — a DuckDB result chunk, or a Parquet2 row group — with the window used to skip what cannot be in it (see "Parquet I/O") |
+| `readparquet(path; time, rename, sort, closed, skipmissing, backend)` | source | parquet file, read through DuckDB or Parquet2 (either backend suffices; DuckDB preferred); column types come from the file itself; the time column (named `:time`, or chosen by `time` as a column name or a per-row function) must be sorted — or, with `sort`, is stably sorted, in the query under DuckDB and in memory otherwise (see "Sorting a file source"); `rename` maps column names first; a missing time dropped with `skipmissing`, an error without it (see "Missing times"); rows clipped to `[start, stop)`, or `[start, stop]` with `closed`; read one chunk at a time — a DuckDB result chunk, or a Parquet2 row group — with the window used to skip what cannot be in it (see "Parquet I/O") |
 | `writeparquet(path; queue, rowgroupsize, backend, ...)` | transform | transparent pass-through sink through Parquet2 or DuckDB (either suffices; Parquet2 preferred): buffers chunks until `rowgroupsize` rows are pending and writes them as one row group, yielding every chunk downstream unchanged; the file is valid only once finalized (see "Parquet I/O") |
 | `readjls(path; closed)` | source | a file written by `writejls`, one chunk per record; rows clipped to `[start, stop)`, or `[start, stop]` with `closed`; read a record at a time, stopping as soon as a time past the window is seen (see "JLS I/O") |
 | `writejls(path; queue)` | transform | transparent pass-through sink through the `Serialization` stdlib: serializes each chunk as it flows by, so columns of any Julia type round-trip (see "JLS I/O") |
@@ -239,7 +239,13 @@ read, so a violation inside a skipped row group goes unreported. With
 `closed = true` both skips move with the window: DuckDB's `WHERE` bounds the
 time with `<=` rather than `<`, and a Parquet2 row group starting exactly at
 `stop` is read rather than ending the scan — skipping it would be a wrong
-answer, not a slower one.
+answer, not a slower one. DuckDB's `WHERE` also drops null times, so without
+`skipmissing` a null in a named time column goes unreported there while
+Parquet2 raises it — error coverage, like sortedness, differs between the
+readers, and successful results do not. Surfacing them with `OR col IS NULL`
+was measured and rejected: the disjunction defeats the row-group skip, ~7x
+slower on every default read even of a file with no nulls
+(`notes/duckdb-null-pushdown.md`).
 
 Backend selection resolves twice: eagerly at construction, so a missing backend
 is reported where the operator was typed, and again inside `run(ctx)`, so a
@@ -309,6 +315,33 @@ output is sorted by construction. The within-timestamp half of an `ORDER BY` —
 secondary sort keys — is not a source option, here or in `readtable`: it needs no
 source, since reordering rows that share a timestamp never moves one in time, and
 so it is the transform `sortcycles` (see "Sorting within a cycle").
+
+## Missing times
+
+A time that is `missing` has no place on the time axis, so every source that
+resolves its own times — `readcsv`, `readparquet`, `readtable` over a table or
+`DataFrame` — refuses one by default, with an error naming the way out:
+`skipmissing = true` drops those rows instead. Where the missing times come
+from does not matter: a blank cell in a typed CSV time column, a null in a
+parquet one, a `Union{Missing,T}` table column, or a `time` function returning
+`missing`. A frame, and so `readjls` and `readtable(frame)`, never holds one,
+its time eltype being `<: T`.
+
+The check sits right after the time is resolved and before everything that
+orders it — the order check, the clip, the sort — in one typed barrier,
+`presentrows`, shared by `clipchunk!`, `gatherchunk!` and both `readtable`
+paths. It returns `nothing` unless a time is missing — decided on the eltype
+alone when it admits no `Missing`, so a typed column pays nothing — and
+otherwise the indices of the present rows, which the clip composes with its
+window (`present[lo:hi]`) so a chunk holding some missing times costs one copy
+of its in-window rows, never a delete-then-slice. As with sortedness, a
+missing time is only detected in the chunks actually read: one past the early
+stop, or in a skipped row group, goes unreported.
+
+Without the check a missing time fell through to whatever it broke: `missing`
+sorts last, so mid-chunk it failed the order check with a misleading message,
+at the end it read as a time past the window and was silently dropped by the
+early stop, and in a `DataFrame` it reached a boolean test as a `TypeError`.
 
 ## JLS I/O
 
