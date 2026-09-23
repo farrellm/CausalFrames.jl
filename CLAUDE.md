@@ -42,7 +42,8 @@ explicitly *not* design law.
 ## Adding an operator or summarizer
 
 A new source or transform touches, in the same commit: `src/CausalFrames.jl`
-(include + export), its category page under `docs/src/api/` (its own
+(include + export), its module entry in `src/CLAUDE.md` (the design rationale
+and performance constraints), its category page under `docs/src/api/` (its own
 `` ## `name` `` header plus a `@docs` block — an unregistered docstring fails
 the docs job), a link in `docs/src/api/index.md`, `DESIGN.md` (module table,
 export list, semantics), `src/precompile.jl` (a workload path — the parquet and
@@ -55,6 +56,13 @@ which structured subtype it claims — a performance decision, not a taxonomy
 one), `docs/src/api/summarizers.md` (again its own header),
 `docs/src/api/index.md`, `DESIGN.md`'s "Summarizers" section and export list,
 `test/summarizers.jl`, and `README.md`'s summarizer table.
+
+A new keyword on the file sources (as `closed` and `skipmissing` were) threads
+through the shared clip: `clipchunk!`/`gatherchunk!` in `src/operators.jl`, the
+`parquetproducer` hook's positional signature (the fallback in `src/parquet.jl`
+and both `ext/` producers, with `ext/CLAUDE.md`'s hook contract), plus
+`readjls`/`readtable` wherever the option applies. Then update DESIGN.md and
+the README's source descriptions, and test every parquet backend.
 
 The `## `name`` header, the overview link and the README link are checked by
 `checkapilinks` in `docs/make.jl`: a missing one, or a README link naming the

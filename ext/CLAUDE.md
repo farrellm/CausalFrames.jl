@@ -1,7 +1,8 @@
-# CausalFrames.jl — parquet backend extensions
+# CausalFrames.jl — package extensions
 
-These two files are the only code in the package that names DuckDB or
-Parquet2; `src/parquet.jl` holds the API, the docstrings and the
+Three weak-dep extensions: the two parquet backends, then the MLJ model hooks
+(last section). `CausalFramesDuckDBExt.jl` and `CausalFramesParquet2Ext.jl` are
+the only code in the package that names DuckDB or Parquet2; `src/parquet.jl` holds the API, the docstrings and the
 backend-independent logic and names neither. Which backend is preferred in
 which direction, and why, is in `src/CLAUDE.md`'s `parquet.jl` entry — this
 file is the contract an extension implements and the traps in implementing it.
