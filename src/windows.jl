@@ -81,9 +81,9 @@ function summarizewindows(clk::CausalPipeline, lookback, summarizers;
         throw(ArgumentError("summarizewindows key columns must be unique"))
     :time in keycols && throw(
         ArgumentError(
-            "time is the window dimension and may not be a summarizewindows key"),
+            ":time is the window dimension and may not be a summarizewindows key"),
     )
-    protos, requested = prototypes(tosummarizers(summarizers), keycols)
+    protos, requested = prototypes(tosummarizers(summarizers), keycols, "summarizewindows")
     ks = tokeyset(keyset, keycols, "summarizewindows")
     cfg = WindowConfig(keycols, Val(Tuple(keycols)), lookback, protos,
         Val(requested), Val(isempty(keycols)), candidatemode(protos), ks)

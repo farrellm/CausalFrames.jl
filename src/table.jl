@@ -259,7 +259,7 @@ function presentrows(times::AbstractVector, skipmissing::Bool, what::String,
     any(ismissing, times) || return nothing
     skipmissing || throw(
         ArgumentError("time column in $(sourcename(what, path)) has missing \
-            values; pass skipmissing = true to drop those rows"),
+            values; pass `skipmissing = true` to drop those rows"),
     )
     return findall(.!ismissing.(times))   # via a BitVector: sized once
 end
@@ -325,7 +325,7 @@ function checkframecontext(ctx::Context, fctx::Context)
     throw(
         ArgumentError("readtable: context [$(ctx.start), $(ctx.stop)) is not \
             within the frame's context [$(fctx.start), $(fctx.stop)], outside \
-            which its rows are unknown; pass checkcontext = false to clip to it \
+            which its rows are unknown; pass `checkcontext = false` to clip to it \
             anyway"),
     )
 end

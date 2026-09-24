@@ -83,7 +83,7 @@ end
 
     # a spec that is neither a Symbol nor a function is eager, not ignored in
     # favour of the :time column
-    @test_throws "readcsv time spec must be" readcsv(path; time = "ts",
+    @test_throws "invalid readcsv time spec of type" readcsv(path; time = "ts",
         types = Dict(:ts => Int))
 
     # naming a column when the file also has :time is ambiguous

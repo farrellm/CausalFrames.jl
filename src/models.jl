@@ -95,13 +95,15 @@ function applymodels(models::CausalPipeline; column::Symbol = :model,
         throw(ArgumentError("applymodels key columns must be unique"))
     :time in keycols && throw(
         ArgumentError(
-            "time is the as-of dimension and may not be an applymodels key"),
+            ":time is the as-of dimension and may not be an applymodels key"),
     )
-    (column === :time || column in keycols) && throw(ArgumentError(
-        "applymodels column $column may not be time or a key column"))
+    (column === :time || column in keycols) && throw(
+        ArgumentError(
+            "applymodels column $(repr(column)) may not be :time or a key column"),
+    )
     (name === :time || name in keycols) && throw(
         ArgumentError(
-            "applymodels output column $name may not be time or a key column"),
+            "applymodels output column $(repr(name)) may not be :time or a key column"),
     )
     operation in PREDICTOPS || throw(
         ArgumentError(
@@ -133,7 +135,8 @@ function predictchunk!(js::AsofJoinState, cfg::AsofJoinConfig, column::Symbol,
         checkkeys(cfg.keycols, c, "left", cfg.op)
         String(name) in names(c) && throw(
             ArgumentError(
-                "applymodels output column $name collides with an existing column"),
+                "applymodels output column $(repr(name)) collides with an existing column",
+            ),
         )
         js.leftchecked = true
     end
@@ -143,8 +146,10 @@ function predictchunk!(js::AsofJoinState, cfg::AsofJoinConfig, column::Symbol,
         return c
     end
     if !js.checked
-        column in js.rvaluenames || throw(ArgumentError(
-            "applymodels: the models pipeline has no column $column"))
+        column in js.rvaluenames || throw(
+            ArgumentError(
+                "applymodels: the models pipeline has no column named $(repr(column))"),
+        )
         js.checked = true
     end
     nt = Tables.columntable(c)
@@ -195,8 +200,10 @@ end
 function predictgroup(fm::FittedModel{P}, nt::NamedTuple, idx::Vector{Int},
     op::Symbol) where {P}
     for p in P
-        hasproperty(nt, p) || throw(ArgumentError(
-            "applymodels: predictor column $p not found in the input"))
+        hasproperty(nt, p) || throw(
+            ArgumentError(
+                "applymodels: predictor column $(repr(p)) not found in the input"),
+        )
     end
     X = NamedTuple{P}(map(p -> view(getproperty(nt, p), idx), P))
     pr = predictmodel(fm.model, fm.fitresult, op, X)
@@ -280,9 +287,9 @@ The curried form composes with `|>`; the uncurried form applies directly, so
 """
 function modelreports(; column::Symbol = :model, name::Symbol = :report)
     column === :time &&
-        throw(ArgumentError("modelreports column may not be time"))
+        throw(ArgumentError("modelreports column may not be :time"))
     name === :time &&
-        throw(ArgumentError("modelreports output column may not be named time"))
+        throw(ArgumentError("modelreports output column may not be named :time"))
     return function (p::CausalPipeline)
         return CausalPipeline() do ctx::Context
             return chunkmap(c -> reportchunk!(c, column, name), p.run(ctx))
@@ -299,7 +306,8 @@ function reportchunk!(c::DataFrame, column::Symbol, name::Symbol)
     name !== column && hasproperty(c, name) &&
         throw(
             ArgumentError(
-                "modelreports output column $name collides with an existing column"),
+                "modelreports output column $(repr(name)) collides with an existing column",
+            ),
         )
     # `map` narrows the element type from the reports themselves, the field
     # being untyped: Union{Missing, R} for a stream of R-typed reports.

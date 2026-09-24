@@ -65,7 +65,7 @@ function forwardfill(selectors...; key = nothing, tolerance = nothing)
     keycols = tokeycolumns(key)
     allunique(keycols) || throw(ArgumentError("forwardfill key columns must be unique"))
     :time in keycols && throw(
-        ArgumentError("time is the ordering dimension and may not be a forwardfill key"),
+        ArgumentError(":time is the ordering dimension and may not be a forwardfill key"),
     )
     keynames = Val(Tuple(keycols))
     return function (p::CausalPipeline)
@@ -144,7 +144,7 @@ function resolvefill!(st::ForwardFillState, c::DataFrame)
     st.lastnames == cols && return nothing
     for k in st.keycols
         String(k) in cols ||
-            throw(ArgumentError("forwardfill key column $k not found in input"))
+            throw(ArgumentError("forwardfill key column $(repr(k)) not found in the input"))
     end
     foreachliteral(st.selectors) do n
         n in cols ||

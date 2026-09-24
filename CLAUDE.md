@@ -85,6 +85,12 @@ or summarizer, prose headers for everything else.
   of an empty stream gives a zero-row frame with only `:time`.
 - Naming is Julian: lowercase, no camelCase, no shadowing of Base functions
   (`filterrows` not `filter`, `emptyframe` not `empty`).
+- Error messages start with the operator name, either as `op <argument> …`
+  (`forwardfill tolerance must be non-negative, got -1`) or as `op: …` for
+  data errors. Show column names with `repr` (`:a`, `:time`). Use the phrasings
+  `must be X, got Y`, `requires at least one X`, `must be unique` and
+  `invalid op spec of type T: expected …`. Put code in hints in backticks
+  (`` pass `skipmissing = true` ``), and don't end a message with a period.
 - A summarizer's output column takes its element type from the input column
   (`Sum`/`SumPower` widen as `Base.sum` does). The summarization transforms
   keep their per-row folding behind a function barrier taking concretely typed

@@ -50,15 +50,17 @@ function asofjoin(right::CausalPipeline; key = nothing, tolerance = nothing,
     allunique(keycols) ||
         throw(ArgumentError("asofjoin key columns must be unique"))
     :time in keycols && throw(ArgumentError(
-        "time is the as-of dimension and may not be an asofjoin key"))
+        ":time is the as-of dimension and may not be an asofjoin key"))
     righttime === :time && throw(
         ArgumentError(
-            "asofjoin righttime may not be time; it would collide with the left time column",
+            "asofjoin righttime may not be :time; it would collide with the left time column",
         ),
     )
     righttime !== nothing && righttime in keycols &&
-        throw(ArgumentError(
-            "asofjoin righttime $righttime collides with a key column"))
+        throw(
+            ArgumentError(
+                "asofjoin righttime $(repr(righttime)) collides with a key column"),
+        )
     lp = normprefix(leftprefix)
     rp = normprefix(rightprefix)
     return function (left::CausalPipeline)
@@ -151,7 +153,7 @@ function checkkeys(keycols::Vector{Symbol}, c::DataFrame, side::String,
     op::String = "asofjoin")
     for k in keycols
         String(k) in names(c) || throw(ArgumentError(
-            "$op key column $k not found in $side input"))
+            "$op key column $(repr(k)) not found in the $side input"))
     end
     return nothing
 end
@@ -306,7 +308,7 @@ function checknames(cfg::AsofJoinConfig, c::DataFrame, rvaluenames)
     function check(n)
         n in seen && throw(
             ArgumentError(
-                "asofjoin output column $n appears more than once; use leftprefix/rightprefix to disambiguate",
+                "asofjoin output column $(repr(n)) appears more than once; use `leftprefix`/`rightprefix` to disambiguate",
             ),
         )
         push!(seen, n)

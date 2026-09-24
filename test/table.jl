@@ -61,7 +61,7 @@
         @test_throws ArgumentError load(ctx,
             readtable(Tables.columntable(both); time = :ts))
         # a bad spec or a non-table is eager on every path
-        @test_throws "readtable time spec must be" readtable(df; time = "time")
+        @test_throws "invalid readtable time spec of type" readtable(df; time = "time")
         @test_throws ArgumentError readtable(Tables.columntable(df); time = 1)
         @test_throws "readtable table must be a Tables.jl table" readtable(1)
         @test_throws ArgumentError readtable(clock(1))

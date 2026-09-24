@@ -71,15 +71,17 @@ function futurejoin(right::CausalPipeline; key = nothing, tolerance = nothing,
     allunique(keycols) ||
         throw(ArgumentError("futurejoin key columns must be unique"))
     :time in keycols && throw(ArgumentError(
-        "time is the as-of dimension and may not be a futurejoin key"))
+        ":time is the as-of dimension and may not be a futurejoin key"))
     righttime === :time && throw(
         ArgumentError(
-            "futurejoin righttime may not be time; it would collide with the left time column",
+            "futurejoin righttime may not be :time; it would collide with the left time column",
         ),
     )
     righttime !== nothing && righttime in keycols &&
-        throw(ArgumentError(
-            "futurejoin righttime $righttime collides with a key column"))
+        throw(
+            ArgumentError(
+                "futurejoin righttime $(repr(righttime)) collides with a key column"),
+        )
     lp = normprefix(leftprefix)
     rp = normprefix(rightprefix)
     return function (left::CausalPipeline)
@@ -169,8 +171,10 @@ end
 
 function checkkeys(keycols::Vector{Symbol}, c::DataFrame, side::String)
     for k in keycols
-        String(k) in names(c) || throw(ArgumentError(
-            "futurejoin key column $k not found in $side input"))
+        String(k) in names(c) || throw(
+            ArgumentError(
+                "futurejoin key column $(repr(k)) not found in the $side input"),
+        )
     end
     return nothing
 end
@@ -314,7 +318,7 @@ function checknames(cfg::FutureJoinConfig, c::DataFrame, rvaluenames)
     function check(n)
         n in seen && throw(
             ArgumentError(
-                "futurejoin output column $n appears more than once; use leftprefix/rightprefix to disambiguate",
+                "futurejoin output column $(repr(n)) appears more than once; use `leftprefix`/`rightprefix` to disambiguate",
             ),
         )
         push!(seen, n)

@@ -59,9 +59,9 @@ function intervalize(clk::CausalPipeline, summarizers; key = nothing,
         throw(ArgumentError("intervalize key columns must be unique"))
     :time in keycols && throw(
         ArgumentError(
-            "time is the interval dimension and may not be an intervalize key"),
+            ":time is the interval dimension and may not be an intervalize key"),
     )
-    protos, requested = prototypes(tosummarizers(summarizers), keycols)
+    protos, requested = prototypes(tosummarizers(summarizers), keycols, "intervalize")
     ks = tokeyset(keyset, keycols, "intervalize")
     keynames = Val(Tuple(keycols))
     outs = Val(requested)
