@@ -50,66 +50,37 @@ parquetsink(::Val, ::Any, ::Any, ::Any, ::Any) = throw(ArgumentError(WRITEHINT))
                 closed = false, skipmissing = false, backend = :auto)
         -> CausalPipeline
 
-A source that reads the parquet file at `path` and clips it to the context's
-half-open interval `[start, stop)`. Needs one of the two parquet backends
-loaded — `using DuckDB` or `using Parquet2` — and uses DuckDB when both are.
+A source reading the parquet file at `path`, clipped to `[start, stop)`. Column
+types come from the file. Requires a backend: `using DuckDB` or
+`using Parquet2`.
 
-Parquet is self-describing, so — unlike [`readcsv`](@ref) — there is nothing to
-type by hand. The file is read in chunks, never all at once, and the context
-window is used to skip data that cannot be in it:
+The file is read in chunks — a DuckDB result chunk, or one Parquet2 row group —
+and data that cannot fall in the window is skipped undecoded: DuckDB pushes the
+window into the reader, and Parquet2 skips row groups whose time statistics lie
+outside it. Skipping needs the time to come from a column; with a `time`
+function the file is scanned from the start, up to the first time past the
+window.
 
-| `backend` | Chunk | Window |
-|---|---|---|
-| `:duckdb` (preferred) | a DuckDB result chunk | pushed into the reader: row groups *and* pages outside the window are never decoded |
-| `:parquet2` | one row group | row groups whose recorded time statistics fall outside the window are skipped undecoded |
+# Arguments
+- `path`: the file.
 
-The resulting time column, whatever its source, is materialized as `:time`,
-must be sorted in non-decreasing order (unless `sort = true`), and is converted
-to the context's time type. It is chosen by `time`:
+# Keywords
+- `time = nothing`: where `:time` comes from, as for [`readcsv`](@ref).
+- `rename = nothing`: a map or a `name -> name` function applied to the column
+  names before `time` is resolved, as for `readcsv`.
+- `sort = false`: stably sort the rows by time, for a file not stored in time
+  order. DuckDB sorts in the query and still streams; Parquet2 (and DuckDB with
+  a `time` function or a `rename` hiding the time column) reads every in-window
+  row and emits them as one sorted chunk. Without it, a decreasing time is an
+  `ArgumentError`.
+- `closed = false`: clip to `[start, stop]` instead, keeping rows at `stop`.
+- `skipmissing = false`: drop rows whose time is `missing` (a null, or a `time`
+  function returning `missing`). Without it such a row is an `ArgumentError`,
+  though DuckDB's pushed-down window skips null times silently.
+- `backend = :auto`: `:duckdb`, `:parquet2`, or `:auto` (DuckDB if loaded).
+  Naming a backend that is not loaded is an `ArgumentError`.
 
-- `time = nothing` (default): the column already named `:time`.
-- `time = :name` (a `Symbol`): the column named `:name` (after `rename`),
-  renamed to `:time` (an `ArgumentError` if the file also has a `:time`
-  column).
-- `time = f` (a function): `f(row)` is called per row to compute the time
-  value, producing the `:time` column (any existing `:time` is overwritten).
-
-Keyword arguments:
-
-- `rename`: an `AbstractDict`/map (over the file's own names) or a
-  `name -> name` function applied to the column names **before** `time` is
-  resolved.
-- `sort`: sort the rows by time, for a file not stored in time order (one
-  written by a query without `ORDER BY`, say). The sort is stable, so rows
-  sharing a timestamp keep their file order. See below for what it costs.
-- `closed`: clip to the closed interval `[start, stop]` instead, keeping the
-  rows at `stop` (which a frame tolerates); the skipping below follows suit.
-- `skipmissing`: drop the rows whose time is `missing` (a null in the file, or a
-  `time` function returning `missing`) before the order check and the clip.
-  Without it such a row is an `ArgumentError` — but only in the rows actually
-  read, and DuckDB's pushed-down window skips null times with everything else
-  outside it, so there a null in a named time column goes unreported.
-- `backend`: `:auto` (default), `:duckdb` or `:parquet2`. Naming a backend that
-  is not loaded is an `ArgumentError`.
-
-Skipping applies only when the time values come from a real column: a `time`
-function is opaque to the reader, so such a file is scanned from the start (it
-still stops as soon as a time past the window is seen). It never changes results —
-the rows are clipped again on arrival — so a file whose writer recorded no
-statistics simply reads more of itself. Consequently, as with [`readcsv`](@ref),
-a sortedness violation is only detected in the chunks actually read.
-
-With `sort = true` the window still skips what cannot be in it, but how the sort
-happens depends on the backend:
-
-| `backend` | Sort |
-|---|---|
-| `:duckdb` | pushed into the query (`ORDER BY` the time column, ties in file order), so the sorted window still streams out chunk by chunk; DuckDB spills a large sort to disk |
-| `:parquet2` | every row group is read (those outside the window still skipped), the in-window rows kept, sorted and emitted as a single chunk |
-
-A `time` function, or a `rename` that leaves the time column unidentifiable,
-cannot be sorted in SQL either, so DuckDB then takes the Parquet2 route: a full
-scan whose in-window rows are sorted in memory.
+Order and missing-time errors are raised only for the rows actually read.
 """
 function readparquet(path::AbstractString; time = nothing, rename = nothing,
     sort::Bool = false, closed::Bool = false, skipmissing::Bool = false,
@@ -130,53 +101,40 @@ end
                  kwargs...) -> (CausalPipeline -> CausalPipeline)
     writeparquet(p::CausalPipeline, path; ...) -> CausalPipeline
 
-A transparent pass-through transform that writes the stream to the parquet file
-at `path` as it flows by, yielding every chunk downstream unchanged. Needs one
-of the two parquet backends loaded — `using Parquet2` or `using DuckDB` — and
-uses Parquet2 when both are.
+A pass-through transform writing every chunk to the parquet file at `path`, then
+yielding it downstream unchanged. Requires a backend: `using Parquet2` or
+`using DuckDB`. Writing happens on a background task, as for
+[`writecsv`](@ref).
 
-Like [`writecsv`](@ref), writing happens on a background task fed by a bounded
-queue of depth `queue`, so the pipeline does not block on disk I/O — only if the
-writer falls more than `queue` chunks behind, plus once at the end to join it.
-Chunks are
-only ever merged, never split, so `rowgroupsize = 1` writes one row group per
-incoming chunk. How they reach the file depends on the backend:
+# Arguments
+- `path`: the file, truncated when the pipeline starts running.
 
-| `backend` | Writing | Memory |
-|---|---|---|
-| `:parquet2` (preferred) | one row group per `rowgroupsize` buffered rows, written as the stream flows by | bounded by `rowgroupsize` |
-| `:duckdb` | chunks are staged in a temporary DuckDB table and written by a single `COPY` when the stream ends | scales with the whole output (DuckDB spills to its temp directory) |
+# Keywords
+- `queue = 1`: how many chunks may wait for the writer before the pipeline
+  blocks; `0` hands each chunk over directly. Must be non-negative.
+- `rowgroupsize = 1_000_000`: rows per row group. Chunks are merged but never
+  split, so `1` writes one row group per chunk. Must be positive. Exact under
+  Parquet2; under DuckDB rounded up to a multiple of 2048.
+- `backend = :auto`: `:parquet2`, `:duckdb`, or `:auto` (Parquet2 if loaded).
+  Parquet2 writes each row group as it fills, holding at most `rowgroupsize`
+  rows; DuckDB stages the whole output in a temporary table and writes it at
+  the end. Naming a backend that is not loaded is an `ArgumentError`.
+- `kwargs...`: passed to `Parquet2.FileWriter` (`compression_codec`,
+  `npages`, `metadata`, …). `compute_statistics` defaults to `["time"]`, the
+  statistics `readparquet` skips by. DuckDB accepts only `compression_codec`
+  (`:zstd`, `:snappy`, `:gzip` or `:uncompressed`).
 
-`rowgroupsize` is exact under Parquet2 and a hint under DuckDB, which rounds it
-up to a multiple of its own 2048-row vector size.
-
-The file is truncated when the run starts, under either backend. Unlike a CSV
-file, **a parquet file is only valid once finalized**, which happens when the
-stream is *exhausted* — by [`load`](@ref), [`scan`](@ref), or
-a fully drained [`stream`](@ref). There is no usable prefix on disk while the
-run is in flight, and abandoning a `stream` part-way leaves an unusable file;
-use [`scan`](@ref) when the file is all you want:
+A parquet file is valid only once the stream is exhausted — by [`load`](@ref),
+[`scan`](@ref) or a fully drained [`stream`](@ref); an abandoned stream leaves
+an unusable file. An empty stream writes a valid file with no rows and only a
+`time` column.
 
 ```julia
-scan(ctx, readparquet("ticks.parquet") |>
-          addcolumns(r -> (; mid = (r.bid + r.ask) / 2)) |>
-          writeparquet("mids.parquet"))
+readparquet("ticks.parquet") |>
+    addcolumns(r -> (; mid = (r.bid + r.ask) / 2)) |>
+    writeparquet("mids.parquet") |>
+    scan(ctx)
 ```
-
-A stream with no rows at all yields a valid file with no rows and a single
-`time` column, which reads back as an empty stream.
-
-`backend` is `:auto` (default), `:parquet2` or `:duckdb`; naming one that is not
-loaded is an `ArgumentError`. Remaining keyword arguments are passed through to
-`Parquet2.FileWriter` (`compression_codec`, `npages`, `metadata`,
-`column_metadata`, …), where `compute_statistics` defaults to `["time"]` so that
-files written here carry the statistics [`readparquet`](@ref) skips by. The
-DuckDB backend understands `compression_codec` (`:zstd`, `:snappy`, `:gzip`,
-`:uncompressed`) and records statistics of its own, but rejects the other,
-Parquet2-specific options.
-
-The curried form composes with `|>`; the uncurried form applies directly, so
-`writeparquet(p, path)` is equivalent to `p |> writeparquet(path)`.
 """
 function writeparquet(path::AbstractString; queue::Integer = 1,
     rowgroupsize::Integer = 1_000_000, backend::Symbol = :auto, kwargs...)

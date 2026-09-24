@@ -8,37 +8,31 @@
 """
     emptyframe() -> CausalPipeline
 
-A source that always produces zero rows (loading it yields a frame with only
-a `:time` column).
+A source producing no rows. Loading it gives a zero-row frame with only
+`:time`. It is the identity of [`concatenate`](@ref) and [`merge`](@ref "merge").
 """
 emptyframe() = CausalPipeline(ctx -> ChunkSource(() -> nothing))
 
 """
     concatenate(ps::CausalPipeline...) -> CausalPipeline
 
-A source running the given pipelines one after another over the same context
-and emitting their chunks end to end — the time-wise concatenation of their
-outputs. There is no interleaving and no merging: the pipelines must be passed
-in time order and must produce identical column names.
+A source running `ps` one after another over the same context and emitting
+their rows end to end. Each pipeline starts only once the previous one is
+exhausted, so a chain of file sources holds one file open at a time. With no
+arguments it is [`emptyframe`](@ref). To interleave rows by time instead, use
+[`merge`](@ref "merge").
 
-Every pipeline is evaluated over the whole context `[start, stop)` and clips
-itself, so keeping their windows from overlapping is the caller's business.
-Each is run only once the previous one is exhausted, which keeps the chain as
-lazy as its parts — a chain of file sources holds one file open at a time.
+# Arguments
+- `ps`: the pipelines, in time order. Each is evaluated over the whole context
+  and clips itself; keeping their data from overlapping is up to the caller.
 
-Both requirements are checked as the chunks flow by: an `ArgumentError` is
-thrown when a chunk's column names differ from the first chunk's, or when a
-chunk's first time precedes the last time already emitted (equal times across
-a boundary are fine). Element *types* may differ between pipelines, as they
-may between the chunks of one pipeline — `DataFrame(frame)` promotes on
-concatenation.
-
-`concatenate()` with no pipelines is [`emptyframe`](@ref), the identity of
-concatenation.
+Throws an `ArgumentError`, when the offending chunk arrives, if a pipeline's
+column names differ from the first pipeline's, or if a pipeline's first time
+precedes the previous one's last (equal times are allowed). Element types may
+differ between pipelines; `DataFrame(frame)` promotes them.
 
 ```julia
-concatenate(readcsv("jan.csv"; types = tt), readcsv("feb.csv"; types = tt)) |>
-    filterrows(r -> r.bid > 0)
+concatenate(readcsv("jan.csv"; types = tt), readcsv("feb.csv"; types = tt))
 ```
 """
 concatenate() = emptyframe()
@@ -112,11 +106,16 @@ end
 """
     clock(interval; batchsize = 1024) -> CausalPipeline
 
-A source producing one row per `interval` at times
-`start, start + interval, ...` while `< stop`, with no columns other than
-`:time`. `interval` may be anything addable to the context's time type
-(e.g. a `Dates.Period` for `DateTime`, a number for numeric time). Ticks are
-generated lazily in chunks of `batchsize` rows.
+A source with only a `:time` column, one row at each of `start`,
+`start + interval`, … before `stop`.
+
+# Arguments
+- `interval`: the tick spacing; anything that can be added to the time type
+  (a `Dates.Period` for `DateTime`, a number for numeric time). Must be
+  positive, checked when the pipeline runs.
+
+# Keywords
+- `batchsize = 1024`: rows per emitted chunk. Must be positive.
 """
 function clock(interval; batchsize::Integer = 1024)
     batchsize > 0 ||
@@ -155,52 +154,44 @@ end
             delim = nothing, sort = false, chunkbytes = 4 * 1024 * 1024,
             closed = false, skipmissing = false) -> CausalPipeline
 
-A source that reads the CSV file at `path` and clips it to the context's
-half-open interval `[start, stop)`. Every column is read as `String` — types
-are **not** inferred — unless `types` opts a column into a concrete type.
+A source reading the CSV file at `path`, clipped to `[start, stop)`. The file is
+read incrementally, in chunks, and reading stops at the first time past the
+window. Column types are **not** inferred: every column is a `String` unless
+`types` says otherwise.
 
-The resulting time column, whatever its source, is materialized as `:time`,
-must be sorted in non-decreasing order (unless `sort = true`), and is converted
-to the context's time type. It is chosen by `time`:
+# Arguments
+- `path`: the file. A zero-byte file (what [`writecsv`](@ref) writes for an
+  empty stream) reads as no rows.
 
-- `time = nothing` (default): the column already named `:time`.
-- `time = :name` (a `Symbol`): the column named `:name` (after `rename`),
-  renamed to `:time` (an `ArgumentError` if the file also has a `:time`
-  column).
-- `time = f` (a function): `f(row)` is called per row to compute the time
-  value, producing the `:time` column (any existing `:time` is overwritten).
+# Keywords
+- `types = nothing`: concrete types for some columns, keyed by the file's own
+  column names (before `rename`): a single type for every column, a vector
+  indexed by column position (`nothing` entries stay `String`), a `Dict` keyed by
+  name (`Symbol` or `String`) or position, or a function `(index, name) -> type`
+  returning `nothing` for `String`. Unless `time` is a function, the time column
+  must be given a type here.
+- `time = nothing`: where `:time` comes from — `nothing` for the column named
+  `:time`; a `Symbol` naming another column (after `rename`), which is renamed
+  to `:time` and must not coexist with one; or a function `row -> time`,
+  whose result replaces any existing `:time`. The result is converted to the
+  context's time type.
+- `rename = nothing`: a map (`Dict` from old to new name) or a function
+  `name -> name`, applied to the column names after typing and before `time` is
+  resolved.
+- `delim = nothing`: the field delimiter (`Char` or `String`), passed to CSV.jl;
+  `nothing` auto-detects.
+- `sort = false`: stably sort the rows by time, for a file not stored in time
+  order. Sorting reads the whole file and emits its in-window rows as one chunk,
+  so memory scales with the window. Without it, a decreasing time is an
+  `ArgumentError`.
+- `chunkbytes = 4 * 1024 * 1024`: the approximate size of each chunk read.
+  Must be positive.
+- `closed = false`: clip to `[start, stop]` instead, keeping rows at `stop`.
+- `skipmissing = false`: drop rows whose time is `missing` (a blank cell, or a
+  `time` function returning `missing`). Without it such a row is an
+  `ArgumentError`.
 
-Since a `String` time column cannot be ordered against the numeric window,
-the time column must be typed unless produced by a function: it is an
-`ArgumentError` if `time` is not a function and `types` gives no concrete
-type for the time column.
-
-Keyword arguments:
-
-- `types`: which columns to give a concrete type (everything else stays
-  `String`), as a `Dict`/`Vector`/function over the file's *original* column
-  names or indices — it is applied while parsing, so it is keyed by the names
-  in the file, before any `rename`.
-- `rename`: an `AbstractDict`/map (over original names) or a `name -> name`
-  function applied to the column names **after** typing but **before** `time`
-  is resolved.
-- `delim`: the field delimiter, passed through to `CSV.Chunks` (a `Char` or
-  `String`); defaults to CSV.jl's own detection.
-- `sort`: sort the rows by time, for a file not stored in time order. The sort
-  is stable, so rows sharing a timestamp keep their file order. A sort cannot
-  stream: the whole file is read (still one chunk at a time), its in-window
-  rows are kept, and they are sorted and emitted as a single chunk — memory
-  scales with the rows in the window, not with the file.
-- `chunkbytes`: the file is read incrementally in chunks of roughly this many
-  bytes — never all at once — and, without `sort`, reading stops as soon as a
-  time past the window is seen. Consequently a sortedness violation is only
-  detected when the offending chunk is actually read.
-- `closed`: clip to the closed interval `[start, stop]` instead, keeping the
-  rows at `stop` (which a frame tolerates).
-- `skipmissing`: drop the rows whose time is `missing` (a blank cell in a typed
-  time column, or a `time` function returning `missing`) before the order check
-  and the clip. Without it such a row is an `ArgumentError` — detected, like a
-  sortedness violation, only in the chunks actually read.
+Order and missing-time errors are raised only for the chunks actually read.
 """
 function readcsv(path::AbstractString; types = nothing, time = nothing,
     rename = nothing, delim = nothing, sort::Bool = false,
@@ -488,38 +479,34 @@ timeclash(
 
 """
     writecsv(path; queue = 1, kwargs...) -> (CausalPipeline -> CausalPipeline)
-    writecsv(p::CausalPipeline, path; ...) -> CausalPipeline
+    writecsv(p::CausalPipeline, path; queue = 1, kwargs...) -> CausalPipeline
 
-A transparent pass-through transform that writes the stream to the CSV file
-at `path` as it flows by, yielding every chunk downstream unchanged. Nothing
-is buffered: each chunk is written and flushed as it is produced, so the file
-grows while the pipeline is still running.
+A pass-through transform writing every chunk to the CSV file at `path` as it
+flows by, then yielding it downstream unchanged. Each chunk is written and
+flushed by a background task, so the file grows while the pipeline runs.
 
-Writing happens on a background task fed by a bounded queue of depth `queue`,
-so the pipeline does not block on disk I/O — only if the writer falls more
-than `queue` chunks behind, plus once at the end to join it. `queue = 0` makes each
-hand-off a rendezvous.
+# Arguments
+- `path`: the file, truncated when the pipeline starts running. An empty stream
+  leaves it empty, which [`readcsv`](@ref) reads back as no rows.
 
-The file is truncated when the run starts and finalized when the stream is
-*exhausted* — by [`load`](@ref), [`scan`](@ref), or a fully drained
-[`stream`](@ref). Abandoning a `stream` part-way leaves the last chunks
-unwritten; use [`scan`](@ref) when the file is all you want:
+# Keywords
+- `queue = 1`: how many chunks may wait for the writer before the pipeline
+  blocks; `0` hands each chunk over directly. Must be non-negative.
+- `kwargs...`: passed to `CSV.write` (`delim`, `missingstring`, `dateformat`,
+  …). `append`, `header`, `writeheader`, `partition` and `compress` are
+  controlled by `writecsv` and are an `ArgumentError`.
+
+The file is complete only once the stream is exhausted — by [`load`](@ref),
+[`scan`](@ref) or a fully drained [`stream`](@ref). A chunk whose column names
+differ from the first chunk's is an `ArgumentError`. Use `scan` when the file
+is all you want:
 
 ```julia
-scan(ctx, readcsv("ticks.csv"; types = tt) |>
-          addcolumns(r -> (; mid = (r.bid + r.ask) / 2)) |>
-          writecsv("mids.csv"))
+readcsv("ticks.csv"; types = tt) |>
+    addcolumns(r -> (; mid = (r.bid + r.ask) / 2)) |>
+    writecsv("mids.csv") |>
+    scan(ctx)
 ```
-
-A stream with no rows at all yields an empty file, which [`readcsv`](@ref)
-reads back as an empty stream. Keyword arguments are
-passed through to `CSV.write` (`delim`, `missingstring`, `dateformat`,
-`quotestrings`, `bufsize`, …), except for `append`, `header`, `writeheader`,
-`partition` and `compress`, which this transform controls itself — passing
-one is an `ArgumentError`.
-
-The curried form composes with `|>`; the uncurried form applies directly, so
-`writecsv(p, path)` is equivalent to `p |> writecsv(path)`.
 """
 function writecsv(path::AbstractString; queue::Integer = 1, kwargs...)
     queue >= 0 ||
@@ -608,12 +595,11 @@ end
     filterrows(pred) -> (CausalPipeline -> CausalPipeline)
     filterrows(p::CausalPipeline, pred) -> CausalPipeline
 
-A transform keeping the rows where `pred(row)` is `true`. `pred` receives a
-map-like row object supporting `row.name` and `row[:name]` access,
-including `row.time`.
+A transform keeping the rows for which `pred(row)` is `true`.
 
-The curried form composes with `|>`; the uncurried form applies directly, so
-`filterrows(p, pred)` is equivalent to `p |> filterrows(pred)`.
+# Arguments
+- `pred`: a function `row -> Bool`. `row` supports `row.name` and `row[:name]`,
+  including `row.time`.
 """
 function filterrows(pred)
     return function (p::CausalPipeline)
@@ -648,13 +634,17 @@ end
     addcolumns(f) -> (CausalPipeline -> CausalPipeline)
     addcolumns(p::CausalPipeline, f) -> CausalPipeline
 
-A transform adding columns computed row by row: `f(row)` must return a
-`NamedTuple` mapping new column names to that row's values. The returned
-tuple may not contain a `time` key. `f` receives the same map-like row
-object as [`filterrows`](@ref).
+A transform appending columns computed from each row.
 
-The curried form composes with `|>`; the uncurried form applies directly, so
-`addcolumns(p, f)` is equivalent to `p |> addcolumns(f)`.
+# Arguments
+- `f`: a function `row -> NamedTuple`, where the `NamedTuple` maps each new
+  column name to its value in that row. `row` is as for [`filterrows`](@ref).
+  The names must be new, and may not include `time`; returning anything but a
+  `NamedTuple` is an `ArgumentError`.
+
+```julia
+p |> addcolumns(r -> (; mid = (r.bid + r.ask) / 2))
+```
 """
 function addcolumns(f)
     return function (p::CausalPipeline)
@@ -686,20 +676,16 @@ rowvalues(f, nt::NamedTuple) = [f(row) for row in Tables.rows(nt)]
     lag(offset) -> (CausalPipeline -> CausalPipeline)
     lag(p::CausalPipeline, offset) -> CausalPipeline
 
-A transform shifting every row `offset` later in time (`time -> time +
-offset`), so that the value observed at time `t` is the one the input carried
-at `t - offset` — the lagged, backward-looking view. Only the `:time` column
-changes; all other columns pass through unchanged.
+A transform moving every row `offset` later (`time -> time + offset`), so the
+row at time `t` carries the values the input had at `t - offset`. Only `:time`
+changes. The input runs over `[start - offset, stop - offset)`, so the output
+fills the whole window.
 
-`offset` must be non-negative (a negative shift would look into the future and
-break causality — see [`lead`](@ref CausalFrames.Acausal.lead) for that); an
-`ArgumentError` is thrown when the pipeline runs otherwise, and `offset` `== 0`
-is the identity. The time type must support adding and subtracting the offset
-(numbers and `Dates` types do): the upstream pipeline is run over the window
-`[start - offset, stop - offset)` so the shifted output covers `[start, stop)`.
-
-The curried form composes with `|>`; the uncurried form applies directly, so
-`lag(p, offset)` is equivalent to `p |> lag(offset)`.
+# Arguments
+- `offset`: the shift, in a type that can be added to and subtracted from the
+  time type (a `Dates.Period`, a number). Must be non-negative, checked when the
+  pipeline runs; `0` is the identity. For a forward shift, see
+  [`Acausal.lead`](@ref CausalFrames.Acausal.lead).
 """
 function lag(offset)
     return function (p::CausalPipeline)
@@ -733,27 +719,20 @@ shifttime(times::AbstractVector, delta) = times .+ delta
     head(n) -> (CausalPipeline -> CausalPipeline)
     head(p::CausalPipeline, n) -> CausalPipeline
 
-A transform emitting the first `n` rows of the stream and then stopping. It
-stops for real: once `n` rows have gone out the upstream pipeline is never
-pulled again, so `readcsv(path; types) |> head(10)` reads one file chunk and no
-more. `n` must be non-negative (an `ArgumentError` at construction otherwise),
-and `head(0)` is the empty stream — the upstream pipeline is built but never
-iterated.
+A transform emitting the first `n` rows of the window, then stopping: its input
+is not pulled again, so `readcsv(path; types) |> head(10)` reads a single file
+chunk.
 
-`head` is causal — rows pass through unchanged and in order — but **stateful**:
-its row budget spans the whole window. Concatenating the frames of
-[`stream`](@ref) therefore still equals [`load`](@ref) of the same window, while
-the chunk-concatenation property over *split* contexts does not hold, since
-`head(n)` over `[a, b)` and over `[b, c)` yields up to `2n` rows where the whole
-window yields `n`.
+# Arguments
+- `n`: the number of rows, an `Integer`. Must be non-negative; `head(0)` never
+  pulls its input.
 
-Do not put a sink upstream of `head`: [`writecsv`](@ref) and
-[`writeparquet`](@ref) finalize when the stream is *exhausted*, which `head`
-prevents, leaving the file unfinished and its writer task unjoined. Truncate
-first — `p |> head(n) |> writecsv(path)`.
+`head` counts rows over the whole window, so `head(n)` over `[a, b)` and over
+`[b, c)` can yield `2n` rows where `[a, c)` yields `n`.
 
-The curried form composes with `|>`; the uncurried form applies directly, so
-`head(p, n)` is equivalent to `p |> head(n)`.
+Put writers downstream of `head`, never upstream (`p |> head(n) |>
+writecsv(path)`): a writer finalizes its file only when its input is exhausted,
+which `head` prevents.
 """
 function head(n::Integer)
     n >= 0 || throw(ArgumentError("head n must be non-negative, got $n"))
@@ -814,45 +793,23 @@ end
     settime(spec) -> (CausalPipeline -> CausalPipeline)
     settime(p::CausalPipeline, spec) -> CausalPipeline
 
-A transform recomputing the `:time` column. `spec` is either
+A transform recomputing `:time`. The result is converted to the context's time
+type and clipped to `[start, stop)`; other columns pass through.
 
-- a `Symbol` — the named column *becomes* `:time`, taking over the position it
-  already occupied, and the old `:time` column disappears ([`readcsv`](@ref)'s
-  `time = :name` rename, applied mid-stream); or
-- a per-row function — `spec(row)` is called for each row, receiving the same
-  map-like row object as [`addcolumns`](@ref), and its result overwrites
-  `:time` in place, keeping that column's position.
+# Arguments
+- `spec`: either a `Symbol`, naming a column that replaces `:time` (taking its
+  own position; the old `:time` is dropped), or a function `row -> time` whose
+  result overwrites `:time` in place. `row` is as for [`filterrows`](@ref).
 
-Either way the resulting column is converted to the context's time type and the
-chunk is re-clipped to the half-open interval `[start, stop)`. All other columns
-pass through unchanged.
+Each of these is an `ArgumentError` when the pipeline runs: a row whose new
+time is earlier than its old one (see
+[`Acausal.settime`](@ref CausalFrames.Acausal.settime)), and a new time column
+that decreases within or across chunks.
 
-The transform is **causal**, and enforces it. Three independent checks, each an
-`ArgumentError` when the pipeline runs:
-
-- every row's new time is at least its old one (use
-  [`CausalFrames.Acausal.settime`](@ref) to move rows earlier);
-- the resulting column is non-decreasing within the chunk;
-- and it does not step back across a chunk boundary.
-
-None implies another: a forward-only map can still reorder rows, and an ordered
-map can move every row back to `start`.
-
-The context is **not widened**. [`lag`](@ref) slides its upstream window because
-its shift is a constant known before any data is read; `settime`'s is per-row
-and data-dependent, so upstream still runs over `[start, stop)` and only rows
-*already* in the window can be retimed — a row before `start` that `spec` would
-move into the window is never seen. For the same reason `settime` does not have
-the chunk-concatenation property: loading `[a, c)` is not the concatenation of
-loading `[a, b)` and `[b, c)`, since a row retimed across `b` is dropped by the
-first half and never offered to the second. Streaming still equals loading.
-
-`settime(:time)` is legal and leaves the values alone, but it still re-clips to
-`[start, stop)` — a row sitting exactly at `stop`, which frames tolerate and
-[`summarize`](@ref) emits, is dropped.
-
-The curried form composes with `|>`; the uncurried form applies directly, so
-`settime(p, spec)` is equivalent to `p |> settime(spec)`.
+The input is not widened: it runs over `[start, stop)`, so a row outside the
+window is never seen, even if `spec` would move it inside. Hence loading
+`[a, c)` need not equal loading `[a, b)` and `[b, c)`. `settime(:time)` changes
+no values, but still drops rows at `stop`.
 """
 function settime(spec)
     checktimespec(spec, "settime")
@@ -984,18 +941,15 @@ settimecolumn!(c::DataFrame, ::Function, new::AbstractVector) = (c[!, :time] = n
     selectcolumns(selectors...) -> (CausalPipeline -> CausalPipeline)
     selectcolumns(p::CausalPipeline, selectors...) -> CausalPipeline
 
-A transform keeping only the selected columns, in the input's own column
-order. Each selector is a column name (a `Symbol` or `AbstractString`), a
-`Regex` matched against the column name, a predicate called with the column
-name as a `String`, or — recursively — any collection of those; a column is
-kept when it matches any of them.
+A transform keeping only the selected columns, in their input order. `:time` is
+always kept.
 
-`:time` is always kept, whether or not it is selected. Naming a column that
-the data does not have is an `ArgumentError`; a `Regex` or predicate matching
-nothing is not.
-
-The curried form composes with `|>`; the uncurried form applies directly, so
-`selectcolumns(p, sel)` is equivalent to `p |> selectcolumns(sel)`.
+# Arguments
+- `selectors`: at least one column selector: a name (`Symbol` or `String`),
+  a `Regex` matched against names, a predicate called with the name as a
+  `String`, or a collection of these. A column is kept if any selector matches
+  it. A name the data lacks is an `ArgumentError`; a `Regex` or predicate
+  matching nothing is not.
 
 ```julia
 p |> selectcolumns(:bid, :ask)
@@ -1012,17 +966,14 @@ selectcolumns(p::CausalPipeline, selectors...) = selectcolumns(selectors...)(p)
     dropcolumns(selectors...) -> (CausalPipeline -> CausalPipeline)
     dropcolumns(p::CausalPipeline, selectors...) -> CausalPipeline
 
-A transform dropping the selected columns and keeping the rest, in the
-input's own column order. Selectors take the same forms as for
-[`selectcolumns`](@ref), and a column is dropped when it matches any of them.
+A transform removing the selected columns and keeping the rest, in their input
+order.
 
-`:time` is never dropped — a `Regex` or predicate matching it is ignored, and
-naming it outright is an `ArgumentError`, since every frame must have a time
-column. Naming a column that the data does not have is an `ArgumentError`
-too.
-
-The curried form composes with `|>`; the uncurried form applies directly, so
-`dropcolumns(p, sel)` is equivalent to `p |> dropcolumns(sel)`.
+# Arguments
+- `selectors`: at least one column selector, as for
+  [`selectcolumns`](@ref). A column is dropped if any selector matches it.
+  `:time` is never dropped: a `Regex` or predicate matching it is ignored, and
+  naming it is an `ArgumentError`, as is naming a column the data lacks.
 """
 function dropcolumns(selectors...)
     checkselectors(selectors, "dropcolumns", true)
@@ -1034,25 +985,16 @@ dropcolumns(p::CausalPipeline, selectors...) = dropcolumns(selectors...)(p)
     reordercolumns(selectors...) -> (CausalPipeline -> CausalPipeline)
     reordercolumns(p::CausalPipeline, selectors...) -> CausalPipeline
 
-A transform moving the selected columns to the front, in the **selectors'**
-order, and leaving the rest behind them in the input's own column order.
-Selectors take the same forms as for [`selectcolumns`](@ref), except that here
-their order is what the output order follows: nested collections are flattened
-in place, so `reordercolumns([:a, :b])` orders as `reordercolumns(:a, :b)`
-does. A `Regex` or predicate matching several columns contributes them in the
-input's order, and a column matched by more than one selector is placed by the
-first of them.
+A transform moving the selected columns to the front, after `:time`, in the
+order of the selectors. The other columns follow in their input order.
 
-Naming only some of the columns is the point — the rest keep their relative
-order at the back, so a reorder never has to re-list the whole schema.
-
-`:time` is always first, whatever the selectors say: a `Regex` or predicate
-matching it is ignored, and naming it outright is an `ArgumentError`. Naming a
-column that the data does not have is an `ArgumentError` too; a `Regex` or
-predicate matching nothing is not.
-
-The curried form composes with `|>`; the uncurried form applies directly, so
-`reordercolumns(p, sel)` is equivalent to `p |> reordercolumns(sel)`.
+# Arguments
+- `selectors`: at least one column selector, as for
+  [`selectcolumns`](@ref). Nested collections are flattened in place. A `Regex`
+  or predicate contributes its matches in input order, and a column matched
+  twice goes where it was first matched. `:time` always stays first: a `Regex`
+  or predicate matching it is ignored, and naming it is an `ArgumentError`, as
+  is naming a column the data lacks.
 
 ```julia
 p |> reordercolumns(:px, :size)   # time, px, size, then the rest

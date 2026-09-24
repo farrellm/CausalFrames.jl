@@ -525,19 +525,18 @@ end
     summarize(summarizers; key = nothing) -> (CausalPipeline -> CausalPipeline)
     summarize(p::CausalPipeline, summarizers; key = nothing) -> CausalPipeline
 
-A transform summarizing the whole context: every input row is folded into the
-summarizers and a single batch of rows is emitted at the context's end time
-`stop`, dropping the input columns. `summarizers` is a [`Summarizer`](@ref)
-or a collection of them; the output columns are `time`, the key columns, then
-each summarizer's value columns.
+A transform summarizing the whole window, emitted at `stop`, with columns
+`time`, the key columns, then the summaries; the input columns are dropped.
 
-Without `key` the output is exactly one row (the identity summary — e.g.
-`count = 0` — when the input is empty). With `key` (a column name or
-collection of column names) one row is emitted per unique key value, sorted
-by key; an empty input yields no rows.
+# Arguments
+- `summarizers`: a [`Summarizer`](@ref) or a collection of them. Output names
+  must be unique and may not be `time` or a key column.
 
-The curried form composes with `|>`; the uncurried form applies directly, so
-`summarize(p, ss; key)` is equivalent to `p |> summarize(ss; key)`.
+# Keywords
+- `key = nothing`: a column name or collection of distinct column names other
+  than `:time`. Without a key the output is one row, the summarizers' empty
+  values for an empty input. With a key it is one row per key, sorted by key,
+  and nothing for an empty input.
 """
 function summarize(summarizers; key = nothing)
     return function (p::CausalPipeline)
@@ -578,27 +577,23 @@ summarize(p::CausalPipeline, summarizers; kwargs...) =
 """
     summarizecycles(summarizers; key = nothing,
                     keyset = nothing) -> (CausalPipeline -> CausalPipeline)
-    summarizecycles(p::CausalPipeline, summarizers; key = nothing,
-                    keyset = nothing) -> CausalPipeline
+    summarizecycles(p::CausalPipeline, summarizers; ...) -> CausalPipeline
 
-A transform summarizing each *cycle* — a maximal run of rows sharing one
-timestamp — independently, with fresh state per cycle. For every cycle one
-row is emitted at the cycle's time (per unique key value, sorted by key, when
-`key` is given), dropping the input columns. A cycle spanning a chunk
-boundary is summarized as a single cycle.
+A transform summarizing each *cycle* — a run of rows sharing one time —
+separately, emitting at the cycle's time with columns `time`, the key columns,
+then the summaries; the input columns are dropped.
 
-When the key values are known up front, `keyset` (which requires `key`)
-declares them and makes the keyed output **dense**: every cycle emits exactly
-one row per declared key, in declared order, a key with no rows in the cycle
-included with the summarizers' empty values (`count = 0`, `mean = missing`), so
-element types widen to admit them. With one key column `keyset` is a collection
-of its values; with several, a collection of tuples (or named tuples) of them.
-The output key columns take their element types from `keyset`, and a row whose
-key is not in `keyset` throws an `ArgumentError`. An empty input still emits
-nothing, having no cycles.
+# Arguments
+- `summarizers`: a [`Summarizer`](@ref) or a collection of them.
 
-The curried form composes with `|>`; the uncurried form applies directly, so
-`summarizecycles(p, ss; key)` is equivalent to `p |> summarizecycles(ss; key)`.
+# Keywords
+- `key = nothing`: a column name or collection of distinct column names other
+  than `:time`. With a key, each cycle emits one row per key present, sorted by
+  key.
+- `keyset = nothing`: the key values, declared up front (requires `key`), as for
+  [`intervalize`](@ref). Every cycle then emits one row per declared key, in
+  declared order, with empty values (`count = 0`, `mean = missing`) for keys
+  without rows.
 """
 function summarizecycles(summarizers; key = nothing, keyset = nothing)
     ks = tokeyset(keyset, tokeycolumns(key), "summarizecycles")
@@ -661,19 +656,17 @@ summarizecycles(p::CausalPipeline, summarizers; kwargs...) =
     addsummarycolumns(summarizers; key = nothing) -> (CausalPipeline -> CausalPipeline)
     addsummarycolumns(p::CausalPipeline, summarizers; key = nothing) -> CausalPipeline
 
-A transform keeping all existing columns and appending each summarizer's
-value columns, holding the running summary *after* that row has been folded
-in. With `key` (a column name or collection of column names) a separate
-running summary is kept per unique key value. State runs over the whole
-window, carried across chunk boundaries. The output columns may not collide
-with existing columns.
+A transform appending running summaries: each row gets the summary of every row
+so far, itself included.
 
-A keyed `Count()` is therefore a per-key row number; see the manual's Recipes
-page for when that amounts to an arbitrary `ORDER BY`.
+# Arguments
+- `summarizers`: a [`Summarizer`](@ref) or a collection of them. Their output
+  columns may not collide with existing columns.
 
-The curried form composes with `|>`; the uncurried form applies directly, so
-`addsummarycolumns(p, ss; key)` is equivalent to
-`p |> addsummarycolumns(ss; key)`.
+# Keywords
+- `key = nothing`: a column name or collection of distinct column names other
+  than `:time`. With a key, each key keeps its own running summary, so a keyed
+  [`Count`](@ref) numbers the rows of each key.
 """
 function addsummarycolumns(summarizers; key = nothing)
     return function (p::CausalPipeline)

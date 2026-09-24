@@ -21,65 +21,52 @@ frame = load(Context(DateTime(2026, 1, 1), DateTime(2026, 2, 1)), p)
 
 ## Concepts
 
-- **`Context(start, stop)`** — a time window. The time type is generic:
-  `DateTime`, `Int` ticks, `Float64` seconds, anything ordered.
-- **`CausalPipeline`** — a lazy description of how to produce data;
-  conceptually a function from a `Context` to a stream of chunks. Built from
-  sources and chained with `|>`. Evaluation is streaming end to end:
-  `load(ctx, pipeline)` materializes the whole window (the only operation
-  that does), `stream(ctx, pipeline)` yields frames incrementally, and
-  `scan(ctx, pipeline)` runs a pipeline for its side effects, discarding
-  every chunk.
-- **`CausalFrame`** — a materialized table. It hides its backing storage
-  (one or more time-disjoint chunks, wrapped without copying) and is
-  accessed via the Tables.jl interface or `DataFrame(frame)`.
+- **`Context(start, stop)`**: a time window. The time type can be anything
+  ordered: `DateTime`, `Int` ticks, `Float64` seconds.
+- **`CausalPipeline`**: a lazy recipe for producing data over a context, built
+  from a source and chained with `|>`. It runs only when evaluated:
+  `load(ctx, p)` materializes the window, `stream(ctx, p)` yields it chunk by
+  chunk, and `scan(ctx, p)` runs it for its side effects. Each also has a
+  curried form, `p |> load(ctx)`.
+- **`CausalFrame`**: a loaded table. Read it through Tables.jl or copy it out
+  with `DataFrame(frame)`.
 
 ## Operators
 
-Each operator below links to its [API reference](https://farrellm.github.io/CausalFrames.jl/dev/api/).
-Every transform also has an uncurried, pipeline-first form — `filterrows(p, pred)`,
-`addcolumns(p, f)`, `summarize(p, ss; key)` — equivalent to the `|>` chain
-(`p |> filterrows(pred)`) for when the applied form reads clearer.
-
-Row functions receive a map-like row object: `row.time`, `row.price`,
-`row[:price]`.
+Each name links to its [API reference](https://farrellm.github.io/CausalFrames.jl/dev/api/). Transforms are
+curried for `|>`, and also take the pipeline first: `filterrows(p, pred)` is
+`p |> filterrows(pred)`. Row functions receive a row supporting `row.time`,
+`row.price` and `row[:price]`.
 
 ### Sources
 
-A source starts a pipeline, constructing or combining streams, or lifting an
-in-memory table, without touching a file.
-
 | Operator | Semantics |
 |---|---|
-| [`emptyframe()`](https://farrellm.github.io/CausalFrames.jl/dev/api/sources/#emptyframe) | zero rows, just a `:time` column |
-| [`concatenate(ps...)`](https://farrellm.github.io/CausalFrames.jl/dev/api/sources/#concatenate) | run the pipelines one after another, emitting their chunks end to end; they must be passed in time order and produce identical column names |
-| [`merge(ps...; batchsize)`](https://farrellm.github.io/CausalFrames.jl/dev/api/sources/#merge) | run the pipelines concurrently and interleave their rows by time; the output carries the union of their columns, `missing` where a pipeline lacks one, ties broken by argument order |
-| [`clock(interval)`](https://farrellm.github.io/CausalFrames.jl/dev/api/sources/#clock) | one row per `interval` in `[start, stop)` |
-| [`readtable(table; time, checkorder, sort, closed, skipmissing)`](https://farrellm.github.io/CausalFrames.jl/dev/api/sources/#readtable) | any Tables.jl table — a `DataFrame`, a `NamedTuple` of vectors, a loaded `CausalFrame` — clipped to `[start, stop)` (`closed` keeps rows at `stop`); `time` and `skipmissing` as for `readcsv`, `sort` orders the rows by time first; only in-window rows are copied, and a frame's whole-window chunks not even those; a frame refuses a context outside its own unless `checkcontext = false` |
+| [`emptyframe()`](https://farrellm.github.io/CausalFrames.jl/dev/api/sources/#emptyframe) | no rows, only `:time` |
+| [`concatenate(ps...)`](https://farrellm.github.io/CausalFrames.jl/dev/api/sources/#concatenate) | the pipelines one after another, in time order, with identical columns |
+| [`merge(ps...; batchsize)`](https://farrellm.github.io/CausalFrames.jl/dev/api/sources/#merge) | the pipelines interleaved by time, with the union of their columns (`missing` where one lacks a column); ties in argument order |
+| [`clock(interval; batchsize)`](https://farrellm.github.io/CausalFrames.jl/dev/api/sources/#clock) | one row every `interval` in `[start, stop)` |
+| [`readtable(table; time, checkorder, sort, closed, skipmissing)`](https://farrellm.github.io/CausalFrames.jl/dev/api/sources/#readtable) | an in-memory Tables.jl table or `CausalFrame`, clipped to the window |
 
 ### File I/O
 
-Reading starts a pipeline; writing does not end one — every writer is a
-pass-through transform, so a sink can sit in the middle of a chain.
+Readers are sources and clip to `[start, stop)` (`closed = true` keeps rows at
+`stop`), reading incrementally. Writers are pass-through transforms that write
+each chunk as it flows by, on a background task.
 
 | Operator | Semantics |
 |---|---|
-| [`readcsv(path; types, time, rename, delim, sort, closed, skipmissing)`](https://farrellm.github.io/CausalFrames.jl/dev/api/io/#readcsv) | CSV read as `String` columns (`types` opts columns into concrete types); `time` picks the time column by name or a per-row function; a missing time is an error unless `skipmissing` drops its row; clipped to `[start, stop)` (`closed` keeps rows at `stop`), read incrementally; `sort` orders a file not stored in time order, holding the window in memory |
-| [`readparquet(path; time, rename, sort, closed, skipmissing, backend)`](https://farrellm.github.io/CausalFrames.jl/dev/api/io/#readparquet) | parquet file (needs `using DuckDB` or `using Parquet2`); types come from the file; the context window skips row groups that cannot be in it; `time`, `rename`, `sort`, `closed` and `skipmissing` as for `readcsv`, DuckDB sorting in the query |
-| [`readjls(path; closed)`](https://farrellm.github.io/CausalFrames.jl/dev/api/io/#readjls) | read back a file written by `writejls`, a record at a time, clipped to `[start, stop)` (`closed` keeps rows at `stop`) |
-| [`writecsv(path; queue, ...)`](https://farrellm.github.io/CausalFrames.jl/dev/api/io/#writecsv) | writes each chunk to `path` as it flows by, on a background task |
-| [`writeparquet(path; queue, rowgroupsize, backend, ...)`](https://farrellm.github.io/CausalFrames.jl/dev/api/io/#writeparquet) | needs `using Parquet2` or `using DuckDB`: writes row groups of `rowgroupsize` rows as the stream flows by; the file is valid only once the stream is exhausted |
-| [`writejls(path; queue)`](https://farrellm.github.io/CausalFrames.jl/dev/api/io/#writejls) | through Julia's `Serialization` stdlib: one record per chunk, so columns CSV and parquet cannot encode (fitted models, `NamedTuple`s) round-trip; tied to the Julia and package versions that wrote it |
+| [`readcsv(path; types, time, rename, delim, sort, chunkbytes, closed, skipmissing)`](https://farrellm.github.io/CausalFrames.jl/dev/api/io/#readcsv) | a CSV file; columns are `String` unless `types` says otherwise |
+| [`readparquet(path; time, rename, sort, closed, skipmissing, backend)`](https://farrellm.github.io/CausalFrames.jl/dev/api/io/#readparquet) | a parquet file, skipping data outside the window |
+| [`readjls(path; closed)`](https://farrellm.github.io/CausalFrames.jl/dev/api/io/#readjls) | a file written by `writejls` |
+| [`writecsv(path; queue, ...)`](https://farrellm.github.io/CausalFrames.jl/dev/api/io/#writecsv) | write a CSV file |
+| [`writeparquet(path; queue, rowgroupsize, backend, ...)`](https://farrellm.github.io/CausalFrames.jl/dev/api/io/#writeparquet) | write a parquet file, valid once the stream is exhausted |
+| [`writejls(path; queue)`](https://farrellm.github.io/CausalFrames.jl/dev/api/io/#writejls) | write with Julia's `Serialization`, for values CSV and parquet cannot hold (such as fitted models) |
 
-Parquet support is optional, through two backends: either `using DuckDB` or
-`using Parquet2` enables both operators. Reading prefers DuckDB (it pushes the
-window into the reader) and writing prefers Parquet2 (it streams row groups
-out); `backend = :duckdb` / `:parquet2` forces the choice.
+Parquet needs a backend: `using DuckDB` or `using Parquet2` enables both
+operators. Reading prefers DuckDB and writing Parquet2; `backend` overrides.
 
-`writecsv` streams a pipeline to disk without materializing it, and `scan`
-drives the pipeline for its side effects alone. `load`, `stream` and `scan`
-also take a curried, context-only form, so a chain can end in its own
-evaluation:
+End a chain with `scan` to run it for the file alone:
 
 ```julia
 readcsv("ticks.csv"; types = Dict(:time => Int, :bid => Float64)) |>
@@ -90,201 +77,123 @@ readcsv("ticks.csv"; types = Dict(:time => Int, :bid => Float64)) |>
 
 ### Row transformations
 
-Driven by one row at a time: testing a row, computing values from it, and
-selecting or retiming rows.
-
 | Operator | Semantics |
 |---|---|
 | [`filterrows(pred)`](https://farrellm.github.io/CausalFrames.jl/dev/api/rows/#filterrows) | keep rows where `pred(row)` |
-| [`addcolumns(f)`](https://farrellm.github.io/CausalFrames.jl/dev/api/rows/#addcolumns) | `f(row)::NamedTuple` of new column values |
-| [`head(n)`](https://farrellm.github.io/CausalFrames.jl/dev/api/rows/#head) | emit the first up to `n` rows, then stop pulling the source — it genuinely stops, so a `readcsv` behind `head(10)` reads one file chunk |
-| [`lastrow(; key)`](https://farrellm.github.io/CausalFrames.jl/dev/api/rows/#lastrow) | emit the last row, or one per key, retimed to the window's `stop` |
-| [`sortcycles(by; rev)`](https://farrellm.github.io/CausalFrames.jl/dev/api/rows/#sortcycles) | stably reorder the rows sharing each timestamp by a column, a list of columns, or a per-row key function; the time order is untouched |
-| [`lag(offset)`](https://farrellm.github.io/CausalFrames.jl/dev/api/rows/#lag) | shift every row `offset` later in time, so time `t` carries what the input had at `t - offset`; only `:time` changes and `offset` must be non-negative |
-| [`settime(spec)`](https://farrellm.github.io/CausalFrames.jl/dev/api/rows/#settime) | recompute `:time` from a column name or a per-row function; rows may only move later, and the result is re-clipped to `[start, stop)` |
-
-The forward-looking counterparts — `lead`, and a permissive `settime` — live in
-the `Acausal` submodule, under "Causality" below.
+| [`addcolumns(f)`](https://farrellm.github.io/CausalFrames.jl/dev/api/rows/#addcolumns) | append the columns of the `NamedTuple` `f(row)` |
+| [`head(n)`](https://farrellm.github.io/CausalFrames.jl/dev/api/rows/#head) | the first `n` rows, then stop reading the input |
+| [`lastrow(; key)`](https://farrellm.github.io/CausalFrames.jl/dev/api/rows/#lastrow) | the last row (per key), retimed to `stop` |
+| [`sortcycles(by; rev)`](https://farrellm.github.io/CausalFrames.jl/dev/api/rows/#sortcycles) | stably sort the rows sharing each time |
+| [`lag(offset)`](https://farrellm.github.io/CausalFrames.jl/dev/api/rows/#lag) | move every row `offset` later |
+| [`settime(spec)`](https://farrellm.github.io/CausalFrames.jl/dev/api/rows/#settime) | recompute `:time` from a column or function; rows may only move later |
 
 ### Column transformations
 
-The column set itself: which columns exist and in what order, and filling or
-joining values into them. Rows pass through one for one, unless `lookupjoin` is
-asked to drop unmatched ones.
-
 | Operator | Semantics |
 |---|---|
-| [`selectcolumns(sel...)`](https://farrellm.github.io/CausalFrames.jl/dev/api/columns/#selectcolumns) | keep the columns matching a name, `Regex`, name predicate, or collection of those (`:time` always kept) |
-| [`dropcolumns(sel...)`](https://farrellm.github.io/CausalFrames.jl/dev/api/columns/#dropcolumns) | drop the columns matching the same selector forms (`:time` never dropped) |
-| [`reordercolumns(sel...)`](https://farrellm.github.io/CausalFrames.jl/dev/api/columns/#reordercolumns) | move the matching columns to the front, in the selectors' order, the rest following in the input's order (`:time` always first) |
-| [`forwardfill(sel...; key, tolerance)`](https://farrellm.github.io/CausalFrames.jl/dev/api/columns/#forwardfill) | replace `missing` in the selected columns with that column's last non-missing value, per key, while not older than `tolerance` |
-| [`fillmissing(specs...)`](https://farrellm.github.io/CausalFrames.jl/dev/api/columns/#fillmissing) | replace `missing` with a per-column constant, given as `name => value` pairs or a `NamedTuple` |
-| [`asofjoin(right; key, tolerance, ...)`](https://farrellm.github.io/CausalFrames.jl/dev/api/columns/#asofjoin) | append the most recent right-pipeline row at or before each row's time |
-| [`lookupjoin(table; key, unmatched, ...)`](https://farrellm.github.io/CausalFrames.jl/dev/api/columns/#lookupjoin) | append the row with the same key from an in-memory table that has no time column; an unmatched row gets `missing`, raises, or is dropped |
+| [`selectcolumns(sel...)`](https://farrellm.github.io/CausalFrames.jl/dev/api/columns/#selectcolumns) | keep the matching columns (and `:time`) |
+| [`dropcolumns(sel...)`](https://farrellm.github.io/CausalFrames.jl/dev/api/columns/#dropcolumns) | drop the matching columns |
+| [`reordercolumns(sel...)`](https://farrellm.github.io/CausalFrames.jl/dev/api/columns/#reordercolumns) | move the matching columns to the front, after `:time` |
+| [`forwardfill(sel...; key, tolerance)`](https://farrellm.github.io/CausalFrames.jl/dev/api/columns/#forwardfill) | fill `missing` with the last value (per key, within `tolerance`) |
+| [`fillmissing(specs...)`](https://farrellm.github.io/CausalFrames.jl/dev/api/columns/#fillmissing) | fill `missing` with a constant per column |
+| [`asofjoin(right; key, tolerance, strict, leftprefix, rightprefix, righttime)`](https://farrellm.github.io/CausalFrames.jl/dev/api/columns/#asofjoin) | append the latest `right` row at or before each row |
+| [`lookupjoin(table; key, unmatched, leftprefix, rightprefix)`](https://farrellm.github.io/CausalFrames.jl/dev/api/columns/#lookupjoin) | append the row with the same key from a table without time |
 
-The forward-looking `futurejoin` lives in the `Acausal` submodule, under
-"Causality" below.
+Column selectors are names, `Regex`es, name predicates, or collections of them.
 
 ### Summarizing transforms
 
-Each folds one or more [summarizers](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/) over a set of rows.
+Each folds one or more [summarizers](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/) over a set of rows; `key`
+splits the fold by key value, and `keyset` declares the keys up front so every
+key is emitted each time.
 
 | Operator | Semantics |
 |---|---|
-| [`summarize(ss; key)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizing/#summarize) | summarize the whole window into rows at time `stop` |
-| [`summarizecycles(ss; key, keyset)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizing/#summarizecycles) | summarize each unique timestamp independently; a declared `keyset` emits every key in every cycle |
-| [`intervalize(clock, ss; key, keyset, closelast)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizing/#intervalize) | summarize over the intervals `[bₖ, bₖ₊₁)` a `clock` pipeline's times define, each emitted at its end time; a declared `keyset` emits every key in every interval |
-| [`summarizewindows(clock, lookback, ss; key, keyset)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizing/#summarizewindows) | at each tick `τ` of a `clock` pipeline, summarize the trailing window `[τ - lookback, τ)`; one row per tick, or per key with rows in its window (plus one empty row when a key's window empties), or per declared `keyset` key |
-| [`addsummarycolumns(ss; key)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizing/#addsummarycolumns) | append running summary values after each row |
-| [`addrollingcolumns(windows, ss; key, from)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizing/#addrollingcolumns) | append summaries over named trailing windows, columns prefixed `{window}_` |
+| [`summarize(ss; key)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizing/#summarize) | the whole window, emitted at `stop` |
+| [`summarizecycles(ss; key, keyset)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizing/#summarizecycles) | each time separately |
+| [`intervalize(clock, ss; key, keyset, closelast)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizing/#intervalize) | each interval between clock ticks, emitted at its end |
+| [`summarizewindows(clock, lookback, ss; key, keyset)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizing/#summarizewindows) | the window `[τ - lookback, τ)` at each clock tick `τ` |
+| [`addsummarycolumns(ss; key)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizing/#addsummarycolumns) | append running summaries of every row so far |
+| [`addrollingcolumns(windows, ss; key, from)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizing/#addrollingcolumns) | append summaries of `[t - lookback, t]` for each named window |
+
+```julia
+p |> addrollingcolumns((m5 = Minute(5), h1 = Hour(1)), Mean(:mid); key = :symbol)
+# appends m5_mid_mean and h1_mid_mean
+```
 
 ### Model fitting (MLJ)
 
+These need `using MLJ`.
+
 | Operator | Semantics |
 |---|---|
-| [`applymodels(models; column, key, tolerance, strict, name, operation)`](https://farrellm.github.io/CausalFrames.jl/dev/api/models/#applymodels) | append each row's prediction from the latest fitted model at or before it (per key), given a pipeline of `FitModel` outputs (needs `using MLJ`) |
-| [`addpredictions(clock, lookback, model, predictors, response; key, ...)`](https://farrellm.github.io/CausalFrames.jl/dev/api/models/#addpredictions) | refit an MLJ model at every clock tick `τ` over `[τ - lookback, τ)`, per key, and append each row's prediction from the latest model — training rows always precede the rows they predict |
-| [`modelreports(; column, name)`](https://farrellm.github.io/CausalFrames.jl/dev/api/models/#modelreports) | over a pipeline of fitted models: replace each model with its fit report |
+| [`applymodels(models; column, key, tolerance, strict, name, operation)`](https://farrellm.github.io/CausalFrames.jl/dev/api/models/#applymodels) | append each row's prediction from the latest model in `models` |
+| [`addpredictions(clock, lookback, model, predictors, response; key, name, operation, verbosity)`](https://farrellm.github.io/CausalFrames.jl/dev/api/models/#addpredictions) | refit `model` on a trailing window at each clock tick and append its predictions |
+| [`modelreports(; column, name)`](https://farrellm.github.io/CausalFrames.jl/dev/api/models/#modelreports) | replace each fitted model with its fit report |
 
 ## Summarizers
 
-The summarization transforms take one or more summarizers — or your own
-`Summarizer` subtype — and an optional `key` (one or more column names) to
-produce a separate summary per unique key value. Output columns are named by
-suffix, shown here for a column `:x` (and `:y`, for the pairwise ones):
+Output columns are named by suffix, shown here for columns `:x` and `:y`.
+Most summarize no rows as `missing`; the rest give the identity shown.
 
 | Summarizer | Output | Structure | Semantics |
 |---|---|---|---|
-| [`Count()`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#Count) | `:count` | group | rows summarized; `0` for no rows |
-| [`CountDistinct(:x)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#CountDistinct) | `:x_countdistinct` | monoid | distinct values seen, always an `Int`, `missing` counted as one of them; `0` for no rows |
-| [`Sum(:x)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#Sum) | `:x_sum` | group | `Σx`, widening as `Base.sum` does; `0` for no rows |
-| [`SumPower(:x, n)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#SumPower) | `:x_sumpower_n` | group | `Σxⁿ`; `0` for no rows |
-| [`Product(:x)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#Product) | `:x_product` | monoid | `Πx`; `1` for no rows |
-| [`DotProduct(:x, :y)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#DotProduct) | `:x_y_dotproduct` | group | `Σxy`; `0` for no rows |
-| [`Moment(:x, n)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#Moment) | `:x_moment_n` | group | the `n`-th raw moment, `Σxⁿ / count` |
-| [`Mean(:x)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#Mean) | `:x_mean` | group | arithmetic mean |
-| [`Variance(:x; corrected)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#Variance) | `:x_variance` | group | variance, following `Statistics.var` |
-| [`Std(:x; corrected)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#Std) | `:x_std` | group | standard deviation, following `Statistics.std` |
-| [`Covariance(:x, :y; corrected)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#Covariance) | `:x_y_covariance` | group | covariance, following `Statistics.cov` |
+| [`Count()`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#Count) | `:count` | group | number of rows; `0` |
+| [`CountDistinct(:x)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#CountDistinct) | `:x_countdistinct` | monoid | distinct values, `missing` included; `0` |
+| [`Sum(:x)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#Sum) | `:x_sum` | group | `Σx`; `0` |
+| [`SumPower(:x, n)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#SumPower) | `:x_sumpower_n` | group | `Σxⁿ`; `0` |
+| [`Product(:x)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#Product) | `:x_product` | monoid | `Πx`; `1` |
+| [`DotProduct(:x, :y)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#DotProduct) | `:x_y_dotproduct` | group | `Σxy`; `0` |
+| [`Moment(:x, n)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#Moment) | `:x_moment_n` | group | `n`-th raw moment |
+| [`Mean(:x)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#Mean) | `:x_mean` | group | mean |
+| [`Variance(:x; corrected)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#Variance) | `:x_variance` | group | variance, as `Statistics.var` |
+| [`Std(:x; corrected)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#Std) | `:x_std` | group | standard deviation, as `Statistics.std` |
+| [`Covariance(:x, :y; corrected)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#Covariance) | `:x_y_covariance` | group | covariance, as `Statistics.cov` |
 | [`Correlation(:x, :y)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#Correlation) | `:x_y_correlation` | group | Pearson correlation |
-| [`LinearRegression(predictors, response; name, intercept)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#LinearRegression) | a block of columns under the `name` prefix | group | ordinary least squares; see below |
-| [`Min(:x)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#Min) | `:x_min` | monoid | smallest value |
-| [`Max(:x)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#Max) | `:x_max` | monoid | largest value |
-| [`First(:x)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#First) | `:x_first` | monoid | value of the earliest row |
-| [`Last(:x)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#Last) | `:x_last` | monoid | value of the latest row |
-| [`FitModel(model, predictors, response)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#FitModel) | `:model` | — | fits `model` to the rows it summarizes (needs `using MLJ`) |
-
-Only the four accumulating summarizers and `CountDistinct` have an identity
-element, given in the table; the rest summarize no rows as `missing`.
-`CountDistinct` is also the one summarizer a `missing` does not poison — unlike
-a sum, a distinct count stays knowable — and the one whose state is not O(1),
-holding the distinct values it has seen. (MLJ exports a scientific type named
-`Count`, so alongside `using MLJ` the summarizer is `CausalFrames.Count()`.)
+| [`LinearRegression(predictors, response; intercept, name)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#LinearRegression) | `n`, `r2`, `stderr`, and a beta and t statistic per term | group | ordinary least squares |
+| [`Min(:x)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#Min) | `:x_min` | monoid | minimum |
+| [`Max(:x)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#Max) | `:x_max` | monoid | maximum |
+| [`First(:x)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#First) | `:x_first` | monoid | value in the first row |
+| [`Last(:x)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#Last) | `:x_last` | monoid | value in the last row |
+| [`FitModel(model, predictors, response; name, verbosity)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#FitModel) | `:model` | — | a fitted MLJ model (needs `using MLJ`, where `Count` must be written `CausalFrames.Count`) |
 
 ```julia
-p = readcsv("ticks.csv";
-        types = Dict(:time => Int, :bid => Float64, :ask => Float64)) |>
-    addcolumns(r -> (; mid = (r.bid + r.ask) / 2)) |>
-    addsummarycolumns([Count(), Sum(:mid), Min(:mid), Max(:mid)]; key = :symbol)
+p |> addsummarycolumns([Count(), Sum(:mid), Min(:mid), Max(:mid)]; key = :symbol)
 ```
 
-`Moment`, `Mean`, `Variance`, `Std`, `Covariance`, `Correlation`, and
-`LinearRegression` are *dependent* summarizers, computed from the counting and
-accumulating ones — `Moment(:mid, n)` from `Count()` and `SumPower(:mid, n)`,
-for instance. Those are folded alongside them but appear in the output only if
-requested themselves.
+Moments, variances, correlations and regressions are computed from shared
+counts and sums, which are folded once however many summarizers need them and
+appear in the output only if requested. An output column takes its element type
+from the input: `Min`, `Max`, `First` and `Last` keep it, and `Sum` widens as
+`Base.sum` does.
 
-`FitModel` emits the fitted model itself in a `:model` column — applied to a
-stream by `applymodels`, refit on a rolling window by `addpredictions`, and
-persisted by `writejls`.
-
-`LinearRegression` fits ordinary least squares of a response on one or more
-predictors, emitting a coefficient and a t statistic per term alongside `:r2`,
-`:stderr` (the residual standard error), and `:n`:
-
-```julia
-p |> addrollingcolumns((h1 = Hour(1),),
-    [LinearRegression([:mid, :size], :ret; name = :m1)])
-# h1_m1_n, h1_m1_r2, h1_m1_stderr, h1_m1_intercept_beta,
-# h1_m1_intercept_tstat, h1_m1_mid_beta, h1_m1_mid_tstat,
-# h1_m1_size_beta, h1_m1_size_tstat
-```
-
-Pass `intercept = false` to drop the constant term. The `name` prefix is what
-lets two regressions share a call — without it they collide on `:n`, `:r2`,
-and `:stderr`. Being dependent is what makes running several cheap: every
-regression is a function of the same `Count`, `Sum`, `SumPower`, and
-`DotProduct` accumulators, so overlapping predictors fold each cross product
-exactly once, and a `Variance` or `Correlation` requested beside them shares
-those accumulators too. A window without enough rows, or with collinear
-predictors, yields `NaN` rather than raising; `:n` always reports the honest
-row count.
-
-`addrollingcolumns` summarizes named trailing windows instead of the whole
-window so far: `addrollingcolumns((m5 = Minute(5), h1 = Hour(1)), Mean(:mid);
-key = :symbol)` appends `m5_mid_mean` and `h1_mid_mean`, each row
-summarizing the rows within its look-back (`t - lookback <= time <= t`). By
-default the pipeline summarizes itself; `from` names another pipeline to
-summarize. The summarized pipeline runs over a context widened backward by
-the longest look-back, so the first row already sees a full window; an
-empty window yields the summarizer's identity or `missing` as above.
-
-Rolling windows, and the clock-sampled windows of `summarizewindows`, pick
-their algorithm from the structure column above: `GroupSummarizer`s (`Sum`,
-`Mean`, …) slide a running state in O(1) per row by subtracting exiting rows,
-`MonoidSummarizer`s (`Min`, `Product`, …) fold each window from a segment tree
-of partial combinations in O(log window), and summarizers declaring neither
-re-fold each window from scratch — see DESIGN.md for the `combine!`/`downdate!`
-interface a custom structured summarizer implements. A summarizer on one of
-these paths should also implement `fresh!`, which zeroes a state in place: the
-transforms zero a state tuple per cycle, per interval and per window query, so
-building a new one there is a heap allocation per summarizer per row.
-
-An output column takes its element type from the input column: `Min`, `Max`,
-`First`, and `Last` reproduce it verbatim, while `Sum` and `SumPower` widen it
-exactly as `Base.sum` does (`Int32` sums to `Int64`, `Float32` to `Float32`).
-Summarizers are typed from the input schema, so folding a large window
-allocates on the order of kilobytes — see DESIGN.md for the interface a custom
-`Summarizer` implements.
+The structure column sets the window algorithm in `addrollingcolumns` and
+`summarizewindows`: a group summarizer slides in O(1) per row, a monoid folds a
+segment tree in O(log window), and anything else re-folds each window. See
+[DESIGN.md](DESIGN.md) for the interface a custom summarizer implements.
 
 ## Causality
 
-Every operator above is **causal**: its output at time `t` depends only on
-input rows with time `≤ t`. That gives the *chunk-concatenation property* —
-loading `[a, c)` equals concatenating the results of loading `[a, b)` and
-`[b, c)` — which is what makes chunked, streaming evaluation sound.
+Every exported operator is **causal**: its output at time `t` depends only on
+input rows with time `≤ t`. So loading `[a, c)` equals concatenating loads of
+`[a, b)` and `[b, c)`, which makes streaming sound.
 
-The forward-looking operators are the deliberate exceptions. They live in the
-`Acausal` submodule and are never re-exported, so opting into acausality is
-always explicit:
+The forward-looking exceptions live in the `Acausal` submodule, which is never
+re-exported:
 
 ```julia
 using CausalFrames.Acausal
 
 quotes |> futurejoin(fills; key = :symbol)  # earliest fill at or after each quote
 prices |> lead(Minute(5))                   # time -> time - offset
-# the permissive settime, which may move rows earlier:
-prices |> CausalFrames.Acausal.settime(r -> r.exchange_time)
+prices |> CausalFrames.Acausal.settime(r -> r.exchange_time)  # may move rows earlier
 ```
 
-The permissive `settime` is the one exception to the submodule's export rule:
-it is reached only as `CausalFrames.Acausal.settime`, never unqualified, so
-that `using CausalFrames.Acausal` leaves the causal `settime` usable.
+[`futurejoin`](https://farrellm.github.io/CausalFrames.jl/dev/api/columns/#Acausal.futurejoin) mirrors `asofjoin`, but can
+buffer every right row; [`lead`](https://farrellm.github.io/CausalFrames.jl/dev/api/rows/#Acausal.lead) mirrors `lag`; and
+the permissive [`settime`](https://farrellm.github.io/CausalFrames.jl/dev/api/rows/#Acausal.settime), not exported even
+from `Acausal`, mirrors `settime`.
 
-[`futurejoin`](https://farrellm.github.io/CausalFrames.jl/dev/api/columns/#Acausal.futurejoin)
-mirrors `asofjoin` with the match direction inverted — the **earliest** right
-row whose time is not before the left row's, `missing` where none qualifies —
-and [`lead`](https://farrellm.github.io/CausalFrames.jl/dev/api/rows/#Acausal.lead)
-mirrors `lag`; the permissive
-[`settime`](https://farrellm.github.io/CausalFrames.jl/dev/api/rows/#Acausal.settime)
-mirrors the causal one. One cost worth knowing before
-reaching for it: because `futurejoin` matches the earliest qualifying row, it
-buffers right rows per key until a left row consumes or outruns them, and
-proving that a key has no future match drains the right stream. Worst-case
-memory is therefore O(right rows), against `asofjoin`'s O(keys).
-
-The [Recipes](https://farrellm.github.io/CausalFrames.jl/dev/recipes/) page
-collects the patterns that are not obvious from the operator list: ranking
-within a group, joining a reference table, and using a derived stream as one.
-
-See [DESIGN.md](DESIGN.md) for the full design.
+The [Recipes](https://farrellm.github.io/CausalFrames.jl/dev/recipes/) page covers ranking within a group, reference-table
+joins, and fitting a model once to apply later. See [DESIGN.md](DESIGN.md) for
+the full design.

@@ -1,13 +1,13 @@
 """
     CausalPipeline(run)
 
-A lazy description of how to produce time-series data: conceptually a
-function `Context -> single-pass lazy iterator of DataFrame chunks` (time
-non-decreasing within and across chunks). Nothing runs until the iterator is
-consumed; [`load`](@ref) drains it into a [`CausalFrame`](@ref) and
-[`stream`](@ref) yields one frame per chunk. Build pipelines from sources
-([`emptyframe`](@ref), [`clock`](@ref), [`readcsv`](@ref)) and chain
-transforms with `|>`:
+A lazy description of how to produce time-series data. `run` maps a
+[`Context`](@ref) to a single-pass iterator of DataFrame chunks whose `:time`
+is non-decreasing within and across chunks. Nothing runs until the pipeline is
+evaluated by [`load`](@ref), [`stream`](@ref) or [`scan`](@ref).
+
+Build pipelines from sources (such as [`clock`](@ref) or [`readcsv`](@ref))
+and chain transforms with `|>`:
 
 ```julia
 p = readcsv("ticks.csv";
@@ -16,8 +16,8 @@ p = readcsv("ticks.csv";
     addcolumns(r -> (; mid = (r.bid + r.ask) / 2))
 ```
 
-Every operator must be *causal*: its output at time `t` may depend only on
-input rows with time `<= t`.
+Every operator is *causal*: its output at time `t` depends only on input rows
+with time `<= t`.
 """
 struct CausalPipeline{F}
     run::F
@@ -27,13 +27,12 @@ end
     load(ctx::Context, p::CausalPipeline) -> CausalFrame
     load(ctx::Context) -> (CausalPipeline -> CausalFrame)
 
-Evaluate the pipeline over the time window `ctx`, materializing the whole
-window into a frame. This is the only operation that forces the full window
-into memory; the frame wraps the streamed chunks as-is, without copying.
-An empty result yields a zero-row frame with only a `:time` column.
+Evaluate `p` over `ctx` and materialize the result as a [`CausalFrame`](@ref).
+The only evaluation that holds the whole window in memory; the frame wraps the
+produced chunks without copying them. An empty result gives a zero-row frame
+with only `:time`.
 
-The curried form composes with `|>`, so a chain can end in its own
-evaluation: `p |> load(ctx)` is equivalent to `load(ctx, p)`.
+The curried form ends a chain: `p |> load(ctx)` is `load(ctx, p)`.
 """
 function load(ctx::Context{T}, p::CausalPipeline) where {T}
     chunks = DataFrame[]
@@ -50,13 +49,11 @@ load(ctx::Context) = (p::CausalPipeline) -> load(ctx, p)
     scan(ctx::Context, p::CausalPipeline) -> Nothing
     scan(ctx::Context) -> (CausalPipeline -> Nothing)
 
-Evaluate the pipeline over `ctx`, discarding every chunk as it is produced.
-Nothing is materialized — this is how to run a pipeline for its side effects
-(see [`writecsv`](@ref)) without paying for a frame that would be thrown
-away. Chunks are validated exactly as [`load`](@ref) validates them.
+Evaluate `p` over `ctx` for its side effects, discarding each chunk as it is
+produced — the way to run a pipeline ending in a writer such as
+[`writecsv`](@ref). Chunks are validated as by [`load`](@ref).
 
-The curried form composes with `|>`, so a chain can end in its own
-evaluation: `p |> scan(ctx)` is equivalent to `scan(ctx, p)`.
+The curried form ends a chain: `p |> scan(ctx)` is `scan(ctx, p)`.
 """
 function scan(ctx::Context, p::CausalPipeline)
     prev = nothing
@@ -88,20 +85,16 @@ end
     stream(ctx::Context, p::CausalPipeline) -> iterator of CausalFrames
     stream(ctx::Context) -> (CausalPipeline -> iterator of CausalFrames)
 
-Evaluate the pipeline over `ctx` incrementally, yielding one
-[`CausalFrame`](@ref) per chunk without ever materializing the whole window.
-Chunk boundaries are chosen by the pipeline's source (see e.g. the
-`batchsize`/`chunkbytes` arguments of [`clock`](@ref) and
-[`readcsv`](@ref)); stateful operators carry their state across chunks, so
-concatenating the streamed frames equals `load` of the whole window.
+Evaluate `p` over `ctx` incrementally, yielding one [`CausalFrame`](@ref) per
+chunk. Chunk sizes are set by the source (for example `clock`'s `batchsize` or
+`readcsv`'s `chunkbytes`). Transforms carry their state across chunks, so
+concatenating the streamed frames equals `load(ctx, p)`.
 
-The frames' contexts tile `[ctx.start, ctx.stop)`: frame `i` covers
-`[bᵢ₋₁, bᵢ)` where `b₀ = ctx.start`, `bᵢ` is the first time of chunk
-`i + 1`, and the last frame's context stops at `ctx.stop`. The iterator is
-single-pass and maintains one chunk of lookahead.
+The frames' contexts tile the window: frame `i` covers `[bᵢ₋₁, bᵢ)`, where
+`b₀ = ctx.start` and `bᵢ` is the first time of chunk `i + 1`; the last frame
+extends to `ctx.stop`. The iterator is single-pass and looks one chunk ahead.
 
-The curried form composes with `|>`, so a chain can end in its own
-evaluation: `p |> stream(ctx)` is equivalent to `stream(ctx, p)`.
+The curried form ends a chain: `p |> stream(ctx)` is `stream(ctx, p)`.
 """
 stream(ctx::Context, p::CausalPipeline) = FrameStream(ctx, p.run(ctx))
 stream(ctx::Context) = (p::CausalPipeline) -> stream(ctx, p)

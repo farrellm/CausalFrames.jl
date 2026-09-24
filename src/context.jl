@@ -1,13 +1,16 @@
 """
     Context(start, stop)
 
-A time window over which a [`CausalPipeline`](@ref) is evaluated. The time
-type `T` may be any ordered type (`DateTime`, `Int`, `Float64`, ...).
-`start <= stop` is enforced.
+The time window a [`CausalPipeline`](@ref) is evaluated over.
 
-Sources clip their output to the half-open interval `[start, stop)`; a
-materialized [`CausalFrame`](@ref) may contain rows in the closed interval
-`[start, stop]` (intermediate operators may emit a row exactly at `stop`).
+# Arguments
+- `start`, `stop`: the window bounds, promoted to a common time type `T`. Any
+  ordered type works (`DateTime`, `Int`, `Float64`, …); `start <= stop` is
+  required.
+
+Sources clip their output to the half-open interval `[start, stop)`. A loaded
+[`CausalFrame`](@ref) may also hold rows at `stop`, since some transforms (such
+as [`summarize`](@ref)) emit there.
 """
 struct Context{T}
     start::T

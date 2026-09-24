@@ -12,27 +12,24 @@ const JLSHEADER = (format = :CausalFramesJLS, version = 1)
 
 """
     writejls(path; queue = 1) -> (CausalPipeline -> CausalPipeline)
-    writejls(p::CausalPipeline, path; ...) -> CausalPipeline
+    writejls(p::CausalPipeline, path; queue = 1) -> CausalPipeline
 
-A transparent pass-through transform that writes the stream to `path` through
-Julia's `Serialization` stdlib as it flows by, yielding every chunk downstream
-unchanged — [`writecsv`](@ref)'s contract in a format that stores any Julia
-value a column holds, so columns that neither CSV nor parquet can encode (a
-fitted model, a `NamedTuple`) round-trip through [`readjls`](@ref).
+A pass-through transform writing every chunk to `path` with Julia's
+`Serialization`, then yielding it downstream unchanged. It stores any value a
+column can hold — fitted models, `NamedTuple`s — which CSV and parquet cannot.
+Read the file back with [`readjls`](@ref).
 
-Each chunk becomes one serialized record, written and flushed as it is
-produced on a background task fed by a bounded queue of depth `queue`, as for
-`writecsv`. The file is truncated when the run starts and finalized when
-the stream is exhausted; a stream with no rows yields a file holding only its
-header, which reads back as an empty stream. Every complete record of an
-interrupted run stays readable.
+# Arguments
+- `path`: the file, truncated when the pipeline starts running.
 
-A JLS file is readable only by a compatible Julia and compatible versions of the
-packages whose types it holds, so it is a persistence format for a pipeline's
-own outputs, not an interchange format.
+# Keywords
+- `queue = 1`: how many chunks may wait for the writer before the pipeline
+  blocks; `0` hands each chunk over directly. Must be non-negative.
 
-The curried form composes with `|>`; the uncurried form applies directly, so
-`writejls(p, path)` is equivalent to `p |> writejls(path)`.
+Each chunk is one record, written and flushed on a background task. The file is
+complete once the stream is exhausted, but every record written before an
+interruption stays readable. A JLS file can be read only with a compatible
+Julia and compatible versions of the packages whose types it holds.
 """
 function writejls(path::AbstractString; queue::Integer = 1)
     queue >= 0 ||
@@ -67,23 +64,18 @@ end
 """
     readjls(path; closed = false) -> CausalPipeline
 
-A source reading a file written by [`writejls`](@ref): one chunk per record,
-each clipped to the context's half-open interval `[start, stop)`, with the time
-converted to the context's time type. Reading is incremental — a record at a
-time, never the whole file — and stops as soon as a time past the window is
-seen, but there is no index to seek by, so a read costs the file's prefix up to
-`stop`. As for [`readcsv`](@ref), sortedness is checked in the records actually
-read.
+A source reading a file written by [`writejls`](@ref), one chunk per record,
+clipped to `[start, stop)`. Records are read one at a time, stopping at the
+first time past the window; there is no index, so a read costs the file up to
+`stop`.
 
-Keyword arguments:
+# Arguments
+- `path`: the file. One not written by `writejls`, or whose last record is
+  truncated, is an `ArgumentError`. Deserialization can construct any type, so
+  read only files you trust.
 
-- `closed`: clip to the closed interval `[start, stop]` instead, keeping the
-  rows at `stop` (which a frame tolerates).
-
-A file that was not written by `writejls` is an `ArgumentError`, as is one whose
-last record was cut short by an interrupted write (every record before it has
-already been emitted). Deserialization can construct arbitrary types, so read
-only files you trust.
+# Keywords
+- `closed = false`: clip to `[start, stop]` instead, keeping rows at `stop`.
 """
 function readjls(path::AbstractString; closed::Bool = false)
     return CausalPipeline() do ctx::Context

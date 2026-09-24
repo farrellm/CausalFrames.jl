@@ -1,9 +1,8 @@
 # Sources
 
-A source starts a pipeline: it produces rows rather than transforming them, and
-clips what it produces to the context's half-open interval `[start, stop)`.
-These construct or combine streams, or lift an in-memory table, without touching
-a file — the file-backed sources are under [File I/O](io.md).
+Sources start a pipeline, producing rows clipped to `[start, stop)`. The ones
+here build, combine or lift in-memory streams; file readers are under
+[File I/O](io.md).
 
 ## `emptyframe`
 

@@ -5,24 +5,26 @@
 struct Trusted end
 
 """
-    CausalFrame(ctx::Context, chunks)
+    CausalFrame(ctx::Context, chunks::Vector{DataFrame})
     CausalFrame(ctx::Context, df::DataFrame)
 
-A materialized time-series table over the window `ctx`. Backed by one or
-more time-disjoint DataFrame chunks; the chunk structure is an
-implementation detail and is not part of the public API.
+A materialized time-series table over the window `ctx`, usually obtained from
+[`load`](@ref) rather than constructed directly.
 
-Invariants, checked at construction:
+# Arguments
+- `ctx`: the window the data covers.
+- `chunks` / `df`: the data, as time-ordered DataFrames. The frame takes
+  ownership of them; do not mutate them afterwards.
 
-- every chunk has a `:time` column with element type `<: T`;
-- all (non-empty) chunks share the same column names (element types may
-  differ between chunks; `DataFrame(frame)` promotes on concatenation);
-- time is non-decreasing within each chunk and across chunk boundaries;
-- all times lie in the closed interval `[ctx.start, ctx.stop]`.
+The constructor checks, throwing an `ArgumentError` otherwise, that every
+non-empty chunk has a `:time` column with element type `<: T`, that all
+non-empty chunks share their column names (element types may differ;
+`DataFrame(frame)` promotes them), that time is non-decreasing within and
+across chunks, and that every time lies in `[ctx.start, ctx.stop]`.
 
-Access the data via the Tables.jl interface, `DataFrame(frame)`,
-[`context`](@ref), `nrow(frame)`, or `names(frame)`. The constructor takes
-ownership of the passed DataFrames; do not mutate them afterwards.
+The backing chunks are not part of the API. Read the data through the Tables.jl
+interface or `DataFrame(frame)`, and query it with [`context`](@ref),
+`nrow(frame)` and `names(frame)`.
 """
 struct CausalFrame{T}
     context::Context{T}
@@ -65,7 +67,7 @@ CausalFrame(ctx::Context, df::DataFrame) = CausalFrame(ctx, [df])
 """
     context(frame::CausalFrame) -> Context
 
-The time window this frame was loaded over.
+The window the frame was loaded over.
 """
 context(frame::CausalFrame) = frame.context
 
@@ -77,11 +79,10 @@ Base.names(frame::CausalFrame) =
     isempty(frame.chunks) ? ["time"] : names(first(frame.chunks))
 
 """
-    DataFrame(frame::CausalFrame)
+    DataFrame(frame::CausalFrame) -> DataFrame
 
-Concatenate the frame's chunks into a plain `DataFrame` — an explicit exit
-from the causal world, and the point where the data is copied. A frame with
-no rows yields a zero-row DataFrame with only its `:time` column.
+Copy the frame into a plain `DataFrame`, promoting column element types across
+chunks. A frame with no rows gives a zero-row DataFrame with only `:time`.
 """
 function DataFrames.DataFrame(frame::CausalFrame{T}) where {T}
     isempty(frame.chunks) && return DataFrame(time = T[])

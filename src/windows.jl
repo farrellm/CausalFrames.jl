@@ -25,54 +25,36 @@
     summarizewindows(clock, lookback, summarizers; key = nothing,
                      keyset = nothing) -> (CausalPipeline -> CausalPipeline)
     summarizewindows(p::CausalPipeline, clock, lookback, summarizers;
-                     key = nothing, keyset = nothing) -> CausalPipeline
+                     ...) -> CausalPipeline
 
-A transform summarizing a trailing window at every tick of a **clock** pipeline:
-at each time `τ` in the clock's `:time` column, the rows with time in
-`[τ - lookback, τ)` — inclusive of the window's start, exclusive of the tick
-itself — are summarized and emitted at `τ`, dropping the input columns.
-`summarizers` is a [`Summarizer`](@ref) or a collection of them; the output
-columns are `time`, the key columns, then each summarizer's value columns. Only
-the clock's `:time` column is used.
+A transform summarizing a trailing window at every clock tick: at each tick
+`τ`, the rows with time in `[τ - lookback, τ)` are summarized and emitted at
+`τ`, with columns `time`, the key columns, then the summaries; the input
+columns are dropped. The input runs over `[start - lookback, stop)`, so the
+first tick sees a full window. Unlike [`intervalize`](@ref)'s intervals,
+windows may overlap or leave gaps.
 
-It generalizes [`intervalize`](@ref): intervalize's intervals are the gaps
-between consecutive ticks, while these windows have a fixed length that may be
-shorter or longer than the gaps, so windows may overlap. A `lookback` equal to a
-regular clock's spacing reproduces intervalize's intervals. The input runs over
-the context widened to `[start - lookback, stop)`, so the first tick already
-sees a full window; this requires the time type to support subtraction (numbers
-and `Dates` types do), and `lookback` must be non-negative.
+# Arguments
+- `clock`: a pipeline whose `:time` column gives the ticks (other columns are
+  ignored), such as [`clock`](@ref).
+- `lookback`: the window length; non-negative and subtractable from the time
+  type.
+- `summarizers`: a [`Summarizer`](@ref) or a collection of them.
 
-Without `key` the output is a **regular grid**: every tick emits exactly one
-row, an empty window included, with the summarizers' identity/missing values
-(`count = 0`, `mean = missing`), so element types widen to admit them. With
-`key` (a column name or collection of column names) the output is **sparse**:
-each tick emits one row per key with rows in its window, sorted by key — plus
-one row of empty values for each key that had rows in its window at the
-previous tick and has none now. That row is what lets a consumer tracking the
-latest row per key (such as [`asofjoin`](@ref)) see a key's summary go empty
-rather than keep its stale value; the key is then not emitted again until its
-window holds rows.
+# Keywords
+- `key = nothing`: a column name or collection of distinct column names other
+  than `:time`. Without a key every tick emits one row, an empty window its
+  summarizers' empty values. With a key each tick emits one row per key with
+  rows in its window, sorted by key, plus one row of empty values for each key
+  whose window has just emptied, so a downstream [`asofjoin`](@ref) sees it go
+  empty.
+- `keyset = nothing`: the key values, declared up front (requires `key`), as for
+  [`intervalize`](@ref). Every tick then emits one row per declared key, in
+  declared order.
 
-When the key values are known up front, `keyset` (which requires `key`)
-declares them and makes the keyed output **dense**: every tick emits exactly
-one row per declared key, in declared order, a key with an empty window
-included with the empty values — so there is no separate vanish row. With one
-key column `keyset` is a collection of its values; with several, a collection
-of tuples (or named tuples) of them. The output key columns take their element
-types from `keyset`, a data stream producing no chunks still emits the whole
-grid, and a row admitted to a window whose key is not in `keyset` throws an
-`ArgumentError`.
-
-Windows over [`GroupSummarizer`](@ref)s slide in O(1) per row, subtracting rows
-as they leave. Windows over [`MonoidSummarizer`](@ref)s (`Min`, `First`, …) fold
-from a segment tree of partial combinations, O(1) amortized per row plus
-O(log window) per key per tick. Anything else is re-folded over each window,
-O(window) per tick.
-
-The curried form composes with `|>`; the uncurried form applies directly, so
-`summarizewindows(p, clock, lookback, ss; key)` is equivalent to
-`p |> summarizewindows(clock, lookback, ss; key)`.
+A window slides in O(1) per row when every summarizer is a
+[`GroupSummarizer`](@ref), in O(log window) per key per tick when all are
+[`MonoidSummarizer`](@ref)s, and is re-folded in O(window) otherwise.
 """
 function summarizewindows(clk::CausalPipeline, lookback, summarizers;
     key = nothing, keyset = nothing)

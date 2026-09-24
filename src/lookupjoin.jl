@@ -12,42 +12,31 @@
     lookupjoin(p::CausalPipeline, table; key, ...) -> CausalPipeline
 
 A transform joining each row to the row of `table` with the same key, appending
-the table's non-key columns. `table` is any Tables.jl table *without* a `:time`
-column — a `DataFrame`, a `NamedTuple` of vectors, a vector of `NamedTuple`s, a
-`CSV.File`. Having no time, the table holds for the whole window, so the join is
-causal at every row; to join data that changes over time use
-[`asofjoin`](@ref).
+`table`'s other columns. Having no time, `table` holds for the whole window.
+To join data that changes over time, use [`asofjoin`](@ref).
 
-`key` (a column name or collection of column names) is required and must be
-present in both the table and the input. Keys are exact-matched with `isequal`,
-so an `Int` key matches a `Float64` one and `missing` matches `missing`. The key
-columns appear once in the output, taken from the input row, never prefixed.
-The table must hold at most one row per key — a duplicate is an `ArgumentError`
-when `lookupjoin` is called.
+# Arguments
+- `table`: any Tables.jl table without a `:time` column (a `DataFrame`, a
+  `CSV.File`, …), holding at most one row per key; a duplicate key is an
+  `ArgumentError`. It is validated and copied when `lookupjoin` is called. An
+  empty table still appends its columns.
 
-`unmatched` decides what happens to an input row whose key is not in the table:
-
-- `:missing` (default): the appended columns have element type
-  `Union{Missing, T}` and are `missing` in that row.
-- `:error`: an `ArgumentError`. The appended columns keep the table's element
-  types.
-- `:drop`: the row is dropped. The appended columns keep the table's element
-  types; this is the one mode that changes the number of rows.
-
-`leftprefix` / `rightprefix` rename that side's non-time, non-key columns to
-`"{prefix}_{name}"`. Output column names must be unique after prefixing.
-
-The table is validated and indexed when `lookupjoin` is called, and its columns
-are copied, so mutating `table` afterwards does not affect the pipeline. A table
-with no rows still appends its columns.
+# Keywords
+- `key`: required; a column name or collection of column names, present in both
+  `table` and the input. Keys match by `isequal`, so `1` matches `1.0` and
+  `missing` matches `missing`. Key columns appear once, from the input, never
+  prefixed.
+- `unmatched = :missing`: what to do with an input row whose key is not in
+  `table` — `:missing` fills the appended columns with `missing` (so they become
+  `Union{Missing, T}`), `:error` throws an `ArgumentError`, and `:drop` drops the
+  row. Under `:error` and `:drop` the appended columns keep `table`'s types.
+- `leftprefix = nothing`, `rightprefix = nothing`: rename that side's non-time,
+  non-key columns to `"{prefix}_{name}"`. Output names must be unique.
 
 ```julia
 dim = DataFrame(sym = ["a", "b"], sector = ["tech", "energy"])
 trades |> lookupjoin(dim; key = :sym)
 ```
-
-The curried form composes with `|>`; the uncurried form applies directly, so
-`lookupjoin(p, table; ...)` is equivalent to `p |> lookupjoin(table; ...)`.
 """
 function lookupjoin(table; key = nothing, unmatched::Symbol = :missing,
     leftprefix = nothing, rightprefix = nothing)

@@ -12,45 +12,33 @@
 """
     intervalize(clock, summarizers; key = nothing, keyset = nothing,
                 closelast = false) -> (CausalPipeline -> CausalPipeline)
-    intervalize(p::CausalPipeline, clock, summarizers; key = nothing,
-                keyset = nothing, closelast = false) -> CausalPipeline
+    intervalize(p::CausalPipeline, clock, summarizers; ...) -> CausalPipeline
 
-A transform summarizing the data stream over the intervals defined by a
-**clock** pipeline: the clock's `:time` column supplies boundaries
-`b₀ < b₁ < … < b_K`, and each complete interval `[bₖ, bₖ₊₁)` — inclusive of
-its begin, exclusive of its end — is summarized independently, dropping the
-input columns. Everything after `clock` mirrors [`summarize`](@ref):
-`summarizers` is a [`Summarizer`](@ref) or a collection of them, and each
-summary is emitted at the interval's **end** time `bₖ₊₁`, with columns `time`,
-the key columns, then each summarizer's value columns. Only the clock's `:time`
-column is used; any other columns it carries are ignored. Input rows before
-`b₀` fall in no interval and are dropped.
+A transform summarizing the input over the intervals between consecutive clock
+times `b₀ < b₁ < …`. The rows in each `[bₖ, bₖ₊₁)` are summarized and emitted
+at `bₖ₊₁`, with columns `time`, the key columns, then the summaries; the input
+columns are dropped. Rows before `b₀` are dropped.
 
-Without `key` the output is a **regular grid**: every complete interval emits
-exactly one row, an empty interval (no input rows) included with the
-summarizers' identity/missing values (`count = 0`, `sum = 0`,
-`mean = missing`), so the output-column element types widen to admit them
-(e.g. `Mean` gives `Union{Missing, Float64}`). With `key` (a column name or
-collection of column names) the output is **sparse**: unseen keys cannot be
-emitted causally, so each interval emits one row per key present in it, sorted
-by key, and an interval with no rows emits nothing.
+# Arguments
+- `clock`: a pipeline whose `:time` column gives the boundaries (other columns
+  are ignored), such as [`clock`](@ref). An empty clock gives no output.
+- `summarizers`: a [`Summarizer`](@ref) or a collection of them.
 
-When the key values are known up front, `keyset` (which requires `key`)
-declares them and makes the keyed output **dense**: every complete interval
-emits exactly one row per declared key, in declared order, a key with no rows in
-the interval included with the empty values, so element types widen as for the
-keyless grid. With one key column `keyset` is a collection of its values; with
-several, a collection of tuples (or named tuples) of them. The output key
-columns take their element types from `keyset`, a data stream producing no
-chunks still emits the whole grid, and a row falling in an interval whose key
-is not in `keyset` throws an `ArgumentError`.
+# Keywords
+- `key = nothing`: a column name or collection of distinct column names other
+  than `:time`. Without a key every interval emits one row, an empty interval
+  its summarizers' empty values (`count = 0`, `mean = missing`). With a key each
+  interval emits one row per key present, sorted by key, and an empty interval
+  emits nothing.
+- `keyset = nothing`: the key values, declared up front (requires `key`): a
+  collection of values for one key column, or of tuples or named tuples for
+  several. Every interval then emits one row per declared key, in declared
+  order, with empty values for keys without rows. Key columns take `keyset`'s
+  types, and a row with an undeclared key is an `ArgumentError`.
+- `closelast = false`: also emit the partial interval after the last boundary,
+  at `stop`.
 
-The trailing partial interval `[b_K, stop)` after the final boundary is
-emitted only when `closelast = true`, timestamped at the context end `stop`;
-otherwise it is dropped. An empty clock produces no output.
-
-The curried form composes with `|>`; the uncurried form applies directly, so
-`intervalize(p, clock, ss; …)` is equivalent to `p |> intervalize(clock, ss; …)`.
+Empty values widen the output types (`Mean` gives `Union{Missing, Float64}`).
 """
 function intervalize(clk::CausalPipeline, summarizers; key = nothing,
     keyset = nothing, closelast::Bool = false)

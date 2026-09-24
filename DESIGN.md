@@ -1,17 +1,18 @@
 # CausalFrames.jl — Design
 
-CausalFrames represents time-series tables: tabular data with a monotonically
-non-decreasing `time` column. Data is described *lazily* as a pipeline;
-evaluation is streaming end to end — operators pass chunks between each other
-lazily. A time window (`Context`) plus a pipeline yields a materialized
-`CausalFrame` via `load` (the only operation that forces the whole window
-into memory) or an iterator of frames via `stream`.
+CausalFrames represents time-series tables: tabular data with a non-decreasing
+`time` column. Data is described *lazily* as a pipeline and evaluated by
+streaming chunks from operator to operator. A time window (`Context`) plus a
+pipeline gives a `CausalFrame` via `load` (the only operation that holds the
+whole window in memory), an iterator of frames via `stream`, or nothing via
+`scan`, which runs the pipeline for its side effects.
 
 ```julia
 using CausalFrames, Dates
 
-p = readcsv("ticks.csv") |>
-    filterrows(r -> r.price > 0) |>
+p = readcsv("ticks.csv";
+        types = Dict(:time => DateTime, :bid => Float64, :ask => Float64)) |>
+    filterrows(r -> r.bid > 0) |>
     addcolumns(r -> (; mid = (r.bid + r.ask) / 2))
 
 frame = load(Context(DateTime(2026, 1, 1), DateTime(2026, 2, 1)), p)
@@ -22,143 +23,116 @@ frame = load(Context(DateTime(2026, 1, 1), DateTime(2026, 2, 1)), p)
 ### `Context{T}`
 
 A time window with fields `start::T` and `stop::T`, `start <= stop` enforced
-at construction. The time type `T` is generic: anything ordered (`isless`)
-works — `DateTime`, `Date`, `Int` ticks, `Float64` seconds, …
+at construction. `T` is anything ordered (`isless`): `DateTime`, `Date`, `Int`
+ticks, `Float64` seconds, ….
 
 ### `CausalFrame{T}`
 
-A materialized table. **Opaque**: it hides its backing storage because a
-frame is composed of one or more time-disjoint DataFrame chunks — the chunks
-a pipeline streamed, wrapped without copying. Users never manipulate the
-underlying DataFrames directly.
+A materialized table, **opaque**: it is one or more time-disjoint DataFrame
+chunks (the chunks a pipeline streamed, wrapped without copying), and users
+never touch them directly.
 
 Invariants, checked at construction:
 
-- every chunk has a `:time` column whose element type is `<: T`;
-- all chunks share the same column names (element types may differ between
-  chunks; `DataFrame(cf)` promotes on concatenation);
-- time is non-decreasing within each chunk and across chunk boundaries;
-- all times lie in the **closed** interval `[start, stop]` of the frame's
-  context (see "Interval semantics" below).
+- every chunk has a `:time` column with element type `<: T`;
+- all chunks share their column names (element types may differ;
+  `DataFrame(cf)` promotes on concatenation);
+- time is non-decreasing within and across chunks;
+- all times lie in the **closed** interval `[start, stop]` (see "Interval
+  semantics").
 
-The public constructors validate all of this — including an O(n) sortedness
-scan — because they accept arbitrary user DataFrames. `load` and `stream`
-instead construct through an internal trusted inner constructor (the
-`Trusted` token): the chunk protocol they consume already guarantees the
-invariants, and re-scanning each streamed chunk would tax the hot path for
-nothing. They keep O(1)-per-chunk guards — cross-chunk time order and
-window bounds — so a misbehaving hand-rolled `CausalPipeline` source is
-still caught; within-chunk sortedness and schema equality are trusted to
-the protocol (sources validate their own input, e.g. `readcsv` checks the
-file's order; transforms preserve order). Any other construction site must
-use the validating path.
+The public constructors validate all of this, including an O(n) sortedness
+scan, because they accept arbitrary DataFrames. `load` and `stream` use an
+internal trusted constructor (the `Trusted` token) instead: the chunk protocol
+already guarantees the invariants (sources validate their input, transforms
+preserve order), so they keep only O(1)-per-chunk guards — cross-chunk order and
+window bounds — which still catch a misbehaving hand-rolled source. Any other
+construction site must use the validating path.
 
-Public access is through:
+Public access:
 
-- the Tables.jl interface — a **column-access** table (`Tables.columns`
-  materializes once, as a copy; row iteration is served through Tables.jl's
-  row-view fallback over those columns, so consumers touching both pay one
-  materialization, not two). `Tables.schema(cf)` is cheap — names from the
-  first chunk, eltypes promoted across chunks without a row scan — and
-  matches what `DataFrame(cf)` produces. `Tables.partitions(cf)` yields one
-  partition per backing chunk (as copies, keeping the backing opaque) for
-  partition-aware sinks; an empty frame yields the single zero-row frame
-  `DataFrame(cf)` would, so both views agree;
-- `DataFrame(cf)` — concatenates chunks into a plain DataFrame (an explicit
-  exit from the causal world, and the point where the data is copied);
+- the Tables.jl interface, as a **column-access** table. `Tables.columns`
+  materializes once, as a copy; rows are served by Tables.jl's row-view
+  fallback over those columns, so touching both costs one materialization.
+  `Tables.schema(cf)` needs no row scan (names from the first chunk, eltypes
+  promoted across chunks) and matches `DataFrame(cf)`. `Tables.partitions(cf)`
+  yields one copied partition per chunk; an empty frame yields the zero-row
+  frame `DataFrame(cf)` would;
+- `DataFrame(cf)`, which concatenates the chunks into a copy;
 - `context(cf)`, `nrow(cf)`, `names(cf)`.
 
 ### `CausalPipeline`
 
 A lazy description of how to produce data: conceptually a function
-`Context -> single-pass lazy iterator of DataFrame chunks`, with time
-non-decreasing within and across chunks and empty chunks never emitted.
-The run function's type is a parameter (`CausalPipeline{F}`), never an
-abstract `Function` field. Nothing runs until the iterator is consumed. Two entry points evaluate a
-pipeline:
+`Context -> single-pass lazy iterator of DataFrame chunks`, time non-decreasing
+within and across chunks and no chunk empty. The run function's type is a
+parameter (`CausalPipeline{F}`), never an abstract `Function` field. Nothing
+runs until the iterator is consumed, by one of:
 
-- `load(ctx, pipeline) -> CausalFrame` — drains the iterator into a frame
-  that wraps all the chunks, without copying; the only operation that
-  forces the whole window into memory. An empty result yields a zero-row
-  frame with only a `:time` column.
-- `stream(ctx, pipeline) -> iterator of CausalFrames` — yields one frame per
-  chunk (see "Causality and streaming" below).
-- `scan(ctx, pipeline) -> nothing` — drains the iterator, discarding every
-  chunk. Nothing is materialized: this runs a pipeline for its side effects
-  (`writecsv`) without paying for a frame that would be thrown away.
+- `load(ctx, p) -> CausalFrame`: drains the iterator into a frame wrapping the
+  chunks without copying. An empty result gives a zero-row frame with only
+  `:time`.
+- `stream(ctx, p) -> iterator of CausalFrames`: one frame per chunk (see
+  "Causality and streaming").
+- `scan(ctx, p) -> nothing`: drains the iterator, discarding every chunk, to
+  run a pipeline for its side effects (such as `writecsv`).
 
-All three also have curried, context-only forms — `load(ctx)`, `stream(ctx)`
-and `scan(ctx)` return a function of the pipeline — so a chain can end in its
-own evaluation: `source |> transform(args) |> load(ctx)`. As with the
-transforms, the two-argument form is primary and the curried one is a thin
-wrapper.
-
-`load` and `scan` apply the same O(1)-per-chunk guards (cross-chunk order,
-window bounds) via the shared `checkchunk`, and `stream` applies the
-equivalent ones as it places sub-context boundaries; the O(n) within-chunk
-scans of the public `CausalFrame` constructor stay the chunk protocol's
-responsibility.
+Each also has a curried form (`load(ctx)` returns a function of the pipeline),
+so a chain can end in its own evaluation: `p |> transform(args) |> load(ctx)`.
+The two-argument form is primary. `load` and `scan` share the O(1) guards in
+`checkchunk`; `stream` applies the same guards as it places sub-context
+boundaries.
 
 ## Operators
 
-Two kinds, both compatible with the chaining operator `|>`:
-
 - **Sources** take ordinary arguments and return a `CausalPipeline`.
 - **Transforms** are curried: `filterrows(pred)` returns a
-  `CausalPipeline -> CausalPipeline` function, so
-  `source |> transform(args)` chains naturally. Each transform also has an
-  uncurried, pipeline-first form `transform(p, args)` (e.g.
-  `filterrows(p, pred)`), equivalent to `p |> transform(args)`, for when the
-  applied form reads clearer than a chain. The curried form is primary; the
-  uncurried form is a thin wrapper, so `|>` stays overhead-free.
+  `CausalPipeline -> CausalPipeline` function, so `source |> transform(args)`
+  chains. Each also has a pipeline-first form, `filterrows(p, pred)`, a thin
+  wrapper over the curried one.
 
 | Operator | Kind | Semantics |
 |---|---|---|
-| `emptyframe()` | source | zero rows, just a `:time` column |
-| `concatenate(ps...)` | source | run the pipelines one after another over the same context and emit their chunks end to end; they must be passed in time order and have identical columns (see "Concatenation") |
-| `merge(ps...; batchsize)` | source | run the pipelines concurrently over the same context and interleave their rows by time; columns may differ (the output is their union, `missing` where a pipeline lacks one) and ties break by argument order (see "Merging") |
-| `clock(interval; batchsize)` | source | rows at `start, start + interval, …` while `< stop`; no other columns; generated lazily in chunks of `batchsize` rows |
-| `readtable(table; time, checkorder, sort, closed, skipmissing)` / `readtable(frame; closed, checkcontext)` | source | an in-memory Tables.jl table, `DataFrame` or `CausalFrame`; the time column chosen as for `readcsv`, checked for order (`checkorder`) or stably sorted (`sort`); a missing time dropped with `skipmissing`, an error without it (see "Missing times"); rows clipped to `[start, stop)`, or `[start, stop]` with `closed`; only in-window rows are copied, and a frame's whole-window chunks not even those; a frame refuses a context outside its own unless `checkcontext = false`, and closes the window by default when the stops match (see "Tables as sources") |
-| `readcsv(path; types, time, rename, delim, sort, chunkbytes, closed, skipmissing)` | source | CSV file, every column read as `String` unless `types` opts it into a concrete type; the time column (named `:time`, or chosen by `time` as a column name or a per-row function) must be typed and sorted — or, with `sort`, is stably sorted, the whole file scanned and the in-window rows emitted as one chunk (see "Sorting a file source"); `rename` maps column names first; a missing time dropped with `skipmissing`, an error without it (see "Missing times"); rows clipped to `[start, stop)`, or `[start, stop]` with `closed`; read incrementally in chunks of roughly `chunkbytes` bytes — never all at once — stopping as soon as a time past the window is seen |
-| `writecsv(path; queue, ...)` | transform | transparent pass-through sink: writes each chunk to `path` as it flows by and yields it downstream unchanged (see "CSV output") |
-| `readparquet(path; time, rename, sort, closed, skipmissing, backend)` | source | parquet file, read through DuckDB or Parquet2 (either backend suffices; DuckDB preferred); column types come from the file itself; the time column (named `:time`, or chosen by `time` as a column name or a per-row function) must be sorted — or, with `sort`, is stably sorted, in the query under DuckDB and in memory otherwise (see "Sorting a file source"); `rename` maps column names first; a missing time dropped with `skipmissing`, an error without it (see "Missing times"); rows clipped to `[start, stop)`, or `[start, stop]` with `closed`; read one chunk at a time — a DuckDB result chunk, or a Parquet2 row group — with the window used to skip what cannot be in it (see "Parquet I/O") |
-| `writeparquet(path; queue, rowgroupsize, backend, ...)` | transform | transparent pass-through sink through Parquet2 or DuckDB (either suffices; Parquet2 preferred): buffers chunks until `rowgroupsize` rows are pending and writes them as one row group, yielding every chunk downstream unchanged; the file is valid only once finalized (see "Parquet I/O") |
-| `readjls(path; closed)` | source | a file written by `writejls`, one chunk per record; rows clipped to `[start, stop)`, or `[start, stop]` with `closed`; read a record at a time, stopping as soon as a time past the window is seen (see "JLS I/O") |
-| `writejls(path; queue)` | transform | transparent pass-through sink through the `Serialization` stdlib: serializes each chunk as it flows by, so columns of any Julia type round-trip (see "JLS I/O") |
-| `filterrows(pred)` | transform | keep rows where `pred(row)` is `true` |
-| `addcolumns(f)` | transform | `f(row)` returns a `NamedTuple` of new column values for that row; may **not** contain a `time` key (this preserves the time invariant without re-validation) |
-| `selectcolumns(selectors...)` | transform | keep only the matching columns, in the input's own order (see "Column selectors") |
-| `dropcolumns(selectors...)` | transform | keep only the non-matching columns, in the input's own order (see "Column selectors") |
-| `reordercolumns(selectors...)` | transform | move the matching columns to the front, in the selectors' own order, the rest following in the input's order (see "Column selectors") |
-| `summarize(ss; key)` | transform | summarize the whole context into rows at time `stop`; drops input columns |
-| `summarizecycles(ss; key, keyset)` | transform | summarize each cycle (maximal run of rows sharing a timestamp) independently; drops input columns; a declared `keyset` makes keyed output dense (see "Declared key sets") |
-| `intervalize(clock, ss; key, keyset, closelast)` | transform | summarize over the intervals a clock pipeline defines (`[bₖ, bₖ₊₁)`, timestamped at `bₖ₊₁`); keyless is a regular grid, keyed is sparse, keyed with a declared `keyset` is dense (see "Interval summarization") |
-| `summarizewindows(clock, lookback, ss; key, keyset)` | transform | at each tick `τ` of a clock pipeline, summarize the trailing window `[τ - lookback, τ)` at `τ`; keyless is a regular grid, keyed is sparse plus one empty row when a key's window empties, keyed with a declared `keyset` is dense (see "Window summarization") |
-| `addsummarycolumns(ss; key)` | transform | keep input columns, append the running summary value after each row |
-| `addrollingcolumns(windows, ss; key, from)` | transform | keep input columns, append each summarizer's value over each named trailing window, prefixed `"{window}_"` (see "Rolling windows") |
-| `asofjoin(right; key, tolerance, strict, leftprefix, rightprefix, righttime)` | transform | left as-of join: append the most recent right row with time `<= time` (`strict`: `<`), per key; `missing` where none qualifies (see "As-of join") |
-| `lookupjoin(table; key, unmatched, leftprefix, rightprefix)` | transform | join each row to the row with the same key in an in-memory table that has no time column; an unmatched row gets `missing`, raises, or is dropped (`unmatched`); stateless (see "Lookup join") |
-| `lag(offset)` | transform | shift every row `offset` later in time (`time -> time + offset`); the value at time `t` is the input's value at `t - offset` (see "Lead and lag") |
-| `settime(spec)` | transform | recompute `:time` from a column name or a per-row function; times may only move later, and the result is re-clipped to `[start, stop)` (see "Retiming") |
-| `head(n)` | transform | emit the first up to `n` rows and stop pulling upstream (see "Truncation") |
-| `lastrow(; key)` | transform | emit each key's last row, retimed to `stop`; keyless emits the stream's last row (see "Last row") |
-| `sortcycles(by; rev)` | transform | stably reorder the rows sharing each timestamp by a column name, a collection of names, or a per-row key function; the time order is untouched and the latest cycle is held back until it closes (see "Sorting within a cycle") |
-| `forwardfill(selectors...; key, tolerance)` | transform | replace `missing` in the selected columns (see "Column selectors") with that column's last non-missing value, per key, while not older than `tolerance` (see "Filling") |
-| `fillmissing(specs...)` | transform | replace `missing` with a per-column constant, given as `name => value` pairs or a `NamedTuple`; the column's element type narrows (see "Filling") |
-| `applymodels(models; column, key, tolerance, strict, name, operation)` | transform | as-of match each row to the latest `FittedModel` row of a models pipeline (per key), and append that model's prediction; `missing` where there is none (see "Model fitting (MLJ)") |
-| `addpredictions(clock, lookback, model, predictors, response; key, name, operation)` | transform | `summarizewindows` over a `FitModel` feeding `applymodels`: refit at every tick on `[τ - lookback, τ)`, predict each row from the latest tick at or before it (see "Model fitting (MLJ)") |
-| `modelreports(; column, name)` | transform | over a models pipeline, replace each `FittedModel` with its fit report; row-wise (see "Model fitting (MLJ)") |
+| `emptyframe()` | source | no rows, only `:time` |
+| `concatenate(ps...)` | source | the pipelines end to end, in time order, with identical columns (see "Concatenation") |
+| `merge(ps...; batchsize)` | source | the pipelines interleaved by time, with the union of their columns (see "Merging") |
+| `clock(interval; batchsize)` | source | rows at `start, start + interval, …` before `stop`, only `:time`, in chunks of `batchsize` |
+| `readtable(table; time, checkorder, sort, closed, skipmissing)` / `readtable(frame; closed, checkcontext)` | source | an in-memory table or frame (see "Tables as sources") |
+| `readcsv(path; types, time, rename, delim, sort, chunkbytes, closed, skipmissing)` | source | a CSV file, `String` columns unless typed, read in chunks of about `chunkbytes` bytes (see "Resolving the time column", "Missing times", "Sorting a file source") |
+| `readparquet(path; time, rename, sort, closed, skipmissing, backend)` | source | a parquet file through DuckDB or Parquet2, skipping data outside the window (see "Parquet I/O") |
+| `readjls(path; closed)` | source | a file written by `writejls` (see "JLS I/O") |
+| `writecsv(path; queue, ...)` | transform | pass-through CSV sink (see "CSV output") |
+| `writeparquet(path; queue, rowgroupsize, backend, ...)` | transform | pass-through parquet sink (see "Parquet I/O") |
+| `writejls(path; queue)` | transform | pass-through `Serialization` sink (see "JLS I/O") |
+| `filterrows(pred)` | transform | keep rows where `pred(row)` |
+| `addcolumns(f)` | transform | append the `NamedTuple` `f(row)`, which may **not** contain `time` (so the time invariant needs no re-validation) |
+| `selectcolumns(selectors...)` / `dropcolumns(selectors...)` / `reordercolumns(selectors...)` | transform | keep, drop, or move to the front the matching columns (see "Column selectors") |
+| `summarize(ss; key)` | transform | the whole window, emitted at `stop` |
+| `summarizecycles(ss; key, keyset)` | transform | each cycle (run of rows sharing a time) |
+| `intervalize(clock, ss; key, keyset, closelast)` | transform | each interval `[bₖ, bₖ₊₁)` between clock ticks, at `bₖ₊₁` (see "Interval summarization") |
+| `summarizewindows(clock, lookback, ss; key, keyset)` | transform | `[τ - lookback, τ)` at each clock tick `τ` (see "Window summarization") |
+| `addsummarycolumns(ss; key)` | transform | append the running summary after each row |
+| `addrollingcolumns(windows, ss; key, from)` | transform | append summaries over named trailing windows (see "Rolling windows") |
+| `asofjoin(right; key, tolerance, strict, leftprefix, rightprefix, righttime)` | transform | append the latest right row at or before each row (see "As-of join") |
+| `lookupjoin(table; key, unmatched, leftprefix, rightprefix)` | transform | append the row with the same key from a table without time (see "Lookup join") |
+| `lag(offset)` | transform | move every row `offset` later (see "Lead and lag") |
+| `settime(spec)` | transform | recompute `:time`; rows may only move later (see "Retiming") |
+| `head(n)` | transform | the first `n` rows, then stop pulling (see "Truncation") |
+| `lastrow(; key)` | transform | the last row per key, retimed to `stop` (see "Last row") |
+| `sortcycles(by; rev)` | transform | stably sort the rows of each cycle (see "Sorting within a cycle") |
+| `forwardfill(selectors...; key, tolerance)` / `fillmissing(specs...)` | transform | fill `missing` with the last value or a constant (see "Filling") |
+| `applymodels(models; column, key, tolerance, strict, name, operation)` | transform | append predictions from the latest fitted model (see "Model fitting (MLJ)") |
+| `addpredictions(clock, lookback, model, predictors, response; key, name, operation, verbosity)` | transform | refit on a trailing window at each tick and predict (see "Model fitting (MLJ)") |
+| `modelreports(; column, name)` | transform | replace each fitted model with its report (see "Model fitting (MLJ)") |
 
-Row functions (`pred`, `f`) receive a map-like row object supporting
-`row.name` and `row[:name]` access (Tables.jl row semantics), including
-`row.time`. The transforms iterate the concretely typed rows of a column
-table behind a per-chunk function barrier — never `DataFrameRow`s, whose
-column accesses are type-unstable — so a row function compiles to direct
-field access, exactly like a summarizer's `update!`.
+Row functions (`pred`, `f`) receive a row supporting `row.name` and
+`row[:name]`, including `row.time`. Transforms iterate the concretely typed
+rows of a column table behind a per-chunk function barrier — never
+`DataFrameRow`s, whose column access is type-unstable — so a row function
+compiles to direct field access, like a summarizer's `update!`.
 
-Naming follows Julia convention: lowercase, no camelCase, and no shadowing
-of `Base.filter` / `Base.empty` / `Base.count` / `Base.sum` /
-`Base.join`.
+Names are lowercase, with no camelCase and no shadowing of Base functions
+(`filter`, `empty`, `count`, `sum`, `join`).
 
 ## CSV output
 
@@ -836,11 +810,10 @@ time column** — one is an `ArgumentError` pointing at `asofjoin`, and a
 `CausalFrame` is refused the same way — so it holds over every window: the join
 is causal at every row whatever the context, and nothing needs widening.
 
-This is what the constant-time `asofjoin` recipe used to approximate, and that
-approximation broke when the constant fell outside the window: the source
-clipped every reference row away, and an empty right stream passes left chunks
-through *without* the right columns. A lookup table is not a stream, so it is
-never clipped, and a table with no rows still has a schema to append.
+A lookup table is not a stream, so it is never clipped to the window, and a
+table with no rows still has a schema to append. (An `asofjoin` against a
+constant-time stream, its predecessor, lost every row when the constant fell
+outside the window.)
 
 - **Keys.** `key` is required and must be present in both — the table's checked
   at construction, each input chunk's on arrival. Keys match with `isequal`
@@ -1073,7 +1046,7 @@ vectors being homogeneous and indexable type-stably.
 
 ## Interval summarization
 
-`intervalize(clock, ss; key, closelast)` is the third binary operator: a
+`intervalize(clock, ss; key, keyset, closelast)` is the third binary operator: a
 **clock** pipeline supplies interval boundaries and the data stream is
 summarized over them, the same summarizer machinery as `summarize`, dropping
 the input columns. Everything after `clock` mirrors `summarize`. It relates to
@@ -1121,7 +1094,7 @@ does across a cycle boundary).
 
 ## Window summarization
 
-`summarizewindows(clock, lookback, ss; key)` separates *when* a summary is
+`summarizewindows(clock, lookback, ss; key, keyset)` separates *when* a summary is
 taken from *what* it covers: a clock pipeline supplies the ticks, and at each
 tick `τ` the rows in the trailing window `[τ - lookback, τ)` are summarized and
 emitted at `τ`, dropping the input columns. It sits between two neighbours.
@@ -1639,32 +1612,27 @@ Concrete summarizers provided, for an input column of element type `T`:
 | `Max(column)` | `:x_max` | `T` | `missing` |
 | `First(column)` | `:x_first` | `T` | `missing` |
 | `Last(column)` | `:x_last` | `T` | `missing` |
-| `FitModel(model, predictors, response; name)` | `:model`, or `name` | `FittedModel{P,M}` | `missing` |
+| `FitModel(model, predictors, response; name, verbosity)` | `:model`, or `name` | `FittedModel{P,M}` | `missing` |
 
 `FitModel` is the one summarizer whose value is not a statistic but an object:
 an MLJ model fit to the rows folded, buffered at the input's own types and fit
 when the summary is emitted. It needs the MLJ extension, and its design is in
 "Model fitting (MLJ)".
 
-`LinearRegression` is the only summarizer emitting a whole block of columns, so
-its contract is spelled out here. For `K` predictors it produces `2K + 5`
-columns with an intercept and `2K + 3` without, in this order: `:n`, `:r2`,
-`:stderr`, then `:intercept_beta` and `:intercept_tstat` when there is an
-intercept, then a `Symbol(p, :_beta)`, `Symbol(p, :_tstat)` pair per predictor
-`p` in the order given. An optional `name` prefixes every one of them as
-`Symbol(name, :_, base)`, which is how two regressions coexist in one call —
-without it they collide on `:n`, `:r2`, and `:stderr` even when their
-predictors are disjoint, and the name-keyed deduplication rejects that. The
-`2K + 4` statistic columns share one element type, the computation's result;
-`:n` is separately `Int` and never `missing`, being the `Count` dependency
-under another name. No rows gives `missing` statistics and `n = 0`; a `missing`
-anywhere in a predictor or the response gives `missing` statistics and the
-honest count; a rank-deficient system — collinear predictors, or `n ≤ K`
-(`n ≤ K + 1` with an intercept) — gives `NaN` rather than raising, as
-`Correlation` does for a single row; and with no residual degrees of freedom
-left the coefficients and `:r2` are the exact fit while `:stderr` and the t
-statistics are `NaN`. Without an intercept, `:r2` is the uncentered
-coefficient of determination, as is conventional for a no-intercept fit.
+`LinearRegression` is the only summarizer emitting a block of columns: for `K`
+predictors, `:n`, `:r2`, `:stderr`, then `:intercept_beta`/`:intercept_tstat`
+with an intercept, then a `:p_beta`/`:p_tstat` pair per predictor in order —
+`2K + 5` columns, or `2K + 3` without an intercept. An optional `name` prefixes
+all of them, which is how two regressions coexist in one call; without it they
+collide on `:n`, `:r2` and `:stderr` and the name-keyed deduplication rejects
+them. The statistics share one element type; `:n` is the `Count` dependency
+renamed, `Int` and never `missing`. No rows gives `missing` statistics and
+`n = 0`; a `missing` input gives `missing` statistics and the honest count; a
+rank-deficient system (collinear predictors, or `n ≤ K`, `n ≤ K + 1` with an
+intercept) gives `NaN` rather than raising, as `Correlation` does for one row;
+and with no residual degrees of freedom the coefficients and `:r2` are exact
+while `:stderr` and the t statistics are `NaN`. Without an intercept `:r2` is
+the uncentered R², as is conventional.
 
 `Min`/`Max`/`First`/`Last` produce the input column's element type verbatim;
 all four are backed by one shared state type, parameterized by the combining
@@ -1841,12 +1809,11 @@ Three structures own reusable scratch rather than allocating it per use:
 A retired or borrowed tuple is only ever handed out again after `fresh!`, and
 by then `summaryvalues` has copied the values it held into the emitted row.
 
-The three summarization functions take one summarizer or a collection of
-them, plus an optional `key` (one or more column names) to produce a separate
-summary per unique key value (key groups are emitted sorted by key value;
-`summarizecycles` also takes a declared `keyset`, which emits every declared
-key per cycle in declared order instead — see "Declared key sets").
-The functions treat the given summarizers as *prototypes*: they only ever
+### Prototypes and deduplication
+
+The summarizing transforms take one summarizer or a collection, plus an
+optional `key` giving a separate summary per key value (emitted sorted by key,
+or in declared order under a `keyset`; see "Declared key sets"). They treat the given summarizers as *prototypes*: they only ever
 mutate `fresh` copies, one per key group (and, for `summarizecycles`, per
 cycle). Before running, prototypes are **deduplicated by output-name tuple** —
 identical configurations collapse to one shared instance — and the surviving
@@ -1979,8 +1946,8 @@ declaring what a summarizer's states support beyond folding:
   invertible (`downdate!`), modulo `isinvertible`'s per-accumulator-type
   escape hatch.
 
-`addrollingcolumns` selects its window algorithm from this structure (see
-"Rolling windows"). The classification of the built-ins:
+`addrollingcolumns` and `summarizewindows` select their window algorithm from
+this structure (see "Rolling windows" and "Window summarization"). The classification of the built-ins:
 
 - **Groups**: `Count`, `Sum`, `SumPower`, `DotProduct` — subtraction is the
   exact inverse of addition for integer accumulators; float accumulators
@@ -2056,38 +2023,29 @@ covers `[bᵢ₋₁, bᵢ)` where `b₀ = start`, `bᵢ` is the first time of ch
 single-pass and maintains one chunk of lookahead (needed to place the next
 boundary).
 
-Row-wise transforms map over chunks independently. The summarization
-operators are **stateful**: their state spans the whole window, carried
-across chunk boundaries rather than restarting per chunk —
-`addsummarycolumns` carries its running summarizers across boundaries
-(preserving the chunk structure), `summarizecycles` buffers the open cycle
-across boundaries (a cycle closes, causally, when a row with a later time
-arrives or the stream ends), and `summarize` folds chunk by chunk and emits
-once, at `stop`, when its input is exhausted (so its stream is a single
-frame over `[start, stop]`). `asofjoin` is stateful too: its store of
-most-recent right rows and its position in the right stream carry across
-left chunk boundaries (it is causal — a row emitted at time `t` looks only
-at right rows with time `<= t`, possibly from before `start` when
-`tolerance` widens the right window), and so is `addrollingcolumns`, whose
-buffer of summarized rows and position in the summarized stream carry
-across augmented chunk boundaries. `head` and `lastrow` join that list:
-`head`'s remaining-row budget spans the window (see
-[Truncation](#truncation)), and `lastrow`'s per-key store does, emitting once
-at `stop` exactly as `summarize` does (see [Last row](#last-row)). So does
-`forwardfill`, whose carried value per key and column spans the window (see
-[Filling](#filling)); `fillmissing`, having no state at all, does not. So does
-`summarizewindows`, whose buffer of live rows, pending ticks and previous
-tick's keys all span the window (see
-[Window summarization](#window-summarization)), and `applymodels`, whose as-of
-store of latest models is `asofjoin`'s — hence `addpredictions`, their
-composition. `modelreports` is row-wise and stateless. `sortcycles` holds back
-the open cycle across chunk boundaries (see
-[Sorting within a cycle](#sorting-within-a-cycle)), though unlike the rest of this
-list it keeps the chunk-concatenation property over split contexts too.
-Consequently concatenating the frames
-of `stream(ctx, p)` always equals `load(ctx, p)`, even for stateful
-operators — but the chunk-concatenation property over *split contexts*
-still does not hold for them.
+Row-wise transforms (`filterrows`, `addcolumns`, the column projections,
+`fillmissing`, `lookupjoin`, `lag`, `modelreports`) map over chunks
+independently. The rest are **stateful**, carrying state across chunk
+boundaries rather than restarting per chunk:
+
+- `summarize` and `lastrow` fold the whole window and emit once, at `stop`,
+  when their input is exhausted, so their stream is a single frame over
+  `[start, stop]`;
+- `addsummarycolumns` carries its running states, and `summarizecycles` and
+  `sortcycles` the open cycle (a cycle closes when a later time arrives or the
+  stream ends);
+- `intervalize` and `summarizewindows` carry pending clock ticks and buffered
+  rows (and, for `summarizewindows`, the previous tick's keys);
+- `asofjoin`, `applymodels` (and so `addpredictions`) and `addrollingcolumns`
+  carry their store or buffer of right-side rows and their position in that
+  stream;
+- `forwardfill` carries a value per key and column, and `head` its remaining
+  row budget.
+
+Concatenating the frames of `stream(ctx, p)` therefore always equals
+`load(ctx, p)`. The chunk-concatenation property over *split contexts* does not
+hold for stateful operators, with one exception: `sortcycles`, since a split at
+`b` sends every row at `b` to the later half and never divides a cycle.
 
 `settime` is the odd one out: it carries only a `prevtime` for validation, so it
 is not stateful in the sense above, yet it still loses the chunk-concatenation
@@ -2103,7 +2061,7 @@ the second.
 | `src/context.jl` | `Context{T}` |
 | `src/frame.jl` | `CausalFrame{T}`, invariants, Tables.jl interface |
 | `src/chunks.jl` | internal chunk-iterator machinery (`ChunkSource`, `chunkmap`) |
-| `src/pipeline.jl` | `CausalPipeline{F}`, `load`, `stream` |
+| `src/pipeline.jl` | `CausalPipeline{F}`, `load`, `stream`, `scan` |
 | `src/operators.jl` | sources (including the n-ary `concatenate`), the CSV sink, row-wise transforms, the causal time shift (`lag`) with the shared `shiftchunk!`, the column projections and `reordercolumns` over one shared selector vocabulary, the truncating `head` with its `HeadProducer`, and the causal retiming (`settime`) with the shared `settimechunk!` |
 | `src/merge.jl` | the n-ary time-interleaving source (`Base.merge`) and its per-pipeline cursors |
 | `src/parquet.jl` | the parquet operators, their docstrings, and backend selection |
@@ -2140,9 +2098,9 @@ Exports: `Context`, `CausalFrame`, `CausalPipeline`, `load`, `stream`,
 `asofjoin`, `lookupjoin`, `lag`, `settime`, `head`, `lastrow`, `sortcycles`, `forwardfill`,
 `fillmissing`.
 
-`merge` is not in that list either: it is `Base.merge`, extended for
-`CausalPipeline` arguments rather than exported under a name of our own, so
-`using CausalFrames` leaves the dict and NamedTuple methods alone.
+`merge` is not in that list: it is `Base.merge`, extended for `CausalPipeline`
+arguments rather than exported under a name of our own, so `using CausalFrames`
+leaves the dict and NamedTuple methods alone.
 
 `CausalFrames.Acausal` and its `futurejoin`, `lead` and `settime` are
 deliberately **not** in this list: the acausal operators are reached only

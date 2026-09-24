@@ -15,56 +15,35 @@
     readtable(frame::CausalFrame; closed = nothing, checkcontext = true)
         -> CausalPipeline
 
-A source lifting in-memory data into a pipeline: any Tables.jl table — a
-`DataFrame`, a `NamedTuple` of vectors, a vector of `NamedTuple`s, a loaded
-[`CausalFrame`](@ref) — clipped to the context's half-open interval
-`[start, stop)`, with `:time` converted to the context's time type.
+A source reading an in-memory table, clipped to `[start, stop)`. Only the rows
+in the window are copied.
 
-The time column is chosen by `time`, as for [`readcsv`](@ref):
+# Arguments
+- `table`: any Tables.jl table — a `DataFrame`, a `NamedTuple` of vectors, a
+  vector of `NamedTuple`s. A table with several `Tables.partitions` is read one
+  chunk per partition. A `DataFrame` is referenced, not copied, and is prepared
+  when `readtable` is called, so its time errors are raised there; do not mutate
+  it while the pipeline is in use.
+- `frame`: a loaded [`CausalFrame`](@ref), read back chunk by chunk. Its time is
+  already resolved, so only `closed` and `checkcontext` apply.
 
-- `time = nothing` (default): the column named `:time`.
-- `time = :name`: the column `:name`, renamed to `:time` where it stands (an
-  `ArgumentError` if the table also has a `:time` column).
-- `time = f` (a function): `f(row)` is called per row to compute `:time`,
-  overwriting any existing `:time` column.
-
-A textual time column cannot be ordered against the window and is an
-`ArgumentError`.
-
-Keyword arguments:
-
-- `checkorder`: the time column must be non-decreasing, which is checked unless
-  `checkorder = false` — the caller then vouches for the order, and an unsorted
-  table clips to nonsense rather than to an error.
-- `sort`: sort the rows by time first. The sort is stable, so rows sharing a
-  timestamp keep their order; a table with several partitions is concatenated
-  to sort it.
-- `closed`: clip to the closed interval `[start, stop]` instead, keeping the
-  rows at `stop` (which a frame tolerates).
-- `skipmissing`: drop the rows whose time is `missing` before the order check
-  and the clip. Without it such a row is an `ArgumentError`.
-
-Only the rows inside the window are copied, so a narrow window over a large
-table costs the window, and a loaded frame never shares memory with `table`. A
-table with several `Tables.partitions` is read one chunk per partition, and
-reading stops at the first partition holding a time past the window.
-
-A `DataFrame` (any `AbstractDataFrame`) is prepared once, when `readtable` is
-called: the time column is resolved and its order checked (or sorted) there, so
-those errors are raised by `readtable` itself, and each run only searches for the
-window. `readtable` keeps a reference to the DataFrame rather than a copy, so
-mutating its values while the pipeline is still in use is unsupported.
-
-A `CausalFrame` is read back chunk by chunk, and a chunk lying wholly inside the
-window is not copied at all. A frame knows its rows only over its own context,
-so running over a context that is not within `context(frame)` is an
-`ArgumentError` unless `checkcontext = false`, which clips the frame to it
-anyway. `closed = nothing` (the frame default) keeps the rows at `stop` exactly
-when the run's `stop` equals the frame's, so `load(context(frame),
-readtable(frame))` reproduces a frame holding rows at its stop — a
-[`summarize`](@ref) output, say; `true` or `false` forces the choice. `time`,
-`checkorder`, `sort` and `skipmissing` are not accepted for a frame, whose
-`:time` is already resolved and sorted.
+# Keywords
+- `time = nothing`: where `:time` comes from, as for [`readcsv`](@ref). A
+  textual time column is an `ArgumentError`.
+- `checkorder = true`: check that time is non-decreasing. With `false` the
+  caller vouches for the order, and an unsorted table gives wrong results rather
+  than an error.
+- `sort = false`: stably sort the rows by time first. A partitioned table is
+  concatenated to sort it.
+- `closed = false`: clip to `[start, stop]` instead, keeping rows at `stop`. For
+  a frame the default `nothing` keeps them exactly when the run's `stop` equals
+  the frame's own, so `load(context(frame), readtable(frame))` reproduces
+  `frame`.
+- `skipmissing = false`: drop rows whose time is `missing`. Without it such a
+  row is an `ArgumentError`.
+- `checkcontext = true`: for a frame, require the run's context to lie within
+  `context(frame)` (an `ArgumentError` otherwise); `false` clips the frame to any
+  context.
 
 ```julia
 df = DataFrame(ts = [3, 1, 2], bid = [1.0, 2.0, 3.0])
