@@ -61,8 +61,10 @@
     end
 
     @testset "forwardfill tolerance" begin
-        p = readtable(DataFrame(time = [dt(1, 31), dt(2, 28), dt(3, 1)],
-            x = [1.0, missing, missing]))
+        p = readtable(
+            DataFrame(time = [dt(1, 31), dt(2, 28), dt(3, 1)],
+                x = [1.0, missing, missing]),
+        )
         # Feb 28 reaches back to Jan 28; Mar 1 only to Feb 1
         df = frame(p |> forwardfill(:x; tolerance = Month(1)))
         @test isequal(df.x, [1.0, 1.0, missing])
@@ -108,9 +110,11 @@
         c = Context(dt(2, 1), dt(12, 1))
         out = findall(>=(c.start), ts)
         windows = (m = Month(1), d = Day(10), q = Quarter(1))
-        oracle(lb, i, keyed, f) = f([xs[j] for j in 1:n
-                                     if ts[j] <= ts[i] && inwindow(ts[i], ts[j], lb) &&
-                                        (!keyed || ks[j] == ks[i])])
+        oracle(lb, i, keyed, f) = f([
+            xs[j] for j in 1:n
+            if ts[j] <= ts[i] && inwindow(ts[i], ts[j], lb) &&
+                (!keyed || ks[j] == ks[i])
+        ])
         # running (Sum), tree (Min) and re-fold (Opaque) paths
         for (ss, col, f) in ((Sum(:x), "x_sum", sum), (Min(:x), "x_min", minimum),
             (Opaque(Sum(:x)), "x_sum", sum))
@@ -130,7 +134,7 @@
         clk = clock(Month(1))
         τs = frame(clk, c).time
         oracle(τ, lb, f, empty) = (v = [xs[j] for j in 1:n
-                                        if ts[j] < τ && inwindow(τ, ts[j], lb)];
+                        if ts[j] < τ && inwindow(τ, ts[j], lb)];
             isempty(v) ? empty : f(v))
         for (ss, col, f, empty) in ((Sum(:x), :x_sum, sum, 0),
             (Min(:x), :x_min, minimum, missing),
@@ -140,11 +144,14 @@
             @test isequal(df[!, col], [oracle(τ, Month(2), f, empty) for τ in τs])
         end
         # keyed, with a declared key set: every key at every tick
-        df = frame(data |> summarizewindows(clk, Month(1), Count(); key = :k,
+        df = frame(
+            data |> summarizewindows(clk, Month(1), Count(); key = :k,
                 keyset = ["a", "b"]), c)
-        @test df.count == [count(j -> ks[j] == k && ts[j] < τ &&
-                                      inwindow(τ, ts[j], Month(1)), 1:n)
-                           for τ in τs for k in ("a", "b")]
+        @test df.count == [
+            count(j -> ks[j] == k && ts[j] < τ &&
+                       inwindow(τ, ts[j], Month(1)), 1:n)
+            for τ in τs for k in ("a", "b")
+        ]
     end
 
     @testset "applymodels tolerance" begin
