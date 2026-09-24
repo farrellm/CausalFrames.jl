@@ -45,9 +45,19 @@ in the window are copied.
   `context(frame)` (an `ArgumentError` otherwise); `false` clips the frame to any
   context.
 
-```julia
+```jldoctest
 df = DataFrame(ts = [3, 1, 2], bid = [1.0, 2.0, 3.0])
-readtable(df; time = :ts, sort = true) |> filterrows(r -> r.bid > 1)
+p = readtable(df; time = :ts, sort = true) |> filterrows(r -> r.bid > 1)
+DataFrame(load(Context(0, 10), p))
+
+# output
+
+2×2 DataFrame
+ Row │ time   bid
+     │ Int64  Float64
+─────┼────────────────
+   1 │     1      2.0
+   2 │     2      3.0
 ```
 """
 function readtable(table; time = nothing, checkorder::Bool = true,

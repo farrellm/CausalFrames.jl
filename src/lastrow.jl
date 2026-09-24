@@ -23,8 +23,19 @@ exhausted, so it streams as a single frame.
 
 The original time is overwritten; keep it under another name if needed:
 
-```julia
-p |> addcolumns(r -> (; t0 = r.time)) |> lastrow(; key = :sym)
+```jldoctest
+df = DataFrame(time = [1, 2, 3], sym = ["a", "b", "a"], px = [10, 20, 11])
+p = readtable(df) |> addcolumns(r -> (; t0 = r.time)) |> lastrow(; key = :sym)
+DataFrame(load(Context(0, 10), p))
+
+# output
+
+2×4 DataFrame
+ Row │ time   sym     px     t0
+     │ Int64  String  Int64  Int64
+─────┼─────────────────────────────
+   1 │    10  a          11      3
+   2 │    10  b          20      2
 ```
 
 A chunk whose column names differ from the first chunk's is an

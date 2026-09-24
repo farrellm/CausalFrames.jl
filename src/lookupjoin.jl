@@ -33,9 +33,19 @@ To join data that changes over time, use [`asofjoin`](@ref).
 - `leftprefix = nothing`, `rightprefix = nothing`: rename that side's non-time,
   non-key columns to `"{prefix}_{name}"`. Output names must be unique.
 
-```julia
+```jldoctest
+trades = readtable(DataFrame(time = [1, 2], sym = ["a", "b"], qty = [100, 200]))
 dim = DataFrame(sym = ["a", "b"], sector = ["tech", "energy"])
-trades |> lookupjoin(dim; key = :sym)
+DataFrame(load(Context(0, 10), trades |> lookupjoin(dim; key = :sym)))
+
+# output
+
+2×4 DataFrame
+ Row │ time   sym     qty    sector
+     │ Int64  String  Int64  String?
+─────┼───────────────────────────────
+   1 │     1  a         100  tech
+   2 │     2  b         200  energy
 ```
 """
 function lookupjoin(table; key = nothing, unmatched::Symbol = :missing,

@@ -31,8 +31,25 @@ column names differ from the first pipeline's, or if a pipeline's first time
 precedes the previous one's last (equal times are allowed). Element types may
 differ between pipelines; `DataFrame(frame)` promotes them.
 
-```julia
-concatenate(readcsv("jan.csv"; types = tt), readcsv("feb.csv"; types = tt))
+```jldoctest
+dir = mktempdir()
+jan, feb = joinpath(dir, "jan.csv"), joinpath(dir, "feb.csv")
+scan(Context(0, 10), readtable(DataFrame(time = [1, 2], bid = [10.0, 10.5])) |> writecsv(jan))
+scan(Context(0, 10), readtable(DataFrame(time = [3], bid = [11.0])) |> writecsv(feb))
+
+types = Dict(:time => Int, :bid => Float64)
+p = concatenate(readcsv(jan; types), readcsv(feb; types))
+DataFrame(load(Context(0, 10), p))
+
+# output
+
+3×2 DataFrame
+ Row │ time   bid
+     │ Int64  Float64
+─────┼────────────────
+   1 │     1     10.0
+   2 │     2     10.5
+   3 │     3     11.0
 ```
 """
 concatenate() = emptyframe()
@@ -501,11 +518,19 @@ The file is complete only once the stream is exhausted — by [`load`](@ref),
 differ from the first chunk's is an `ArgumentError`. Use `scan` when the file
 is all you want:
 
-```julia
-readcsv("ticks.csv"; types = tt) |>
+```jldoctest
+path = joinpath(mktempdir(), "mids.csv")
+readtable(DataFrame(time = [1, 2], bid = [10.0, 10.5], ask = [10.2, 10.7])) |>
     addcolumns(r -> (; mid = (r.bid + r.ask) / 2)) |>
-    writecsv("mids.csv") |>
-    scan(ctx)
+    writecsv(path) |>
+    scan(Context(0, 10))
+print(read(path, String))
+
+# output
+
+time,bid,ask,mid
+1,10.0,10.2,10.1
+2,10.5,10.7,10.6
 ```
 """
 function writecsv(path::AbstractString; queue::Integer = 1, kwargs...)
@@ -642,8 +667,18 @@ A transform appending columns computed from each row.
   The names must be new, and may not include `time`; returning anything but a
   `NamedTuple` is an `ArgumentError`.
 
-```julia
-p |> addcolumns(r -> (; mid = (r.bid + r.ask) / 2))
+```jldoctest
+p = readtable(DataFrame(time = [1, 2], bid = [10.0, 10.5], ask = [10.2, 10.7]))
+DataFrame(load(Context(0, 10), p |> addcolumns(r -> (; mid = (r.bid + r.ask) / 2))))
+
+# output
+
+2×4 DataFrame
+ Row │ time   bid      ask      mid
+     │ Int64  Float64  Float64  Float64
+─────┼──────────────────────────────────
+   1 │     1     10.0     10.2     10.1
+   2 │     2     10.5     10.7     10.6
 ```
 """
 function addcolumns(f)
@@ -951,9 +986,19 @@ always kept.
   it. A name the data lacks is an `ArgumentError`; a `Regex` or predicate
   matching nothing is not.
 
-```julia
-p |> selectcolumns(:bid, :ask)
-p |> selectcolumns(r"^px_", startswith("qty"))
+```jldoctest
+df = DataFrame(time = [1], px_bid = [10.0], px_ask = [10.2], qty_bid = [5], venue = ["X"])
+p = readtable(df) |> selectcolumns(:venue, r"^px_", startswith("qty"))
+names(load(Context(0, 10), p))
+
+# output
+
+5-element Vector{String}:
+ "time"
+ "px_bid"
+ "px_ask"
+ "qty_bid"
+ "venue"
 ```
 """
 function selectcolumns(selectors...)
@@ -996,9 +1041,19 @@ order of the selectors. The other columns follow in their input order.
   or predicate matching it is ignored, and naming it is an `ArgumentError`, as
   is naming a column the data lacks.
 
-```julia
-p |> reordercolumns(:px, :size)   # time, px, size, then the rest
-p |> reordercolumns(r"^px_")
+```jldoctest
+df = DataFrame(time = [1], px_bid = [10.0], px_ask = [10.2], qty_bid = [5], venue = ["X"])
+p = readtable(df) |> reordercolumns(:venue, r"^qty_")   # time, venue, qty_bid, then the rest
+names(load(Context(0, 10), p))
+
+# output
+
+5-element Vector{String}:
+ "time"
+ "venue"
+ "qty_bid"
+ "px_bid"
+ "px_ask"
 ```
 """
 function reordercolumns(selectors...)

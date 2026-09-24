@@ -11,12 +11,29 @@ Time-series tables for Julia: DataFrames with a monotonically non-decreasing
 ```julia
 using CausalFrames, Dates
 
-p = readcsv("ticks.csv";
-        types = Dict(:time => DateTime, :bid => Float64, :ask => Float64)) |>
+path = joinpath(mktempdir(), "ticks.csv")
+write(path, """
+    time,bid,ask
+    2026-01-02T09:30:00,100.0,100.2
+    2026-01-02T09:31:00,-1.0,100.3
+    2026-01-02T09:32:00,100.4,100.6
+    """)
+
+p = readcsv(path; types = Dict(:time => DateTime, :bid => Float64, :ask => Float64)) |>
     filterrows(r -> r.bid > 0) |>
     addcolumns(r -> (; mid = (r.bid + r.ask) / 2))
 
-frame = load(Context(DateTime(2026, 1, 1), DateTime(2026, 2, 1)), p)
+ctx = Context(DateTime(2026, 1, 1), DateTime(2026, 2, 1))
+load(ctx, p)
+
+# output
+
+CausalFrame{Dates.DateTime} with 2 rows over [2026-01-01T00:00:00, 2026-02-01T00:00:00]
+ Row │ time                 bid      ask      mid
+     │ DateTime             Float64  Float64  Float64
+─────┼────────────────────────────────────────────────
+   1 │ 2026-01-02T09:30:00    100.0    100.2    100.1
+   2 │ 2026-01-02T09:32:00    100.4    100.6    100.5
 ```
 
 ## Concepts
@@ -69,10 +86,15 @@ operators. Reading prefers DuckDB and writing Parquet2; `backend` overrides.
 End a chain with `scan` to run it for the file alone:
 
 ```julia
-readcsv("ticks.csv"; types = Dict(:time => Int, :bid => Float64)) |>
-    filterrows(r -> r.bid > 0) |>
-    writecsv("clean.csv") |>
-    scan(Context(0, 10^6))
+clean = joinpath(mktempdir(), "clean.csv")
+p |> writecsv(clean) |> scan(ctx)
+print(read(clean, String))
+
+# output
+
+time,bid,ask,mid
+2026-01-02T09:30:00.0,100.0,100.2,100.1
+2026-01-02T09:32:00.0,100.4,100.6,100.5
 ```
 
 ### Row transformations
@@ -117,8 +139,18 @@ key is emitted each time.
 | [`addrollingcolumns(windows, ss; key, from)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizing/#addrollingcolumns) | append summaries of `[t - lookback, t]` for each named window |
 
 ```julia
-p |> addrollingcolumns((m5 = Minute(5), h1 = Hour(1)), Mean(:mid); key = :symbol)
-# appends m5_mid_mean and h1_mid_mean
+p |> addrollingcolumns((m1 = Minute(1), h1 = Hour(1)), Mean(:mid)) |>
+    selectcolumns(:mid, r"_mean") |>
+    load(ctx)
+
+# output
+
+CausalFrame{Dates.DateTime} with 2 rows over [2026-01-01T00:00:00, 2026-02-01T00:00:00]
+ Row │ time                 mid      m1_mid_mean  h1_mid_mean
+     │ DateTime             Float64  Float64?     Float64?
+─────┼────────────────────────────────────────────────────────
+   1 │ 2026-01-02T09:30:00    100.1        100.1        100.1
+   2 │ 2026-01-02T09:32:00    100.5        100.5        100.3
 ```
 
 ### Model fitting (MLJ)
@@ -158,7 +190,18 @@ Most summarize no rows as `missing`; the rest give the identity shown.
 | [`FitModel(model, predictors, response; name, verbosity)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#FitModel) | `:model` | — | a fitted MLJ model (needs `using MLJ`, where `Count` must be written `CausalFrames.Count`) |
 
 ```julia
-p |> addsummarycolumns([Count(), Sum(:mid), Min(:mid), Max(:mid)]; key = :symbol)
+p |> addsummarycolumns([Count(), Sum(:mid), Min(:mid), Max(:mid)]) |>
+    selectcolumns(:count, r"mid_") |>
+    load(ctx)
+
+# output
+
+CausalFrame{Dates.DateTime} with 2 rows over [2026-01-01T00:00:00, 2026-02-01T00:00:00]
+ Row │ time                 count  mid_sum  mid_min  mid_max
+     │ DateTime             Int64  Float64  Float64  Float64
+─────┼───────────────────────────────────────────────────────
+   1 │ 2026-01-02T09:30:00      1    100.1    100.1    100.1
+   2 │ 2026-01-02T09:32:00      2    200.6    100.1    100.5
 ```
 
 Moments, variances, correlations and regressions are computed from shared
@@ -182,11 +225,22 @@ The forward-looking exceptions live in the `Acausal` submodule, which is never
 re-exported:
 
 ```julia
-using CausalFrames.Acausal
+using CausalFrames.Acausal, DataFrames
 
-quotes |> futurejoin(fills; key = :symbol)  # earliest fill at or after each quote
-prices |> lead(Minute(5))                   # time -> time - offset
-prices |> CausalFrames.Acausal.settime(r -> r.exchange_time)  # may move rows earlier
+quotes = readtable(DataFrame(time = [1, 3], bid = [10.0, 10.2]))
+fills = readtable(DataFrame(time = [2, 3], qty = [5, 7]))
+
+# the earliest fill at or after each quote
+quotes |> futurejoin(fills; righttime = :filltime) |> load(Context(0, 10))
+
+# output
+
+CausalFrame{Int64} with 2 rows over [0, 10]
+ Row │ time   bid      qty     filltime
+     │ Int64  Float64  Int64?  Int64?
+─────┼──────────────────────────────────
+   1 │     1     10.0       5         2
+   2 │     3     10.2       7         3
 ```
 
 [`futurejoin`](https://farrellm.github.io/CausalFrames.jl/dev/api/columns/#Acausal.futurejoin) mirrors `asofjoin`, but can

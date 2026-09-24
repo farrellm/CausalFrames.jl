@@ -1,8 +1,19 @@
 [deps]
+CSV = "336ed68f-0bac-5ca0-87d4-7b16caf5d00b"
 CausalFrames = "388faf74-d151-4224-8c39-96f47ad15296"
 DataFrames = "a93c6f00-e57d-5684-b7b6-d8193f3e46c0"
+Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
 Documenter = "e30172f5-a6a5-5a46-863b-614d45cd2de4"
+MLJBase = "a7f614a8-145f-11e9-1d2a-a57a1082229d"
+MLJLinearModels = "6ee0df7b-362f-4a72-a706-9e79364fb692"
+MLJModelInterface = "e80e1ace-859a-464e-9ed9-23947d8ae3ea"
+Parquet2 = "98572fba-bba0-415d-956f-fa77e587d26d"
 
 [compat]
+CSV = "0.10"
 DataFrames = "1.8.2"
 Documenter = "1.17.0"
+MLJBase = "1.14"
+MLJLinearModels = "0.10"
+MLJModelInterface = "1.12"
+Parquet2 = "0.2"

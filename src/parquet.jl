@@ -129,11 +129,26 @@ A parquet file is valid only once the stream is exhausted — by [`load`](@ref),
 an unusable file. An empty stream writes a valid file with no rows and only a
 `time` column.
 
-```julia
-readparquet("ticks.parquet") |>
+```jldoctest
+using Parquet2   # or DuckDB
+dir = mktempdir()
+ticks = DataFrame(time = [1, 2], bid = [10.0, 10.5], ask = [10.2, 10.7])
+readtable(ticks) |> writeparquet(joinpath(dir, "ticks.parquet")) |> scan(Context(0, 10))
+
+readparquet(joinpath(dir, "ticks.parquet")) |>
     addcolumns(r -> (; mid = (r.bid + r.ask) / 2)) |>
-    writeparquet("mids.parquet") |>
-    scan(ctx)
+    writeparquet(joinpath(dir, "mids.parquet")) |>
+    scan(Context(0, 10))
+DataFrame(load(Context(0, 10), readparquet(joinpath(dir, "mids.parquet"))))
+
+# output
+
+2×4 DataFrame
+ Row │ time   bid      ask      mid
+     │ Int64  Float64  Float64  Float64
+─────┼──────────────────────────────────
+   1 │     1     10.0     10.2     10.1
+   2 │     2     10.5     10.7     10.6
 ```
 """
 function writeparquet(path::AbstractString; queue::Integer = 1,

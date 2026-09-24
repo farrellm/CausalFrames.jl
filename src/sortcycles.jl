@@ -23,10 +23,23 @@ cycle, so memory is one cycle plus one chunk.
 
 Sorting cycles turns a keyed [`Count`](@ref) over `key = :time` into a rank:
 
-```julia
-readtable(films; time = :year) |>
+```jldoctest
+films = DataFrame(year = [2020, 2020, 2020, 2021], id = [1, 2, 3, 4], votes = [5, 9, 9, 1])
+p = readtable(films; time = :year) |>
     sortcycles(r -> (-r.votes, r.id)) |>
     addsummarycolumns(Count(); key = :time)   # :count ranks films within a year
+DataFrame(load(Context(2020, 2030), p))
+
+# output
+
+4×4 DataFrame
+ Row │ time   id     votes  count
+     │ Int64  Int64  Int64  Int64
+─────┼────────────────────────────
+   1 │  2020      2      9      1
+   2 │  2020      3      9      2
+   3 │  2020      1      5      3
+   4 │  2021      4      1      1
 ```
 """
 function sortcycles(by; rev::Bool = false)

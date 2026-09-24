@@ -989,10 +989,25 @@ An ordinary least squares fit of `response` on `predictors`.
 | `intercept_beta`, `intercept_tstat` | the constant term and its t statistic (only with `intercept`) |
 | `{p}_beta`, `{p}_tstat` | per predictor `p`, in order |
 
-```julia
-LinearRegression([:x, :z], :y; name = :m1)
-# :m1_n, :m1_r2, :m1_stderr, :m1_intercept_beta, :m1_intercept_tstat,
-# :m1_x_beta, :m1_x_tstat, :m1_z_beta, :m1_z_tstat
+```jldoctest
+df = DataFrame(time = 1:5, x = [1.0, 2.0, 3.0, 4.0, 5.0], z = [0.0, 1.0, 0.0, 1.0, 1.0],
+               y = [3.1, 7.9, 7.2, 12.1, 13.8])
+p = readtable(df) |> summarize(LinearRegression([:x, :z], :y; name = :m1))
+names(load(Context(0, 10), p))
+
+# output
+
+10-element Vector{String}:
+ "time"
+ "m1_n"
+ "m1_r2"
+ "m1_stderr"
+ "m1_intercept_beta"
+ "m1_intercept_tstat"
+ "m1_x_beta"
+ "m1_x_tstat"
+ "m1_z_beta"
+ "m1_z_tstat"
 ```
 
 The statistics share one element type (`Float64` for integer input) and admit

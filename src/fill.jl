@@ -35,8 +35,24 @@ first value, or past `tolerance`, stay `missing`. To fill with a constant, use
   `[start - tolerance, stop)`, so rows near `start` can be filled from before
   the window; the time type must support subtraction.
 
-```julia
-p |> forwardfill(:bid, :ask; key = :sym, tolerance = Minute(5))
+```jldoctest
+using Dates
+t0 = DateTime(2026, 1, 1)
+df = DataFrame(time = t0 .+ Minute.([0, 1, 2, 10]), sym = ["a", "b", "a", "a"],
+               bid = [1.0, 2.0, missing, missing])
+p = readtable(df) |> forwardfill(:bid; key = :sym, tolerance = Minute(5))
+DataFrame(load(Context(t0, t0 + Hour(1)), p))
+
+# output
+
+4×3 DataFrame
+ Row │ time                 sym     bid
+     │ DateTime             String  Float64?
+─────┼────────────────────────────────────────
+   1 │ 2026-01-01T00:00:00  a             1.0
+   2 │ 2026-01-01T00:01:00  b             2.0
+   3 │ 2026-01-01T00:02:00  a             1.0
+   4 │ 2026-01-01T00:10:00  a       missing
 ```
 """
 function forwardfill(selectors...; key = nothing, tolerance = nothing)
@@ -303,9 +319,19 @@ column. A filled column's element type becomes
   collection of pairs. Names must be unique, may not be `time`, and must exist
   in the data (checked when a chunk arrives).
 
-```julia
-p |> fillmissing(:qty => 0.0, :sym => "")
-p |> fillmissing((qty = 0.0, sym = ""))
+```jldoctest
+df = DataFrame(time = [1, 2], qty = [missing, 3.0], sym = ["a", missing])
+p = readtable(df) |> fillmissing(:qty => 0.0, :sym => "")   # or ((qty = 0.0, sym = ""))
+DataFrame(load(Context(0, 10), p))
+
+# output
+
+2×3 DataFrame
+ Row │ time   qty      sym
+     │ Int64  Float64  String
+─────┼────────────────────────
+   1 │     1      0.0  a
+   2 │     2      3.0
 ```
 """
 function fillmissing(specs...)

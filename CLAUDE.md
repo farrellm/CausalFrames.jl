@@ -17,6 +17,13 @@ with any API or semantics change.**
   Documenter runs strict — an unregistered docstring fails the docs CI job.
   The home page is **generated from `README.md`** by `docs/make.jl`;
   `docs/src/index.md` is gitignored, so edit the README, never that file
+- Every example is a doctest, run only by the docs build. Keep each one
+  self-contained (build data with `readtable`, write files under `mktempdir()`).
+  README examples are ```` ```julia ```` blocks with a `# output` section,
+  which `docs/make.jl` turns into one shared `jldoctest readme` session. To
+  regenerate outputs, build once with `makedocs(; doctest = :fix, …)`, starting
+  from a non-empty placeholder: Documenter misplaces output fixed from an empty
+  `# output` section
 - Benchmark: `julia --project=benchmark benchmark/benchmarks.jl` (same
   one-time `Pkg.develop(path=".")` setup; defines `SUITE` for PkgBenchmark)
 - Formatting is automatic: a `Stop` hook in `.claude/settings.json` formats

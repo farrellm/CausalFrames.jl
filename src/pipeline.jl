@@ -9,11 +9,21 @@ evaluated by [`load`](@ref), [`stream`](@ref) or [`scan`](@ref).
 Build pipelines from sources (such as [`clock`](@ref) or [`readcsv`](@ref))
 and chain transforms with `|>`:
 
-```julia
-p = readcsv("ticks.csv";
-        types = Dict(:time => Int, :bid => Float64, :ask => Float64)) |>
+```jldoctest
+ticks = DataFrame(time = [1, 2, 3], bid = [10.0, -1.0, 10.4], ask = [10.2, 10.3, 10.6])
+p = readtable(ticks) |>
     filterrows(r -> r.bid > 0) |>
     addcolumns(r -> (; mid = (r.bid + r.ask) / 2))
+load(Context(0, 10), p)
+
+# output
+
+CausalFrame{Int64} with 2 rows over [0, 10]
+ Row │ time   bid      ask      mid
+     │ Int64  Float64  Float64  Float64
+─────┼──────────────────────────────────
+   1 │     1     10.0     10.2     10.1
+   2 │     3     10.4     10.6     10.5
 ```
 
 Every operator is *causal*: its output at time `t` depends only on input rows

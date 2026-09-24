@@ -35,8 +35,21 @@ A pipeline's column names are fixed by its first chunk; a later chunk with
 different names, or the same names in a different order, is an
 `ArgumentError`.
 
-```julia
-merge(readcsv("trades.csv"; types = tt), readcsv("quotes.csv"; types = qt))
+```jldoctest
+trades = readtable(DataFrame(time = [1, 3], price = [10.1, 10.3]))
+quotes = readtable(DataFrame(time = [1, 2], bid = [10.0, 10.2]))
+DataFrame(load(Context(0, 10), merge(trades, quotes)))
+
+# output
+
+4×3 DataFrame
+ Row │ time   price      bid
+     │ Int64  Float64?   Float64?
+─────┼─────────────────────────────
+   1 │     1       10.1  missing
+   2 │     1  missing         10.0
+   3 │     2  missing         10.2
+   4 │     3       10.3  missing
 ```
 """
 function Base.merge(p::CausalPipeline, ps::CausalPipeline...;
