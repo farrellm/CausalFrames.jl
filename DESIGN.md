@@ -194,7 +194,9 @@ The file is truncated when the run starts and finalized when the stream is
 *exhausted*, via `chunkmap`'s once-only `flush`. Abandoning a `stream`
 part-way therefore leaves the last chunks unwritten — `scan` is the entry
 point to use when the file is the only thing wanted. A stream with no rows
-yields an empty file, never a stale one. Keyword arguments pass through to
+yields an empty file, never a stale one — there is no chunk to take a header
+from — and `readcsv` reads a zero-byte file back as an empty stream, so the
+round trip holds. Keyword arguments pass through to
 `CSV.write`, except `append`/`header`/`writeheader`/`partition`/`compress`,
 which the transform controls itself and rejects eagerly.
 
@@ -272,8 +274,13 @@ The one semantic difference from `writecsv`: **a parquet file is only valid
 once finalized**. The footer (or, for DuckDB, the whole file) is written when
 the stream is exhausted, so there is no usable prefix on disk mid-run and
 abandoning a `stream` part-way leaves an unusable file — `scan` is the entry
-point when the file is the point. A stream with no rows yields a valid, empty
-file. Keyword arguments pass through to `Parquet2.FileWriter`, where
+point when the file is the point. Both sinks truncate the file when the run
+starts, as `writecsv` does — the DuckDB sink explicitly, since otherwise it
+touches the file only at the final `COPY`, and a failed run would leave the
+previous one's file looking current. A stream with no rows yields a valid file
+of zero rows and one `time::Int64` column under either sink (DuckDB cannot read
+a parquet file with no columns at all), which both readers return as an empty
+stream. Keyword arguments pass through to `Parquet2.FileWriter`, where
 `compute_statistics` defaults to `["time"]` so that files written here carry the
 statistics the readers skip by; the DuckDB sink understands `compression_codec`
 (mapped onto `COPY`'s `COMPRESSION`, and it records statistics of its own) and
@@ -315,6 +322,24 @@ output is sorted by construction. The within-timestamp half of an `ORDER BY` —
 secondary sort keys — is not a source option, here or in `readtable`: it needs no
 source, since reordering rows that share a timestamp never moves one in time, and
 so it is the transform `sortcycles` (see "Sorting within a cycle").
+
+## Resolving the time column
+
+The three sources that resolve their own times — `readcsv`, `readparquet` and
+`readtable` over a table or `DataFrame` — share one set of rules, whether the
+work is done by `resolvetime!` (file chunks) or `tabletimes` (tables):
+
+- `time` is `nothing`, a `Symbol` or a function, checked when the operator is
+  called (`checksourcetimespec`). The chunk path acts only on a `Symbol` or a
+  function, so anything else would otherwise quietly read the `:time` column.
+- `time = :name` when the source also has a `:time` column is an error, never a
+  silent overwrite: which column the user meant is ambiguous.
+- A textual time cannot be ordered against the window and is an error, whether
+  it came from a column or from a `time` function. The message names the way
+  out: fix the function, or (CSV only) type the column through `types`.
+- Data errors name their source the same way — "CSV file x.csv", "parquet file
+  x.parquet", "jls file x.jls", or "table" — through `sourcename`, and every
+  message is built only on the error path, never per chunk.
 
 ## Missing times
 

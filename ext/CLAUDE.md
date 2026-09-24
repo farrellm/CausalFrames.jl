@@ -80,7 +80,8 @@ error — a wrong answer is unacceptable, a slower one is fine:
   parquet file: the stream is staged in a `TEMP TABLE` (which DuckDB spills
   under memory pressure) and written by one `COPY` at the end. An empty stream
   must still leave a valid file — hence the `SELECT NULL::BIGINT AS time WHERE
-  FALSE` source
+  FALSE` source. Since nothing is written until that `COPY`, the write loop
+  truncates `path` first, as every other sink does by opening it
 - `compression_codec` is the only `writeparquet` option this backend can
   express. The rest are Parquet2's, and are rejected with an `ArgumentError`
   rather than silently dropped, since dropping would hide a deliberate request
@@ -94,6 +95,9 @@ error — a wrong answer is unacceptable, a slower one is fine:
   `rowgroupsize = 1` gives one row group per incoming chunk
 - The file becomes readable only when `finalize!` writes the footer as the
   channel closes — there is no usable prefix mid-run
+- An empty stream is written as one zero-row `time::Int64` column, matching
+  the DuckDB sink, because DuckDB refuses a parquet file with no columns. That
+  write turns statistics off, since Parquet2 cannot compute them over zero rows
 
 ## Infrastructure
 

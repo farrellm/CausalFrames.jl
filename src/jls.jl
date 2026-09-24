@@ -12,7 +12,7 @@ const JLSHEADER = (format = :CausalFramesJLS, version = 1)
 
 """
     writejls(path; queue = 1) -> (CausalPipeline -> CausalPipeline)
-    writejls(p::CausalPipeline, path; queue = 1) -> CausalPipeline
+    writejls(p::CausalPipeline, path; ...) -> CausalPipeline
 
 A transparent pass-through transform that writes the stream to `path` through
 Julia's `Serialization` stdlib as it flows by, yielding every chunk downstream
@@ -21,8 +21,8 @@ value a column holds, so columns that neither CSV nor parquet can encode (a
 fitted model, a `NamedTuple`) round-trip through [`readjls`](@ref).
 
 Each chunk becomes one serialized record, written and flushed as it is
-produced on a background task fed by a bounded queue of depth `queue`, exactly
-as for `writecsv`. The file is truncated when the run starts and finalized when
+produced on a background task fed by a bounded queue of depth `queue`, as for
+`writecsv`. The file is truncated when the run starts and finalized when
 the stream is exhausted; a stream with no rows yields a file holding only its
 header, which reads back as an empty stream. Every complete record of an
 interrupted run stays readable.
@@ -68,13 +68,17 @@ end
     readjls(path; closed = false) -> CausalPipeline
 
 A source reading a file written by [`writejls`](@ref): one chunk per record,
-each clipped to the context's `[start, stop)` — or, with `closed = true`, to the
-closed interval `[start, stop]`, keeping the rows at `stop` — with the time
+each clipped to the context's half-open interval `[start, stop)`, with the time
 converted to the context's time type. Reading is incremental — a record at a
 time, never the whole file — and stops as soon as a time past the window is
 seen, but there is no index to seek by, so a read costs the file's prefix up to
 `stop`. As for [`readcsv`](@ref), sortedness is checked in the records actually
 read.
+
+Keyword arguments:
+
+- `closed`: clip to the closed interval `[start, stop]` instead, keeping the
+  rows at `stop` (which a frame tolerates).
 
 A file that was not written by `writejls` is an `ArgumentError`, as is one whose
 last record was cut short by an interrupted write (every record before it has
@@ -84,8 +88,8 @@ only files you trust.
 function readjls(path::AbstractString; closed::Bool = false)
     return CausalPipeline() do ctx::Context
         return ChunkSource(
-            JLSProducer{timetype(ctx)}(String(path), closed,
-                ctx.start, ctx.stop),
+            JLSProducer{timetype(ctx)}(String(path), ctx.start, ctx.stop,
+                closed),
         )
     end
 end
@@ -96,14 +100,14 @@ end
 # per-chunk setup state; the per-row work is clipchunk!'s.
 mutable struct JLSProducer{T}
     const path::String
-    const closed::Bool
     const start::T
     const stop::T
+    const closed::Bool
     io::Union{Nothing,IOStream}   # opened on the first pull
     prevtime::Any                 # last raw time seen, for cross-chunk order
     done::Bool
-    JLSProducer{T}(path, closed, start, stop) where {T} =
-        new{T}(path, closed, start, stop, nothing, nothing, false)
+    JLSProducer{T}(path, start, stop, closed) where {T} =
+        new{T}(path, start, stop, closed, nothing, nothing, false)
 end
 
 function (p::JLSProducer{T})() where {T}

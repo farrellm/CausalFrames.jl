@@ -69,7 +69,8 @@ to the context's time type. It is chosen by `time`:
 
 - `time = nothing` (default): the column already named `:time`.
 - `time = :name` (a `Symbol`): the column named `:name` (after `rename`),
-  renamed to `:time`.
+  renamed to `:time` (an `ArgumentError` if the file also has a `:time`
+  column).
 - `time = f` (a function): `f(row)` is called per row to compute the time
   value, producing the `:time` column (any existing `:time` is overwritten).
 
@@ -113,6 +114,7 @@ scan whose in-window rows are sorted in memory.
 function readparquet(path::AbstractString; time = nothing, rename = nothing,
     sort::Bool = false, closed::Bool = false, skipmissing::Bool = false,
     backend::Symbol = :auto)
+    checksourcetimespec(time, "readparquet")
     resolvebackend(backend, :duckdb, READHINT)   # eager: fail at the call site
     return CausalPipeline() do ctx::Context
         return ChunkSource(
@@ -134,8 +136,9 @@ of the two parquet backends loaded — `using Parquet2` or `using DuckDB` — an
 uses Parquet2 when both are.
 
 Like [`writecsv`](@ref), writing happens on a background task fed by a bounded
-queue, so the pipeline does not block on disk I/O — only if the writer falls
-more than `queue` chunks behind, plus once at the end to join it. Chunks are
+queue of depth `queue`, so the pipeline does not block on disk I/O — only if the
+writer falls more than `queue` chunks behind, plus once at the end to join it.
+Chunks are
 only ever merged, never split, so `rowgroupsize = 1` writes one row group per
 incoming chunk. How they reach the file depends on the backend:
 
@@ -147,8 +150,9 @@ incoming chunk. How they reach the file depends on the backend:
 `rowgroupsize` is exact under Parquet2 and a hint under DuckDB, which rounds it
 up to a multiple of its own 2048-row vector size.
 
-Unlike a CSV file, **a parquet file is only valid once finalized**, which
-happens when the stream is *exhausted* — by [`load`](@ref), [`scan`](@ref), or
+The file is truncated when the run starts, under either backend. Unlike a CSV
+file, **a parquet file is only valid once finalized**, which happens when the
+stream is *exhausted* — by [`load`](@ref), [`scan`](@ref), or
 a fully drained [`stream`](@ref). There is no usable prefix on disk while the
 run is in flight, and abandoning a `stream` part-way leaves an unusable file;
 use [`scan`](@ref) when the file is all you want:
@@ -159,7 +163,8 @@ scan(ctx, readparquet("ticks.parquet") |>
           writeparquet("mids.parquet"))
 ```
 
-A stream with no rows at all yields a valid file with no rows.
+A stream with no rows at all yields a valid file with no rows and a single
+`time` column, which reads back as an empty stream.
 
 `backend` is `:auto` (default), `:parquet2` or `:duckdb`; naming one that is not
 loaded is an `ArgumentError`. Remaining keyword arguments are passed through to
@@ -175,13 +180,13 @@ The curried form composes with `|>`; the uncurried form applies directly, so
 """
 function writeparquet(path::AbstractString; queue::Integer = 1,
     rowgroupsize::Integer = 1_000_000, backend::Symbol = :auto, kwargs...)
-    resolvebackend(backend, :parquet2, WRITEHINT)   # eager: fail at the call site
     queue >= 0 ||
         throw(ArgumentError("writeparquet queue must be non-negative, got $queue"))
     rowgroupsize >= 1 || throw(
         ArgumentError(
             "writeparquet rowgroupsize must be positive, got $rowgroupsize"),
     )
+    resolvebackend(backend, :parquet2, WRITEHINT)   # eager: fail at the call site
     # Materialized once, so the per-row-group splat into the writer is over a
     # concretely typed NamedTuple rather than the keyword iterator.
     opts = values(kwargs)

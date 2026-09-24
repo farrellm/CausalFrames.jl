@@ -49,8 +49,10 @@
         @test_throws ArgumentError readtable(src)
         @test_throws ArgumentError readtable(src; time = :nope)
         @test_throws ArgumentError readtable(textual)
-        @test_throws ArgumentError readtable(both; time = :ts)
-        @test_throws ArgumentError readtable(src; time = r -> string(r.a))
+        @test_throws "table has both a :time column and the time column :ts" readtable(
+            both; time = :ts)
+        @test_throws "the `time` function over table returned text" readtable(
+            src; time = r -> string(r.a))
         # ... the generic path when it runs
         @test_throws ArgumentError load(ctx, readtable(Tables.columntable(src)))
         @test_throws ArgumentError load(ctx,
@@ -59,9 +61,9 @@
         @test_throws ArgumentError load(ctx,
             readtable(Tables.columntable(both); time = :ts))
         # a bad spec or a non-table is eager on every path
-        @test_throws ArgumentError readtable(df; time = "time")
+        @test_throws "readtable time spec must be" readtable(df; time = "time")
         @test_throws ArgumentError readtable(Tables.columntable(df); time = 1)
-        @test_throws ArgumentError readtable(1)
+        @test_throws "readtable table must be a Tables.jl table" readtable(1)
         @test_throws ArgumentError readtable(clock(1))
     end
 

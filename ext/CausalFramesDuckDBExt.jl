@@ -177,6 +177,9 @@ end
 
 function writeloop(chan::Channel{DataFrame}, path::String, rowgroupsize::Int,
     compression::String)
+    # Truncated when the run starts, as every other sink's file is: a run that
+    # fails or is abandoned must not leave the previous run's file looking current.
+    close(open(path, "w"))
     con = connection()
     staged = false
     try

@@ -82,6 +82,20 @@ end
     @test_throws ArgumentError load(Context(0, 100),
         readparquet(path; time = :nope))
 
+    # a spec that is neither a Symbol nor a function is eager
+    @test_throws "readparquet time spec must be" readparquet(path; time = "ts")
+
+    both = writeparquetfile(joinpath(dir, "both.parquet"),
+        DataFrame(time = [1, 2, 3], ts = [1, 2, 3]))
+    for backend in (:duckdb, :parquet2)
+        # naming a column when the file also has :time is ambiguous
+        @test_throws "has both a :time column and the time column :ts" load(
+            Context(0, 100), readparquet(both; time = :ts, backend))
+        # a time function returning text is refused as a textual column is
+        @test_throws "the `time` function over parquet file $path returned text" load(
+            Context(0, 100), readparquet(path; time = row -> string(row.ts), backend))
+    end
+
     # time from a function, over the file's own columns
     frame = load(Context(0, 100), readparquet(path; time = row -> row.ts * 2))
     df = DataFrame(frame)
@@ -471,11 +485,32 @@ end
     scan(ctx, p |> writeparquet(ducksmall; backend = :duckdb, rowgroupsize = 2048))
     @test Parquet2.nrowgroups(Parquet2.Dataset(ducksmall)) > 1
 
-    # a stream with no rows still leaves a valid, empty file
-    none = joinpath(dir, "none.parquet")
-    scan(ctx, emptyframe() |> writeparquet(none; backend = :duckdb))
-    @test isfile(none)
-    @test nrow(DataFrame(Parquet2.Dataset(none))) == 0
+    # a stream with no rows leaves a valid file, with one empty time column
+    # under either sink, which either reader returns as an empty stream
+    for wb in (:duckdb, :parquet2)
+        none = joinpath(dir, "none_$wb.parquet")
+        scan(ctx, emptyframe() |> writeparquet(none; backend = wb))
+        @test names(DataFrame(Parquet2.Dataset(none))) == ["time"]
+        for rb in (:duckdb, :parquet2), sort in (false, true)
+            df = DataFrame(load(ctx, readparquet(none; backend = rb, sort)))
+            @test nrow(df) == 0 && names(df) == ["time"]
+        end
+    end
+
+    # both sinks truncate when the run starts, so a failed run never leaves
+    # the previous file looking current (queue = 0: the writer has opened the
+    # file before the first chunk is handed over)
+    failing =
+        clock(1; batchsize = 2) |>
+        addcolumns(r -> r.time >= 4 ? error("boom") : (; y = r.time))
+    for wb in (:duckdb, :parquet2)
+        stale = joinpath(dir, "stale_$wb.parquet")
+        scan(ctx, clock(1) |> writeparquet(stale; backend = wb))
+        @test filesize(stale) > 0
+        @test_throws Exception scan(Context(0, 10),
+            failing |> writeparquet(stale; backend = wb, queue = 0))
+        @test filesize(stale) == 0
+    end
 
     # DuckDB takes compression_codec and rejects the Parquet2-only options
     zstd = joinpath(dir, "zstd.parquet")
@@ -562,11 +597,11 @@ end
         rowgroupsize = 3))
     @test DataFrame(load(Context(0, 10), readparquet(many))) == expected
 
-    # a stream with no rows yields a valid, column-less file
+    # a stream with no rows yields a valid file of one empty time column
     none = joinpath(dir, "none.parquet")
     scan(ctx, emptyframe() |> writeparquet(none))
-    @test isfile(none)
-    @test nrow(DataFrame(Parquet2.Dataset(none))) == 0
+    @test names(DataFrame(Parquet2.Dataset(none))) == ["time"]
+    @test nrow(DataFrame(load(ctx, readparquet(none)))) == 0
 
     # ownership: the writer reads its chunk on another task while downstream
     # ops mutate their own chunk's column index in place (asofjoin's
