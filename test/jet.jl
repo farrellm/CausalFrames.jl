@@ -223,40 +223,72 @@ end
     JET.@test_opt CausalFrames.cycleperm!(Int[], fkeys, times, Base.Order.Forward)
 end
 
-@testset "summarizewindows kernels" begin
-    # both window algorithms, keyed (with the vanish-row merge) and keyless
-    # (the grid over the empty key), over a String key so the key is non-isbits
-    protos, requested = CausalFrames.prototypes(
-        CausalFrames.tosummarizers([Count(), Sum(:x), Mean(:x)]), [:k])
-    outs = Val(requested)
+# The tier combinations the window kernels specialize on: each tier alone, and
+# all of them with a dependent spanning them (TierSpan, test/fixtures.jl), over
+# a String key so the key is non-isbits.
+const JETTIERSETS = ([Count(), Sum(:x), Mean(:x), Last(:x), Min(:x),
+    CountDistinct(:x), AgeWeightedSum(:x)], [Product(:x)], [PlainSum(:x)],
+    [TierSpan(:x), Mean(:x), First(:x)])
+
+@testset "addrollingcolumns kernel" begin
     types = (time = Int, k = String, x = Float64)
-    states = CausalFrames.newstates(protos, types)
-    S = typeof(states)
-    R = CausalFrames.storerowtype(types)
-    V = CausalFrames.promotedvaluetype(S, protos, outs)
-    emptyrow = convert(V, CausalFrames.emptyvalues(protos, outs))
+    lnt = (time = [1, 3, 6], k = ["a", "b", "a"], x = [0.0, 0.0, 0.0])
+    snt = (time = [1, 2, 6], k = ["a", "b", "a"], x = [1.0, 2.0, 3.0])
+    for ss in JETTIERSETS, kn in (Val((:k,)), Val(()))
+        protos, requested = CausalFrames.prototypes(
+            CausalFrames.tosummarizers(ss), Symbol[])
+        outs = Val(requested)
+        tg = CausalFrames.tiering(protos, types)
+        tiers = CausalFrames.rolltiers(tg, types, kn, 2, nothing)
+        V = CausalFrames.tieredvaluetype(tg, protos, outs)
+        emptyrow = convert(V, CausalFrames.emptyvalues(protos, outs))
+        vals = (Vector{V}(undef, 3), Vector{V}(undef, 3))
+        JET.@test_opt CausalFrames.rollsegment!(vals, tiers, lnt, 1, snt, 1,
+            true, (1, 5), kn, outs, emptyrow)
+    end
+end
+
+@testset "summarizewindows kernels" begin
+    # keyed (with the vanish-row merge), keyless (the grid over the empty key),
+    # and dense (the declared emission and its keyset checks)
+    types = (time = Int, k = String, x = Float64)
     nt = (time = [1, 3, 6], k = ["a", "b", "a"], x = [1.0, 2.0, 3.0])
     ticks = [0, 5, 10]
-    # the third case declares the keys, taking the dense emission and the
-    # admission-time keyset checks
     declared = CausalFrames.tokeyset(["b", "a"], [:k], "summarizewindows")
-    for (kn, grid, ks) in ((Val((:k,)), Val(false), nothing),
-        (Val(()), Val(true), nothing), (Val((:k,)), Val(false), declared))
-        K = CausalFrames.storekeytype(types, kn)
-        RT = CausalFrames.gridrowtype(Int, K, V)
-        G = CausalFrames.RunningGroup{S}
-        JET.@test_opt CausalFrames.windowrunning!(RT[], R[], 1, nt, ticks,
-            Dict{K,G}(), states, Pair{K,G}[], K[], 5, kn, outs, emptyrow, grid,
-            ks)
-        JET.@test_opt CausalFrames.windowrefold!(RT[], R[], 1, nt, ticks,
-            CausalFrames.GroupTable{K,S}(), states, K[], 5, kn, outs, emptyrow,
-            grid, ks)
-        TR = CausalFrames.SegTree{S,R,Int}
-        JET.@test_opt CausalFrames.windowtree!(RT[], nt, ticks, Dict{K,TR}(),
-            states, Pair{K,TR}[], K[], 5, kn, outs, emptyrow, grid, ks)
-        JET.@test_opt CausalFrames.flushtree!(RT[], ticks, Dict{K,TR}(),
-            Pair{K,TR}[], K[], 5, outs, emptyrow, grid, ks)
+    for ss in JETTIERSETS,
+        (kc, grid, ks) in (([:k], Val(false), nothing),
+            (Symbol[], Val(true), nothing), ([:k], Val(false), declared))
+
+        protos, requested = CausalFrames.prototypes(
+            CausalFrames.tosummarizers(ss), kc)
+        outs = Val(requested)
+        kn = Val(Tuple(kc))
+        cfg = CausalFrames.WindowConfig(kc, kn, 5, protos, outs, grid, ks)
+        st = CausalFrames.WindowState{Int}(
+            CausalFrames.IntervalCursor{Int}(clock(5).run(Context(0, 10))))
+        CausalFrames.preparewindows!(st, cfg, types)
+        RT, emptyrow = CausalFrames.windowtypes(st, cfg)
+        JET.@test_opt CausalFrames.windowrows!(RT[], st.tiers, 1, nt, ticks,
+            st.prevkeys, 5, kn, outs, emptyrow, grid, ks)
+        JET.@test_opt CausalFrames.flushwindows!(RT[], st.tiers, 1, ticks,
+            st.prevkeys, 5, kn, outs, emptyrow, grid, ks)
     end
+end
+
+@testset "windowed states and the age-weighted sum" begin
+    for T in (Float64, Int, Union{Missing,Float64}),
+        s in (Min(:x), First(:x),
+            Last(:x), CountDistinct(:x), AgeWeightedSum(:x))
+
+        st = CausalFrames.freshwindowed(s, (time = Int, x = T))
+        row = (time = 1, x = one(nonmissingtype(T)))
+        JET.@test_opt CausalFrames.update!(st, row)
+        CausalFrames.update!(st, row)
+        JET.@test_opt CausalFrames.value(st)
+        JET.@test_opt CausalFrames.downdate!(st, row)
+    end
+    st = CausalFrames.fresh(AgeWeightedSum(:x), (time = Int, x = Float64))
+    JET.@test_opt CausalFrames.combine!(st, st, st)
 end
 
 # A FitModel fold is a typed push per column (the fit itself is opaque and runs

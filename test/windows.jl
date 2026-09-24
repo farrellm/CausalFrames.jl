@@ -1,31 +1,3 @@
-# A group summarizer whose state reports itself non-invertible once its column
-# widens to Float64. Every built-in accumulator stays invertible under
-# widening, so this is the only way to drive summarizewindows' running -> tree
-# demotion. The output name rides in a type parameter, as the
-# interface requires for `value` to infer.
-struct FragileSum{C} <: GroupSummarizer end
-FragileSum(column::Symbol) = FragileSum{column}()
-mutable struct FragileSumState{C,N,T} <: SummarizerState
-    total::T
-end
-CausalFrames.emptyvalue(::FragileSum{C}) where {C} =
-    NamedTuple{(Symbol(C, :_fragile),)}((0,))
-CausalFrames.fresh(::FragileSum{C}, intypes::NamedTuple) where {C} =
-    FragileSumState{C,Symbol(C, :_fragile),intypes[C]}(zero(intypes[C]))
-CausalFrames.fresh(::FragileSumState{C,N,T}) where {C,N,T} =
-    FragileSumState{C,N,T}(zero(T))
-CausalFrames.update!(st::FragileSumState{C}, row) where {C} =
-    (st.total += getproperty(row, C); nothing)
-CausalFrames.downdate!(st::FragileSumState{C}, row) where {C} =
-    (st.total -= getproperty(row, C); nothing)
-CausalFrames.combine!(dest::FragileSumState, a, b) =
-    (dest.total = a.total + b.total; nothing)
-CausalFrames.value(st::FragileSumState{C,N,T}) where {C,N,T} =
-    NamedTuple{(N,),Tuple{T}}((st.total,))
-CausalFrames.widenstate(st::FragileSumState{C,N}, intypes::NamedTuple) where {C,N} =
-    FragileSumState{C,N,intypes[C]}(convert(intypes[C], st.total))
-CausalFrames.isinvertible(::FragileSumState{C,N,Float64}) where {C,N} = false
-
 # The brute-force oracle: at each tick τ, `summarize` the rows in [τ - L, τ)
 # alone, then apply the keyed vanish rule — an empty row for every key present
 # at the previous tick and absent now — and sort each tick's rows by key. With
@@ -222,8 +194,9 @@ end
         @test df.count == zeros(Int, 6)
         @test all(ismissing, df.x_mean)
 
-        # an undeclared key throws in every window mode: running, tree, re-fold
-        for ss in ([Count(), Sum(:x)], Min(:x), Opaque(Sum(:x)))
+        # an undeclared key throws whichever tier is primary: running, tree,
+        # re-fold
+        for ss in ([Count(), Sum(:x)], Product(:x), Opaque(Sum(:x)))
             @test_throws ArgumentError load(Context(5, 25),
                 p |> summarizewindows(clock(5), 5, ss; key = :k, keyset = ["a"]))
         end
@@ -256,10 +229,15 @@ end
     ctx = Context(20, 250)
     ticks = 20:5:245
 
+    # each window tier (tiers.jl) alone and together, as in the rolling tests
     groupset = [Count(), Sum(:x), Mean(:x), Variance(:x), Correlation(:x, :y),
-        LinearRegression(:x, :y; name = :m1)]
-    monoidset = [Min(:x), Max(:x), First(:x), Last(:x), CountDistinct(:x)]
-    plainset = [Sum(:x), TestVar(:x)]
+        AgeWeightedSum(:x), LinearRegression(:x, :y; name = :m1)]
+    trackset = [Min(:x), Max(:x), First(:x), Last(:x), CountDistinct(:x)]
+    monoidset = [Product(:y), MinMax(:x)]                 # the tree alone
+    mixedset = [Sum(:x), Min(:x), MinMax(:y), Product(:y)] # running + tree
+    plainset = [Sum(:x), TestVar(:x), PlainSum(:y)]       # running + re-fold
+    spanset = [TierSpan(:y), Mean(:x), Last(:x)]          # every tier at once
+    allsets = (groupset, trackset, monoidset, mixedset, plainset, spanset)
     windowed(p, L, ss; kwargs...) = DataFrame(load(ctx,
         p |> summarizewindows(clock(5), L, ss; kwargs...)))
 
@@ -267,8 +245,7 @@ end
     layouts = ((;), (; key = :k), (; key = :k, keyset = ["c", "a", "b"]))
 
     @testset "differential against the brute-force oracle" begin
-        for x in (intx, floatx), ss in (groupset, monoidset, plainset),
-            L in (3, 11), opts in layouts
+        for x in (intx, floatx), ss in allsets, L in (3, 11), opts in layouts
 
             windowsagree(windowed(mkdata(x), L, ss; opts...),
                 windowsoracle(frame(x), ticks, L, ss; opts...))
@@ -276,18 +253,17 @@ end
     end
 
     @testset "running agrees with re-fold" begin
-        for x in (intx, floatx), opts in layouts
-            windowsagree(windowed(mkdata(x), 11, groupset; opts...),
-                windowed(mkdata(x), 11, map(Opaque, groupset); opts...))
+        for x in (intx, floatx), ss in (groupset, trackset), opts in layouts
+            windowsagree(windowed(mkdata(x), 11, ss; opts...),
+                windowed(mkdata(x), 11, map(Opaque, ss); opts...))
         end
     end
 
-    @testset "tree agrees with re-fold" begin
-        # L = 40 spans eight ticks, so trees grow, rebuild and slide; the mixed
-        # set is all monoid (Sum is a group, hence a monoid) and takes the tree
-        mixedset = [Sum(:x), Min(:x), Last(:x)]
-        for x in (intx, floatx), ss in (monoidset, mixedset), L in (3, 11, 40),
-            opts in layouts
+    @testset "tree and mixed tiers agree with re-fold" begin
+        # L = 40 spans eight ticks, so trees grow, rebuild and slide, and
+        # running groups empty and refill between ticks at L = 3
+        for x in (intx, floatx), ss in (monoidset, mixedset, plainset, spanset),
+            L in (3, 11, 40), opts in layouts
 
             windowsagree(windowed(mkdata(x), L, ss; opts...),
                 windowed(mkdata(x), L, map(Opaque, ss); opts...))
@@ -303,10 +279,15 @@ end
                 for r in ranges
             ])
         whole = frame(Float64.(xs))
-        # running stays running, running demotes to tree, tree widens within
-        # tree, re-fold widens within re-fold
+        # running stays running; FragileSum alone demotes to the tree, rebuilt
+        # from the buffer beside a running Count, from the old trees beside
+        # Product, and beside a re-fold PlainSum; the tree widens within the
+        # tree, re-fold within re-fold
         for ss in ([Sum(:x), Mean(:x)], [FragileSum(:x), Count()],
-                [Min(:x), Last(:x)], [Sum(:x), TestVar(:x)]),
+                [FragileSum(:x), Product(:y)], [FragileSum(:x), PlainSum(:y)],
+                [LateSum(:x)], [LateSum(:x), Product(:y)],
+                [Min(:x), Last(:x)], [Product(:x), MinMax(:x)],
+                [Sum(:x), TestVar(:x), PlainSum(:x)]),
             opts in layouts
 
             windowsagree(windowed(mixed, 11, ss; opts...),
@@ -315,11 +296,33 @@ end
     end
 
     @testset "streaming agrees with loading" begin
-        for ss in (groupset, monoidset), opts in layouts
+        for ss in (groupset, trackset, spanset), opts in layouts
             t = summarizewindows(clock(5), 11, ss; opts...)
             loaded = DataFrame(load(ctx, mkdata(intx) |> t))
             streamed = reduce(vcat, DataFrame.(stream(ctx, mkdata(intx) |> t)))
             @test isequal(streamed, loaded)
+        end
+    end
+
+    @testset "allocations do not grow with rows" begin
+        # as in the rolling tests: pooled running groups, reused windowed
+        # states and trees, one refold table pool — quadrupling the rows (and
+        # with them the ticks) adds only logarithmic buffer growth and the
+        # emitted rows' vector
+        function windowallocs(ss, n; opts...)
+            src = DataFrame(time = 1:n, k = repeat(["a", "b"], n ÷ 2),
+                x = mod.(1:n, 7), y = mod.(1:n, 5))
+            p = CausalPipeline(ctx -> [src])
+            t = summarizewindows(clock(10), 40, ss; opts...)
+            load(Context(0, n + 1), p |> t)
+            return @allocations load(Context(0, n + 1), p |> t)
+        end
+        for ss in ([Sum(:x), Mean(:x), Last(:x), Min(:x), CountDistinct(:x),
+                AgeWeightedSum(:x)], [Product(:x)], [PlainSum(:x)], spanset),
+            opts in layouts
+
+            @test windowallocs(ss, 8000; opts...) -
+                  windowallocs(ss, 2000; opts...) < 200
         end
     end
 

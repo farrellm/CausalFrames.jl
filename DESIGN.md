@@ -999,50 +999,78 @@ the row itself, and every row sharing its timestamp, is in its own window.
 The implementation is a `chunkmap` over the augmented stream that pulls
 summarized chunks on demand (the `asofjoin` machinery). Times are
 non-decreasing, so windows slide forward monotonically: per window and key,
-rows enter in stream order and expire for good. The window algorithm
-follows the summarizers' structure, classified over the *expanded*
-prototype tuple at construction time:
+rows enter in stream order and expire for good, oldest first. The window
+algorithm is chosen **per accumulator**, not per call (`tiers.jl`). The
+expanded prototype tuple is partitioned into tiers from the realized states,
+so the weakest structure in a call costs only its own summarizers:
 
-- **All `GroupSummarizer`s — running mode.** Each window keeps per-key
-  running states (a `Dict` from key to state tuple plus a live-row count):
-  admitted rows are `update!`d in, and a per-window eviction head over the
-  shared row buffer `downdate!`s rows as they age out — O(1) amortized per
-  row per window. A key's group is deleted when its last row leaves, so an
-  absent key *means* an empty window and emits the empty values (`Mean`
-  over an empty window is `missing`, never `0/0`), exactly as the re-fold
-  path's seen-flag decides it. The floating-point sum accumulators use
-  compensated summation and count nonfinite terms instead of folding them
-  in (see "Summarizers"), so eviction is clean: a window recovers exactly
-  once a `NaN` or `±Inf` row ages out, and finite values carry only the
-  compensated round-off rather than the usual sliding-sum drift.
-- **All `MonoidSummarizer`s — tree mode.** Rows append to per-key segment
+- **Running tier — `GroupSummarizer`s.** Each window keeps per-key running
+  states (a `Dict` from key to state tuple plus a live-row count). Admitted
+  rows are `update!`d in, and a per-window eviction head over the shared row
+  buffer `downdate!`s rows as they age out, oldest first: O(1) amortized per
+  row per window. The states are the summarizers' *windowed* states
+  (`freshwindowed`), which for most summarizers are their ordinary ones; `Min`,
+  `Max`, `First`, `Last` and `CountDistinct` slide a windowed state of their own
+  (see "Structured subtypes"). A key's group is deleted when its last row
+  leaves, and retired to a pool that the next group of any key reuses zeroed,
+  so an absent key *means* an empty window, and it emits the empty values
+  (`Mean` over an empty window is `missing`, never `0/0`). The floating-point
+  sum accumulators use compensated summation and count nonfinite terms instead
+  of folding them in (see "Summarizers"), so eviction is clean: a window
+  recovers exactly once a `NaN` or `±Inf` row ages out, and finite values carry
+  only the compensated round-off rather than the usual sliding-sum drift.
+- **Tree tier — the other `MonoidSummarizer`s.** Rows append to per-key segment
   trees (`segtree.jl`) whose nodes hold the `combine!` of their children;
   each output row binary-searches its window's start per look-back — using
   the kernel's exact membership predicate `t - s <= lookback`, never a
   rearrangement of it — and folds the window from O(log n) partial
-  combinations, order-preserved for `First`/`Last`. Expired rows leave the
-  tree only logically (a head index) and are dropped at the next
+  combinations, order-preserved for order-sensitive states. Expired rows leave
+  the tree only logically (a head index) and are dropped at the next
   capacity-triggered rebuild, amortized O(1) per append; a query never
   touches a node unless its whole range is in the window, which is also
-  what makes an expired absorbing leaf (`missing`, `NaN`) harmless.
-- **Anything less — re-fold mode.** Each output row folds *fresh* states
-  over its window's buffered rows, oldest to newest, one buffer scan plus
-  one `update!` per in-window row per window; the always-correct baseline,
-  and the oracle the fast paths are differentially tested against.
+  what makes an expired absorbing leaf (`missing`, `NaN`) harmless. The trees
+  own their rows, so a call mixing the tree with another tier stores its rows
+  twice, once there and once in the shared buffer.
+- **Re-fold tier — everything else.** Each output row folds *fresh* states
+  over its window's buffered rows, from that window's eviction head: one
+  `update!` per in-window row per window. The always-correct baseline, and the
+  oracle the other tiers are differentially tested against.
+- **No tier — stateless states.** A state with no fields (every dependent
+  summarizer's) folds nothing, so it needs no per-key copy: one instance
+  serves every window and reads its dependencies' values at emission.
 
-The candidate mode is re-checked against the realized states whenever they
-are built or widened: a widening that produces an accumulator defeating
-`downdate!` (`isinvertible`) demotes running to tree mid-stream — the tree
-recovers a poisoned window once the offending row expires, where such a
-running state never could. The sum family, though, counts `NaN`, `±Inf`, and
-`missing` terms rather than folding them in (see Summarizers), so those
-widenings stay on the running path and recover on expiry there. Widening only
-promotes, so a mode can demote but never return. A schema widening rebuilds the incremental structures from
-the live rows — rare, O(live), and correct for every transition. In every
-mode the type-unstable setup happens once per chunk and the per-row work
-sits behind concretely-typed function barriers; only the (possibly
-heterogeneous) look-backs peel vararg-style, the per-window dicts and value
-vectors being homogeneous and indexable type-stably.
+At emission, each window takes its running group, its tree query and its
+re-fold states for the row's key, splices them back into topological order by
+a compile-time permutation (`mergestates`), and runs the ordinary
+`summaryvalues` over the result, so a dependent reads dependencies from any
+tier. Every tier holds the same rows per key, so any one of them decides
+whether the window is empty. A call whose summarizers share one structure
+compiles to the single-algorithm kernel: an absent tier's structure is
+`nothing`, and its code disappears.
+
+Measured over the benchmark's 100,000 rows (four per time unit, 100 keys), the
+per-accumulator choice leaves single-structure calls where they were and
+speeds up everything that used to fall to the weakest summarizer: an
+OHLC-style `[First, Max, Min, Last, Mean, Std]` goes from 52 ms to 17 ms at a
+250-unit look-back (it used to take the tree whole) and from 28 ms to 17 ms at
+5 units; `[Min, Max]` from 14.4 ms (tree) to 7.6 ms (deques); and
+`CountDistinct` from 218 ms (a set copied per combine) to 7.8 ms.
+
+The partition is re-derived from the realized states whenever they are built
+or widened. A widening that produces an accumulator defeating `downdate!`
+(`isinvertible`) moves that accumulator from the running tier to the tree
+mid-stream; the tree recovers a poisoned window once the offending row
+expires, where such a running state never could. The sum family, though,
+counts `NaN`, `±Inf`, and `missing` terms rather than folding them in (see
+Summarizers), so those widenings stay running and recover on expiry there.
+Widening only promotes, so an accumulator can demote but never return. A
+widening rebuilds every tier from the live rows (the buffer, or the old trees
+for a tree that already existed) — rare, O(live), and correct for every
+transition; the new types force a rebuild anyway. In every tier the
+type-unstable setup happens once per chunk and the per-row work sits behind
+one concretely typed kernel; only the (possibly heterogeneous) look-backs
+peel vararg-style, the per-window tables and value vectors being homogeneous
+and indexable type-stably.
 
 ## Interval summarization
 
@@ -1146,22 +1174,21 @@ rows (`storerowtype`, `rowat`) with an eviction head. Closing `τ` advances the
 head past the rows with `τ - time > lookback`. Flush drains the clock and
 closes the remaining ticks against the buffer as it stands.
 
-There are three window algorithms. As in `addrollingcolumns`, the choice is made
-from the expanded prototype tuple and re-derived whenever the states are built
-or widened:
+The window algorithm is chosen per accumulator, by `addrollingcolumns`' tiers
+(`tiers.jl`), and re-derived whenever the states are built or widened:
 
-- **Running**, for an all-`GroupSummarizer` set whose realized states are all
+- **Running**, for the `GroupSummarizer`s whose realized windowed states are
   `isinvertible`. Per-key `RunningGroup`s live in a `Dict` (keyless is the key
   `(;)`, the `rolling.jl` precedent); they are `update!`ed on admission and
-  `downdate!`ed on eviction, and a group is deleted with its last row, so
-  presence means rows in the window. Cost: O(1) amortized per row, plus a key
-  sort per tick into a reused scratch vector.
-- **Tree**, for an all-`MonoidSummarizer` set (group summarizers mixed with
-  monoid-only ones included). Rows append to per-key segment trees
-  (`segtree.jl`, the `addrollingcolumns` structure), and at each tick every
+  `downdate!`ed on eviction, oldest first, and a group is deleted with its last
+  row (retired to a pool for reuse), so presence means rows in the window.
+  Cost: O(1) amortized per row, plus a key sort per tick into a reused scratch
+  vector.
+- **Tree**, for the other `MonoidSummarizer`s. Rows append to per-key segment
+  trees (`segtree.jl`, the `addrollingcolumns` structure), and at each tick every
   tree binary-searches its window start with the exact membership predicate
   and folds the window from O(log n) partial combinations, order-preserved for
-  `First`/`Last`. What differs from `addrollingcolumns` is *when* a tree
+  order-sensitive states. What differs from `addrollingcolumns` is *when* a tree
   recombines. There a window is queried after every row, so each append
   updates its O(log n) ancestors at once. Here nothing reads a tree between
   ticks, so rows append as bare leaves (`treeappend!`), and at the tick each
@@ -1170,26 +1197,40 @@ or widened:
   tree would pay log₂(window) combines per row (about sixteen at a 20,000-row
   window), against re-fold's one update per row per overlapping tick. A tree
   whose window empties is dropped, so presence means rows in the window, as in
-  running mode. Cost: O(1) amortized per row plus O(log n) per key per tick.
-  Measured over the benchmark's million rows with `[Min, Max]`, a 5,000-unit
-  look-back and 1,000-unit ticks (five-fold overlap), tree beats re-fold
-  56 ms to 75 ms keyless and 117 ms to 152 ms keyed over 100 keys; at a
-  50,000-unit look-back (fifty-fold) it is 198 ms to 687 ms. The price is
-  memory, as for rolling's trees: a tree holds between two and eight state
-  tuples per live row, each state its own heap object, where re-fold holds
-  only the rows. Growing to the 20,000-row window allocates about 350,000
-  states (25 MiB) once, though nothing per row in the steady state.
+  the running tier. Cost: O(1) amortized per row plus O(log n) per key per
+  tick. The price is memory, as for rolling's trees: a tree holds between two
+  and eight state tuples per live row, each state its own heap object, where
+  re-fold holds only the rows.
 - **Re-fold** otherwise. At each tick the live rows are folded into per-key
   states drawn from a `GroupTable`'s pool, emitted, and retired back —
   `closecycle!`'s protocol — at O(window) per tick. This is the path `FitModel`
-  takes, and the differential-test oracle for the running one.
+  takes, and the differential-test oracle for the others.
+- **No tier** for stateless (dependent) states, as in `addrollingcolumns`.
 
-A widening that defeats `isinvertible` demotes running to the tree mid-stream,
-as in `addrollingcolumns`: the buffer's live rows replay into trees, which own
-their rows from then on. A widening within tree mode replays each tree's live
-rows (`replaytrees!`), and one that stays running replays the live rows into
-fresh groups (`replaygroups!`). Re-fold keeps nothing but the buffer, so a
-widening there rebuilds only the states.
+Measured over the benchmark's million rows with 1,000-unit ticks, the tiers
+keep single-structure calls at parity and speed up mixed ones: the OHLC-style
+set above goes from 145 ms to 122 ms keyless and 296 ms to 190 ms keyed at a
+5,000-unit look-back, and from 289 ms to 119 ms keyless at a 20-unit look-back
+(shorter than the tick spacing, where the old tree was rebuilt at every tick).
+The one loss is keyless `[Min, Max]` alone, 48 ms to 51 ms: there the old tree
+recombined a tick's leaves together at about one `combine!` per row, cheaper
+than two deque pushes per row plus the eviction lookup. Keyed, the same set
+goes from 119 ms to 91 ms, so no heuristic chooses between them. (The buffer is
+compacted at every tick's eviction, and rolling's after every row's, so it
+stays near the window's size rather than growing through a whole chunk — which
+is what keeps the running tier at or ahead of its old single-mode kernel.)
+
+Presence means rows in the window in every tier, so the first tier present
+(running, then tree, then re-fold) supplies the keys a tick emits, and the
+others are looked up by key; each emitted row merges the tiers' states back
+into topological order, as `addrollingcolumns` does. The row buffer is kept
+only when the running or re-fold tier is present.
+
+A widening that defeats `isinvertible` moves only that accumulator to the tree
+mid-stream, as in `addrollingcolumns`. Every widening rebuilds the tiers from
+the live rows: running groups replay the buffer, new trees replay the buffer,
+and surviving trees replay their own rows; the re-fold table starts empty,
+since it is filled only at ticks.
 
 `summarizewindows` is **causal**: a row emitted at `τ` folds only rows with time
 `< τ`. It is **stateful** in the usual sense, so streaming equals loading,
@@ -1234,12 +1275,13 @@ declaration that took one upstream pipeline per key, `merge`d back together.
 per slot. A row pays one lookup in the `KeySet`'s `Dict{K,Int}`, what the
 sparse table's lookup costs, and a close (`closedense!`) is an indexed walk over
 the slots that emits them all and zeroes only the folded ones — no sort, no
-table churn, no pool. `summarizewindows` keeps its three modes' structures,
-whose presence-means-rows-in-the-window invariant is exactly what the dense
-emission reads (`emitdense!`, a lookup per declared key per tick). The running
-and tree modes check the declaration only where a key's group or tree is made,
-so a key's later rows pay nothing for it; re-fold groups only at ticks, so it
-checks each admitted row. The undeclared paths pass `nothing` for the key set,
+table churn, no pool. `summarizewindows` keeps its tiers' structures, whose
+presence-means-rows-in-the-window invariant is exactly what the dense emission
+reads (`emitdense!`, a lookup per declared key per tick in the first tier
+present). When that primary tier is the running or the tree tier, the
+declaration is checked only where a key's group or tree is made, so a key's
+later rows pay nothing for it; re-fold groups only at ticks, so when it is the
+primary it checks each admitted row. The undeclared paths pass `nothing` for the key set,
 and the checks dispatch away.
 
 ## Model fitting (MLJ)
@@ -1575,13 +1617,29 @@ The interface, extended by concrete subtypes (unexported — extend
   order-sensitive `First`/`Last` combine. All three states are of the same
   concrete type, and `dest` may alias `a` or `b`, so implementations read
   their inputs before writing;
-- `downdate!(st, row)` — required of a `GroupSummarizer`'s states: remove a
-  previously folded row, the inverse of `update!`;
+- `freshwindowed(s, intypes) -> SummarizerState` — optional (defaults to
+  `fresh(s, intypes)`): the state a sliding window slides, which the window
+  transforms `update!` as rows arrive and `downdate!` as they leave. A
+  `GroupSummarizer` whose ordinary state cannot remove rows implements it
+  instead. The windowed state needs `fresh`, `fresh!`, `update!`, `downdate!`,
+  `value` (of the ordinary state's type) and optionally `isinvertible`; it is
+  never combined or widened, since only the running window tier holds one and
+  a widening rebuilds that tier from its rows;
+- `downdate!(st, row)` — required of a `GroupSummarizer`'s windowed state:
+  remove `row`, the **oldest** row still folded, the inverse of its `update!`.
+  This is a strengthening of the plain "remove a previously folded row" a
+  group inverse would be, and it is the callers' side of the contract: every
+  caller evicts in the order it folded (the running tiers of
+  `addrollingcolumns` and `summarizewindows` evict `buffer[head]`, and a key's
+  group sees its rows in buffer order). A state may rely on it — the
+  age-weighted sum knows the evicted row's weight, and the windowed trackers
+  know the row is at their front — and every future caller must keep it;
 - `isinvertible(st) -> Bool` — optional (defaults to `true`): whether
-  `downdate!` actually inverts `update!` for the state's realized
+  `downdate!` actually inverts `update!` for the windowed state's realized
   accumulator type. The sum family keeps `NaN`, `±Inf`, and `missing` terms
   out of the running total and counts them, so they stay invertible; a state
-  that folds an absorbing value past recovery returns `false`.
+  that folds an absorbing value past recovery returns `false`, and the window
+  transforms fold that summarizer through a segment tree instead.
 
 Output column names are deterministic, formed by suffixing the column name:
 `Sum(:x)` produces `:x_sum`, `Min(:x)` produces `:x_min`, and `SumPower(:x, 2)`
@@ -1601,6 +1659,7 @@ Concrete summarizers provided, for an input column of element type `T`:
 | `SumPower(column, n)` | `:x_sumpower_2` for `n = 2` | `sum` of `T^n` | `0` |
 | `Product(column)` | `:x_product` | `prod` of `T` | `1` |
 | `DotProduct(a, b)` | `:a_b_dotproduct` | `sum` of `Ta * Tb` | `0` |
+| `AgeWeightedSum(column)` | `:x_ageweightedsum` | `sum` of `T` | `0` |
 | `Moment(column, n)` | `:x_moment_2` for `n = 2` | `sum` of `T^n` over `Int` | `missing` |
 | `Mean(column)` | `:x_mean` | `sum` of `T` over `Int` | `missing` |
 | `Variance(column; corrected)` | `:x_variance` | division result | `missing` |
@@ -1636,7 +1695,7 @@ the uncentered R², as is conventional.
 
 `Min`/`Max`/`First`/`Last` produce the input column's element type verbatim;
 all four are backed by one shared state type, parameterized by the combining
-function.
+function, and slide one shared windowed state (see "Structured subtypes").
 `Sum` and `SumPower` produce the element type `Base.sum` would: small signed
 and unsigned integers widen (`Int32` sums to `Int64`, `Bool` to `Int64`,
 `UInt8` to `UInt64`), everything else keeps its type (`Float32` sums to
@@ -1703,6 +1762,26 @@ promotions — plain→compensated (an `Int` column promoted to float), and, whe
 `missing` first appears, plain/compensated→`Optional*` (missings start at zero,
 the existing total carried) and widening within the `Optional*` family.
 
+`AgeWeightedSum(column)` is the sum family's one accumulator that the term
+functor cannot express, because its update reads its own running total: it
+folds `Σₖ k·yₖ`, where `k` is the row's age in rows (`0` for the newest). With
+`Sum` and `Count` that gives the linearly weighted moving average,
+`(n·Σy − Σk·y) / (n(n+1)/2)`, and least squares on the row number, as
+fieldless dependents. Its state carries its own count `n` and `S₁ = Σy`
+beside `S₂ = Σk·y`, since a state cannot read a sibling's: a new row adds `S₁`
+to `S₂` (every row ages by one) and then joins `S₁` at weight `0`;
+`downdate!`, handed the oldest row by the law above, takes back its weight
+`n − 1`; and `combine!` ages `a`'s rows by `b`'s count,
+`S₂ = a.S₂ + a.S₁·b.n + b.S₂`. It uses the sum family's representations: an
+exact plain state for integers, and for fixed-precision floats Neumaier
+compensation over `S₁` and `S₂`, with `S₁`'s counters classifying each raw
+`NaN`/`±Inf` input once. `S₂`'s nonfinite terms are `S₁`'s less the newest
+row's, whose weight is `0`, so a nonfinite value contributes nothing until a
+later row ages it (a weight of zero is exact, not IEEE's `0·Inf = NaN`), and a
+window recovers once it leaves. A `missing` input is counted as the `Optional*`
+states count it, but through a type flag on the two states rather than two
+more state types.
+
 `CountDistinct` is the one summarizer that departs from both of the rules
 above, and the one whose state is not O(1). It holds a `Set` of the values it
 has seen, so folding `n` rows costs O(distinct) memory rather than a few fields
@@ -1715,20 +1794,19 @@ rule exists because a total with an unknown term is unknowable, which a
 you saw, `missing` among them. `count(DISTINCT x)`'s null-skipping is a
 `filterrows` upstream.
 
-Its structure is a deliberate trade. Set union is a lawful monoid — associative,
-with a fresh set as the identity — so `CountDistinct` is a `MonoidSummarizer`
-and rolling windows take the tree path. The tree is not asymptotically better
-here the way it is for `Min`: a node's `combine!` copies a set, so a query
-costs O(window) either way, and the nodes hold O(n log n) elements where the
-re-fold path holds one window's worth. Measured over 200k rows in one key
-group with a 5,000-row window, tree beats re-fold 5.3 s to 6.6 s alone and
-5.4 s to 7.6 s beside a `Mean` (where declaring it plain would drag the
-`Mean` off the running path too); at a 50,000-row window the times converge
-(72 s to 76 s) and the tree's live memory is 122 MiB against 28 MiB. So the
-monoid classification wins on time everywhere measured and loses on memory at
-large windows — which is the direction worth documenting rather than hiding,
-since a caller who knows their window is huge and their cardinality high is
-the one who needs to know.
+It is a group through its windowed state. The ordinary state's `Set` combines
+(set union is a lawful monoid) but cannot remove a row: whether the row's value
+still appears elsewhere in the window is unknowable from the set. The windowed
+state counts the rows per distinct value in a `Dict{T,Int}` instead and drops a
+value when its count reaches zero, so a sliding window costs O(1) per row where
+the segment tree it used to take copied a set on every combine — 218 ms over
+the benchmark's 100,000 rows at a 25-unit look-back. The two stay separate
+because the count costs the folds that never remove a row: incrementing a count
+through the public `Dict` API hashes twice per row, which measured 1.4–1.7×
+slower than `push!` on a Set over a million-row fold (1.62× for 100 distinct
+`Int`s, 1.39× for 100,000, 1.71× for 1,000 `Float64`s, 1.56× for 100
+`String`s). A single-hash increment needs `Base`'s non-public `ht_keyindex2!`,
+so `summarize`, `intervalize` and the cycle folds keep the `Set`.
 
 `Sum`, `SumPower`, `Product`, `DotProduct`, and `CountDistinct` have an
 identity element, so they summarize no rows as `0` (`Product` as `1`). The
@@ -1772,7 +1850,9 @@ million rows allocates on the order of kilobytes.
 One consequence worth knowing: more than about 32 summarizers in a single
 call — counting hidden dependencies after expansion — exceeds Julia's tuple
 inference limits, and the fold degrades to dynamic dispatch. It stays
-correct, just no longer specialized.
+correct, just no longer specialized. The window transforms hold one tuple per
+tier, which only helps, but still merge them into the whole topological tuple
+at emission.
 
 ### Reusing state
 
@@ -1804,7 +1884,10 @@ Three structures own reusable scratch rather than allocating it per use:
   reused key-ordered emission buffer and a pool of retired state tuples, so
   closing a cycle neither collects a fresh vector to sort nor leaves the next
   cycle to rebuild a state tuple per key. `summarize` and `addsummarycolumns`
-  never close their table and leave both buffers empty.
+  never close their table and leave both buffers empty. The window
+  transforms' running tier pools its retired groups the same way, which
+  matters because a windowed tracker owns vectors: a key whose window empties
+  and refills reuses them rather than growing new ones.
 
 A retired or borrowed tuple is only ever handed out again after `fresh!`, and
 by then `summaryvalues` has copied the values it held into the emitted row.
@@ -1949,25 +2032,40 @@ declaring what a summarizer's states support beyond folding:
 `addrollingcolumns` and `summarizewindows` select their window algorithm from
 this structure (see "Rolling windows" and "Window summarization"). The classification of the built-ins:
 
-- **Groups**: `Count`, `Sum`, `SumPower`, `DotProduct` — subtraction is the
-  exact inverse of addition for integer accumulators; float accumulators
-  use the compensated, nonfinite-counting states (see above), leaving only
-  the compensated round-off; and a `Missing`-admitting column counts its
-  `missing` terms the same way, so it stays invertible rather than absorbing. The dependent summarizers (`Moment`, `Mean`,
+- **Groups**: `Count`, `Sum`, `SumPower`, `DotProduct`, `AgeWeightedSum` —
+  subtraction is the exact inverse of addition for integer accumulators;
+  float accumulators use the compensated, nonfinite-counting states (see
+  above), leaving only the compensated round-off; and a `Missing`-admitting
+  column counts its `missing` terms the same way, so it stays invertible
+  rather than absorbing. The dependent summarizers (`Moment`, `Mean`,
   `Variance`, `Std`, `Covariance`, `Correlation`, `LinearRegression`) are
   groups too: their states are fieldless, so `combine!` and `downdate!` are
-  no-ops, and their effective structure is that of their transitive
-  dependencies — all of which are the group accumulators above.
-- **Monoids only**: `CountDistinct` — a set union combines, but removing a
-  row cannot tell you whether its value still appears elsewhere in the window;
-  `Product` — dividing a row back out fails outright at
-  zero (the total is `0` regardless of what else was folded) and truncates
-  for integers; `Min`/`Max`/`First`/`Last` — no inverse exists, but two
-  ordered sub-ranges combine (for `First`/`Last` *because* the ranges are
-  ordered, which is why the law requires it).
+  no-ops, and the window transforms give them no tier at all — their
+  effective structure is that of their dependencies.
+- **Groups through a windowed state**: `Min`, `Max`, `First`, `Last`,
+  `CountDistinct`. Their ordinary states have no inverse — a minimum or a set
+  forgets what it would need — but combine over ordered sub-ranges (for
+  `First`/`Last` *because* the ranges are ordered, which is why the law
+  requires it), and fold everywhere but a sliding window at a fixed size.
+  In a window they slide `freshwindowed` states instead, which the oldest-first
+  law makes cheap. The four trackers share a *monotonic deque*: a new value
+  first drops every value at the back it makes redundant (those `b` with
+  `F(b, v)` `isequal` to `v`), so the front is always the fold of the window,
+  and eviction pops the front only when the evicted row's sequence number is
+  the front's. That relies on `F` selecting one of its arguments
+  associatively, which `min` and `max` do under `isequal` — `NaN`, `±0.0` and
+  `missing` included — as do `keepfirst` (nothing is redundant, so the deque is
+  the window: O(window) memory per key) and `keeplast` (everything is, so it
+  holds one value). `Min` and `Max` hold between one value and the whole window
+  (a monotone column). `CountDistinct` counts rows per value (see above). Dead
+  front slots are reclaimed in place once they dominate, so a steady window
+  allocates nothing.
+- **Monoids only**: `Product` — dividing a row back out fails outright at
+  zero (the total is `0` regardless of what else was folded), truncates for
+  integers, and compounds round-off for floats.
 
-A custom summarizer that declares neither still works everywhere; the
-rolling transform just keeps its re-fold path for any tuple containing one.
+A custom summarizer that declares neither still works everywhere; the window
+transforms re-fold it, and only it, per window.
 
 ## Interval semantics
 
@@ -2076,7 +2174,8 @@ the second.
 | `src/lastrow.jl` | the last-row-per-key transform (`lastrow`), over the join's store |
 | `src/sortcycles.jl` | the within-timestamp stable sort (`sortcycles`) and its `cycleperm!` barrier |
 | `src/fill.jl` | the missing-value fills: the stateful `forwardfill` and the row-wise `fillmissing` |
-| `src/segtree.jl` | the monoid segment tree behind the rolling and window tree modes |
+| `src/segtree.jl` | the monoid segment tree behind the rolling and window tree tiers |
+| `src/tiers.jl` | the per-accumulator window tiers shared by `addrollingcolumns` and `summarizewindows`: partitioning, running groups, state merging |
 | `src/rolling.jl` | the rolling-window summarization transform (`addrollingcolumns`) |
 | `src/intervalize.jl` | the interval-summarization transform (`intervalize`) |
 | `src/windows.jl` | the clock-sampled trailing-window summarization transform (`summarizewindows`) |
@@ -2089,7 +2188,7 @@ Exports: `Context`, `CausalFrame`, `CausalPipeline`, `load`, `stream`,
 `scan`, `context`, `timetype`, `emptyframe`, `concatenate`, `clock`, `readcsv`, `writecsv`, `readparquet`,
 `writeparquet`, `readjls`, `writejls`, `readtable`, `filterrows`,
 `addcolumns`, `selectcolumns`, `dropcolumns`, `reordercolumns`, `Summarizer`, `MonoidSummarizer`, `GroupSummarizer`,
-`SummarizerState`, `Count`, `CountDistinct`, `Sum`, `SumPower`,
+`SummarizerState`, `Count`, `CountDistinct`, `Sum`, `SumPower`, `AgeWeightedSum`,
 `Moment`, `Product`, `DotProduct`, `Mean`, `Variance`, `Std`, `Covariance`,
 `Correlation`, `LinearRegression`, `Min`, `Max`, `First`, `Last`, `FitModel`,
 `FittedModel`, `applymodels`, `addpredictions`, `modelreports`, `summarize`,

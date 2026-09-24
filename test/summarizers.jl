@@ -729,22 +729,23 @@ end
         return st
     end
 
-    # the hierarchy: the accumulators and the dependent summarizers are
-    # groups; Product and the trackers are monoids only; a plain Summarizer
+    # the hierarchy: the accumulators, the dependent summarizers, and — through
+    # their windowed states — the trackers and CountDistinct are groups;
+    # Product is a monoid only, as is the MinMax fixture; a plain Summarizer
     # is neither
     @test all(s -> s isa GroupSummarizer,
         [Count(), Sum(:x), SumPower(:x, 2), DotProduct(:x, :y),
-            Moment(:x, 2), Mean(:x), Variance(:x), Std(:x),
+            AgeWeightedSum(:x), Moment(:x, 2), Mean(:x), Variance(:x), Std(:x),
             Covariance(:x, :y), Correlation(:x, :y),
-            LinearRegression(:x, :y), LinearRegression([:x, :y], :y)])
+            LinearRegression(:x, :y), LinearRegression([:x, :y], :y),
+            Min(:x), Max(:x), First(:x), Last(:x), CountDistinct(:x)])
     @test all(s -> s isa MonoidSummarizer && !(s isa GroupSummarizer),
-        [Product(:x), Min(:x), Max(:x), First(:x), Last(:x), MinMax(:x),
-            CountDistinct(:x)])
+        [Product(:x), MinMax(:x)])
     @test !(Opaque(Sum(:x)) isa MonoidSummarizer)
 
     monoids = [Count(), Sum(:x), SumPower(:x, 2), DotProduct(:x, :y),
-        Product(:x), Min(:x), Max(:x), First(:x), Last(:x), MinMax(:x),
-        CountDistinct(:x)]
+        AgeWeightedSum(:x), Product(:x), Min(:x), Max(:x), First(:x), Last(:x),
+        MinMax(:x), CountDistinct(:x)]
 
     # fresh! must be indistinguishable from fresh: the transforms zero and
     # reuse state tuples per cycle, per interval and per window query, so a
@@ -752,8 +753,8 @@ end
     # next. MinMax is in the list without implementing fresh!, which is what
     # exercises the `fresh(st)` default a custom summarizer inherits.
     selfcontained = [Count(), Sum(:x), SumPower(:x, 2), DotProduct(:x, :y),
-        Product(:x), Min(:x), Max(:x), First(:x), Last(:x), MinMax(:x),
-        CountDistinct(:x), Opaque(Sum(:x))]
+        AgeWeightedSum(:x), Product(:x), Min(:x), Max(:x), First(:x), Last(:x),
+        MinMax(:x), CountDistinct(:x), Opaque(Sum(:x))]
     for s in selfcontained
         reused = CausalFrames.fresh!(fold(s, rows))   # folded, then zeroed
         rebuilt = CausalFrames.fresh(s, intypes)      # never folded
@@ -785,7 +786,8 @@ end
     # Zeroing a built-in state is pure field writes, so it allocates nothing —
     # the property every reuse path depends on.
     for s in [Count(), Sum(:x), SumPower(:x, 2), DotProduct(:x, :y),
-        Product(:x), Min(:x), Max(:x), First(:x), Last(:x), CountDistinct(:x)]
+        AgeWeightedSum(:x), Product(:x), Min(:x), Max(:x), First(:x), Last(:x),
+        CountDistinct(:x)]
         st = fold(s, rows)
         CausalFrames.fresh!(st)
         # CountDistinct is in this list because `empty!` keeps a Set's slots:
@@ -856,7 +858,8 @@ end
 
     # the group inverse: downdating the oldest rows equals folding the rest —
     # exact for integer accumulators
-    for s in [Count(), Sum(:x), SumPower(:x, 2), DotProduct(:x, :y)]
+    for s in [Count(), Sum(:x), SumPower(:x, 2), DotProduct(:x, :y),
+        AgeWeightedSum(:x)]
         st = fold(s, rows)
         @test @inferred(CausalFrames.downdate!(st, rows[1])) === nothing
         CausalFrames.downdate!(st, rows[2])
@@ -1259,4 +1262,187 @@ end
     st = foldm(Sum(:x), mint, Int[])
     @test updalloc(st, (x = 3,)) == 0
     @test updalloc(st, (x = missing,)) == 0
+end
+
+# A pseudo-random walk over a sliding window: each step admits a row or evicts
+# the oldest, and the check runs after every step. Admissions win two times in
+# three, so the window grows, drains and refills.
+function windowwalk(check, vals, nsteps; seed)
+    ops = lcgsequence(seed, nsteps, 3)
+    picks = lcgsequence(seed + 1, nsteps, length(vals))
+    live = NamedTuple[]
+    for i in 1:nsteps
+        if ops[i] == 0 && !isempty(live)
+            check(:evict, popfirst!(live), live)
+        else
+            row = (time = i, x = vals[picks[i]+1])
+            push!(live, row)
+            check(:admit, row, live)
+        end
+    end
+    return nothing
+end
+
+@testset "windowed states" begin
+    # The deque behind the windowed Min/Max/First/Last, and CountDistinct's
+    # counts, against the definition: a fresh ordinary state folded over the
+    # live window. The pools carry what a selection can trip over — ties,
+    # ±0.0, NaN and missing (min and max both propagate the last two) — and
+    # the deque must agree under isequal, not just ==.
+    pools = [
+        Union{Missing,Float64}[1.0, 2.0, 2.0, -0.0, 0.0, NaN, missing, 3.0, -1.0],
+        [3, 1, 4, 1, 5, 9, 2, 6],
+        ["b", "a", "c", "a"],
+    ]
+    for vals in pools, s in (Min(:x), Max(:x), First(:x), Last(:x),
+            CountDistinct(:x))
+
+        intypes = (time = Int, x = eltype(vals))
+        ws = CausalFrames.freshwindowed(s, intypes)
+        @test !(ws isa typeof(CausalFrames.fresh(s, intypes)))
+        windowwalk(vals, 400; seed = 7) do op, row, live
+            op === :admit ? CausalFrames.update!(ws, row) :
+            CausalFrames.downdate!(ws, row)
+            isempty(live) && return
+            ref = CausalFrames.fresh(s, intypes)
+            foreach(r -> CausalFrames.update!(ref, r), live)
+            @test isequal(CausalFrames.value(ws), CausalFrames.value(ref))
+        end
+        # zeroing gives a state indistinguishable from a fresh one
+        ws = CausalFrames.fresh!(ws)
+        ref = CausalFrames.fresh(s, intypes)
+        CausalFrames.update!(ws, (time = 0, x = vals[2]))
+        CausalFrames.update!(ref, (time = 0, x = vals[2]))
+        @test isequal(CausalFrames.value(ws), CausalFrames.value(ref))
+    end
+
+    # Every summarizer without its own windowed state gets its ordinary one.
+    intypes = (time = Int, x = Int)
+    @test CausalFrames.freshwindowed(Sum(:x), intypes) isa
+          typeof(CausalFrames.fresh(Sum(:x), intypes))
+
+    # A steady window slides without allocating: the deque reclaims its dead
+    # front slots in place, and a retired count leaves the Dict's slots behind.
+    slrow(t) = (time = t, x = Float64(mod(t, 17)))
+    function slidealloc(ws, from, n)
+        for t in from:(from+n-1)
+            CausalFrames.update!(ws, slrow(t))
+            CausalFrames.downdate!(ws, slrow(t - 50))
+        end
+        return nothing
+    end
+    for s in (Min(:x), Max(:x), First(:x), Last(:x), CountDistinct(:x))
+        ws = CausalFrames.freshwindowed(s, (time = Int, x = Float64))
+        foreach(t -> CausalFrames.update!(ws, slrow(t)), -49:0)
+        slidealloc(ws, 1, 1000)
+        @test (@allocated slidealloc(ws, 1001, 1000)) == 0
+    end
+end
+
+@testset "age-weighted sum" begin
+    s = AgeWeightedSum(:x)
+    @test CausalFrames.emptyvalue(s) === (x_ageweightedsum = 0,)
+
+    # The definition, Σ k·y with k the row's age and the newest weighing 0 — so
+    # a nonfinite newest value contributes nothing — and missing anywhere
+    # poisoning the whole.
+    function naive(live)
+        any(r -> ismissing(r.x), live) && return missing
+        n = length(live)
+        acc = 0 * live[1].x
+        for (j, r) in enumerate(live)
+            k = n - j
+            k == 0 || (acc += k * r.x)
+        end
+        return acc
+    end
+    agree(a, b) = isequal(a, b) || (a isa AbstractFloat && isapprox(a, b))
+    fold(intypes, rows) = foldl((st, r) -> (CausalFrames.update!(st, r); st),
+        rows; init = CausalFrames.fresh(s, intypes))
+
+    pools = [
+        [3, -1, 4, 1, -5, 9, 2, 6],
+        [0.1, -2.5, 3.0, 1e8, 0.3, Inf, -Inf, NaN, 7.25],
+        Union{Missing,Int}[2, missing, 5, -3],
+        Union{Missing,Float64}[0.5, missing, Inf, 1.5, NaN],
+    ]
+    for vals in pools
+        intypes = (time = Int, x = eltype(vals))
+        st = CausalFrames.fresh(s, intypes)
+        windowwalk(vals, 500; seed = 3) do op, row, live
+            op === :admit ? CausalFrames.update!(st, row) :
+            CausalFrames.downdate!(st, row)
+            isempty(live) && return
+            @test agree(CausalFrames.value(st).x_ageweightedsum, naive(live))
+            # combine! over every split point of the live window equals the fold
+            length(live) > 6 && return
+            for k in 0:length(live)
+                dest = CausalFrames.fresh(st)
+                CausalFrames.combine!(dest, fold(intypes, live[1:k]),
+                    fold(intypes, live[(k+1):end]))
+                @test agree(CausalFrames.value(dest).x_ageweightedsum,
+                    naive(live))
+            end
+        end
+    end
+
+    # The newest row weighs 0: a nonfinite value there waits for a later row.
+    ft = (time = Int, x = Float64)
+    st = fold(ft, [(time = 1, x = 1.0), (time = 2, x = 2.0), (time = 3, x = Inf)])
+    @test CausalFrames.value(st) === (x_ageweightedsum = 4.0,)
+    CausalFrames.update!(st, (time = 4, x = 5.0))
+    @test CausalFrames.value(st) === (x_ageweightedsum = Inf,)
+    CausalFrames.update!(st, (time = 5, x = NaN))
+    @test CausalFrames.value(st).x_ageweightedsum === Inf
+    CausalFrames.update!(st, (time = 6, x = 0.0))
+    @test isnan(CausalFrames.value(st).x_ageweightedsum)
+    for x in (1.0, 2.0, Inf, 5.0, NaN)     # every row but the last leaves
+        CausalFrames.downdate!(st, (time = 0, x = x))
+    end
+    @test CausalFrames.value(st) === (x_ageweightedsum = 0.0,)
+
+    # The element type follows Sum, and a missing-admitting column's value
+    # admits missing.
+    @test CausalFrames.value(fold((time = Int, x = Int32),
+        [(time = 1, x = Int32(1))])) === (x_ageweightedsum = 0,)
+    @test fieldtype(
+        typeof(
+            CausalFrames.value(
+                fold((time = Int,
+                    x = Union{Missing,Float64}), [(time = 1, x = 1.0)]),
+            ),
+        ), 1) ==
+          Union{Missing,Float64}
+
+    # Widening carries (n, S1, S2): Int to Float64, then to Missing-admitting,
+    # after which the older rows still downdate exactly.
+    rows = [(time = 1, x = 3), (time = 2, x = 1), (time = 3, x = 4)]
+    st = fold((time = Int, x = Int), rows)
+    st = CausalFrames.widenstate(st, (time = Int, x = Float64))
+    @test st isa CausalFrames.CompensatedAgeSumState
+    CausalFrames.update!(st, (time = 4, x = 0.5))
+    st = CausalFrames.widenstate(st, (time = Int, x = Union{Missing,Float64}))
+    CausalFrames.update!(st, (time = 5, x = missing))
+    @test ismissing(CausalFrames.value(st).x_ageweightedsum)
+    CausalFrames.downdate!(st, rows[1])
+    @test ismissing(CausalFrames.value(st).x_ageweightedsum)
+    st2 = CausalFrames.widenstate(fold((time = Int, x = Int), rows),
+        (time = Int, x = Union{Missing,Int}))
+    @test st2 isa CausalFrames.AgeSumState
+    @test CausalFrames.value(st2) == (x_ageweightedsum = 2 * 3 + 1 * 1,)
+
+    # update!/downdate! allocate nothing on either representation (a lone row
+    # in, then out: the oldest row is the only one)
+    function agealloc(st, row)
+        CausalFrames.update!(st, row)
+        CausalFrames.downdate!(st, row)
+        return @allocated begin
+            CausalFrames.update!(st, row)
+            CausalFrames.downdate!(st, row)
+        end
+    end
+    @test agealloc(CausalFrames.fresh(s, (time = Int, x = Int)),
+        (time = 9, x = 2)) == 0
+    @test agealloc(CausalFrames.fresh(s, (time = Int, x = Union{Missing,Float64})),
+        (time = 9, x = 2.0)) == 0
 end

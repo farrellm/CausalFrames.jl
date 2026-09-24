@@ -59,8 +59,8 @@ open(CSVPATH, "w") do io
 end
 
 # A structure-hiding wrapper: delegates the interface to the wrapped
-# summarizer but subtypes plain Summarizer, so addrollingcolumns takes its
-# re-fold fallback — the baseline the fast paths are measured against.
+# summarizer but subtypes plain Summarizer, so the window transforms re-fold it
+# — the baseline the running and tree tiers are measured against.
 struct RefoldWrap{S<:CausalFrames.Summarizer} <: CausalFrames.Summarizer
     inner::S
 end
@@ -187,6 +187,8 @@ SUITE["summarize"]["cycles-keyed"] = @benchmarkable load(CTX,
     SRC |> summarizecycles([Count(), Sum(:qty)]; key = :sym))
 SUITE["summarize"]["running"] = @benchmarkable load(CTX,
     SRC |> addsummarycolumns([Sum(:qty), Last(:qty)]))
+SUITE["summarize"]["countdistinct"] = @benchmarkable load(CTX,
+    SRC |> summarize(CountDistinct(:qty); key = :sym))
 
 # intervalize over the same source and summarizers as the summarize group, so
 # the two are directly comparable: the difference is the per-interval state
@@ -211,11 +213,13 @@ SUITE["intervalize"]["dense"] = @benchmarkable load(CTX,
         keyset = SYMS))
 
 # The same ~1000 ticks, each now summarizing a trailing 5000 time units (about
-# 20,000 rows, five tick spacings, so windows overlap five-fold). One entry per
-# window algorithm: the running mode slides per-key states once per row; the
-# tree mode (Min/Max are monoids only) appends each row to a segment tree and
-# recombines a tick's rows together at the tick; the re-fold baseline folds
-# every window at its tick, paying the overlap.
+# 20,000 rows, five tick spacings, so windows overlap five-fold). Entries per
+# window tier: the running tier slides per-key states once per row (Min/Max
+# through their windowed deques in "tracking"); the tree tier (Product is a
+# monoid only) appends each row to a segment tree and recombines a tick's rows
+# together at the tick; the re-fold baseline folds every window at its tick,
+# paying the overlap. "mixed" is an OHLC-style set spanning the running tier
+# and dependents, at a look-back shorter than the tick spacing and at 5000.
 SUITE["windows"] = BenchmarkGroup()
 SUITE["windows"]["running"] = @benchmarkable load(CTX,
     SRC |> summarizewindows(clock(1000), 5000, [Count(), Sum(:qty), Mean(:qty)]))
@@ -227,26 +231,46 @@ SUITE["windows"]["running-keyed"] = @benchmarkable load(CTX,
 SUITE["windows"]["running-dense"] = @benchmarkable load(CTX,
     SRC |> summarizewindows(clock(1000), 5000, [Count(), Sum(:qty)];
         key = :sym, keyset = SYMS))
-SUITE["windows"]["tree"] = @benchmarkable load(CTX,
+SUITE["windows"]["tracking"] = @benchmarkable load(CTX,
     SRC |> summarizewindows(clock(1000), 5000, [Min(:qty), Max(:qty)]))
-SUITE["windows"]["tree-keyed"] = @benchmarkable load(CTX,
+SUITE["windows"]["tracking-keyed"] = @benchmarkable load(CTX,
     SRC |> summarizewindows(clock(1000), 5000, [Min(:qty), Max(:qty)];
         key = :sym))
+SUITE["windows"]["tree"] = @benchmarkable load(CTX,
+    SRC |> summarizewindows(clock(1000), 5000, [Product(:qty)]))
+const MIXED = [First(:qty), Max(:qty), Min(:qty), Last(:qty), Mean(:qty),
+    Std(:qty)]
+for L in (20, 5000)
+    SUITE["windows"]["mixed-$L"] = @benchmarkable load(CTX,
+        SRC |> summarizewindows(clock(1000), $L, MIXED))
+    SUITE["windows"]["mixed-keyed-$L"] = @benchmarkable load(CTX,
+        SRC |> summarizewindows(clock(1000), $L, MIXED; key = :sym))
+end
 SUITE["windows"]["refold"] = @benchmarkable load(CTX,
     SRC |> summarizewindows(clock(1000), 5000,
         [RefoldWrap(Min(:qty)), RefoldWrap(Max(:qty))]))
 
-# One group per window algorithm: all-group summarizers slide running
-# states, all-monoid sets fold from a segment tree, and an unstructured
-# summarizer forces the re-fold baseline (see src/rolling.jl).
+# Entries per window tier, as for the windows group (see src/tiers.jl), plus
+# the mixed set at windows of about 4, 24 and 1000 rows (keyless) — the small
+# ones are where a running+tree split could have lost to a tree alone.
 SUITE["rolling"] = BenchmarkGroup()
 SUITE["rolling"]["running"] = @benchmarkable load(RCTX,
     RSRC |> addrollingcolumns((; w25 = 25), [Sum(:qty), Mean(:qty)]))
 SUITE["rolling"]["running-keyed"] = @benchmarkable load(RCTX,
     RSRC |> addrollingcolumns((; w25 = 25), [Sum(:qty), Mean(:qty)];
         key = :sym))
-SUITE["rolling"]["tree"] = @benchmarkable load(RCTX,
+SUITE["rolling"]["tracking"] = @benchmarkable load(RCTX,
     RSRC |> addrollingcolumns((; w25 = 25), [Min(:qty), Max(:qty)]))
+SUITE["rolling"]["countdistinct"] = @benchmarkable load(RCTX,
+    RSRC |> addrollingcolumns((; w25 = 25), [CountDistinct(:qty)]))
+SUITE["rolling"]["tree"] = @benchmarkable load(RCTX,
+    RSRC |> addrollingcolumns((; w25 = 25), [Product(:qty)]))
+for (nm, w) in (("w0", 0), ("w5", 5), ("w250", 250))
+    SUITE["rolling"]["mixed-$nm"] = @benchmarkable load(RCTX,
+        RSRC |> addrollingcolumns((; a = $w), MIXED))
+    SUITE["rolling"]["mixed-keyed-$nm"] = @benchmarkable load(RCTX,
+        RSRC |> addrollingcolumns((; a = $w), MIXED; key = :sym))
+end
 SUITE["rolling"]["refold"] = @benchmarkable load(RCTX,
     RSRC |> addrollingcolumns((; w25 = 25), [RefoldWrap(Sum(:qty))]))
 
