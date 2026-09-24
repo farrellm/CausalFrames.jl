@@ -73,9 +73,9 @@ readtable(df; time = :ts, sort = true) |> filterrows(r -> r.bid > 1)
 """
 function readtable(table; time = nothing, checkorder::Bool = true,
     sort::Bool = false, closed::Bool = false, skipmissing::Bool = false)
-    checktabletimespec(time)
-    Tables.istable(table) ||
-        throw(ArgumentError("readtable: a $(typeof(table)) is not a Tables.jl table"))
+    checksourcetimespec(time, "readtable")
+    Tables.istable(table) || throw(ArgumentError("readtable table must be a \
+        Tables.jl table, got $(typeof(table))"))
     return CausalPipeline() do ctx::Context
         return ChunkSource(
             TableProducer{timetype(ctx)}(table, time, checkorder,
@@ -86,7 +86,7 @@ end
 
 function readtable(df::AbstractDataFrame; time = nothing, checkorder::Bool = true,
     sort::Bool = false, closed::Bool = false, skipmissing::Bool = false)
-    checktabletimespec(time)
+    checksourcetimespec(time, "readtable")
     # A private index over the caller's vectors: O(ncols), and the rename and
     # the :time assignment below never reach `df` itself.
     wrapped = DataFrame(df; copycols = false)
@@ -100,7 +100,7 @@ function readtable(df::AbstractDataFrame; time = nothing, checkorder::Bool = tru
     # of its own, the chunk aliases the caller's vectors, and every run must
     # slice rather than share.
     owned = false
-    present = presentrows(times, skipmissing, "table")
+    present = presentrows(times, skipmissing, "table", "")
     if present !== nothing
         wrapped = wrapped[present, :]
         times = wrapped.time
@@ -113,7 +113,7 @@ function readtable(df::AbstractDataFrame; time = nothing, checkorder::Bool = tru
         end
     elseif checkorder
         issorted(times) ||
-            throw(ArgumentError("time column in table is not non-decreasing"))
+            throw(ArgumentError(unordered("table", "")))
     end
     chunks = nrow(wrapped) > 0 ? [wrapped] : DataFrame[]
     return framepipeline(chunks, nothing, closed, false, owned)
@@ -122,9 +122,6 @@ end
 readtable(frame::CausalFrame; closed::Union{Nothing,Bool} = nothing,
     checkcontext::Bool = true) =
     framepipeline(frame.chunks, frame.context, closed, checkcontext, true)
-
-checktabletimespec(::Nothing) = nothing
-checktabletimespec(time) = checktimespec(time, "readtable time")
 
 # The generic path's producer. The pull-to-pull state lives in fields rather
 # than reassigned closure captures (which would be boxed); the dynamically
@@ -188,7 +185,7 @@ function tablechunk(part, time, checkorder::Bool, sort::Bool, closed::Bool,
     cols = Tables.columns(part)
     colnames = Tables.columnnames(cols)
     times, source = tabletimes(cols, colnames, time)
-    present = presentrows(times, skipmissing, "table")
+    present = presentrows(times, skipmissing, "table", "")
     if present === nothing
         rows, sawstop, prevtime =
             tablerows(times, checkorder, sort, closed, prevtime, start, stop)
@@ -206,7 +203,7 @@ end
 # The raw time values, and the column they came from (`nothing` for a function,
 # whose values become a `:time` column). `cols` is a Tables.jl column table.
 tabletimes(cols, colnames, time::Function) =
-    (checktabletimes(maptime(time, Tables.columntable(cols))), nothing)
+    (checktabletimes(maptime(time, Tables.columntable(cols)), true), nothing)
 function tabletimes(cols, colnames, time::Union{Nothing,Symbol})
     name = something(time, :time)
     name in colnames || throw(
@@ -215,15 +212,13 @@ function tabletimes(cols, colnames, time::Union{Nothing,Symbol})
             "table has no column $(repr(name))"),
     )
     name === :time || !(:time in colnames) ||
-        throw(
-            ArgumentError("table has both a :time column and the time column \
-            $(repr(name)); drop one of them first"),
-        )
-    return (checktabletimes(Tables.getcolumn(cols, name)), name)
+        throw(ArgumentError(timeclash("table", "", name)))
+    return (checktabletimes(Tables.getcolumn(cols, name), false), name)
 end
 
-checktabletimes(v::AbstractVector) =
-    istextual(v) ? throw(ArgumentError(textualtime("table", "table"))) : v
+checktabletimes(v::AbstractVector, fromfunction::Bool) =
+    istextual(v) ? throw(ArgumentError(textualtime("table", "", fromfunction))) :
+    v
 
 # Function barrier, typed on the time vector and the context's time type: the
 # order check (within the partition, and against the previous partition's last
@@ -239,8 +234,7 @@ function tablerows(times::AbstractVector, checkorder::Bool, sort::Bool,
         return (perm[lo:hi], false, prevtime)
     end
     if checkorder && !sort
-        issorted(times) ||
-            throw(ArgumentError("time column in table is not non-decreasing"))
+        issorted(times) || throw(ArgumentError(unordered("table", "")))
         if !isempty(times)
             prevtime === nothing || prevtime <= first(times) ||
                 throw(
@@ -257,13 +251,15 @@ end
 # Function barrier, typed on the raw time vector, shared by every source that
 # resolves its own times: `nothing` when no time is missing (settled by the
 # eltype alone when it admits no `Missing`), else the indices of the present
-# ones under `skipmissing`, and an error without it. `what` names the source.
-function presentrows(times::AbstractVector, skipmissing::Bool, what::String)
+# ones under `skipmissing`, and an error without it. `what` and `path` name the
+# source (see `sourcename`), joined only if the error is raised.
+function presentrows(times::AbstractVector, skipmissing::Bool, what::String,
+    path::String)
     Missing <: eltype(times) || return nothing
     any(ismissing, times) || return nothing
     skipmissing || throw(
-        ArgumentError("time column in $what has missing values; pass \
-            skipmissing = true to drop those rows"),
+        ArgumentError("time column in $(sourcename(what, path)) has missing \
+            values; pass skipmissing = true to drop those rows"),
     )
     return findall(.!ismissing.(times))   # via a BitVector: sized once
 end

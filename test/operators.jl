@@ -49,12 +49,12 @@ time,bid,ask
 
     unsorted = joinpath(mktempdir(), "unsorted.csv")
     write(unsorted, "time,x\n3,1\n1,2\n")
-    @test_throws ArgumentError load(
+    @test_throws "time column in CSV file $unsorted is not non-decreasing" load(
         Context(0, 100), readcsv(unsorted; types = Dict(:time => Int)))
 
     notime = joinpath(mktempdir(), "notime.csv")
     write(notime, "t,x\n1,2\n")
-    @test_throws ArgumentError load(
+    @test_throws "has no time column; choose one with `time`" load(
         Context(0, 100), readcsv(notime; types = Dict(:time => Int)))
 
     # the time column must be typed (or produced by a function), else error
@@ -80,6 +80,22 @@ end
 
     # a Symbol time column still needs a type, else error
     @test_throws ArgumentError readcsv(path; time = :ts)
+
+    # a spec that is neither a Symbol nor a function is eager, not ignored in
+    # favour of the :time column
+    @test_throws "readcsv time spec must be" readcsv(path; time = "ts",
+        types = Dict(:ts => Int))
+
+    # naming a column when the file also has :time is ambiguous
+    both = joinpath(dir, "both.csv")
+    write(both, "time,ts\n1,2\n")
+    @test_throws "has both a :time column and the time column :ts" load(
+        Context(0, 100), readcsv(both; time = :ts, types = Dict(:ts => Int,
+        :time => Int)))
+
+    # a time function returning text is refused as a textual column is
+    @test_throws "the `time` function over CSV file $path returned text" load(
+        Context(0, 100), readcsv(path; time = row -> row.x))
 
     # time as a per-row function: produces the :time column from strings
     path2 = joinpath(dir, "func.csv")
@@ -178,6 +194,11 @@ time,bid,ask
     none = joinpath(dir, "none.csv")
     scan(ctx, emptyframe() |> writecsv(none))
     @test isfile(none) && isempty(read(none, String))
+    # ... which reads back as an empty stream, sorted or not
+    for sort in (false, true)
+        df = DataFrame(load(ctx, readcsv(none; types = Dict(:time => Int), sort)))
+        @test nrow(df) == 0 && names(df) == ["time"]
+    end
 
     # ownership: the writer reads its chunk on another task while downstream
     # ops mutate their own chunk's column index in place (asofjoin's

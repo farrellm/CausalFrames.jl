@@ -33,10 +33,20 @@ end
 function writeloop(chan::Channel{DataFrame}, path::String, rowgroupsize::Int,
     opts::NamedTuple)
     open(path, "w") do io
+        next = iterate(chan)
+        if next === nothing
+            # A stream with no rows gets the DuckDB sink's empty `time` column,
+            # since DuckDB cannot read a parquet file with no columns at all.
+            # Statistics are off: Parquet2 cannot compute them over zero rows.
+            fw = Parquet2.FileWriter(io, path; opts..., compute_statistics = false)
+            Parquet2.writetable!(fw, DataFrame(time = Int64[]))
+            Parquet2.finalize!(fw)
+            return nothing
+        end
         fw = Parquet2.FileWriter(io, path; opts...)
         buffered = DataFrame[]
         rows = 0
-        for c in chan
+        for c in Iterators.flatten(((first(next),), Iterators.rest(chan, next[2])))
             push!(buffered, c)
             rows += nrow(c)
             if rows >= rowgroupsize

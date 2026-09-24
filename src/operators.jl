@@ -165,7 +165,8 @@ to the context's time type. It is chosen by `time`:
 
 - `time = nothing` (default): the column already named `:time`.
 - `time = :name` (a `Symbol`): the column named `:name` (after `rename`),
-  renamed to `:time`.
+  renamed to `:time` (an `ArgumentError` if the file also has a `:time`
+  column).
 - `time = f` (a function): `f(row)` is called per row to compute the time
   value, producing the `:time` column (any existing `:time` is overwritten).
 
@@ -205,6 +206,7 @@ function readcsv(path::AbstractString; types = nothing, time = nothing,
     rename = nothing, delim = nothing, sort::Bool = false,
     chunkbytes::Integer = 4 * 1024 * 1024, closed::Bool = false,
     skipmissing::Bool = false)
+    checksourcetimespec(time, "readcsv")
     chunkbytes > 0 ||
         throw(ArgumentError("readcsv chunkbytes must be positive, got $chunkbytes"))
     # Eager error where the time column is provably untyped: no `types` at all,
@@ -284,8 +286,12 @@ end
 function csvchunks(path::String, chunkbytes::Int, types, delim)
     # CSV.jl's own default for `delim` is `nothing`, so passing it through
     # unchanged is a no-op.
+    # A zero-byte file is what writecsv leaves for a stream with no rows (with
+    # no chunk, there is no header to write), so it reads back as one.
+    bytes = filesize(path)
+    bytes == 0 && return DataFrame[]
     opts = (; types = typesfunction(types), stringtype = String, delim = delim)
-    ntasks = max(1, Int(cld(filesize(path), chunkbytes)))
+    ntasks = max(1, Int(cld(bytes, chunkbytes)))
     ntasks == 1 && return [CSV.read(path, DataFrame; opts...)]
     try
         return CSV.Chunks(path; ntasks = ntasks, opts...)
@@ -342,13 +348,12 @@ function clipchunk!(df::DataFrame, time, rename, path::String, what::String,
     resolvetime!(df, time, path, what)
     # Missing rows are folded into the clip's row index rather than deleted
     # first, so a chunk holding some costs one copy of its in-window rows.
-    present = presentrows(df.time, skipmissing, path)
+    present = presentrows(df.time, skipmissing, what, path)
     times = present === nothing ? df.time : view(df.time, present)
-    issorted(times) ||
-        throw(ArgumentError("time column in $path is not non-decreasing"))
+    issorted(times) || throw(ArgumentError(unordered(what, path)))
     if !isempty(times)
         prevtime !== nothing && first(times) < prevtime &&
-            throw(ArgumentError("time column in $path is not non-decreasing"))
+            throw(ArgumentError(unordered(what, path)))
         prevtime = last(times)
     end
     lo, hi = windowbounds(times, closed, start, stop)
@@ -371,7 +376,7 @@ function gatherchunk!(kept::Vector{DataFrame}, df::DataFrame, time, rename,
     path::String, what::String, closed::Bool, skipmissing::Bool, start, stop)
     renamecolumns!(df, rename)
     resolvetime!(df, time, path, what)
-    present = presentrows(df.time, skipmissing, path)
+    present = presentrows(df.time, skipmissing, what, path)
     rows =
         present === nothing ? windowrows(df.time, closed, start, stop) :
         present[windowrows(view(df.time, present), closed, start, stop)]
@@ -400,15 +405,30 @@ function sortgathered(kept::Vector{DataFrame}, ::Type{T}) where {T}
     return df
 end
 
-# A time column that arrived as text cannot be ordered against the window. Only
-# CSV has a `types` knob to point the user at; parquet carries its own types, so
-# there the only way out is a `time` function.
-textualtime(path::String, what::String) =
-    what == "CSV file" ?
-    "time column in $path needs a concrete type via `types`, or a `time` \
-    function to produce it" :
-    "time column in $path is textual; use a `time` function to produce a \
-    usable time"
+# The subject of every data error a source raises: "CSV file x.csv", or a bare
+# "table" for readtable, which has no path. Built only on the error path.
+sourcename(what::String, path::String) = isempty(path) ? what : "$what $path"
+
+unordered(
+    what::String,
+    path::String,
+) = "time column in $(sourcename(what, path)) is not non-decreasing"
+
+# A time column that arrived as text cannot be ordered against the window. A
+# `time` function that produced it has to be fixed itself; otherwise only CSV
+# has a `types` knob to point the user at, and parquet or a table carries its
+# own types, so there the way out is a `time` function.
+function textualtime(what::String, path::String, fromfunction::Bool)
+    src = sourcename(what, path)
+    fromfunction &&
+        return "the `time` function over $src returned text; return a value \
+            ordered like the context's times"
+    what == "CSV file" &&
+        return "time column in $src needs a concrete type via `types`, or a \
+            `time` function to produce it"
+    return "time column in $src is textual; use a `time` function to produce \
+        a usable time"
+end
 
 # Text times, blank cells aside (a CSV text column with blanks is
 # `Union{Missing,String}`); an all-missing column is not text, whose
@@ -436,24 +456,35 @@ function renamecolumns!(df::DataFrame, m::AbstractDict)
     return nothing
 end
 
-# Materialize the `:time` column and check it is usable (non-String) unless it
-# was produced by a function. `what` names the file format for error messages;
-# only CSV has a `types` knob to point the user at.
+# Materialize the `:time` column and check it is usable (not text), whether it
+# was a column or produced by a function. `what` names the file format for error
+# messages. Columns are looked up by `columnindex`, which unlike `names(df)`
+# allocates nothing.
 function resolvetime!(df::DataFrame, time, path::String, what::String)
     if time isa Function
         df[!, :time] = maptime(time, Tables.columntable(df))
     else
-        if time isa Symbol
-            String(time) in names(df) ||
+        if time isa Symbol && time !== :time
+            columnindex(df, time) > 0 ||
                 throw(ArgumentError("$what $path has no column $(repr(time))"))
-            time === :time || rename!(df, time => :time)
+            columnindex(df, :time) > 0 &&
+                throw(ArgumentError(timeclash(what, path, time)))
+            rename!(df, time => :time)
         end
-        "time" in names(df) ||
-            throw(ArgumentError("$what $path has no time column"))
-        istextual(df.time) && throw(ArgumentError(textualtime(path, what)))
+        columnindex(df, :time) > 0 || throw(
+            ArgumentError("$what $path has no time column; choose one with `time`"))
     end
+    istextual(df.time) &&
+        throw(ArgumentError(textualtime(what, path, time isa Function)))
     return nothing
 end
+
+timeclash(
+    what::String,
+    path::String,
+    name::Symbol,
+) = "$(sourcename(what, path)) has both a :time column and the time column \
+    $(repr(name)); drop one of them first"
 
 """
     writecsv(path; queue = 1, kwargs...) -> (CausalPipeline -> CausalPipeline)
@@ -464,9 +495,9 @@ at `path` as it flows by, yielding every chunk downstream unchanged. Nothing
 is buffered: each chunk is written and flushed as it is produced, so the file
 grows while the pipeline is still running.
 
-Writing happens on a background task fed by a bounded queue, so the pipeline
-does not block on disk I/O — only if the writer falls more than `queue`
-chunks behind, plus once at the end to join it. `queue = 0` makes each
+Writing happens on a background task fed by a bounded queue of depth `queue`,
+so the pipeline does not block on disk I/O — only if the writer falls more
+than `queue` chunks behind, plus once at the end to join it. `queue = 0` makes each
 hand-off a rendezvous.
 
 The file is truncated when the run starts and finalized when the stream is
@@ -480,7 +511,8 @@ scan(ctx, readcsv("ticks.csv"; types = tt) |>
           writecsv("mids.csv"))
 ```
 
-A stream with no rows at all yields an empty file. Keyword arguments are
+A stream with no rows at all yields an empty file, which [`readcsv`](@ref)
+reads back as an empty stream. Keyword arguments are
 passed through to `CSV.write` (`delim`, `missingstring`, `dateformat`,
 `quotestrings`, `bufsize`, …), except for `append`, `header`, `writeheader`,
 `partition` and `compress`, which this transform controls itself — passing
@@ -836,8 +868,9 @@ function settime(spec)
 end
 settime(p::CausalPipeline, spec) = settime(spec)(p)
 
-# Eager validation, shared by the two variants: a column name or a per-row
-# function, nothing else. A CausalPipeline lands here too, which is what turns a
+# Eager validation, shared by the two settime variants and (through
+# checksourcetimespec) the sources: a column name or a per-row function, nothing
+# else. A CausalPipeline lands here too, which is what turns a
 # mistyped `settime(p)` into a message rather than a MethodError deep in a chunk.
 checktimespec(::Symbol, ::String) = nothing
 checktimespec(::Function, ::String) = nothing
@@ -846,6 +879,12 @@ checktimespec(x, opname::String) = throw(
         "$opname spec must be a column name (Symbol) or a per-row function, \
         got $(typeof(x))"),
 )
+
+# A source's `time`: the same spec, or `nothing` for the column named `:time`.
+# Checked eagerly, since the chunk path only acts on a Symbol or a Function and
+# would read the `:time` column in place of anything else it was given.
+checksourcetimespec(::Nothing, ::String) = nothing
+checksourcetimespec(time, opname::String) = checktimespec(time, "$opname time")
 
 # Per-run mutable state, in a field rather than a reassigned closure capture
 # (those get boxed). Unlike CSVProducer's `prevtime::Any` the type is known
