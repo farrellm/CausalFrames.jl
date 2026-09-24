@@ -2,6 +2,7 @@ module CausalFrames
 
 using CSV
 using DataFrames
+using Dates: Dates
 using LinearAlgebra: Symmetric, cholesky!, issuccess, ldiv!
 using PrecompileTools: @setup_workload, @compile_workload
 using Serialization: Serialization, deserialize, serialize

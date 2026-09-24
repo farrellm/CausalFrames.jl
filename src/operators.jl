@@ -129,10 +129,29 @@ A source with only a `:time` column, one row at each of `start`,
 # Arguments
 - `interval`: the tick spacing; anything that can be added to the time type
   (a `Dates.Period` for `DateTime`, a number for numeric time). Must be
-  positive, checked when the pipeline runs.
+  positive, checked when the pipeline runs. A calendar period (`Month`,
+  `Quarter`, `Year`) counts from `start`, tick `k` at `start + k * interval`,
+  so a month-end start stays on month ends.
 
 # Keywords
 - `batchsize = 1024`: rows per emitted chunk. Must be positive.
+
+```jldoctest
+using Dates
+DataFrame(load(Context(Date(2026, 1, 31), Date(2026, 6, 1)), clock(Month(1))))
+
+# output
+
+5×1 DataFrame
+ Row │ time
+     │ Date
+─────┼────────────
+   1 │ 2026-01-31
+   2 │ 2026-02-28
+   3 │ 2026-03-31
+   4 │ 2026-04-30
+   5 │ 2026-05-31
+```
 """
 function clock(interval; batchsize::Integer = 1024)
     batchsize > 0 ||
@@ -154,17 +173,26 @@ end
 Base.IteratorSize(::Type{<:ClockChunks}) = Base.SizeUnknown()
 Base.eltype(::Type{<:ClockChunks}) = DataFrame
 
-Base.iterate(it::ClockChunks) = iterate(it, it.start)
-function Base.iterate(it::ClockChunks{T}, t) where {T}
+# The state is the next tick and its index k, so a calendar interval can be
+# anchored to start rather than accumulated.
+Base.iterate(it::ClockChunks) = iterate(it, (it.start, 0))
+function Base.iterate(it::ClockChunks{T}, (t, k)) where {T}
     t < it.stop || return nothing
     times = T[]
     sizehint!(times, it.batchsize)
     while t < it.stop && length(times) < it.batchsize
         push!(times, t)
-        t += it.interval
+        k += 1
+        t = nexttick(it.start, it.interval, t, k)
     end
-    return (DataFrame(time = times), t)
+    return (DataFrame(time = times), (t, k))
 end
+
+# Tick k. A fixed interval accumulates, as it always has; a calendar one is
+# measured from start, since repeated addition drifts at month ends (Jan 31 +
+# Month(1) is Feb 28, and Feb 28 + Month(1) is Mar 28, not Mar 31).
+nexttick(start, interval, t, k::Int) = t + interval
+nexttick(start, interval::CalendarPeriod, t, k::Int) = start + k * interval
 
 """
     readcsv(path; types = nothing, time = nothing, rename = nothing,
@@ -719,13 +747,17 @@ fills the whole window.
 # Arguments
 - `offset`: the shift, in a type that can be added to and subtracted from the
   time type (a `Dates.Period`, a number). Must be non-negative, checked when the
-  pipeline runs; `0` is the identity. For a forward shift, see
+  pipeline runs; `0` is the identity. A calendar period (`Month`, `Quarter`,
+  `Year`) shifts on the calendar, so several rows can land on one month end
+  (Jan 29 through 31 all lag to Feb 28); the input is then read over a wider
+  window and the shifted rows are clipped to it. For a forward shift, see
   [`Acausal.lead`](@ref CausalFrames.Acausal.lead).
 """
 function lag(offset)
     return function (p::CausalPipeline)
         return CausalPipeline() do ctx::Context
-            return chunkmap(c -> shiftchunk!(c, offset), p.run(lagcontext(ctx, offset)))
+            return chunkmap(c -> clipshifted(shiftchunk!(c, offset), offset, ctx),
+                p.run(lagcontext(ctx, offset)))
         end
     end
 end
@@ -742,6 +774,19 @@ function lagcontext(ctx::Context, offset)
     return Context(start, ctx.stop - offset)
 end
 
+# A calendar shift is not a translation: it clamps to the end of the month, so
+# Jan 29–31 all land on Feb 28, and `[start - M, stop - M)` shifted by M need
+# not cover `[start, stop)` (the row at Feb 28 lands on Mar 28, inside a window
+# ending Mar 31 but outside `[.., Feb 28)`). Read a superset instead — no row
+# earlier than `start - M` can land at or after `start`, and a shift never
+# moves a row back past `stop` — and clip the shifted rows (`clipshifted`).
+function lagcontext(ctx::Context, offset::CalendarPeriod)
+    start = ctx.start - offset
+    start <= ctx.start ||
+        throw(ArgumentError("lag offset must be non-negative, got $offset"))
+    return Context(start, ctx.stop)
+end
+
 # Shift the owned chunk's time column by a constant, preserving order (so no
 # re-sort) and column position. Shared with the acausal `lead`. `delta` may be
 # negative (lead subtracts). One allocation per chunk for the new column.
@@ -749,6 +794,17 @@ shiftchunk!(c::DataFrame, delta) = (c[!, :time] = shifttime(c.time, delta); c)
 
 # Function barrier: the broadcast specializes on the concretely typed column.
 shifttime(times::AbstractVector, delta) = times .+ delta
+
+# A fixed shift maps the widened window onto [start, stop) exactly; a calendar
+# shift reads a superset (see lagcontext), so its shifted chunk is clipped back
+# to the half-open window. The shift is non-decreasing, so the kept rows are one
+# contiguous range; `nothing` for none, which chunkmap skips.
+clipshifted(c::DataFrame, offset, ctx::Context) = c
+function clipshifted(c::DataFrame, offset::CalendarPeriod, ctx::Context)
+    lo, hi = windowbounds(c.time, false, ctx.start, ctx.stop)
+    hi < lo && return nothing
+    return lo == 1 && hi == nrow(c) ? c : c[lo:hi, :]
+end
 
 """
     head(n) -> (CausalPipeline -> CausalPipeline)

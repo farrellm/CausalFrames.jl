@@ -180,7 +180,7 @@ train = Context(Date(2024, 1, 1), Date(2025, 1, 1))
 ticks |> summarize(FitModel(model, :x, :y)) |> writejls(path) |> scan(train)
 
 later = Context(Date(2026, 1, 1), Date(2027, 1, 1))
-ticks |> applymodels(readjls(path); tolerance = Day(3 * 365)) |>
+ticks |> applymodels(readjls(path); tolerance = Year(3)) |>
     addcolumns(r -> (; rounded = round(r.prediction; digits = 3))) |>
     selectcolumns(:y, :rounded) |> head(3) |> load(later)
 

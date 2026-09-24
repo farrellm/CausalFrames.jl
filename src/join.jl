@@ -26,16 +26,35 @@ the same time, the last one wins. For a table with no time column, use
   than `:time`, present on both sides; a row matches only right rows with an
   equal key. Key columns appear once, from the left, never prefixed.
 - `tolerance = nothing`: the maximum age of a match, `time - righttime <=
-  tolerance`; must be non-negative. The right pipeline then runs over
-  `[start - tolerance, stop)`, so rows near `start` can match earlier right
-  rows; the time type must support subtraction. Without it, right runs over
-  `[start, stop)` only.
+  tolerance`; must be non-negative. A calendar period (`Month`, `Quarter`,
+  `Year`) is measured on the calendar: `righttime >= time - tolerance`. The
+  right pipeline then runs over `[start - tolerance, stop)`, so rows near
+  `start` can match earlier right rows; the time type must support subtraction.
+  Without it, right runs over `[start, stop)` only.
 - `strict = false`: match only right rows strictly before the left row.
 - `leftprefix = nothing`, `rightprefix = nothing`: rename that side's non-time,
   non-key columns to `"{prefix}_{name}"`. Output names must be unique, so a self
   join needs a prefix.
 - `righttime = nothing`: a name under which to keep the matched right row's
   time; by default it is dropped.
+
+```jldoctest
+using Dates
+quotes = readtable(DataFrame(time = [Date(2026, 1, 31), Date(2026, 2, 15)], bid = [10.0, 10.5]))
+trades = readtable(DataFrame(time = [Date(2026, 2, 28), Date(2026, 3, 15), Date(2026, 3, 16)]))
+p = trades |> asofjoin(quotes; tolerance = Month(1), righttime = :quotetime)
+DataFrame(load(Context(Date(2026, 2, 1), Date(2026, 4, 1)), p))
+
+# output
+
+3×3 DataFrame
+ Row │ time        bid        quotetime
+     │ Date        Float64?   Date?
+─────┼───────────────────────────────────
+   1 │ 2026-02-28       10.5  2026-02-15
+   2 │ 2026-03-15       10.5  2026-02-15
+   3 │ 2026-03-16  missing    missing
+```
 """
 function asofjoin(right::CausalPipeline; key = nothing, tolerance = nothing,
     strict::Bool = false, leftprefix = nothing,
@@ -260,7 +279,7 @@ function joinsegment!(matches::Vector{V}, found::Vector{Bool},
         j = get(index, keyat(lnt, i, keynames), 0)
         if j > 0
             m = @inbounds slots[j]
-            if tolerance === nothing || t - m.time <= tolerance
+            if tolerance === nothing || withinback(t, m.time, tolerance)
                 @inbounds matches[i] = m
                 @inbounds found[i] = true
             end

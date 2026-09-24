@@ -39,6 +39,7 @@ include("fixtures.jl")
     include("summarize.jl")
     include("summarizers.jl")
     include("models.jl")
+    include("calendar.jl")
 
     # JET can lag pre-release Julia; the checks are the same on every
     # released version, so skipping them there loses nothing.

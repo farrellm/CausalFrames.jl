@@ -143,16 +143,16 @@ function treequery(tr::SegTree{S}, lo::Int, hi::Int) where {S<:Tuple}
 end
 
 # The first live index whose row is inside a window ending at t: the least
-# m in head:length(times) with t - times[m] <= lb, or length + 1 when the
-# window is empty. The predicate is the rolling kernel's own membership test
-# verbatim — never rearranged to times[m] >= t - lb, which could disagree at
-# the last ulp for floating-point times — and it is monotone in m because
-# times are non-decreasing, so the search is a plain binary chop.
+# m in head:length(times) with withinback(t, times[m], lb), or length + 1 when
+# the window is empty. The predicate is the rolling kernel's own membership
+# test (see `withinback` for why the fixed form is never rearranged), and it is
+# monotone in m because times are non-decreasing, so the search is a plain
+# binary chop.
 function windowstart(times::Vector{T}, head::Int, t, lb) where {T}
     lo, hi = head, length(times) + 1
     while lo < hi
         m = (lo + hi) >>> 1
-        if t - @inbounds(times[m]) <= lb
+        if withinback(t, @inbounds(times[m]), lb)
             hi = m
         else
             lo = m + 1

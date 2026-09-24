@@ -13,7 +13,8 @@ using Tables
 using ..CausalFrames: CausalPipeline, Context, chunkmap, shiftchunk!,
     settimechunk!, SetTimeState, checktimespec, timetype,
     tokeycolumns, chunktypes, promotetypes, normprefix, prefixed,
-    storerowtype, storekeytype, rowat, keyat, matchcolumn, convertmatches
+    storerowtype, storekeytype, rowat, keyat, matchcolumn, convertmatches,
+    withinahead, CalendarPeriod, clipshifted
 
 export futurejoin, lead
 
@@ -38,7 +39,9 @@ first one wins. Available after `using CausalFrames.Acausal`.
   than `:time`, present on both sides; a row matches only right rows with an
   equal key. Key columns appear once, from the left, never prefixed.
 - `tolerance = nothing`: the maximum distance ahead, `righttime - time <=
-  tolerance`; must be non-negative. The right pipeline then runs over
+  tolerance`; must be non-negative. A calendar period (`Month`, `Quarter`,
+  `Year`) is measured on the calendar: `righttime <= time + tolerance`. The
+  right pipeline then runs over
   `[start, stop + tolerance)`, so rows near `stop` can match later right rows;
   the time type must support addition. Without it, right runs over
   `[start, stop)` only.
@@ -277,7 +280,7 @@ function futuresegment!(matches::Vector{V}, found::Vector{Bool},
             # front too far ahead now may match a later, larger t, so never
             # evict on tolerance — leave the slot missing.
             m = buffront(b)
-            if tolerance === nothing || m.time - t <= tolerance
+            if tolerance === nothing || withinahead(t, m.time, tolerance)
                 @inbounds matches[i] = m
                 @inbounds found[i] = true
             end
@@ -354,12 +357,16 @@ Available after `using CausalFrames.Acausal`.
 # Arguments
 - `offset`: the shift, in a type that can be added to and subtracted from the
   time type. Must be non-negative, checked when the pipeline runs; `0` is the
-  identity.
+  identity. A calendar period (`Month`, `Quarter`, `Year`) shifts on the
+  calendar, so several rows can land on one month end (Mar 29 through 31 all
+  lead to Feb 28); the input is
+  then read over a wider window and the shifted rows are clipped to it.
 """
 function lead(offset)
     return function (p::CausalPipeline)
         return CausalPipeline() do ctx::Context
-            return chunkmap(c -> shiftchunk!(c, -offset), p.run(leadcontext(ctx, offset)))
+            return chunkmap(c -> clipshifted(shiftchunk!(c, -offset), offset, ctx),
+                p.run(leadcontext(ctx, offset)))
         end
     end
 end
@@ -374,6 +381,16 @@ function leadcontext(ctx::Context, offset)
     start >= ctx.start ||
         throw(ArgumentError("lead offset must be non-negative, got $offset"))
     return Context(start, ctx.stop + offset)
+end
+
+# The mirror of lag's calendar lagcontext. A row at `stop + M` can still land
+# before `stop` (Feb 28 - Month(1) is Jan 28, before a stop of Jan 31), but none
+# at or after `stop + M + M` can, so that bounds the superset read.
+function leadcontext(ctx::Context, offset::CalendarPeriod)
+    start = ctx.start + offset
+    start >= ctx.start ||
+        throw(ArgumentError("lead offset must be non-negative, got $offset"))
+    return Context(start, ctx.stop + offset + offset)
 end
 
 # --- settime: the permissive time reassignment -----------------------------

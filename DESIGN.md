@@ -96,7 +96,7 @@ boundaries.
 | `emptyframe()` | source | no rows, only `:time` |
 | `concatenate(ps...)` | source | the pipelines end to end, in time order, with identical columns (see "Concatenation") |
 | `merge(ps...; batchsize)` | source | the pipelines interleaved by time, with the union of their columns (see "Merging") |
-| `clock(interval; batchsize)` | source | rows at `start, start + interval, …` before `stop`, only `:time`, in chunks of `batchsize` |
+| `clock(interval; batchsize)` | source | rows at `start, start + interval, …` before `stop`, only `:time`, in chunks of `batchsize`; a calendar interval is anchored to `start` (see "Calendar periods") |
 | `readtable(table; time, checkorder, sort, closed, skipmissing)` / `readtable(frame; closed, checkcontext)` | source | an in-memory table or frame (see "Tables as sources") |
 | `readcsv(path; types, time, rename, delim, sort, chunkbytes, closed, skipmissing)` | source | a CSV file, `String` columns unless typed, read in chunks of about `chunkbytes` bytes (see "Resolving the time column", "Missing times", "Sorting a file source") |
 | `readparquet(path; time, rename, sort, closed, skipmissing, backend)` | source | a parquet file through DuckDB or Parquet2, skipping data outside the window (see "Parquet I/O") |
@@ -689,7 +689,8 @@ receive the matched row's time.
   output, taken from the left row, never prefixed. `time` may not be a key.
 - **Tolerance.** With `tolerance` a match additionally requires
   `time - rtime <= tolerance` (inclusive; checked per left row against the
-  stored right row, never by eager eviction). The right pipeline then runs
+  stored right row, never by eager eviction), or `rtime >= time - tolerance`
+  for a calendar period (see "Calendar periods"). The right pipeline then runs
   over the widened context `[start - tolerance, stop)` so lookback near the
   window start is fully covered — the only place the time type needs
   subtraction (`T - tolerance` yielding a time, `T - T` comparable to
@@ -879,7 +880,8 @@ guard `rightcontext`/`futurecontext` use, since a negative shift would flip the
 causality contract), and treat `offset == 0` as the identity. The shared
 `shiftchunk!`/`shifttime` (broadcast add behind a function barrier) lives in
 `src/operators.jl` and is imported into the submodule; `lead` shifts by
-`-offset`.
+`-offset`. A calendar offset is not a translation, so it widens differently
+and clips; see "Calendar periods".
 
 ## Retiming
 
@@ -1018,8 +1020,8 @@ prototype tuple at construction time:
 - **All `MonoidSummarizer`s — tree mode.** Rows append to per-key segment
   trees (`segtree.jl`) whose nodes hold the `combine!` of their children;
   each output row binary-searches its window's start per look-back — using
-  the kernel's exact membership predicate `t - s <= lookback`, never a
-  rearrangement of it — and folds the window from O(log n) partial
+  the kernel's own membership predicate, `withinback` (see "Calendar
+  periods") — and folds the window from O(log n) partial
   combinations, order-preserved for `First`/`Last`. Expired rows leave the
   tree only logically (a head index) and are dropped at the next
   capacity-triggered rebuild, amortized O(1) per append; a query never
@@ -1969,6 +1971,47 @@ this structure (see "Rolling windows" and "Window summarization"). The classific
 A custom summarizer that declares neither still works everywhere; the
 rolling transform just keeps its re-fold path for any tuple containing one.
 
+## Calendar periods
+
+`Month`, `Quarter` and `Year` (`Dates.OtherPeriod`, aliased `CalendarPeriod` in
+`src/context.jl`) have no fixed length. Dates adds one to a time, clamping to
+the month end (Jan 31 + `Month(1)` is Feb 28), but refuses to compare one with a
+time difference: `t - s` is a `Day` or `Millisecond`, and
+`isless(Millisecond, Month)` is a `MethodError`. So every operator taking a
+period measures a calendar one on the calendar, by dispatch on its type, and
+leaves every other type exactly as before.
+
+- **Windows.** Every backward membership test — `asofjoin`/`applymodels` and
+  `forwardfill` tolerance, the rolling and window look-backs, and the segment
+  tree's binary search — goes through `withinback(t, s, lb)`: `t - s <= lb`,
+  or `s >= t - lb` for a calendar period. The calendar form uses the arithmetic
+  the context widening already uses (`start - lb`), so predicate and widened
+  window agree. It is monotone in both `s` and `t` (`t - lb` never decreases as
+  `t` grows), which the eviction heads and the binary search need. The fixed
+  form is kept verbatim rather than rearranged, since for floating-point times
+  `s >= t - lb` can disagree with `t - s <= lb` at the last ulp. `futurejoin`
+  uses the mirror, `withinahead`: `r <= t + lb`, matching its `stop + lb`
+  widening. The dispatch is on the look-back's type, already a type parameter
+  in every kernel, so no row pays a branch.
+- **`clock`.** Repeated addition drifts at month ends (Jan 31, Feb 28, Mar 28,
+  …), so a calendar tick `k` is `start + k * interval`: Jan 31, Feb 28, Mar 31.
+  Fixed intervals still accumulate, keeping floating-point clocks bit-for-bit
+  as they were. The iterator state is the pair `(tick, k)`.
+- **`lag` and `lead`.** A calendar shift is monotone but neither a translation
+  nor injective (Jan 29–31 all lag to Feb 28), so the oppositely shifted
+  context no longer maps onto `[start, stop)`. It can hand `load` a shifted row
+  before `start`, and it can miss one: with `stop = Mar 31`, the row at Feb 28
+  lags to Mar 28 but lies outside `[.., stop - M)`. The calendar methods of
+  `lagcontext`/`leadcontext` read a superset instead — `lag` over
+  `[start - M, stop)`, since a shift never moves a row back past `stop`, and
+  `lead` over `[start + M, stop + M + M)`, since no row at or past that bound
+  can lead back before `stop` — and `clipshifted` clips each shifted chunk back
+  to the half-open window. The shift is monotone, so the kept rows are one
+  range; fixed offsets skip the clip entirely.
+
+`CompoundPeriod` (`Month(1) + Day(1)`) is not covered: among other things it
+cannot be multiplied by an `Int` for the clock.
+
 ## Interval semantics
 
 - **Sources** clip to the half-open interval `[start, stop)`. Adjacent
@@ -2058,7 +2101,7 @@ the second.
 | File | Content |
 |---|---|
 | `src/CausalFrames.jl` | module, includes, exports |
-| `src/context.jl` | `Context{T}` |
+| `src/context.jl` | `Context{T}` and the window-membership predicates (`withinback`, `withinahead`) |
 | `src/frame.jl` | `CausalFrame{T}`, invariants, Tables.jl interface |
 | `src/chunks.jl` | internal chunk-iterator machinery (`ChunkSource`, `chunkmap`) |
 | `src/pipeline.jl` | `CausalPipeline{F}`, `load`, `stream`, `scan` |
@@ -2108,8 +2151,9 @@ through `using CausalFrames.Acausal`, so acausality is always an explicit
 opt-in. The submodule's `settime` is not exported from the submodule either, so
 that `using CausalFrames.Acausal` cannot shadow the causal one.
 
-Dependencies: DataFrames, CSV, Tables, LinearAlgebra, PrecompileTools, and the
-`Serialization` stdlib (see "JLS I/O"); weak dependencies DuckDB and Parquet2,
+Dependencies: DataFrames, CSV, Tables, LinearAlgebra, PrecompileTools, the
+`Dates` stdlib (see "Calendar periods") and the `Serialization` stdlib (see
+"JLS I/O"); weak dependencies DuckDB and Parquet2,
 each behind a package extension (see "Parquet I/O"), and MLJModelInterface,
 behind the MLJ extension (see "Model fitting (MLJ)").
 

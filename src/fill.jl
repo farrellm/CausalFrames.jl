@@ -31,7 +31,9 @@ first value, or past `tolerance`, stay `missing`. To fill with a constant, use
 - `key = nothing`: a column name or collection of distinct column names other
   than `:time`. With a key, values carry only within the same key.
 - `tolerance = nothing`: the maximum age of a carried value, measured from the
-  row it came from; must be non-negative. The input then runs over
+  row it came from; must be non-negative. A calendar period (`Month`,
+  `Quarter`, `Year`) is measured on the calendar, as for [`asofjoin`](@ref).
+  The input then runs over
   `[start - tolerance, stop)`, so rows near `start` can be filled from before
   the window; the time type must support subtraction.
 
@@ -279,7 +281,7 @@ end
         # is decided here, against each row — never by evicting eagerly, which
         # is asofjoin's rule too.
         outcol === nothing || (@inbounds outcol[i] =
-            cell.seen && (tolerance === nothing || t - cell.time <= tolerance) ?
+            cell.seen && (tolerance === nothing || withinback(t, cell.time, tolerance)) ?
             cell.value : missing)
     else
         cell.value = x

@@ -7,7 +7,11 @@ design rationale and performance constraints behind each module.
   evaluation window, and the internal chunk protocol (`ChunkSource`,
   `chunkmap`): a single-pass lazy iterator of non-empty DataFrame chunks,
   consumers taking ownership of what they're yielded; empty chunks are
-  filtered out here so all downstream code may assume a chunk has rows
+  filtered out here so all downstream code may assume a chunk has rows.
+  `context.jl` also holds `withinback`/`withinahead`, the one membership test
+  every tolerance and look-back window must use: a new window kernel that
+  writes `t - s <= lb` inline breaks calendar periods (`Month`, `Year`), which
+  Dates cannot compare with a time difference
 - `src/frame.jl` — `CausalFrame{T}`: opaque, backed by a vector of
   time-disjoint DataFrame chunks; invariants checked in the public inner
   constructor, while `load`/`stream` build through a `Trusted`-token

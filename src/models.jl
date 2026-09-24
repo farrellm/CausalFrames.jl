@@ -77,7 +77,8 @@ MLJModelInterface (`using MLJ`).
 - `key = nothing`: a column name or collection of distinct column names other
   than `:time`, present in both pipelines; each row uses its own key's latest
   model.
-- `tolerance = nothing`: the maximum age of a model, as for `asofjoin`. It
+- `tolerance = nothing`: the maximum age of a model, as for `asofjoin`
+  (calendar periods included). It
   widens the models' context to `[start - tolerance, stop)`, which is how a
   model fit in an earlier window reaches a later one.
 - `strict = false`: use only models strictly before the row.

@@ -129,6 +129,9 @@ end
     CausalFrames.treesync!(tr)
     JET.@test_opt CausalFrames.treequery(tr, 1, 1)
     JET.@test_opt CausalFrames.windowstart(tr.times, tr.head, 1, 0)
+    # a calendar look-back takes the other membership method, still static
+    times = [DateTime(2026, 1, 31), DateTime(2026, 2, 28)]
+    JET.@test_opt CausalFrames.windowstart(times, 1, DateTime(2026, 3, 31), Month(1))
 end
 
 @testset "intervalize kernels" begin
@@ -182,6 +185,11 @@ end
     rnt = (time = [0], sym = ["a"], y = [2.0])
     JET.@test_opt CausalFrames.joinsegment!(matches, found, index, slots, lnt,
         1, rnt, 1, true, Val((:sym,)), <=, nothing)
+    dlnt = (time = [DateTime(2026, 3, 1)], sym = ["a"])
+    drnt = (time = [DateTime(2026, 2, 1)], sym = ["a"], y = [2.0])
+    DV = typeof((time = DateTime(2026), sym = "a", y = 1.0))
+    JET.@test_opt CausalFrames.joinsegment!(Vector{DV}(undef, 1), [false],
+        Dict{K,Int}(), DV[], dlnt, 1, drnt, 1, true, Val((:sym,)), <=, Month(1))
     JET.@test_opt CausalFrames.matchcolumn(matches, found, Val(:y))
 end
 

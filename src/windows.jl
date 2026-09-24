@@ -38,7 +38,8 @@ windows may overlap or leave gaps.
 - `clock`: a pipeline whose `:time` column gives the ticks (other columns are
   ignored), such as [`clock`](@ref).
 - `lookback`: the window length; non-negative and subtractable from the time
-  type.
+  type. A calendar look-back (`Month`, `Quarter`, `Year`) is measured on the
+  calendar, so `clock(Month(1))` with `Month(1)` summarizes calendar months.
 - `summarizers`: a [`Summarizer`](@ref) or a collection of them.
 
 # Keywords
@@ -356,7 +357,8 @@ end
     groups::Dict{K,RunningGroup{S}}, scratch::Vector{Pair{K,RunningGroup{S}}},
     prevkeys::Vector{K}, lookback, keynames::Val, outs::Val, emptyrow,
     grid::Val, ks::Union{Nothing,KeySet}) where {K,S<:Tuple}
-    while head <= length(buffer) && τ - @inbounds(buffer[head]).time > lookback
+    while head <= length(buffer) &&
+          !withinback(τ, @inbounds(buffer[head]).time, lookback)
         row = @inbounds buffer[head]
         k = keyvalues(row, keynames)
         g = groups[k]
@@ -411,7 +413,8 @@ end
     gt::GroupTable{K,S}, stateprotos::S, prevkeys::Vector{K}, lookback,
     keynames::Val, outs::Val, emptyrow, grid::Val,
     ks::Union{Nothing,KeySet}) where {K,S<:Tuple}
-    while head <= length(buffer) && τ - @inbounds(buffer[head]).time > lookback
+    while head <= length(buffer) &&
+          !withinback(τ, @inbounds(buffer[head]).time, lookback)
         head += 1
     end
     for j in head:length(buffer)

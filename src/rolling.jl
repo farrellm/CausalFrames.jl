@@ -30,7 +30,8 @@ window.
 - `windows`: window names and their look-backs, as a `NamedTuple`
   (`(m5 = Minute(5), h1 = Hour(1))`), a `name => lookback` pair, or a collection
   of pairs. Names must be unique; look-backs must be non-negative and
-  subtractable from the time type.
+  subtractable from the time type. A calendar look-back (`Month`, `Quarter`,
+  `Year`) is measured on the calendar: the window is `[t - lookback, t]`.
 - `summarizers`: a [`Summarizer`](@ref) or a collection of them. Their output
   columns may not collide with existing columns.
 
@@ -435,7 +436,7 @@ function rollsegment!(vals::Tuple, buffer::Vector{R}, head::Int,
         # Times are non-decreasing, so a row outside every window now is
         # outside forever.
         while head <= length(buffer) &&
-              outsideall(t - @inbounds(buffer[head]).time, lookbacks...)
+              outsideall(t, @inbounds(buffer[head]).time, lookbacks...)
             head += 1
         end
         scratch = foldwindows!(vals, i, t, buffer, head,
@@ -446,8 +447,9 @@ function rollsegment!(vals::Tuple, buffer::Vector{R}, head::Int,
     return (i, spos, head, false)
 end
 
-@inline outsideall(d) = true
-@inline outsideall(d, lb, rest...) = d > lb && outsideall(d, rest...)
+@inline outsideall(t, s) = true
+@inline outsideall(t, s, lb, rest...) =
+    !withinback(t, s, lb) && outsideall(t, s, rest...)
 
 # One window per call, peeling the value vectors and look-backs in step
 # (vararg style, so inference tracks the heterogeneous look-back types).
@@ -468,7 +470,7 @@ end
     seen = false
     for j in head:length(buffer)
         s = @inbounds buffer[j]
-        t - s.time <= lb || continue
+        withinback(t, s.time, lb) || continue
         isequal(keyvalues(s, keynames), k) || continue
         updateall!(states, s)
         seen = true
@@ -544,7 +546,7 @@ end
     rest...)
     d = rgroups[w]
     head = @inbounds winheads[w]
-    while head <= length(buffer) && t - @inbounds(buffer[head]).time > lb
+    while head <= length(buffer) && !withinback(t, @inbounds(buffer[head]).time, lb)
         row = @inbounds buffer[head]
         k = keyvalues(row, keynames)
         g = d[k]
