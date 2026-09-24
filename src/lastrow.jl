@@ -50,7 +50,7 @@ function lastrow(; key = nothing)
     keycols = tokeycolumns(key)
     allunique(keycols) || throw(ArgumentError("lastrow key columns must be unique"))
     :time in keycols && throw(
-        ArgumentError("time is the ordering dimension and may not be a lastrow key"),
+        ArgumentError(":time is the ordering dimension and may not be a lastrow key"),
     )
     keynames = Val(Tuple(keycols))
     return function (p::CausalPipeline)
@@ -119,7 +119,7 @@ function checkschema!(st::LastRowState, c::DataFrame)
     if st.names === nothing
         for k in st.keycols
             String(k) in cols ||
-                throw(ArgumentError("lastrow key column $k not found in input"))
+                throw(ArgumentError("lastrow key column $(repr(k)) not found in the input"))
         end
         st.names = cols
     elseif st.names != cols

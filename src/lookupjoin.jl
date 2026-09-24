@@ -52,12 +52,12 @@ The curried form composes with `|>`; the uncurried form applies directly, so
 function lookupjoin(table; key = nothing, unmatched::Symbol = :missing,
     leftprefix = nothing, rightprefix = nothing)
     keycols = tokeycolumns(key)
-    isempty(keycols) && throw(ArgumentError("lookupjoin requires key"))
+    isempty(keycols) && throw(ArgumentError("lookupjoin requires a key"))
     allunique(keycols) ||
         throw(ArgumentError("lookupjoin key columns must be unique"))
     mode = unmatchedmode(unmatched)
     Tables.istable(table) || throw(
-        ArgumentError("lookupjoin: a $(typeof(table)) is not a Tables.jl table"),
+        ArgumentError("lookupjoin table must be a Tables.jl table, got $(typeof(table))"),
     )
     # Owned 1-based vectors: the index is built now, so a caller mutating the
     # table later must not be able to desynchronize it.
@@ -71,7 +71,7 @@ function lookupjoin(table; key = nothing, unmatched::Symbol = :missing,
     )
     for k in keycols
         k in colnames ||
-            throw(ArgumentError("lookupjoin key column $k not found in the table"))
+            throw(ArgumentError("lookupjoin key column $(repr(k)) not found in the table"))
     end
     lp = normprefix(leftprefix)
     rp = normprefix(rightprefix)
@@ -80,8 +80,8 @@ function lookupjoin(table; key = nothing, unmatched::Symbol = :missing,
     for n in rightnames
         (n === :time || n in keycols) && throw(
             ArgumentError(
-                "lookupjoin output column $n appears more than once; use \
-                leftprefix/rightprefix to disambiguate",
+                "lookupjoin output column $(repr(n)) appears more than once; use \
+                `leftprefix`/`rightprefix` to disambiguate",
             ),
         )
     end
@@ -163,8 +163,8 @@ function checklookupnames(cfg::LookupJoin, c::DataFrame)
         m = prefixed(cfg.leftprefix, n)
         (m === :time || m in cfg.keycols || m in cfg.rightnames) && throw(
             ArgumentError(
-                "lookupjoin output column $m appears more than once; use \
-                leftprefix/rightprefix to disambiguate",
+                "lookupjoin output column $(repr(m)) appears more than once; use \
+                `leftprefix`/`rightprefix` to disambiguate",
             ),
         )
     end
@@ -214,8 +214,8 @@ end
 
 @noinline throwunmatched(k) = throw(
     ArgumentError(
-        "lookupjoin key $k is not in the table; pass unmatched = :missing or \
-        :drop to allow it",
+        "lookupjoin key $k is not in the table; pass `unmatched = :missing` \
+        or `unmatched = :drop` to allow it",
     ),
 )
 

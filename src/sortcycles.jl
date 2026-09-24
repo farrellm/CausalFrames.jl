@@ -76,8 +76,8 @@ function sortspec(names)
 end
 
 sortspecerror(x) = throw(
-    ArgumentError("sortcycles: expected a column name, a collection of column \
-        names, or a per-row function, got $(typeof(x))"))
+    ArgumentError("invalid sortcycles spec of type $(typeof(x)): expected a \
+        column name, a collection of column names, or a per-row function"))
 
 # Per-run state: the pieces of the open cycle, all sharing its time. Pieces are
 # concatenated once, when the cycle closes, so a cycle spread over many chunks

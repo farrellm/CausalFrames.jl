@@ -22,7 +22,7 @@ tokeycolumns(ks) = collect(Symbol, ks)
 function checkkeycolumns(keycols::Vector{Symbol}, c::DataFrame, op::String)
     for k in keycols
         String(k) in names(c) ||
-            throw(ArgumentError("$op key column $k not found in the input"))
+            throw(ArgumentError("$op key column $(repr(k)) not found in the input"))
     end
     return nothing
 end
@@ -42,7 +42,7 @@ end
 
 tokeyset(::Nothing, keycols::Vector{Symbol}, op::String) = nothing
 function tokeyset(keyset, keycols::Vector{Symbol}, op::String)
-    isempty(keycols) && throw(ArgumentError("$op keyset requires key"))
+    isempty(keycols) && throw(ArgumentError("$op keyset requires a key"))
     KN = Tuple(keycols)
     tuples = map(v -> keysettuple(v, KN, op), collect(keyset))
     # `map` narrows each column to the typejoin of its values, so an ordinary
@@ -68,7 +68,7 @@ function keysettuple(v, KN::Tuple{Vararg{Symbol}}, op::String)
     throw(
         ArgumentError(
             "$op keyset element $(repr(v)) must be a tuple or named tuple of " *
-            "values for the key columns $(join(KN, ", "))"),
+            "values for the key columns $(join(map(repr, KN), ", "))"),
     )
 end
 
@@ -99,8 +99,12 @@ end
 # the expanded prototypes as a tuple (so the states derived from them are a
 # concrete tuple too and the folding loops specialize on it) plus the
 # requested output names, in request order, for projecting emitted rows.
-function prototypes(ss::Vector{Summarizer}, keycols::Vector{Symbol})
-    isempty(ss) && throw(ArgumentError("at least one summarizer is required"))
+function prototypes(
+    ss::Vector{Summarizer},
+    keycols::Vector{Symbol},
+    op::String = "summarize",
+)
+    isempty(ss) && throw(ArgumentError("$op requires at least one summarizer"))
     protos = Summarizer[]
     # Output-name tuples are heterogeneous, so a Set of them would be keyed by
     # an abstract type; at the handful of summarizers a call can carry (tuple
@@ -111,15 +115,18 @@ function prototypes(ss::Vector{Summarizer}, keycols::Vector{Symbol})
     function expand(s::Summarizer)
         outnames = keys(emptyvalue(s))
         outnames in seen && return
-        outnames in visiting && throw(ArgumentError(
-            "summarizer dependency cycle through $(first(outnames))"))
+        outnames in visiting && throw(
+            ArgumentError(
+                "$op: summarizer dependency cycle through $(repr(first(outnames)))"),
+        )
         push!(visiting, outnames)          # a stack: the walk is depth-first
         foreach(expand, dependencies(s))
         pop!(visiting)
         for n in outnames
             n in used && throw(
                 ArgumentError(
-                    "output column $n is produced by more than one summarizer"),
+                    "$op output column $(repr(n)) is produced by more than one summarizer",
+                ),
             )
             push!(used, n)
         end
@@ -132,10 +139,10 @@ function prototypes(ss::Vector{Summarizer}, keycols::Vector{Symbol})
         outnames = keys(emptyvalue(s))
         for n in outnames
             n === :time && throw(ArgumentError(
-                "summarizer output column may not be named time"))
+                "$op output column may not be named :time"))
             n in keycols && throw(
                 ArgumentError(
-                    "summarizer output column $n collides with a key column"),
+                    "$op output column $(repr(n)) collides with a key column"),
             )
         end
         expand(s)
@@ -536,7 +543,7 @@ function summarize(summarizers; key = nothing)
     return function (p::CausalPipeline)
         return CausalPipeline() do ctx::Context
             keycols = tokeycolumns(key)
-            protos, requested = prototypes(tosummarizers(summarizers), keycols)
+            protos, requested = prototypes(tosummarizers(summarizers), keycols, "summarize")
             keynames = Val(Tuple(keycols))
             outs = Val(requested)
             keyed = !isempty(keycols)
@@ -598,7 +605,8 @@ function summarizecycles(summarizers; key = nothing, keyset = nothing)
     return function (p::CausalPipeline)
         return CausalPipeline() do ctx::Context
             keycols = tokeycolumns(key)
-            protos, requested = prototypes(tosummarizers(summarizers), keycols)
+            protos, requested =
+                prototypes(tosummarizers(summarizers), keycols, "summarizecycles")
             keynames = Val(Tuple(keycols))
             outs = Val(requested)
             keyed = !isempty(keycols)
@@ -671,7 +679,8 @@ function addsummarycolumns(summarizers; key = nothing)
     return function (p::CausalPipeline)
         return CausalPipeline() do ctx::Context
             keycols = tokeycolumns(key)
-            protos, requested = prototypes(tosummarizers(summarizers), keycols)
+            protos, requested =
+                prototypes(tosummarizers(summarizers), keycols, "addsummarycolumns")
             keynames = Val(Tuple(keycols))
             outs = Val(requested)
             keyed = !isempty(keycols)
@@ -681,7 +690,7 @@ function addsummarycolumns(summarizers; key = nothing)
                     for n in requested   # hidden dependencies are never added
                         String(n) in names(c) && throw(
                             ArgumentError(
-                                "summary column $n collides with an existing column",
+                                "addsummarycolumns output column $(repr(n)) collides with an existing column",
                             ),
                         )
                     end

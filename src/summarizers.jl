@@ -1185,9 +1185,9 @@ function LinearRegression(predictors, response::Symbol;
     intercept::Bool = true, name::Union{Nothing,Symbol} = nothing)
     ps = Tuple(Symbol(p) for p in predictors)
     isempty(ps) &&
-        throw(ArgumentError("LinearRegression needs at least one predictor"))
+        throw(ArgumentError("LinearRegression requires at least one predictor"))
     allunique(ps) || throw(ArgumentError(
-        "LinearRegression predictors must be distinct, got $ps"))
+        "LinearRegression predictors must be unique, got $ps"))
     # A predictor named `intercept` produces the constant term's own pair of
     # columns. Caught here rather than left to the NamedTuple constructor,
     # whose "duplicate field name" says nothing about which summarizer built
@@ -1195,7 +1195,7 @@ function LinearRegression(predictors, response::Symbol;
     # stays honest if the naming scheme grows.
     outs = regnames(ps, name, intercept)
     allunique(outs) || throw(ArgumentError(
-        "LinearRegression output columns are not distinct: $outs"))
+        "LinearRegression output columns must be unique, got $outs"))
     return LinearRegression{ps,response}(intercept, name)
 end
 # A lone name. A string is one name too, never iterated as a collection of
@@ -1633,15 +1633,15 @@ function FitModel(model, predictors, response::Symbol; name::Symbol = :model,
     ismodel(model) || throw(
         ArgumentError(
             mljloaded() ?
-            "FitModel needs an MLJ model; got a $(typeof(model))" : MLJHINT,
+            "FitModel model must be an MLJ model, got a $(typeof(model))" : MLJHINT,
         ),
     )
     ps = Tuple(Symbol(p) for p in predictors)
-    isempty(ps) && throw(ArgumentError("FitModel needs at least one predictor"))
+    isempty(ps) && throw(ArgumentError("FitModel requires at least one predictor"))
     allunique(ps) || throw(ArgumentError(
-        "FitModel predictors must be distinct, got $ps"))
+        "FitModel predictors must be unique, got $ps"))
     response in ps && throw(ArgumentError(
-        "FitModel response $response is also a predictor"))
+        "FitModel response $(repr(response)) is also a predictor"))
     return FitModel{name,ps,response,typeof(model)}(model, Int(verbosity))
 end
 # A lone name. A string is one name too, never iterated as a collection of

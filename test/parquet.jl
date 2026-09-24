@@ -83,7 +83,7 @@ end
         readparquet(path; time = :nope))
 
     # a spec that is neither a Symbol nor a function is eager
-    @test_throws "readparquet time spec must be" readparquet(path; time = "ts")
+    @test_throws "invalid readparquet time spec of type" readparquet(path; time = "ts")
 
     both = writeparquetfile(joinpath(dir, "both.parquet"),
         DataFrame(time = [1, 2, 3], ts = [1, 2, 3]))

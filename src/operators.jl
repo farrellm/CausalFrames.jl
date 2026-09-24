@@ -876,8 +876,8 @@ checktimespec(::Symbol, ::String) = nothing
 checktimespec(::Function, ::String) = nothing
 checktimespec(x, opname::String) = throw(
     ArgumentError(
-        "$opname spec must be a column name (Symbol) or a per-row function, \
-        got $(typeof(x))"),
+        "invalid $opname spec of type $(typeof(x)): expected a column name \
+        (Symbol) or a per-row function"),
 )
 
 # A source's `time`: the same spec, or `nothing` for the column named `:time`.
@@ -957,7 +957,7 @@ function checkforward(old::AbstractVector, new::AbstractVector, opname::String)
         new[i] >= old[i] || throw(
             ArgumentError(
                 "$opname may not move a row earlier in time: row $i moves from \
-                $(old[i]) to $(new[i]); use CausalFrames.Acausal.settime for that"),
+                $(old[i]) to $(new[i]); use `CausalFrames.Acausal.settime` for that"),
         )
     end
     return nothing

@@ -56,7 +56,7 @@ function addrollingcolumns(windows, summarizers; key = nothing,
     from::Union{Nothing,CausalPipeline} = nothing)
     windownames, lookbacks = towindows(windows)
     isempty(windownames) &&
-        throw(ArgumentError("at least one window is required"))
+        throw(ArgumentError("addrollingcolumns requires at least one window"))
     allunique(windownames) ||
         throw(ArgumentError("addrollingcolumns window names must be unique"))
     keycols = tokeycolumns(key)
@@ -64,15 +64,16 @@ function addrollingcolumns(windows, summarizers; key = nothing,
         throw(ArgumentError("addrollingcolumns key columns must be unique"))
     :time in keycols && throw(
         ArgumentError(
-            "time is the window dimension and may not be an addrollingcolumns key"),
+            ":time is the window dimension and may not be an addrollingcolumns key"),
     )
-    protos, requested = prototypes(tosummarizers(summarizers), Symbol[])
+    protos, requested =
+        prototypes(tosummarizers(summarizers), Symbol[], "addrollingcolumns")
     prefixednames = Symbol[]
     for w in windownames, n in requested
         pn = Symbol(w, '_', n)
         pn in prefixednames && throw(
             ArgumentError(
-                "addrollingcolumns output column $pn appears more than once"),
+                "addrollingcolumns output column $(repr(pn)) appears more than once"),
         )
         push!(prefixednames, pn)
     end
@@ -206,7 +207,7 @@ function pullsummarized!(rs::RollingState, cfg::RollingConfig)
         for k in cfg.keycols
             String(k) in names(chunk) || throw(
                 ArgumentError(
-                    "addrollingcolumns key column $k not found in the summarized input",
+                    "addrollingcolumns key column $(repr(k)) not found in the summarized input",
                 ),
             )
         end
@@ -332,13 +333,15 @@ function rollchunk!(rs::RollingState, cfg::RollingConfig, c::DataFrame)
         for k in cfg.keycols
             String(k) in names(c) || throw(
                 ArgumentError(
-                    "addrollingcolumns key column $k not found in the augmented input"),
+                    "addrollingcolumns key column $(repr(k)) not found in the augmented input",
+                ),
             )
         end
         for pn in cfg.prefixednames
             String(pn) in names(c) && throw(
                 ArgumentError(
-                    "rolling summary column $pn collides with an existing column"),
+                    "addrollingcolumns output column $(repr(pn)) collides with an existing column",
+                ),
             )
         end
         rs.checked = true
