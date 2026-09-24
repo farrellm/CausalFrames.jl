@@ -21,47 +21,37 @@ export futurejoin, lead
     futurejoin(right::CausalPipeline; key = nothing, tolerance = nothing,
                strict = false, leftprefix = nothing, rightprefix = nothing,
                righttime = nothing) -> (CausalPipeline -> CausalPipeline)
-    futurejoin(left::CausalPipeline, right::CausalPipeline; key = nothing,
-               ...) -> CausalPipeline
+    futurejoin(left::CausalPipeline, right::CausalPipeline; ...) -> CausalPipeline
 
-The forward-looking mirror of [`asofjoin`](@ref CausalFrames.asofjoin): a
-transform joining each left row to the **earliest** right row whose time is
-not before the left row's time (`strict = true`: strictly after). Every left
-row is kept; the right table's value columns are appended with element type
-`Union{Missing, T}` and are `missing` where no right row qualifies. Among
-right rows sharing one time, the first in stream order wins. The right `time`
-column is dropped unless `righttime` names an output column for the matched
-row's time.
+**Acausal.** The mirror of [`asofjoin`](@ref CausalFrames.asofjoin): joins each
+left row to the earliest `right` row at or after its time. Every left row is
+kept, with `right`'s non-time columns appended as `Union{Missing, T}`:
+`missing` where no right row matches. Among right rows at the same time, the
+first one wins. Available after `using CausalFrames.Acausal`.
 
-This operator is **acausal**: a row emitted at time `t` looks at right rows
-with time `>= t`. That is why it is segregated in the `CausalFrames.Acausal`
-submodule and must be opted into explicitly (`using CausalFrames.Acausal`);
-everything the top-level module exports stays causal.
+# Arguments
+- `right`: the pipeline to join from. If it produces no rows, left rows pass
+  through unchanged (apart from `leftprefix`).
 
-With `key` (a column name or collection of column names, present in both
-tables) rows join per unique key value, exact-matched; the key columns appear
-once in the output, taken from the left row, never prefixed. With `tolerance`
-the match additionally requires `rtime - time <= tolerance`, and the right
-pipeline runs over the widened context `[start, stop + tolerance)` so
-lookahead past the window end is covered — this requires the time type to
-support addition (numbers and `Dates` types do). Without `tolerance` the
-right pipeline sees only `[start, stop)`, so left rows near `stop` may find no
-later right row.
+# Keywords
+- `key = nothing`: a column name or collection of distinct column names other
+  than `:time`, present on both sides; a row matches only right rows with an
+  equal key. Key columns appear once, from the left, never prefixed.
+- `tolerance = nothing`: the maximum distance ahead, `righttime - time <=
+  tolerance`; must be non-negative. The right pipeline then runs over
+  `[start, stop + tolerance)`, so rows near `stop` can match later right rows;
+  the time type must support addition. Without it, right runs over
+  `[start, stop)` only.
+- `strict = false`: match only right rows strictly after the left row.
+- `leftprefix = nothing`, `rightprefix = nothing`: rename that side's non-time,
+  non-key columns to `"{prefix}_{name}"`. Output names must be unique, so a self
+  join needs a prefix.
+- `righttime = nothing`: a name under which to keep the matched right row's
+  time; by default it is dropped.
 
-`leftprefix` / `rightprefix` rename that side's non-time, non-key columns to
-`"{prefix}_{name}"`. Output column names must be unique after prefixing — in
-particular a self join (`p |> futurejoin(p)`) needs a prefix. A right stream
-producing no chunks passes left chunks through unchanged (no right columns, no
-`righttime`), except for the `leftprefix` rename.
-
-Because the match is the earliest qualifying right row, buffering is
-unavoidable: right rows are held per key until a left row consumes or outruns
-them, and confirming that a key has *no* future match drains the right stream.
-Worst-case memory is therefore O(number of right rows), unlike `asofjoin`'s
-O(number of keys) store — the price of looking forward.
-
-The curried form composes with `|>`; the uncurried form applies directly, so
-`futurejoin(left, right; ...)` is equivalent to `left |> futurejoin(right; ...)`.
+Right rows are buffered per key until a left row consumes or passes them, and
+proving a key has no future match reads the rest of `right`, so memory is
+O(right rows) in the worst case, against `asofjoin`'s O(keys).
 """
 function futurejoin(right::CausalPipeline; key = nothing, tolerance = nothing,
     strict::Bool = false, leftprefix = nothing,
@@ -355,25 +345,16 @@ end
     lead(offset) -> (CausalPipeline -> CausalPipeline)
     lead(p::CausalPipeline, offset) -> CausalPipeline
 
-A transform shifting every row `offset` earlier in time (`time -> time -
-offset`), so that the value observed at time `t` is the one the input carried
-at `t + offset` — the leading, forward-looking view. Only the `:time` column
-changes; all other columns pass through unchanged. This is the mirror of the
-causal [`lag`](@ref CausalFrames.lag).
+**Acausal.** The mirror of [`lag`](@ref CausalFrames.lag): moves every row
+`offset` earlier (`time -> time - offset`), so the row at time `t` carries the
+values the input had at `t + offset`. Only `:time` changes. The input runs over
+`[start + offset, stop + offset)`, so the output fills the whole window.
+Available after `using CausalFrames.Acausal`.
 
-This operator is **acausal**: a row emitted at time `t` carries data from time
-`t + offset > t`. That is why it lives in the `CausalFrames.Acausal`
-submodule and must be opted into explicitly (`using CausalFrames.Acausal`);
-everything the top-level module exports stays causal.
-
-`offset` must be non-negative (a negative shift is just a `lag`); an
-`ArgumentError` is thrown when the pipeline runs otherwise, and `offset` `== 0`
-is the identity. The time type must support adding and subtracting the offset
-(numbers and `Dates` types do): the upstream pipeline is run over the window
-`[start + offset, stop + offset)` so the shifted output covers `[start, stop)`.
-
-The curried form composes with `|>`; the uncurried form applies directly, so
-`lead(p, offset)` is equivalent to `p |> lead(offset)`.
+# Arguments
+- `offset`: the shift, in a type that can be added to and subtracted from the
+  time type. Must be non-negative, checked when the pipeline runs; `0` is the
+  identity.
 """
 function lead(offset)
     return function (p::CausalPipeline)
@@ -401,30 +382,20 @@ end
     CausalFrames.Acausal.settime(spec) -> (CausalPipeline -> CausalPipeline)
     CausalFrames.Acausal.settime(p::CausalPipeline, spec) -> CausalPipeline
 
-The permissive mirror of [`settime`](@ref CausalFrames.settime): the same
-`Symbol`-or-function `spec`, the same conversion to the context's time type, and
-the same clip — but **without** the requirement that a row's new time be at
-least its old one, so rows may move *earlier*. The result must still be
-non-decreasing within each chunk and across chunk boundaries, since the chunk
-protocol depends on it, and it is clipped to `[start, stop)` at **both** ends.
+**Acausal.** The permissive [`settime`](@ref CausalFrames.settime): the same
+`spec`, conversion and clip to `[start, stop)`, but rows may move earlier. The
+new time column must still be non-decreasing within and across chunks (an
+`ArgumentError` otherwise).
 
-This operator is **acausal**: a row emitted at time `t` may carry data the input
-held at some later time. That is why it lives in the `CausalFrames.Acausal`
-submodule; everything the top-level module exports stays causal.
+Not exported even from `Acausal`, so that `using CausalFrames.Acausal` leaves
+the causal `settime` unambiguous; call it as `CausalFrames.Acausal.settime`.
 
-Unlike [`futurejoin`](@ref) and [`lead`](@ref), it is deliberately **not
-exported even from this submodule**, so that `using CausalFrames.Acausal`
-alongside `using CausalFrames` leaves the causal `settime` unambiguous. Reach it
-as `CausalFrames.Acausal.settime`.
+# Arguments
+- `spec`: a `Symbol` or a function `row -> time`, as for `settime`.
 
-As for the causal variant the context is **not widened**, which bites harder
-here: a row whose original time is at or past `stop` is never produced upstream,
-so a `spec` that would move it back into the window can never see it — the
-difference from [`lead`](@ref), whose constant shift lets it slide the upstream
-window instead.
-
-The curried form composes with `|>`; the uncurried form applies directly, so
-`settime(p, spec)` is equivalent to `p |> settime(spec)`.
+The input is not widened, so a row at or after `stop` is never seen, even if
+`spec` would move it into the window. For a constant shift, use
+[`lead`](@ref), which does widen.
 """
 function settime(spec)
     checktimespec(spec, "Acausal.settime")

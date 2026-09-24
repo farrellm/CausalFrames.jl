@@ -3,6 +3,11 @@
 Every operator and summarizer has its own section on one of the pages below;
 the links here go straight to it.
 
+Transforms are curried: `op(args...; kwargs...)` returns a function from
+pipeline to pipeline, for chaining with `|>`. Each also has a pipeline-first
+form, so `op(p, args...; kwargs...)` is `p |> op(args...; kwargs...)`. Row
+functions receive a row supporting `row.name` and `row[:name]`.
+
 | Category | Operators |
 |---|---|
 | [Frames and pipelines](core.md) | [`Context`](@ref), [`CausalFrame`](@ref), [`CausalPipeline`](@ref), [`load`](@ref), [`stream`](@ref), [`scan`](@ref) |

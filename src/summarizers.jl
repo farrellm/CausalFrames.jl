@@ -10,84 +10,66 @@
 """
     Summarizer
 
-Abstract supertype for summarization *configurations*. A concrete summarizer
-is immutable and holds only configuration — typically the column to summarize,
-carried as a *type parameter* so that the output column names it implies are
-known to the compiler. It implements:
+Abstract supertype of summarizers: immutable configurations (typically a column
+name, held as a type parameter so the output names are known to the compiler)
+that the summarizing transforms fold over rows. A summarizer implements:
 
-- [`emptyvalue`](@ref)`(s)` — the summary of no rows, as a `NamedTuple` whose
-  keys are the output column names;
-- [`fresh`](@ref)`(s, intypes)` — a zero [`SummarizerState`](@ref), typed for
-  input columns whose element types are given by `intypes`.
+- [`emptyvalue`](@ref)`(s)`: the summary of no rows, a `NamedTuple` keyed by
+  output column name;
+- [`fresh`](@ref)`(s, intypes)`: a zero [`SummarizerState`](@ref) for input
+  columns with the element types `intypes`;
+- optionally [`dependencies`](@ref)`(s)`, with the two-argument
+  [`value`](@ref), to compute its value from other summarizers'.
 
-Output column names are deterministic, formed by suffixing the column name
-(e.g. `Sum(:x)` produces `:x_sum`); summarizers with identical output names
-are treated as identical and share state.
-
-A summarizer may depend on the values of other summarizers by implementing
-[`dependencies`](@ref)`(s)` and the two-argument form of [`value`](@ref);
-dependencies are resolved through the same name-keyed deduplication, so
-shared work is computed once, and appear in the output only when requested
-by the user themselves.
-
-Structured subtypes refine what the state supports: a
-[`MonoidSummarizer`](@ref)'s states combine associatively
-([`combine!`](@ref)), and a [`GroupSummarizer`](@ref)'s updates are
-additionally invertible ([`downdate!`](@ref)). `addrollingcolumns` selects
-faster window algorithms when every summarizer it folds declares the
-structure.
+Summarizers with the same output names are treated as the same summarizer and
+share state. Dependencies are folded but appear in the output only if
+requested. Subtype [`MonoidSummarizer`](@ref) or [`GroupSummarizer`](@ref) to
+unlock faster window algorithms.
 """
 abstract type Summarizer end
 
 """
     MonoidSummarizer <: Summarizer
 
-A summarizer whose states form a monoid: [`combine!`](@ref) merges the states
-of two adjacent, stream-ordered row ranges into the state of their
-concatenation, associatively, with a [`fresh`](@ref) state as the identity.
-`addrollingcolumns` exploits this to answer each window from a tree of
-partial combinations — O(log window) per row — instead of re-folding every
-window row.
+A summarizer whose states [`combine!`](@ref) associatively, with a
+[`fresh`](@ref) state as identity. Window transforms answer each window from a
+segment tree of partial states — O(log window) — instead of re-folding it.
 """
 abstract type MonoidSummarizer <: Summarizer end
 
 """
     GroupSummarizer <: MonoidSummarizer
 
-A monoid summarizer whose updates can also be undone: [`downdate!`](@ref)
-removes a previously folded row. `addrollingcolumns` exploits this to slide
-each window in O(1) amortized per row, subtracting the exiting rows from a
-running state — unless [`isinvertible`](@ref) reports that the realized
-accumulator type defeats the inverse (an absorbing value folded past
-recovery), in which case it falls back to the monoid tree.
+A monoid summarizer whose updates can be undone with [`downdate!`](@ref).
+Window transforms slide a running state in O(1) amortized per row, removing
+rows as they leave the window, unless [`isinvertible`](@ref) says the state can
+no longer be inverted.
 """
 abstract type GroupSummarizer <: MonoidSummarizer end
 
 """
     SummarizerState
 
-Abstract supertype for the running state of one summarization, built by
-[`fresh`](@ref)`(s, intypes)` from a [`Summarizer`](@ref) and the input
-columns' element types. Because the state's value fields are concrete, so are
-the columns it produces. It implements:
+Abstract supertype of the running state of one summarization, built by
+[`fresh`](@ref)`(s, intypes)`. Its value fields are concretely typed, so the
+output columns are too. A state implements:
 
-- [`fresh`](@ref)`(st)` — a new state of the *same type* with zero state;
-- [`update!`](@ref)`(st, row)` — fold one row into the state;
-- [`value`](@ref)`(st)` — the current summary as a `NamedTuple` whose keys are
-  the output column names;
-- [`widenstate`](@ref)`(st, intypes)` — optionally, a state rebuilt for
-  widened input columns.
+- [`fresh`](@ref)`(st)`: a zero state of the same type;
+- [`update!`](@ref)`(st, row)`: fold in one row;
+- [`value`](@ref)`(st)`: the current summary, a `NamedTuple` keyed by output
+  column name;
+- optionally [`fresh!`](@ref)`(st)`, [`widenstate`](@ref)`(st, intypes)`, and,
+  for structured summarizers, [`combine!`](@ref), [`downdate!`](@ref) and
+  [`isinvertible`](@ref).
 """
 abstract type SummarizerState end
 
 """
     emptyvalue(s::Summarizer) -> NamedTuple
 
-The summary of no rows, keyed by output column name. This is the only summary
-available when the input has no rows at all: the chunk protocol never yields
-an empty chunk, so an empty input carries no schema and no state can be built
-for it. It is also where the summarization transforms read a summarizer's
-output column names, before any data has been seen.
+The summary of no rows, keyed by output column name. Transforms read output
+names from it before any data arrives, and use it when there is no data to
+build a state from.
 """
 function emptyvalue end
 
@@ -95,48 +77,30 @@ function emptyvalue end
     fresh(s::Summarizer, intypes::NamedTuple) -> SummarizerState
     fresh(st::SummarizerState) -> SummarizerState
 
-A zero state. The first form builds one from a summarizer and the input
-columns' element types, mirroring the row access in [`update!`](@ref):
-`update!` reads `row[column]` where `fresh` reads `intypes[column]`. The
-second form produces a new state of the same concrete type as `st`, which is
-how the transforms obtain per-key-group and per-cycle states without
-re-consulting the schema.
-
-The summarization transforms treat the summarizers they are given as
-prototypes, so one prototype serves many key groups and the caller's instance
-is never mutated.
+A zero state. The first form builds it from `s` and the input column element
+types `intypes`, read as [`update!`](@ref) reads the row (`intypes[column]` for
+`row[column]`). The second returns a new zero state of the same concrete type as
+`st`, used for each key group and cycle. Transforms never mutate the
+summarizers they are given.
 """
 function fresh end
 
 """
     fresh!(st::SummarizerState) -> SummarizerState
 
-Zero `st` in place and return it — the in-place counterpart of the one-argument
-[`fresh`](@ref). Callers must use the returned value rather than assume `st`
-was mutated: the default implementation is `fresh(st)`, so a state that cannot
-be zeroed in place (an immutable one) simply returns a new object, and every
-existing summarizer keeps working without implementing this at all.
-
-Implementing it is a pure optimization, and worth it for any state on a hot
-path: the transforms zero a state tuple per cycle
-([`summarizecycles`](@ref)), per window query (the `addrollingcolumns` tree
-mode), and per window per row (its re-fold mode), so an allocating `fresh`
-there costs one heap allocation per state per row.
-
-The zeroed state must be indistinguishable from `fresh(st)` through the rest of
-the interface. The one exception is the same one [`fresh`](@ref) already
-carries: a state whose value field is only meaningful once a row has been
-folded in (`Min`/`Max`/`First`/`Last`) may leave a stale value behind, because
-[`value`](@ref) is never called on a state that has folded no rows.
+Zero `st` in place, where possible, and return it; callers use the returned
+value. The default returns `fresh(st)`. Implementing it avoids an allocation per
+state per cycle, window query or row in the window transforms. A state whose
+value is only read after a row has been folded (`Min`, `First`, …) may keep a
+stale value.
 """
 fresh!(st::SummarizerState) = fresh(st)
 
 """
     update!(st::SummarizerState, row)
 
-Fold one row into the state. `row` is a map-like row object supporting
-`row.name` and `row[:name]` access, including `row.time`, so a summarizer may
-read whichever columns it needs.
+Fold one row into `st`. `row` supports `row.name` and `row[:name]`, including
+`row.time`.
 """
 function update! end
 
@@ -144,18 +108,13 @@ function update! end
     value(st::SummarizerState) -> NamedTuple
     value(st::SummarizerState, vals::NamedTuple) -> NamedTuple
 
-The current summary. A summarizer may produce several values; the keys of the
-returned `NamedTuple` are the output column names, and its value types are the
-element types of the columns produced.
+The current summary, keyed by output column name; its value types are the
+output column element types. Only called on a state that has folded at least
+one row (the summary of no rows is [`emptyvalue`](@ref)).
 
-The two-argument form receives in `vals` the already-computed values of every
-summarizer earlier in topological order — in particular of everything named by
-[`dependencies`](@ref). It defaults to calling the one-argument form; a
-dependent summarizer implements the two-argument form instead and may omit
-the one-argument form entirely.
-
-Only ever called on a state that has folded at least one row — the summary of
-no rows is [`emptyvalue`](@ref).
+The two-argument form also receives `vals`, the values of every summarizer
+earlier in dependency order, including all of [`dependencies`](@ref)`(s)`. It
+defaults to the one-argument form; a dependent summarizer implements it instead.
 """
 function value end
 
@@ -164,42 +123,31 @@ value(st::SummarizerState, ::NamedTuple) = value(st)
 """
     widenstate(st::SummarizerState, intypes::NamedTuple) -> SummarizerState
 
-A state equivalent to `st` but typed for input columns of the element types in
-`intypes`, carrying the accumulated value over. A source may hand a column a
-different element type from one chunk to the next, so a column can be `Int` in
-one chunk and `Float64` in the next; the transforms promote the types they have
-seen and call `widenstate` when that promotion changes something.
-
-Defaults to returning `st` unchanged, which is correct for any state whose
-type does not depend on the input, and which lets a summarizer opt out.
+`st` rebuilt for the wider input element types `intypes`, keeping its
+accumulated value. Called when a later chunk widens a column's type (say `Int`
+to `Float64`). Defaults to returning `st`, which suits states whose type does
+not depend on the input.
 """
 widenstate(st::SummarizerState, ::NamedTuple) = st
 
 """
     dependencies(s::Summarizer) -> Tuple
 
-The summarizers whose values `s` reads in the two-argument form of
-[`value`](@ref). The summarization transforms expand dependencies —
-recursively, in topological order — into the set of summarizers they fold,
-deduplicated by output name, so a dependency equal to a user-requested
-summarizer is computed once. Dependencies appear in the output only when the
-user requested them themselves.
-
-Defaults to `()`, which is correct for any self-contained summarizer.
+The summarizers whose values `s` reads in the two-argument [`value`](@ref).
+They are expanded recursively and deduplicated by output name, so a dependency
+also requested by the user is folded once, and they appear in the output only
+if requested. Defaults to `()`.
 """
 dependencies(::Summarizer) = ()
 
 """
     combine!(dest::SummarizerState, a::SummarizerState, b::SummarizerState)
 
-Overwrite `dest` with the combination of `a` and `b`: the state that folding
-`a`'s rows and then `b`'s rows into a fresh state would produce. Required of
-a [`MonoidSummarizer`](@ref)'s states, with the monoid laws: combination is
-associative, and a [`fresh`](@ref) state is the identity on either side.
-Callers guarantee that every row folded into `a` precedes every row folded
-into `b` in stream order — which is what lets order-sensitive summarizers
-like `First` and `Last` combine. All three states are of the same concrete
-type, and `dest` may alias `a` or `b`, so an implementation reads its inputs
+Set `dest` to the state folding `a`'s rows then `b`'s would give. Required for
+a [`MonoidSummarizer`](@ref): it must be associative, with a [`fresh`](@ref)
+state as identity on both sides. Every row of `a` precedes every row of `b` in
+stream order, so order-sensitive states (`First`, `Last`) can combine. All three
+states have the same type and `dest` may alias `a` or `b`, so read the inputs
 before writing.
 """
 function combine! end
@@ -207,27 +155,21 @@ function combine! end
 """
     downdate!(st::SummarizerState, row)
 
-Remove one previously folded row from the state — the inverse of
-[`update!`](@ref). Required of a [`GroupSummarizer`](@ref)'s states. The
-inverse is exact when the accumulator arithmetic is (integer sums); the
-floating-point sum accumulators use compensated summation with NaN and ±Inf
-terms counted separately, so nonfinite rows subtract away exactly and finite
-ones leave only the small compensated round-off. `missing` terms are likewise
-counted rather than folded in (see the Optional* accumulator states), so a
-missing row also subtracts away exactly — the count balances — leaving the
-accumulator invertible.
+Remove a previously folded `row` from `st`, inverting [`update!`](@ref).
+Required for a [`GroupSummarizer`](@ref). The built-in sums are exact for
+integers; for floats they use compensated summation and count NaN, ±Inf and
+`missing` terms separately, so those remove exactly and finite terms leave only
+small round-off.
 """
 function downdate! end
 
 """
     isinvertible(st::SummarizerState) -> Bool
 
-Whether [`downdate!`](@ref) actually inverts [`update!`](@ref) for this
-state's realized accumulator type. Defaults to `true`. The sum-family
-accumulators keep NaN, ±Inf, and `missing` terms out of the running total and
-count them instead, so they stay invertible; a state that folds an absorbing
-value into an unrecoverable running total returns `false`. `addrollingcolumns`
-consults this when choosing the running-state window algorithm.
+Whether [`downdate!`](@ref) inverts [`update!`](@ref) for this state's actual
+accumulator type. Defaults to `true`; a state that folds an absorbing value it
+cannot recover from returns `false`, and window transforms then fall back to the
+segment tree.
 """
 isinvertible(::SummarizerState) = true
 
@@ -571,7 +513,8 @@ end
 """
     Count() -> Summarizer
 
-Counts rows. Produces the output column `:count`, of type `Int`.
+The number of rows, in the column `:count` (`Int`, `0` for no rows). Alongside
+`using MLJ`, which exports its own `Count`, write `CausalFrames.Count()`.
 """
 struct Count <: GroupSummarizer end
 
@@ -590,23 +533,14 @@ combine!(dest::CountState, a::CountState, b::CountState) =
 value(st::CountState) = (; count = st.n)
 
 """
-    CountDistinct(column) -> Summarizer
+    CountDistinct(column::Symbol) -> Summarizer
 
-Counts the distinct values of `column`. Produces the output column
-`Symbol(column, :_countdistinct)`, e.g. `CountDistinct(:x)` produces
-`:x_countdistinct`, of type `Int`. The distinct count of no rows is `0`.
+The number of distinct values of `column`, in `:{column}_countdistinct`
+(`Int`, `0` for no rows).
 
-`missing` counts as a value like any other, so a column holding `1`, `missing`,
-`1` has two distinct values, and the output column is `Int` rather than
-`Union{Missing, Int}`. This is the one place the accumulating summarizers'
-poisoning rule does not apply, and deliberately: a sum with a `missing` term is
-unknowable, while a distinct count never is — you know exactly how many
-distinct things you saw. SQL's `count(DISTINCT x)` skips nulls instead;
-`filterrows(r -> !ismissing(r.x))` upstream recovers that reading.
-
-Unlike every other summarizer, whose state is O(1), this one holds the distinct
-values it has seen: folding `n` rows costs O(distinct) memory, and a rolling
-window pays that per window per key.
+`missing` counts as a value, so `1, missing, 1` has two distinct values; filter
+out `missing` upstream for SQL's `count(DISTINCT x)`. The state holds every
+distinct value seen, so memory is O(distinct values) per summary.
 """
 struct CountDistinct{C} <: MonoidSummarizer end
 CountDistinct(column::Symbol) = CountDistinct{column}()
@@ -652,18 +586,12 @@ function widenstate(st::CountDistinctState{C,N,T},
 end
 
 """
-    Sum(column) -> Summarizer
+    Sum(column::Symbol) -> Summarizer
 
-Sums `column`. Produces the output column `Symbol(column, :_sum)`, e.g.
-`Sum(:x)` produces `:x_sum`. The sum of no rows is `0`.
-
-The output column's element type is the one `Base.sum` would produce: small
-signed and unsigned integers widen (`Int32` sums to `Int64`), everything else
-keeps its type (`Float32` sums to `Float32`).
-
-Floating-point accumulators use compensated (Neumaier) summation and count
-NaN and ±Inf inputs separately: results match `Base.sum`, and a rolling
-window recovers exactly once a nonfinite row leaves the window.
+The sum of `column`, in `:{column}_sum` (`0` for no rows). The element type is
+what `Base.sum` gives: small integers widen (`Int32` to `Int64`), other types
+are kept (`Float32` stays `Float32`). Floats use compensated summation, with
+NaN and ±Inf counted separately so a rolling window recovers once they leave.
 """
 struct Sum{C} <: GroupSummarizer end
 Sum(column::Symbol) = Sum{column}()
@@ -673,20 +601,12 @@ fresh(::Sum{C}, intypes::NamedTuple) where {C} =
     accumfresh(ColumnTerm{C}(), Symbol(C, :_sum), sumtype(intypes[C]))
 
 """
-    SumPower(column, n) -> Summarizer
+    SumPower(column::Symbol, n::Integer) -> Summarizer
 
-Sums `column` raised to the power `n`. Produces the output column
-`Symbol(column, :_sumpower_, n)`, e.g. `SumPower(:x, 2)` produces
-`:x_sumpower_2`. The sum of no rows is `0`. The output column's element type
-follows the same rule as [`Sum`](@ref), applied to the type of `column ^ n`.
-Each term is formed in the accumulator's (widened) type before raising to
-the power, so a per-row power cannot overflow the way raising in the input
-column's own type would. Floating-point accumulators use compensated
-summation with NaN and ±Inf *terms* (the value after raising to the power)
-counted separately, as in [`Sum`](@ref).
-
-`SumPower(column, 1)` produces `:x_sumpower_1`, a distinct column from
-`Sum(:x)`'s `:x_sum`.
+The sum of `column ^ n`, in `:{column}_sumpower_{n}` (`0` for no rows). The
+element type follows [`Sum`](@ref) applied to `column ^ n`; each term is raised
+in that widened type, so it cannot overflow the input type. `SumPower(:x, 1)`
+is a separate column from `Sum(:x)`.
 """
 struct SumPower{C} <: GroupSummarizer
     power::Int
@@ -738,15 +658,11 @@ fresh(s::SumPower{C}, intypes::NamedTuple) where {C} =
 # A monoid but not a group: dividing a row back out fails outright at zero
 # (the total is 0 no matter what else was folded) and truncates for integers.
 """
-    Product(column) -> Summarizer
+    Product(column::Symbol) -> Summarizer
 
-Multiplies `column`. Produces the output column `Symbol(column, :_product)`,
-e.g. `Product(:x)` produces `:x_product`. The product of no rows is `1`.
-
-The output column's element type is the one `Base.prod` would produce: small
-signed and unsigned integers widen (`Int32` multiplies to `Int64`), everything
-else keeps its type (`Float32` stays `Float32`). Like [`Sum`](@ref), the
-accumulator is built at that width up front.
+The product of `column`, in `:{column}_product` (`1` for no rows). The element
+type is what `Base.prod` gives: small integers widen (`Int32` to `Int64`),
+other types are kept.
 """
 struct Product{C} <: MonoidSummarizer end
 Product(column::Symbol) = Product{column}()
@@ -797,26 +713,12 @@ fresh(st::AliasState) = st
 end
 
 """
-    DotProduct(a, b) -> Summarizer
+    DotProduct(a::Symbol, b::Symbol) -> Summarizer
 
-Sums the elementwise product of columns `a` and `b`. Produces the output
-column `Symbol(a, :_, b, :_dotproduct)`, e.g. `DotProduct(:x, :y)` produces
-`:x_y_dotproduct`. The dot product of no rows is `0`.
-
-The output column's element type is `Base.sum` applied to the type of `a * b`,
-so it widens the same way [`Sum`](@ref) does. Each term is formed in the
-accumulator's (widened) type, so a per-row product cannot overflow the way
-multiplying in the input columns' own types would. Floating-point
-accumulators use compensated summation with NaN and ±Inf *terms* (the
-per-row product, so `Inf * 0.0` counts as a NaN term) counted separately, as
-in [`Sum`](@ref).
-
-The value is symmetric, so the fold happens under one canonical (sorted)
-argument order: `DotProduct(:y, :x)` still produces `:y_x_dotproduct`, but it
-folds nothing of its own — it is a dependent summarizer over
-`DotProduct(:x, :y)`, renaming that value. Asking both ways in one call, or
-asking one way beside a [`Covariance`](@ref) or [`LinearRegression`](@ref) that
-needs the same product, therefore costs one accumulator rather than two.
+The sum of `a * b`, in `:{a}_{b}_dotproduct` (`0` for no rows). The element type
+widens as for [`Sum`](@ref), and terms are formed in that type. `DotProduct(:y,
+:x)` shares the accumulator of `DotProduct(:x, :y)` (and of any
+[`Covariance`](@ref) or [`LinearRegression`](@ref) needing it).
 """
 struct DotProduct{A,B} <: GroupSummarizer end
 DotProduct(a::Symbol, b::Symbol) = DotProduct{a,b}()
@@ -843,17 +745,12 @@ fresh(::DotProduct{A,B}, intypes::NamedTuple) where {A,B} =
         dottype(intypes[A], intypes[B]))
 
 """
-    Moment(column, n) -> Summarizer
+    Moment(column::Symbol, n::Integer) -> Summarizer
 
-The `n`-th raw moment of `column`: the mean of `column ^ n`. Produces the
-output column `Symbol(column, :_moment_, n)`, e.g. `Moment(:x, 2)` produces
-`:x_moment_2`; `Moment(:x, 1)` is the mean. The moment of no rows is
-`missing`.
-
-A dependent summarizer, computed as `SumPower(column, n)` divided by
-[`Count`](@ref) — those are folded alongside it but appear in the output only
-if requested themselves. The output column's element type is the division's
-result (`Int` input divides to `Float64`, `Float32` stays `Float32`).
+The `n`-th raw moment of `column`, the mean of `column ^ n`, in
+`:{column}_moment_{n}` (`missing` for no rows). Computed from
+[`SumPower`](@ref)`(column, n)` and [`Count`](@ref); integer input gives
+`Float64`.
 """
 struct Moment{C} <: GroupSummarizer
     order::Int
@@ -884,15 +781,11 @@ fresh(st::MomentState) = st
 end
 
 """
-    Mean(column) -> Summarizer
+    Mean(column::Symbol) -> Summarizer
 
-The mean of `column`. Produces the output column `Symbol(column, :_mean)`,
-e.g. `Mean(:x)` produces `:x_mean`. The mean of no rows is `missing`.
-
-A dependent summarizer, computed as [`Sum`](@ref)`(column)` divided by
-[`Count`](@ref) — those are folded alongside it but appear in the output only
-if requested themselves. The output column's element type is the division's
-result (`Int` input divides to `Float64`, `Float32` stays `Float32`).
+The mean of `column`, in `:{column}_mean` (`missing` for no rows). Computed from
+[`Sum`](@ref)`(column)` and [`Count`](@ref); integer input gives `Float64`,
+`Float32` stays `Float32`.
 """
 struct Mean{C} <: GroupSummarizer end
 Mean(column::Symbol) = Mean{column}()
@@ -911,24 +804,16 @@ fresh(st::MeanState) = st
 end
 
 """
-    Variance(column; corrected = true) -> Summarizer
+    Variance(column::Symbol; corrected = true) -> Summarizer
 
-The variance of `column`, following `Statistics.var`: divided by `n - 1` when
-`corrected` (the default), by `n` otherwise. Produces the output column
-`Symbol(column, :_variance)`, e.g. `Variance(:x)` produces `:x_variance`. The
-variance of no rows is `missing`; the corrected variance of a single row is
-`NaN` (`0.0` when `corrected = false`).
+The variance of `column`, as `Statistics.var`, in `:{column}_variance`
+(`missing` for no rows). Computed from [`Count`](@ref), [`Sum`](@ref) and
+[`SumPower`](@ref)`(column, 2)`; integer input gives `Float64`.
 
-A dependent summarizer, computed from [`Count`](@ref), [`Sum`](@ref)`(column)`,
-and [`SumPower`](@ref)`(column, 2)` by the identity
-`(Σx² − (Σx)²/n) / (n − corrected)`; those are folded alongside it but appear
-in the output only if requested themselves. The output column's element type is
-the computation's result (`Float64` for integer input, `Float32` for
-`Float32`).
-
-`corrected` is not part of the output name, so a corrected and an uncorrected
-`Variance` of the same column cannot be requested together in one call — they
-would share `:x_variance` and collapse under the name-keyed deduplication.
+# Keywords
+- `corrected = true`: divide by `n - 1` (a single row gives `NaN`); `false`
+  divides by `n`. It is not part of the output name, so both forms of one column
+  cannot be requested together.
 """
 struct Variance{C} <: GroupSummarizer
     corrected::Bool
@@ -966,17 +851,14 @@ fresh(st::VarianceState) = st
 end
 
 """
-    Std(column; corrected = true) -> Summarizer
+    Std(column::Symbol; corrected = true) -> Summarizer
 
-The standard deviation of `column`, following `Statistics.std`: the square
-root of [`Variance`](@ref)`(column; corrected)`. Produces the output column
-`Symbol(column, :_std)`, e.g. `Std(:x)` produces `:x_std`. The standard
-deviation of no rows is `missing`, and of a single corrected row is `NaN`.
+The standard deviation of `column`, as `Statistics.std`, in `:{column}_std`
+(`missing` for no rows): the square root of [`Variance`](@ref), with round-off
+negatives clamped to zero.
 
-A dependent summarizer that folds `Variance(column; corrected)` alongside it
-(which appears in the output only if requested itself). A round-off-negative
-variance is clamped to zero before the square root, so folding never raises a
-`DomainError`.
+# Keywords
+- `corrected = true`: as for [`Variance`](@ref).
 """
 struct Std{C} <: GroupSummarizer
     corrected::Bool
@@ -1000,21 +882,15 @@ fresh(st::StdState) = st
 end
 
 """
-    Covariance(a, b; corrected = true) -> Summarizer
+    Covariance(a::Symbol, b::Symbol; corrected = true) -> Summarizer
 
-The covariance of columns `a` and `b`, following `Statistics.cov`: divided by
-`n - 1` when `corrected` (the default), by `n` otherwise. Produces the output
-column `Symbol(a, :_, b, :_covariance)`, e.g. `Covariance(:x, :y)` produces
-`:x_y_covariance`. The covariance of no rows is `missing`; the corrected
-covariance of a single row is `NaN`.
+The covariance of `a` and `b`, as `Statistics.cov`, in `:{a}_{b}_covariance`
+(`missing` for no rows). Computed from [`Count`](@ref), [`Sum`](@ref) of each
+column and [`DotProduct`](@ref)`(a, b)`.
 
-A dependent summarizer, computed from [`Count`](@ref), [`Sum`](@ref)`(a)`,
-[`Sum`](@ref)`(b)`, and [`DotProduct`](@ref)`(a, b)` by the identity
-`(Σ(ab) − ΣaΣb/n) / (n − corrected)`; those are folded alongside it but appear
-in the output only if requested themselves. `Covariance(:x, :x; corrected)`
-equals `Variance(:x; corrected)`.
-
-Like [`Variance`](@ref), `corrected` is not part of the output name.
+# Keywords
+- `corrected = true`: as for [`Variance`](@ref), including that it is not part
+  of the output name.
 """
 struct Covariance{A,B} <: GroupSummarizer
     corrected::Bool
@@ -1051,21 +927,12 @@ fresh(st::CovarianceState) = st
 end
 
 """
-    Correlation(a, b) -> Summarizer
+    Correlation(a::Symbol, b::Symbol) -> Summarizer
 
-The Pearson correlation of columns `a` and `b`, following `Statistics.cor`:
-[`Covariance`](@ref)`(a, b)` divided by the product of the two columns'
-[`Std`](@ref)s, clamped to `[-1, 1]`. Produces the output column
-`Symbol(a, :_, b, :_correlation)`, e.g. `Correlation(:x, :y)` produces
-`:x_y_correlation`. The correlation of no rows is `missing`, and of a single
-row is `NaN`.
-
-Unlike [`Covariance`](@ref) and [`Std`](@ref), `Correlation` takes no
-`corrected` keyword: the `n - 1` (or `n`) factor cancels between the
-covariance and the standard deviations, so the value is the same either way.
-It is a dependent summarizer over `Covariance(a, b)`, `Std(a)`, and `Std(b)`;
-those are folded alongside it but appear in the output only if requested
-themselves.
+The Pearson correlation of `a` and `b`, as `Statistics.cor`, clamped to
+`[-1, 1]`, in `:{a}_{b}_correlation` (`missing` for no rows, `NaN` for one).
+Computed from [`Covariance`](@ref) and the two columns' [`Std`](@ref)s; there is
+no `corrected` keyword, since the correction cancels.
 """
 struct Correlation{A,B} <: GroupSummarizer end
 Correlation(a::Symbol, b::Symbol) = Correlation{a,b}()
@@ -1095,86 +962,65 @@ fresh(st::CorrelationState) = st
 end
 
 """
-    LinearRegression(predictors, response; intercept = true, name = nothing)
+    LinearRegression(predictors, response::Symbol; intercept = true,
+                     name = nothing) -> Summarizer
 
-Ordinary least squares of `response` on `predictors` — a collection of column
-names, or a single column name. With `intercept` (the default) the fit carries
-a constant term.
+An ordinary least squares fit of `response` on `predictors`.
+
+# Arguments
+- `predictors`: a column name, or a collection of distinct names (`K` of them).
+  None may be named `intercept`.
+- `response`: the response column.
+
+# Keywords
+- `intercept = true`: fit a constant term. Without it, `r2` is the uncentered
+  R².
+- `name = nothing`: a prefix for every output column, `{name}_{column}`.
+  Needed to request two regressions together, since both would otherwise
+  produce `n`, `r2` and `stderr`.
 
 # Output columns
 
-`name`, when given, prefixes every output column as `Symbol(name, :_, base)`;
-the base names are:
+| column | meaning |
+|---|---|
+| `n` | rows folded (`Int`, never `missing`) |
+| `r2` | coefficient of determination |
+| `stderr` | residual standard error |
+| `intercept_beta`, `intercept_tstat` | the constant term and its t statistic (only with `intercept`) |
+| `{p}_beta`, `{p}_tstat` | per predictor `p`, in order |
 
-| # | base column | meaning |
-|---|---|---|
-| 1 | `n` | rows folded in |
-| 2 | `r2` | coefficient of determination |
-| 3 | `stderr` | residual standard error |
-| 4 | `intercept_beta` | the constant term, omitted when `intercept = false` |
-| 5 | `intercept_tstat` | its t statistic, omitted when `intercept = false` |
-| 6.. | `Symbol(p, :_beta)`, `Symbol(p, :_tstat)` | per predictor `p`, in the order given |
+```jldoctest
+df = DataFrame(time = 1:5, x = [1.0, 2.0, 3.0, 4.0, 5.0], z = [0.0, 1.0, 0.0, 1.0, 1.0],
+               y = [3.1, 7.9, 7.2, 12.1, 13.8])
+p = readtable(df) |> summarize(LinearRegression([:x, :z], :y; name = :m1))
+names(load(Context(0, 10), p))
 
-so `2K + 5` columns for `K` predictors with an intercept, `2K + 3` without:
+# output
 
-```julia
-LinearRegression([:x, :z], :y)
-# :n, :r2, :stderr, :intercept_beta, :intercept_tstat,
-# :x_beta, :x_tstat, :z_beta, :z_tstat
-
-LinearRegression([:x, :z], :y; name = :m1)
-# :m1_n, :m1_r2, :m1_stderr, :m1_intercept_beta, :m1_intercept_tstat,
-# :m1_x_beta, :m1_x_tstat, :m1_z_beta, :m1_z_tstat
+10-element Vector{String}:
+ "time"
+ "m1_n"
+ "m1_r2"
+ "m1_stderr"
+ "m1_intercept_beta"
+ "m1_intercept_tstat"
+ "m1_x_beta"
+ "m1_x_tstat"
+ "m1_z_beta"
+ "m1_z_tstat"
 ```
 
-The un-prefixed defaults are deliberately grabby: `n`, `r2`, and `stderr` say
-nothing about the model, so **two regressions in one call need distinct
-`name`s** — without them they collide on those three columns even when their
-predictors differ entirely, and the collision is an error. A regression and the
-same regression with `intercept` flipped likewise cannot share a `name`. A
-predictor named `intercept` collides with the constant term's own pair and is
-rejected by the constructor; the other model-level names take no suffix, so a
-predictor named `n`, `r2`, or `stderr` is fine.
+The statistics share one element type (`Float64` for integer input) and admit
+`missing` if an input does. No rows, or a `missing` in any input, gives
+`missing` statistics. A rank-deficient fit (collinear predictors, or too few
+rows) gives `NaN` rather than an error; with no residual degrees of freedom the
+coefficients are exact but `stderr` and the t statistics are `NaN`.
 
-The `2K + 4` statistic columns share one element type, the computation's result
-(`Float64` for integer input, `Float32` for `Float32`), and a
-`Missing`-admitting input makes all of them `Union{Missing,…}`. `n` is
-separately `Int`, exactly as [`Count`](@ref)'s `:count` is, and is never
-`missing`.
-
-The regression of no rows is `missing` in every statistic and `0` in `n`; so is
-any window holding a `missing` in a predictor or the response. A rank-deficient
-system — collinear predictors, or `n ≤ K` (`n ≤ K + 1` with an intercept) —
-gives `NaN` statistics rather than raising, as `Correlation` does for a single
-row. With no residual degrees of freedom left (`n = K + 1`, or `n = K` without
-an intercept) the coefficients and `r2` are the exact fit but `stderr` and every
-t statistic are `NaN`, and a constant response makes `r2` `NaN`. `n` is the
-honest row count throughout, so a poisoned fit still says how much data it saw.
-
-# Sharing
-
-A dependent summarizer over [`Count`](@ref), [`SumPower`](@ref)`(·, 2)`,
-[`DotProduct`](@ref), and — only when `intercept` — [`Sum`](@ref): the whole
-normal-equations system and every statistic drawn from it are functions of
-those. They are folded alongside the regression but appear in the output only
-if requested themselves, and because dependencies deduplicate by output name,
-two regressions over overlapping columns fold each cross product exactly once.
-Cross products are requested under the canonical (sorted) argument order every
-symmetric summarizer shares, so a `Covariance` or `DotProduct` requested
-separately shares the accumulator whichever way round it is written. A squared
-term is requested as `SumPower(c, 2)` — the name `Variance`, `Std`, and
-`Correlation` already depend on — so a regression run beside them shares that
-too.
-
-With an intercept the system is centered on the column means, the multivariate
-form of the identity [`Covariance`](@ref) uses: better conditioned, and one
-dimension smaller than carrying a column of ones. Without one, `r2` is the
-uncentered coefficient of determination, as is conventional for a
-no-intercept fit.
-
-Unlike every other dependent summarizer, a multiple regression allocates: `K ≥
-2` builds a `K × K` workspace per emitted row. Simple regression (`K = 1`, the
-common case) runs a closed form over scalars and allocates nothing.
+The fit is computed from [`Count`](@ref), [`SumPower`](@ref)`(·, 2)`,
+[`DotProduct`](@ref) and (with an intercept) [`Sum`](@ref), so regressions over
+overlapping columns, and [`Covariance`](@ref)s or [`Variance`](@ref)s beside
+them, share accumulators. With `K ≥ 2` each emitted row allocates a `K × K`
+workspace; `K = 1` allocates nothing.
 """
 struct LinearRegression{P,Y} <: GroupSummarizer
     intercept::Bool
@@ -1513,11 +1359,10 @@ function widenstate(st::TrackState{C,N,T,F}, intypes::NamedTuple) where {C,N,T,F
 end
 
 """
-    Min(column) -> Summarizer
+    Min(column::Symbol) -> Summarizer
 
-Tracks the minimum of `column`. Produces the output column
-`Symbol(column, :_min)`, e.g. `Min(:x)` produces `:x_min`, with the same
-element type as `column`. The minimum of no rows is `missing`.
+The minimum of `column`, in `:{column}_min`, with `column`'s element type
+(`missing` for no rows).
 """
 struct Min{C} <: MonoidSummarizer end
 Min(column::Symbol) = Min{column}()
@@ -1527,11 +1372,10 @@ fresh(::Min{C}, intypes::NamedTuple) where {C} =
     TrackState{C,Symbol(C, :_min),intypes[C],typeof(min)}()
 
 """
-    Max(column) -> Summarizer
+    Max(column::Symbol) -> Summarizer
 
-Tracks the maximum of `column`. Produces the output column
-`Symbol(column, :_max)`, e.g. `Max(:x)` produces `:x_max`, with the same
-element type as `column`. The maximum of no rows is `missing`.
+The maximum of `column`, in `:{column}_max`, with `column`'s element type
+(`missing` for no rows).
 """
 struct Max{C} <: MonoidSummarizer end
 Max(column::Symbol) = Max{column}()
@@ -1541,11 +1385,10 @@ fresh(::Max{C}, intypes::NamedTuple) where {C} =
     TrackState{C,Symbol(C, :_max),intypes[C],typeof(max)}()
 
 """
-    First(column) -> Summarizer
+    First(column::Symbol) -> Summarizer
 
-Keeps the value of `column` from the first row folded in. Produces the output
-column `Symbol(column, :_first)`, e.g. `First(:x)` produces `:x_first`, with
-the same element type as `column`. The first of no rows is `missing`.
+The value of `column` in the first row folded, in `:{column}_first`, with
+`column`'s element type (`missing` for no rows).
 """
 struct First{C} <: MonoidSummarizer end
 First(column::Symbol) = First{column}()
@@ -1555,11 +1398,10 @@ fresh(::First{C}, intypes::NamedTuple) where {C} =
     TrackState{C,Symbol(C, :_first),intypes[C],typeof(keepfirst)}()
 
 """
-    Last(column) -> Summarizer
+    Last(column::Symbol) -> Summarizer
 
-Keeps the value of `column` from the most recent row folded in. Produces the
-output column `Symbol(column, :_last)`, e.g. `Last(:x)` produces `:x_last`,
-with the same element type as `column`. The last of no rows is `missing`.
+The value of `column` in the last row folded, in `:{column}_last`, with
+`column`'s element type (`missing` for no rows).
 """
 struct Last{C} <: MonoidSummarizer end
 Last(column::Symbol) = Last{column}()
@@ -1571,14 +1413,11 @@ fresh(::Last{C}, intypes::NamedTuple) where {C} =
 """
     FittedModel{P,M}
 
-A fitted MLJ model, as [`FitModel`](@ref) emits it: the `model` (its
-hyperparameters, of type `M`), the `fitresult` its `fit` returned — everything
-prediction needs — and the fit's `report` of diagnostics (see
-[`modelreports`](@ref)). `P` is the tuple of predictor column names it was fit
-on, which is how [`applymodels`](@ref) finds the columns to predict from, so a
-table of fitted models is self-describing. Serializing one, as
-[`writejls`](@ref) does, routes the fitresult through MLJ's `save`/`restore`,
-so models wrapping foreign resources survive the round trip.
+A fitted MLJ model, as [`FitModel`](@ref) emits it. It holds the `model`
+(hyperparameters, of type `M`), the `fitresult` needed for prediction, and the
+fit `report` (see [`modelreports`](@ref)). `P` is the tuple of predictor names,
+which [`applymodels`](@ref) predicts from. Serialization, as in
+[`writejls`](@ref), goes through MLJ's `save`/`restore`.
 """
 struct FittedModel{P,M}
     model::M
@@ -1592,36 +1431,31 @@ Base.show(io::IO, fm::FittedModel{P}) where {P} =
     print(io, "FittedModel(", nameof(typeof(fm.model)), ", ", P, ")")
 
 """
-    FitModel(model, predictors, response; name = :model,
+    FitModel(model, predictors, response::Symbol; name = :model,
              verbosity = 0) -> Summarizer
 
-Fits an MLJ `model` — any `MLJModelInterface.Model`, so anything in MLJ's model
-registry — regressing `response` on `predictors` (a column name or a collection
-of them) over the rows it folds. Produces one output column, `name`, holding a
-[`FittedModel`](@ref); the summary of no rows is `missing`. Needs
-MLJModelInterface loaded — `using MLJ`, or any MLJ model package; most model
-implementations also need MLJBase, which `using MLJ` loads.
+Fits an MLJ model to the rows it summarizes, emitting a [`FittedModel`](@ref)
+(`missing` for no rows). Requires MLJModelInterface: `using MLJ`, or an MLJ
+model package (most models also need MLJBase, which `using MLJ` loads).
 
-The folded rows are buffered and the model is fit when a summary is emitted, so
-a fit's cost follows the host transform: once per window under
-[`summarize`](@ref), per interval under [`intervalize`](@ref), per tick (and
-key) under [`summarizewindows`](@ref) — the natural hosts. Under
-[`addsummarycolumns`](@ref) it refits after every row, over everything seen so
-far, which is quadratic. `verbosity` is passed to the model's `fit`.
+# Arguments
+- `model`: an `MLJModelInterface.Model`; anything else is an `ArgumentError`.
+- `predictors`: a column name, or a non-empty collection of distinct names.
+  They reach the model as a column table of their own element types, without
+  scientific-type coercion (coerce upstream with [`addcolumns`](@ref)), and
+  `missing` is passed through.
+- `response`: the response column, which may not be a predictor.
 
-The predictors reach the model as a column table of the input's own element
-types, with no scientific-type coercion — coerce upstream with
-[`addcolumns`](@ref) where a model needs it — and `missing` values are passed
-through as they are. The model is handed its own copy of the rows, so a fitted
-model that keeps its training data is never disturbed by later fits.
+# Keywords
+- `name = :model`: the output column.
+- `verbosity = 0`: passed to the model's `fit`.
 
-A fit neither combines nor inverts, so `FitModel` is a plain `Summarizer`:
-windowed transforms re-fold each window for it. [`addpredictions`](@ref) fits
-and applies models over a rolling window in one step.
-
-MLJ exports the scientific type `Count`, so with both `using MLJ` and
-`using CausalFrames` the [`Count`](@ref) summarizer must be written
-`CausalFrames.Count()`.
+Rows are buffered and the model is fit each time a summary is emitted: once
+under [`summarize`](@ref), per interval under [`intervalize`](@ref), per tick
+and key under [`summarizewindows`](@ref), and after every row (quadratic)
+under [`addsummarycolumns`](@ref). Windows re-fold for it, as it neither
+combines nor inverts. Apply the models with [`applymodels`](@ref), or fit and
+apply in one step with [`addpredictions`](@ref).
 """
 struct FitModel{N,P,Y,M} <: Summarizer
     model::M

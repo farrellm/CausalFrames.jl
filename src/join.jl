@@ -9,38 +9,33 @@
     asofjoin(right::CausalPipeline; key = nothing, tolerance = nothing,
              strict = false, leftprefix = nothing, rightprefix = nothing,
              righttime = nothing) -> (CausalPipeline -> CausalPipeline)
-    asofjoin(left::CausalPipeline, right::CausalPipeline; key = nothing,
-             ...) -> CausalPipeline
+    asofjoin(left::CausalPipeline, right::CausalPipeline; ...) -> CausalPipeline
 
-A transform joining each left row to the most recent right row whose time is
-not after the left row's time (`strict = true`: strictly before). Every left
-row is kept; the right table's value columns are appended with element type
-`Union{Missing, T}` and are `missing` where no right row qualifies. Among
-right rows sharing one time, the last in stream order wins. The right `time`
-column is dropped unless `righttime` names an output column for the matched
-row's time.
-
-With `key` (a column name or collection of column names, present in both
-tables) rows join per unique key value, exact-matched; the key columns
-appear once in the output, taken from the left row, never prefixed. With
-`tolerance` the match additionally requires `time - rtime <= tolerance`, and
-the right pipeline runs over the widened context `[start - tolerance, stop)`
-so lookback near the window start is fully covered — this requires the time
-type to support subtraction (numbers and `Dates` types do). Without
-`tolerance` the right pipeline sees only `[start, stop)`, so left rows near
-`start` may find no earlier right row.
-
-`leftprefix` / `rightprefix` rename that side's non-time, non-key columns to
-`"{prefix}_{name}"`. Output column names must be unique after prefixing —
-in particular a self join (`p |> asofjoin(p)`) needs a prefix. A right
-stream producing no chunks passes left chunks through unchanged (no right
-columns, no `righttime`), except for the `leftprefix` rename.
-
-To join a table that has no time column by key alone, use
+A transform joining each left row to the latest `right` row at or before its
+time. Every left row is kept, with `right`'s non-time columns appended as
+`Union{Missing, T}`: `missing` where no right row matches. Among right rows at
+the same time, the last one wins. For a table with no time column, use
 [`lookupjoin`](@ref).
 
-The curried form composes with `|>`; the uncurried form applies directly, so
-`asofjoin(left, right; ...)` is equivalent to `left |> asofjoin(right; ...)`.
+# Arguments
+- `right`: the pipeline to join from. If it produces no rows, left rows pass
+  through unchanged (apart from `leftprefix`).
+
+# Keywords
+- `key = nothing`: a column name or collection of distinct column names other
+  than `:time`, present on both sides; a row matches only right rows with an
+  equal key. Key columns appear once, from the left, never prefixed.
+- `tolerance = nothing`: the maximum age of a match, `time - righttime <=
+  tolerance`; must be non-negative. The right pipeline then runs over
+  `[start - tolerance, stop)`, so rows near `start` can match earlier right
+  rows; the time type must support subtraction. Without it, right runs over
+  `[start, stop)` only.
+- `strict = false`: match only right rows strictly before the left row.
+- `leftprefix = nothing`, `rightprefix = nothing`: rename that side's non-time,
+  non-key columns to `"{prefix}_{name}"`. Output names must be unique, so a self
+  join needs a prefix.
+- `righttime = nothing`: a name under which to keep the matched right row's
+  time; by default it is dropped.
 """
 function asofjoin(right::CausalPipeline; key = nothing, tolerance = nothing,
     strict::Bool = false, leftprefix = nothing,

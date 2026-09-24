@@ -8,41 +8,48 @@
 # iterator, a DataFrame column access) is O(inputs + ncols) per step.
 
 """
-    merge(p::CausalPipeline, ps::CausalPipeline...; batchsize = 1024) -> CausalPipeline
+    merge(p::CausalPipeline, ps::CausalPipeline...; batchsize = 1024)
+        -> CausalPipeline
 
-A source running the given pipelines concurrently over the same context and
-interleaving their rows by time — the time-wise merge of their outputs, as
-opposed to [`concatenate`](@ref)'s end-to-end join.
+A source running the pipelines side by side over the same context and
+interleaving their rows by time. To join them end to end instead, use
+[`concatenate`](@ref). There is no zero-argument form; [`emptyframe`](@ref) is
+the identity.
 
-The pipelines need not have the same columns. The output carries the union of
-their columns, `:time` first and the rest in the order the pipelines introduce
-them; a row coming from a pipeline that lacks a column carries `missing` there,
-so a merged column of `T` has element type `Union{Missing, T}` once the frame
-is materialized. Element *types* may differ between pipelines, as they may
-between the chunks of one pipeline — `DataFrame(frame)` promotes on
-concatenation.
+# Arguments
+- `p`, `ps...`: the pipelines. Each is evaluated over the whole context and
+  clips itself. All run at once, so a merge of file sources holds every file
+  open and buffers one chunk per input.
 
-Rows at equal times are emitted in argument order: all the tied rows of the
-first pipeline, then those of the second, and so on. Each pipeline's own row
-order is preserved. Every pipeline is evaluated over the whole context
-`[start, stop)` and clips itself; unlike `concatenate`, they run at the same
-time, so a merge of file sources holds every file open at once and buffers one
-chunk per input.
+# Keywords
+- `batchsize = 1024`: the minimum number of rows per emitted chunk (the last
+  may be smaller). Must be positive.
 
-A pipeline's column names are fixed by its first chunk: a later chunk whose
-names differ, in content or in order, is an `ArgumentError` naming the
-pipeline. A pipeline that produces no chunk at all over the window contributes
-no columns, exactly as an empty right stream contributes none to
-[`asofjoin`](@ref). Rows are emitted in batches of at least `batchsize` (the
-trailing one excepted), so streams that alternate row by row still yield
-chunk-sized output rather than a chunk per row.
+The output has the union of the inputs' columns: `:time`, then the others in
+the order the pipelines introduce them. A row from a pipeline lacking a column
+has `missing` there. A pipeline that produces no rows contributes no columns.
+Rows at equal times come in argument order, and each pipeline's own row order is
+kept.
 
-There is no zero-argument form: [`emptyframe`](@ref) is the identity of
-merging.
+A pipeline's column names are fixed by its first chunk; a later chunk with
+different names, or the same names in a different order, is an
+`ArgumentError`.
 
-```julia
-merge(readcsv("trades.csv"; types = tt), readcsv("quotes.csv"; types = qt)) |>
-    filterrows(r -> ismissing(r.bid) || r.bid > 0)
+```jldoctest
+trades = readtable(DataFrame(time = [1, 3], price = [10.1, 10.3]))
+quotes = readtable(DataFrame(time = [1, 2], bid = [10.0, 10.2]))
+DataFrame(load(Context(0, 10), merge(trades, quotes)))
+
+# output
+
+4×3 DataFrame
+ Row │ time   price      bid
+     │ Int64  Float64?   Float64?
+─────┼─────────────────────────────
+   1 │     1       10.1  missing
+   2 │     1  missing         10.0
+   3 │     2  missing         10.2
+   4 │     3       10.3  missing
 ```
 """
 function Base.merge(p::CausalPipeline, ps::CausalPipeline...;

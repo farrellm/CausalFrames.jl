@@ -61,31 +61,31 @@ const PREDICTOPS = (:predict, :predict_mean, :predict_mode, :predict_median)
                 operation = :predict) -> (CausalPipeline -> CausalPipeline)
     applymodels(p::CausalPipeline, models::CausalPipeline; ...) -> CausalPipeline
 
-A transform appending model predictions. `models` is a pipeline whose `column`
-holds [`FittedModel`](@ref)s — the output of [`FitModel`](@ref) under any
-summarization transform, or a file of them read back by [`readjls`](@ref).
-Each row is matched to the most recent model row whose time is not after its
-own (`strict = true`: strictly before) — [`asofjoin`](@ref)'s rule, including
-its `key` and `tolerance` — and that model's prediction from the row's
-predictor columns is appended as the column `name`, of element type
-`Union{Missing, T}`. It is `missing` where no model row qualifies or the
-matched cell is itself `missing` (an empty window's summary). A `models` stream
-with no rows at all appends an all-`missing` column.
+A transform appending each row's prediction from the latest model at or before
+its time, matched as by [`asofjoin`](@ref). The prediction column is
+`Union{Missing, T}`: `missing` where no model matches or the matched model is
+`missing`. Rows sharing a model are predicted in one call per chunk. Requires
+MLJModelInterface (`using MLJ`).
 
-Rows sharing a model are predicted together, in one call per distinct model per
-chunk. `operation` chooses the MLJ operation: `:predict` (the default; a
-probabilistic model then yields distributions), `:predict_mean`,
-`:predict_mode` or `:predict_median`. The prediction must be a vector — a
-multi-target model's table is an `ArgumentError`.
+# Arguments
+- `models`: a pipeline with a column of [`FittedModel`](@ref)s, such as
+  [`FitModel`](@ref) under a summarizing transform, or a file of them read with
+  [`readjls`](@ref). If it produces no rows, every prediction is `missing`.
 
-With `key` the models pipeline must carry the key columns and each row uses its
-own key's latest model. `tolerance` widens the models' context to
-`[start - tolerance, stop)`, which is how models fit in an earlier window are
-applied to a later one; see the manual's Recipes page. Needs MLJModelInterface
-loaded, as `FitModel` does.
-
-The curried form composes with `|>`; the uncurried form applies directly, so
-`applymodels(p, models; ...)` is equivalent to `p |> applymodels(models; ...)`.
+# Keywords
+- `column = :model`: the column of `models` holding the models.
+- `key = nothing`: a column name or collection of distinct column names other
+  than `:time`, present in both pipelines; each row uses its own key's latest
+  model.
+- `tolerance = nothing`: the maximum age of a model, as for `asofjoin`. It
+  widens the models' context to `[start - tolerance, stop)`, which is how a
+  model fit in an earlier window reaches a later one.
+- `strict = false`: use only models strictly before the row.
+- `name = :prediction`: the output column.
+- `operation = :predict`: the MLJ operation, one of `:predict` (a probabilistic
+  model then gives distributions), `:predict_mean`, `:predict_mode` or
+  `:predict_median`. It must return a vector; a multi-target table is an
+  `ArgumentError`.
 """
 function applymodels(models::CausalPipeline; column::Symbol = :model,
     key = nothing, tolerance = nothing, strict::Bool = false,
@@ -231,23 +231,28 @@ end
     addpredictions(p::CausalPipeline, clock, lookback, model, predictors,
                    response; ...) -> CausalPipeline
 
-A transform appending the predictions of an MLJ `model` refit on a rolling
-window. At every tick `τ` of the `clock` pipeline the model is fit, regressing
-`response` on `predictors`, over the rows with time in `[τ - lookback, τ)` —
-one model per key present there when `key` is given — and each row at time `t`
-is then predicted by the model from the latest tick `τ <= t`. Every row a model
-was trained on is therefore strictly earlier than every row it predicts.
+A transform appending predictions from a model refit on a trailing window. At
+each clock tick `τ`, `model` is fit to the rows in `[τ - lookback, τ)` (per key
+with `key`); each row is then predicted by the model of the latest tick at or
+before it, so training rows always precede the rows they predict. Rows before
+the first tick, or whose latest window was empty, get `missing`. It is
+[`summarizewindows`](@ref) over [`FitModel`](@ref) feeding
+[`applymodels`](@ref), and the input runs twice.
 
-This is [`summarizewindows`](@ref) over a [`FitModel`](@ref) feeding
-[`applymodels`](@ref), and it inherits their semantics: rows before the first
-tick, a key with no rows in the latest window, and a window with no rows all
-get `missing`; `name` and `operation` are `applymodels`'; `verbosity` is
-passed to the model's `fit`. The pipeline runs twice, once to fit and once to
-predict, as a self-join does.
+# Arguments
+- `clock`: a pipeline whose `:time` column gives the refit times, such as
+  [`clock`](@ref).
+- `lookback`: the training window length, as for `summarizewindows`.
+- `model`, `predictors`, `response`: as for [`FitModel`](@ref). The response
+  must be known at its row's time; one built with
+  [`Acausal.lead`](@ref CausalFrames.Acausal.lead) leaks the future into
+  training.
 
-Causality needs one thing from the data: `response` must be observable at its
-row's time. A response built by looking ahead (with `CausalFrames.Acausal.lead`,
-say) trains every model on values that were not yet known at its tick.
+# Keywords
+- `key = nothing`: a column name or collection of distinct column names other
+  than `:time`; fit and apply one model per key.
+- `name = :prediction`, `operation = :predict`: as for [`applymodels`](@ref).
+- `verbosity = 0`: passed to the model's `fit`.
 """
 function addpredictions(clk::CausalPipeline, lookback, model, predictors,
     response::Symbol; key = nothing, name::Symbol = :prediction,
@@ -269,21 +274,15 @@ addpredictions(p::CausalPipeline, clk::CausalPipeline, lookback, model,
     modelreports(; column = :model, name = :report) -> (CausalPipeline -> CausalPipeline)
     modelreports(p::CausalPipeline; column = :model, name = :report) -> CausalPipeline
 
-A row-wise transform over a pipeline of models, replacing its `column` of
-[`FittedModel`](@ref)s with a column `name` holding each model's fit report —
-exactly what MLJ's `report(mach)` returns for a machine just after `fit!`, so a
-model with nothing to report gives `nothing`. A `missing` cell stays `missing`. The time
-column, keys and every other column pass through, so the result is a pipeline
-of diagnostics per tick (and key).
-
-The report stays one column rather than being spread into its fields: a
-chunk's columns must be fixed before its rows go out, and a report's fields are
-unknown until a model has been fit — a stream opening on empty windows would
-have nothing to name them from. Extract fields with [`addcolumns`](@ref), e.g.
+A transform, over a pipeline of models, replacing each [`FittedModel`](@ref)
+with its fit report: what MLJ's `report(mach)` returns after `fit!` (`nothing`
+for a model with nothing to report). `missing` stays `missing`; other columns
+pass through. Extract fields with [`addcolumns`](@ref), e.g.
 `addcolumns(r -> (; n = r.report.n))`.
 
-The curried form composes with `|>`; the uncurried form applies directly, so
-`modelreports(p; ...)` is equivalent to `p |> modelreports(; ...)`.
+# Keywords
+- `column = :model`: the column holding the models. May not be `:time`.
+- `name = :report`: the output column, replacing `column`. May not be `:time`.
 """
 function modelreports(; column::Symbol = :model, name::Symbol = :report)
     column === :time &&

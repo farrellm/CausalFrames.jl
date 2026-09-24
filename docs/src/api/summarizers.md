@@ -1,8 +1,8 @@
 # Summarizers
 
-The values the [summarizing transforms](summarizing.md) fold over their rows.
-An output column takes its element type from the input column, and is named by
-suffix — `Sum(:mid)` produces `:mid_sum`.
+Summarizers are what the [summarizing transforms](summarizing.md) fold over
+rows. Each output column is named by suffix (`Sum(:mid)` produces `:mid_sum`)
+and takes its element type from the input column.
 
 ## `Count`
 
@@ -114,8 +114,8 @@ FitModel
 
 ## Summarizer interface
 
-Extend these (unexported — `CausalFrames.fresh` etc.) to define a custom
-summarizer.
+To define a summarizer, subtype `Summarizer` and extend these functions
+(unexported: `CausalFrames.fresh` and so on).
 
 ```@docs
 Summarizer

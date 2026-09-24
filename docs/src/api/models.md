@@ -1,9 +1,9 @@
 # Model fitting (MLJ)
 
-With an MLJ model package loaded (`using MLJ`), [`FitModel`](@ref "FitModel")
-fits a model inside any summarization transform, emitting
-[`FittedModel`](@ref)s; these operators apply such models to a stream and read
-their diagnostics.
+With MLJ loaded (`using MLJ`), the [`FitModel`](@ref "FitModel") summarizer
+fits a model inside any summarizing transform, emitting
+[`FittedModel`](@ref)s. These operators apply such models and read their
+diagnostics.
 
 ## `applymodels`
 

@@ -17,48 +17,43 @@
     forwardfill(p::CausalPipeline, selectors...; key = nothing,
                 tolerance = nothing) -> CausalPipeline
 
-A transform replacing `missing` in the selected columns with that column's
-last non-missing value. Every row and every other column is kept; a filled
-column keeps element type `Union{Missing, T}`, since rows before the column's
-first non-missing value — and rows past `tolerance` — stay `missing`.
+A transform replacing `missing` in the selected columns with the column's last
+non-missing value. Each column is filled independently. Rows before a column's
+first value, or past `tolerance`, stay `missing`. To fill with a constant, use
+[`fillmissing`](@ref).
 
-The columns are named by the same selector forms as [`selectcolumns`](@ref): a
-name, a `Regex`, a name predicate, or a collection of those. `:time` and the
-key columns are never filled, even when a selector matches them; a selector
-naming a column the data does not have is an `ArgumentError`. Each column is
-filled independently, so one column may carry a value from a much earlier row
-than another.
+# Arguments
+- `selectors`: the columns to fill, as for [`selectcolumns`](@ref). `:time` and
+  key columns are never filled. The set of selected columns may not change
+  between chunks.
 
-With `key` (a column name or collection of column names) the last non-missing
-value is tracked per distinct key value, so one key's value never fills
-another's row. With `tolerance` a carried value is used only while
-`time - valuetime <= tolerance`, measured against the time of the row the
-value came from — a stale value is never evicted, only declined. As in
-[`asofjoin`](@ref), the input pipeline then runs over the widened context
-`[start - tolerance, stop)` so rows near `start` can be filled from before the
-window, and rows before `start` are dropped before anything is emitted; this
-requires the time type to support subtraction (numbers and `Dates` types do).
-Without `tolerance` the input sees only `[start, stop)`, so rows near `start`
-may find no earlier value to carry.
+# Keywords
+- `key = nothing`: a column name or collection of distinct column names other
+  than `:time`. With a key, values carry only within the same key.
+- `tolerance = nothing`: the maximum age of a carried value, measured from the
+  row it came from; must be non-negative. The input then runs over
+  `[start - tolerance, stop)`, so rows near `start` can be filled from before
+  the window; the time type must support subtraction.
 
-`time` may not be a key and key columns must be unique — both `ArgumentError`s
-when the transform is built — and the key columns must be present in the
-input, checked on its first chunk. Element *types* may differ from chunk to
-chunk, as everywhere else, and the carried state tracks their promotion; the
-*set* of columns being filled may not, and a chunk that changes it is an
-`ArgumentError`.
+```jldoctest
+using Dates
+t0 = DateTime(2026, 1, 1)
+df = DataFrame(time = t0 .+ Minute.([0, 1, 2, 10]), sym = ["a", "b", "a", "a"],
+               bid = [1.0, 2.0, missing, missing])
+p = readtable(df) |> forwardfill(:bid; key = :sym, tolerance = Minute(5))
+DataFrame(load(Context(t0, t0 + Hour(1)), p))
 
-`forwardfill` is causal — the value at time `t` came from a row with time
-`<= t` — and stateful across chunk boundaries, so streaming a pipeline agrees
-with loading it.
+# output
 
-```julia
-p |> forwardfill(:bid, :ask; key = :sym, tolerance = Minute(5))
+4×3 DataFrame
+ Row │ time                 sym     bid
+     │ DateTime             String  Float64?
+─────┼────────────────────────────────────────
+   1 │ 2026-01-01T00:00:00  a             1.0
+   2 │ 2026-01-01T00:01:00  b             2.0
+   3 │ 2026-01-01T00:02:00  a             1.0
+   4 │ 2026-01-01T00:10:00  a       missing
 ```
-
-See [`fillmissing`](@ref) to fill with a constant instead. The curried form
-composes with `|>`; the uncurried form applies directly, so
-`forwardfill(p, :bid; key)` is equivalent to `p |> forwardfill(:bid; key)`.
 """
 function forwardfill(selectors...; key = nothing, tolerance = nothing)
     checkselectors(selectors, "forwardfill", false)
@@ -313,28 +308,31 @@ end
     fillmissing(specs...) -> (CausalPipeline -> CausalPipeline)
     fillmissing(p::CausalPipeline, specs...) -> CausalPipeline
 
-A transform replacing `missing` in the named columns with a per-column
-constant. The spec is a `NamedTuple`, a `name => value` pair, or a collection
-of such pairs:
+A transform replacing `missing` in the named columns with a constant per
+column. A filled column's element type becomes
+`promote_type(nonmissingtype(T), typeof(value))`; a column that cannot hold
+`missing` is left alone. To carry the last value forward, use
+[`forwardfill`](@ref).
 
-```julia
-p |> fillmissing(:qty => 0.0, :sym => "")
-p |> fillmissing((qty = 0.0, sym = ""))
+# Arguments
+- `specs`: at least one fill, as `name => value` pairs, a `NamedTuple`, or a
+  collection of pairs. Names must be unique, may not be `time`, and must exist
+  in the data (checked when a chunk arrives).
+
+```jldoctest
+df = DataFrame(time = [1, 2], qty = [missing, 3.0], sym = ["a", missing])
+p = readtable(df) |> fillmissing(:qty => 0.0, :sym => "")   # or ((qty = 0.0, sym = ""))
+DataFrame(load(Context(0, 10), p))
+
+# output
+
+2×3 DataFrame
+ Row │ time   qty      sym
+     │ Int64  Float64  String
+─────┼────────────────────────
+   1 │     1      0.0  a
+   2 │     2      3.0
 ```
-
-Every row and every other column is kept. A filled column's element type
-becomes `promote_type(nonmissingtype(T), typeof(value))` — no `Missing`, since
-every one is replaced — and a named column whose type admits no `Missing` is
-left untouched. Unlike [`forwardfill`](@ref) this is row-wise and stateless:
-the fill value does not depend on any other row.
-
-Column names must be unique and may not be `time`, which is the ordering
-dimension and never `missing` — both `ArgumentError`s when the transform is
-built. A named column the data does not have is an `ArgumentError` when the
-chunk arrives.
-
-The curried form composes with `|>`; the uncurried form applies directly, so
-`fillmissing(p, :qty => 0.0)` is equivalent to `p |> fillmissing(:qty => 0.0)`.
 """
 function fillmissing(specs...)
     fillnames, vals = tofillvalues(specs)

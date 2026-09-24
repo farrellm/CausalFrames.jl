@@ -7,41 +7,40 @@
     sortcycles(by; rev = false) -> (CausalPipeline -> CausalPipeline)
     sortcycles(p::CausalPipeline, by; rev = false) -> CausalPipeline
 
-A transform reordering the rows within each *cycle* — a maximal run of rows
-sharing one timestamp — while leaving the time order and every column as they
-are. `by` chooses the order:
+A transform stably sorting the rows within each *cycle* — a run of rows sharing
+one time — leaving the time order untouched. It holds back only the latest
+cycle, so memory is one cycle plus one chunk.
 
-- a column name (a `Symbol` or `AbstractString`);
-- a collection of column names, compared lexicographically;
-- a per-row function, receiving the same map-like row object as
-  [`filterrows`](@ref) and returning the row's sort key (return a tuple to
-  compare several values lexicographically).
+# Arguments
+- `by`: the sort key — a column name, a non-empty collection of column names
+  (compared lexicographically), or a function `row -> key`, with `row` as for
+  [`filterrows`](@ref). Keys compare with `isless`, so `missing` sorts last.
+  Anything else is an `ArgumentError`, as is naming a column the data lacks.
 
-The sort is stable, so rows with equal keys keep their stream order. Keys are
-compared with `isless`, so `missing` sorts last — or first with `rev = true`,
-which reverses the whole order. For a mixed order, negate a numeric key in a
-function: `sortcycles(r -> (-r.votes, r.id))`.
+# Keywords
+- `rev = false`: reverse the order. For a mixed order, negate a numeric key in
+  a function instead: `sortcycles(r -> (-r.votes, r.id))`.
 
-This is the within-timestamp half of an SQL `ORDER BY time, ...`, which is what
-makes a keyed [`Count`](@ref) over `key = :time` a rank:
+Sorting cycles turns a keyed [`Count`](@ref) over `key = :time` into a rank:
 
-```julia
-readtable(films; time = :year) |>
+```jldoctest
+films = DataFrame(year = [2020, 2020, 2020, 2021], id = [1, 2, 3, 4], votes = [5, 9, 9, 1])
+p = readtable(films; time = :year) |>
     sortcycles(r -> (-r.votes, r.id)) |>
     addsummarycolumns(Count(); key = :time)   # :count ranks films within a year
+DataFrame(load(Context(2020, 2030), p))
+
+# output
+
+4×4 DataFrame
+ Row │ time   id     votes  count
+     │ Int64  Int64  Int64  Int64
+─────┼────────────────────────────
+   1 │  2020      2      9      1
+   2 │  2020      3      9      2
+   3 │  2020      1      5      3
+   4 │  2021      4      1      1
 ```
-
-`sortcycles` is causal: a cycle is reordered using only its own rows. It holds
-back the latest cycle until a row with a later time arrives or the stream ends,
-so memory is one cycle plus one chunk. Splitting the context changes nothing,
-since every row at a split time falls in the later half.
-
-Naming a column the data does not have is an `ArgumentError` when the pipeline
-runs; an empty collection of names, or a `by` that is neither a name, a
-collection of names nor a function, is an `ArgumentError` at construction.
-
-The curried form composes with `|>`; the uncurried form applies directly, so
-`sortcycles(p, by)` is equivalent to `p |> sortcycles(by)`.
 """
 function sortcycles(by; rev::Bool = false)
     spec = sortspec(by)

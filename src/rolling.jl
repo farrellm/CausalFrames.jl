@@ -20,37 +20,30 @@
     addrollingcolumns(p::CausalPipeline, windows, summarizers;
                       ...) -> CausalPipeline
 
-A transform keeping all existing columns and appending, for each named
-window, each summarizer's value columns computed over that row's trailing
-window: the summarized rows with time `s` satisfying `s <= t` and
-`t - s <= lookback`, inclusive on both ends, for an output row at time `t`.
-`windows` maps window names to look-backs — a NamedTuple
-(`(m5 = Minute(5), h1 = Hour(1))`), a single `name => lookback` pair, or a
-collection of pairs — and each summary column is named by prefixing the
-window name: `m5_price_sum`. Look-backs must be non-negative; as for
-`asofjoin` tolerance, the time type must support subtraction (numbers and
-`Dates` types do).
+A transform appending, for each row at time `t` and each window, the summaries
+of the rows with time in `[t - lookback, t]`. Columns are named
+`{window}_{column}`, e.g. `m5_price_sum`. The summarized pipeline runs over a
+context widened by the longest look-back, so the first row already sees a full
+window.
 
-By default the summaries are computed over the pipeline being augmented,
-which then runs twice — once for the rows, once for the summaries. `from`
-names a different pipeline to summarize instead; its rows relate to the
-output rows by time (and key) only, never by row identity. Either way the
-summarized pipeline runs over the widened context
-`[minimum over windows of start - lookback, stop)`, so windows reaching
-before `start` are fully covered and the first output row already sees a
-full look-back of history.
+# Arguments
+- `windows`: window names and their look-backs, as a `NamedTuple`
+  (`(m5 = Minute(5), h1 = Hour(1))`), a `name => lookback` pair, or a collection
+  of pairs. Names must be unique; look-backs must be non-negative and
+  subtractable from the time type.
+- `summarizers`: a [`Summarizer`](@ref) or a collection of them. Their output
+  columns may not collide with existing columns.
 
-With `key` (a column name or collection of column names, present in both
-inputs) each row's window holds only the summarized rows sharing its key
-value. A window holding no rows — including a key never seen — yields the
-summarizers' empty values, so an output column's element type widens
-accordingly (e.g. `Min` gives `Union{Missing, T}`). A summarized stream
-producing no chunks yields the empty values everywhere. The output columns
-may not collide with existing columns.
+# Keywords
+- `key = nothing`: a column name or collection of distinct column names other
+  than `:time`, present in both inputs. With a key, a row's window holds only
+  rows with the same key.
+- `from = nothing`: a pipeline to summarize instead of the input itself. Its
+  rows relate to the output rows by time and key only. By default the input is
+  summarized, so it runs twice.
 
-The curried form composes with `|>`; the uncurried form applies directly,
-so `addrollingcolumns(p, w, ss; ...)` is equivalent to
-`p |> addrollingcolumns(w, ss; ...)`.
+An empty window, including one for an unseen key, gives the summarizers' empty
+values, so a column's type may widen (`Min` gives `Union{Missing, T}`).
 """
 function addrollingcolumns(windows, summarizers; key = nothing,
     from::Union{Nothing,CausalPipeline} = nothing)

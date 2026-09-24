@@ -1,18 +1,16 @@
 # File I/O
 
-The operators that move rows between a pipeline and a file. Reading starts a
-pipeline; writing does not end one — every writer is a pass-through transform,
-so a sink can sit in the middle of a chain.
+Readers are sources. Writers are pass-through transforms, so they can sit
+anywhere in a chain; end it with [`scan`](@ref) to run it for the file alone.
 
-Parquet support is optional, through two backends: either `using DuckDB` or
-`using Parquet2` enables both parquet operators. Reading prefers DuckDB (it
-pushes the window into the reader) and writing prefers Parquet2 (it streams row
-groups out); `backend = :duckdb` / `:parquet2` forces the choice.
+Parquet needs a backend, `using DuckDB` or `using Parquet2`; either enables both
+operators. Reading prefers DuckDB, which pushes the window into the reader, and
+writing prefers Parquet2, which streams row groups; `backend` overrides the
+choice.
 
 ## Reading
 
-Every reader clips what it produces to the context's half-open interval
-`[start, stop)`, and reads incrementally rather than loading the file.
+Readers clip to `[start, stop)` and read incrementally.
 
 ## `readcsv`
 
@@ -34,9 +32,8 @@ readjls
 
 ## Writing
 
-Every sink is a pass-through transform: it writes each chunk as it flows by and
-yields it downstream unchanged. Pair one with [`scan`](@ref) to drive a pipeline
-for its side effects alone.
+Writers write each chunk on a background task as it flows by, and pass it on
+unchanged.
 
 ## `writecsv`
 

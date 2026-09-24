@@ -13,38 +13,33 @@
     lastrow(; key = nothing) -> (CausalPipeline -> CausalPipeline)
     lastrow(p::CausalPipeline; key = nothing) -> CausalPipeline
 
-A transform emitting the stream's **last row**, retimed to the context's end
-time `stop`. Every input column is kept, carrying its value from that row: the
-output schema is the input's exactly, `:time` included and in its own position.
+A transform emitting the last row of the window, retimed to `stop`, with every
+column kept. An empty input emits nothing. It emits once its input is
+exhausted, so it streams as a single frame.
 
-Without `key` the output is exactly one row, and an input with no rows produces
-no output at all — unlike keyless [`summarize`](@ref), which has an identity
-summary to emit. With `key` (a column name or collection of column names) one
-row is emitted per distinct key value, each being that key's last row, all
-retimed to `stop` and emitted sorted by key — legal precisely because every
-emitted time is then equal.
+# Keywords
+- `key = nothing`: a column name or collection of distinct column names other
+  than `:time`. With a key, emit each key's last row, sorted by key.
 
-The original timestamp is **lost**: `:time` is overwritten with `stop`. Carry it
-forward under another name if you need it:
+The original time is overwritten; keep it under another name if needed:
 
-```julia
-p |> addcolumns(r -> (; t0 = r.time)) |> lastrow(; key = :sym)
+```jldoctest
+df = DataFrame(time = [1, 2, 3], sym = ["a", "b", "a"], px = [10, 20, 11])
+p = readtable(df) |> addcolumns(r -> (; t0 = r.time)) |> lastrow(; key = :sym)
+DataFrame(load(Context(0, 10), p))
+
+# output
+
+2×4 DataFrame
+ Row │ time   sym     px     t0
+     │ Int64  String  Int64  Int64
+─────┼─────────────────────────────
+   1 │    10  a          11      3
+   2 │    10  b          20      2
 ```
 
-`time` may not be a key and key columns must be unique — both `ArgumentError`s
-when the transform is built — and the key columns must be present in the input,
-checked on its first chunk. A chunk whose column names differ from the first
-chunk's, in content or in order, is an `ArgumentError`; element *types* may
-differ from chunk to chunk, as everywhere else, and the store tracks their
-promotion.
-
-Like [`summarize`](@ref), `lastrow` is causal — a row emitted at `stop` folds
-only rows with time `<= stop` — and stateful over the whole window, emitting
-once when its input is exhausted, so its stream is a single frame over
-`[start, stop]`.
-
-The curried form composes with `|>`; the uncurried form applies directly, so
-`lastrow(p; key)` is equivalent to `p |> lastrow(; key)`.
+A chunk whose column names differ from the first chunk's is an
+`ArgumentError`.
 """
 function lastrow(; key = nothing)
     keycols = tokeycolumns(key)

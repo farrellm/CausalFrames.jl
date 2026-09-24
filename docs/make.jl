@@ -1,8 +1,15 @@
 using CausalFrames
 using DataFrames
 using Documenter
+# Loaded up front so their CausalFrames extensions are compiled before the
+# doctests that use them run; otherwise a first `using Parquet2` inside a doctest
+# can print precompilation output into the result being compared. Imported, not
+# used: MLJModelInterface's `Count` would shadow the summarizer in `@docs`.
+import MLJModelInterface
+import Parquet2
 
-DocMeta.setdocmeta!(CausalFrames, :DocTestSetup, :(using CausalFrames);
+DocMeta.setdocmeta!(CausalFrames, :DocTestSetup,
+    :(using CausalFrames, DataFrames, Dates);
     recursive = true)
 
 # Links from the README into the deployed docs, with and without an anchor.
@@ -64,12 +71,15 @@ end
 # to remove the opportunity rather than to re-sync. `docs/src/index.md` is
 # generated and gitignored — edit README.md.
 #
-# Four rewrites separate the GitHub audience from the docs-site one: the docs
+# Five rewrites separate the GitHub audience from the docs-site one: the docs
 # title carries the .jl, the badges are GitHub furniture (one of them links to
-# this very site), the DESIGN.md link is a repo path that would 404 here, and
-# the README's links into the deployed site — Recipes, and every operator and
+# this very site), the DESIGN.md link is a repo path that would 404 here, the
+# README's links into the deployed site — Recipes, and every operator and
 # summarizer link in its tables — should stay inside the site rather than
-# round-tripping through the deployed URL.
+# round-tripping through the deployed URL, and the examples become doctests.
+# GitHub renders a `jldoctest` block as plain text, so the README writes them as
+# `julia` blocks with a `# output` section, and they become one doctest session
+# here, sharing their variables in order.
 function readme_as_index(readme, index)
     text = read(readme, String)
     text = replace(text, r"^# CausalFrames\n" => "# CausalFrames.jl\n")
@@ -85,6 +95,9 @@ function readme_as_index(readme, index)
     text = replace(text,
         "](https://farrellm.github.io/CausalFrames.jl/dev/api/)" => "](api/index.md)")
     text = replace(text, DOCS_PAGE_LINK => s"](\1.md)")
+    text = replace(text,
+        r"```julia\n((?:(?!```)[\s\S])*?\n# output\n[\s\S]*?)```" =>
+            s"```jldoctest readme\n\1```")
     return write(index, text)
 end
 
