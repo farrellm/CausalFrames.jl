@@ -1212,10 +1212,15 @@ keep single-structure calls at parity and speed up mixed ones: the OHLC-style
 set above goes from 145 ms to 122 ms keyless and 296 ms to 190 ms keyed at a
 5,000-unit look-back, and from 289 ms to 119 ms keyless at a 20-unit look-back
 (shorter than the tick spacing, where the old tree was rebuilt at every tick).
-The one loss is keyless `[Min, Max]` alone, 48 ms to 51 ms: there the old tree
-recombined a tick's leaves together at about one `combine!` per row, cheaper
-than two deque pushes per row plus the eviction lookup. Keyed, the same set
-goes from 119 ms to 91 ms, so no heuristic chooses between them. (The buffer is
+The one loss is keyless `[Min, Max]` alone, 48 ms to 51 ms. Per tracker and
+row, the deque's `update!` on admission and `downdate!` on eviction cost 8.6–10.2
+ns — a `pop!` and a `push!` on each of its two vectors, and the counters — where
+the old tree zeroed and folded a leaf and recombined its share of ancestors at
+the tick in 3.1–3.6 ns. The tree's own overheads (rebuilds allocating fresh
+states, a window-start search per tick) win back most of that difference; the
+key lookups, of the empty key, barely register. Keyed, the same set goes from
+119 ms to 91 ms, since a hundred trees each rebuild and search while the
+deque's cost per row is unchanged, so no heuristic chooses between them. (The buffer is
 compacted at every tick's eviction, and rolling's after every row's, so it
 stays near the window's size rather than growing through a whole chunk — which
 is what keeps the running tier at or ahead of its old single-mode kernel.)
