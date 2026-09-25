@@ -83,17 +83,22 @@
         )
         DataFrame(load(ctx, p |> intervalize(clock(2), [Count(), Sum(:v)];
             key = :sym)))
-        # the running window mode keyless, the tree mode (Min is a monoid
-        # only) keyed, which also takes the vanish-row path
+        # the running window tier keyless; keyed, which also takes the
+        # vanish-row path, the running tier's windowed trackers beside the tree
+        # tier (Product is a monoid only) and a fieldless dependent
         DataFrame(
             load(ctx, p |> summarizewindows(clock(2), 3,
                 [Count(), Sum(:v), Mean(:v)])),
         )
         DataFrame(
-            load(ctx, p |> summarizewindows(clock(2), 3, Min(:v); key = :sym)),
+            load(
+                ctx,
+                p |> summarizewindows(clock(2), 3,
+                    [Min(:v), Last(:v), Product(:v), Mean(:v)]; key = :sym),
+            ),
         )
         # the declared-key (dense) paths: the slot fold shared by cycles and
-        # intervals, and the running window mode's dense emission
+        # intervals, and the running window tier's dense emission
         DataFrame(
             load(ctx,
                 p |> summarizecycles(Sum(:v); key = :sym, keyset = ["a", "b"])),
@@ -109,14 +114,17 @@
                     key = :sym, keyset = ["a", "b"])),
         )
         DataFrame(load(ctx, p |> addsummarycolumns([First(:v), Last(:v)])))
-        # all-group summarizers take the running window mode, the mixed
-        # group/monoid set the tree mode; the re-fold mode is reachable
-        # only through user summarizers without the structure, so it
-        # specializes at first call like any custom summarizer
+        # group summarizers take the running window tier, other monoids the
+        # tree tier, each per accumulator; the re-fold tier is reachable only
+        # through user summarizers without the structure, so it specializes
+        # at first call like any custom summarizer
         DataFrame(
-            load(ctx, p |> addrollingcolumns((w2 = 2,),
-                [Sum(:v), Mean(:v)];
-                key = :sym)),
+            load(
+                ctx,
+                p |> addrollingcolumns((w2 = 2,),
+                    [Sum(:v), Mean(:v), AgeWeightedSum(:v)];
+                    key = :sym),
+            ),
         )
         DataFrame(
             load(
@@ -127,9 +135,12 @@
             ),
         )
         DataFrame(
-            load(ctx, p |> addrollingcolumns((w2 = 2,),
-                [Min(:v), Last(:v)];
-                key = :sym)),
+            load(
+                ctx,
+                p |> addrollingcolumns((w2 = 2,),
+                    [Min(:v), Last(:v), Product(:v), Mean(:v)];
+                    key = :sym),
+            ),
         )
         DataFrame(
             load(

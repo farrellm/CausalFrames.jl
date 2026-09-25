@@ -40,10 +40,10 @@ abstract type MonoidSummarizer <: Summarizer end
 """
     GroupSummarizer <: MonoidSummarizer
 
-A monoid summarizer whose updates can be undone with [`downdate!`](@ref).
-Window transforms slide a running state in O(1) amortized per row, removing
-rows as they leave the window, unless [`isinvertible`](@ref) says the state can
-no longer be inverted.
+A monoid summarizer whose windowed state ([`freshwindowed`](@ref)) can remove
+its oldest row with [`downdate!`](@ref). Window transforms slide such a state
+in O(1) amortized per row, removing rows as they leave the window, unless
+[`isinvertible`](@ref) says the state can no longer be inverted.
 """
 abstract type GroupSummarizer <: MonoidSummarizer end
 
@@ -61,6 +61,9 @@ output columns are too. A state implements:
 - optionally [`fresh!`](@ref)`(st)`, [`widenstate`](@ref)`(st, intypes)`, and,
   for structured summarizers, [`combine!`](@ref), [`downdate!`](@ref) and
   [`isinvertible`](@ref).
+
+A [`GroupSummarizer`](@ref) may also build a separate windowed state with
+[`freshwindowed`](@ref).
 """
 abstract type SummarizerState end
 
@@ -84,6 +87,22 @@ types `intypes`, read as [`update!`](@ref) reads the row (`intypes[column]` for
 summarizers they are given.
 """
 function fresh end
+
+"""
+    freshwindowed(s::Summarizer, intypes::NamedTuple) -> SummarizerState
+
+A zero state for a sliding window, which the window transforms
+[`update!`](@ref) as rows arrive and [`downdate!`](@ref) as they leave, oldest
+first. Defaults to [`fresh`](@ref)`(s, intypes)`. A
+[`GroupSummarizer`](@ref) whose ordinary state cannot remove rows implements it
+instead: the windowed `First` keeps every value in the window, where the
+ordinary one keeps a single value.
+
+The windowed state needs `fresh`, `fresh!`, `update!`, `downdate!`, `value` and
+optionally `isinvertible`, and its `value` must have the ordinary state's type.
+It is never combined or widened.
+"""
+freshwindowed(s::Summarizer, intypes::NamedTuple) = fresh(s, intypes)
 
 """
     fresh!(st::SummarizerState) -> SummarizerState
@@ -155,21 +174,23 @@ function combine! end
 """
     downdate!(st::SummarizerState, row)
 
-Remove a previously folded `row` from `st`, inverting [`update!`](@ref).
-Required for a [`GroupSummarizer`](@ref). The built-in sums are exact for
-integers; for floats they use compensated summation and count NaN, ±Inf and
-`missing` terms separately, so those remove exactly and finite terms leave only
-small round-off.
+Remove `row`, the oldest row still folded into `st`, inverting its
+[`update!`](@ref). Callers remove rows in the order they folded them, so a state
+may rely on that: [`AgeWeightedSum`](@ref) and the windowed `Min`, `First`
+and `Last` do. Required of a [`GroupSummarizer`](@ref)'s windowed state
+([`freshwindowed`](@ref)). The built-in sums are exact for integers; for floats
+they use compensated summation and count NaN, ±Inf and `missing` terms
+separately, so those remove exactly and finite terms leave only small round-off.
 """
 function downdate! end
 
 """
     isinvertible(st::SummarizerState) -> Bool
 
-Whether [`downdate!`](@ref) inverts [`update!`](@ref) for this state's actual
-accumulator type. Defaults to `true`; a state that folds an absorbing value it
-cannot recover from returns `false`, and window transforms then fall back to the
-segment tree.
+Whether [`downdate!`](@ref) inverts [`update!`](@ref) for this windowed
+state's actual accumulator type. Defaults to `true`; a state that folds an
+absorbing value it cannot recover from returns `false`, and window transforms
+then fold that summarizer through a segment tree instead.
 """
 isinvertible(::SummarizerState) = true
 
@@ -540,9 +561,11 @@ The number of distinct values of `column`, in `:{column}_countdistinct`
 
 `missing` counts as a value, so `1, missing, 1` has two distinct values; filter
 out `missing` upstream for SQL's `count(DISTINCT x)`. The state holds every
-distinct value seen, so memory is O(distinct values) per summary.
+distinct value seen, so memory is O(distinct values) per summary; in a sliding
+window it also counts each value's rows, so it can drop a value when its last
+row leaves.
 """
-struct CountDistinct{C} <: MonoidSummarizer end
+struct CountDistinct{C} <: GroupSummarizer end
 CountDistinct(column::Symbol) = CountDistinct{column}()
 
 mutable struct CountDistinctState{C,N,T} <: SummarizerState
@@ -584,6 +607,35 @@ function widenstate(st::CountDistinctState{C,N,T},
     union!(widened.seen, st.seen)
     return widened
 end
+
+# The windowed state: a count of rows per distinct value, so removing the
+# oldest row drops its value exactly when no other row in the window holds it.
+# Kept apart from the Set above because incrementing a count through the public
+# Dict API hashes twice per row, which measured 1.4-1.7x slower than `push!` on
+# the folds that never remove a row (see DESIGN.md's CountDistinct paragraph).
+struct CountDistinctWindowState{C,N,T} <: SummarizerState
+    counts::Dict{T,Int}
+end
+
+freshwindowed(::CountDistinct{C}, intypes::NamedTuple) where {C} =
+    CountDistinctWindowState{C,Symbol(C, :_countdistinct),intypes[C]}(
+        Dict{intypes[C],Int}())
+fresh(::CountDistinctWindowState{C,N,T}) where {C,N,T} =
+    CountDistinctWindowState{C,N,T}(Dict{T,Int}())
+@inline fresh!(st::CountDistinctWindowState) = (empty!(st.counts); st)
+@inline function update!(st::CountDistinctWindowState{C}, row) where {C}
+    v = getproperty(row, C)
+    st.counts[v] = get(st.counts, v, 0) + 1
+    return nothing
+end
+@inline function downdate!(st::CountDistinctWindowState{C}, row) where {C}
+    v = getproperty(row, C)
+    c = st.counts[v]
+    c == 1 ? delete!(st.counts, v) : (st.counts[v] = c - 1)
+    return nothing
+end
+value(st::CountDistinctWindowState{C,N}) where {C,N} =
+    NamedTuple{(N,),Tuple{Int}}((length(st.counts),))
 
 """
     Sum(column::Symbol) -> Summarizer
@@ -632,10 +684,11 @@ emptyvalue(s::SumPower{C}) where {C} =
 #
 # The *value* is bit-identical for `n = 1`, and for integers and Bool at both
 # exponents. At `n = 2` over floats it is not quite: `x * x` is the correctly
-# rounded square, while the runtime `^` is 1 ULP off it for a small fraction of
-# inputs whose square lands near underflow (66 of 500k random Float64 bit
-# patterns). The specialization is the more accurate of the two there — but it
-# is a change, so it is stated rather than glossed. What the compensated states
+# rounded square, while the runtime `^` can be 1 ULP off it for inputs whose
+# square lands near underflow (66 of 500k random Float64 bit patterns where it
+# was measured; how many depends on the CPU, since `^` rounds its error terms
+# differently with and without FMA). The specialization is the more accurate of
+# the two there — but it is a change, so it is stated rather than glossed. What the compensated states
 # actually require is unaffected: they classify NaN and ±Inf *terms* and carry
 # the sign of zero, and no nonfinite or subnormal case differs at either
 # exponent. (On Julia 1.10 only, `(-0.0)^1` returns `0.0` — a `^` bug fixed in
@@ -743,6 +796,238 @@ fresh(::DotProduct{A,B}, intypes::NamedTuple) where {A,B} =
     isless(B, A) ? AliasState{dotname(A, B),dotname(B, A)}() :
     accumfresh(PairProductTerm{A,B}(), dotname(A, B),
         dottype(intypes[A], intypes[B]))
+
+"""
+    AgeWeightedSum(column::Symbol) -> Summarizer
+
+The sum of `column` weighted by each row's age, `Σₖ k·yₖ` where `k` counts the
+rows folded after row `k` (`0` for the newest), in `:{column}_ageweightedsum`
+(`0` for no rows). With [`Sum`](@ref) and [`Count`](@ref) it gives the linearly
+weighted moving average `(n·Σy − Σk·y) / (n(n+1)/2)`, whose newest row weighs
+`n`, and a least-squares fit on the row number.
+
+The element type follows [`Sum`](@ref), and floats use compensated summation
+with NaN and ±Inf counted separately, so a rolling window recovers once they
+leave. The newest row weighs `0`, so a NaN or ±Inf there contributes nothing
+until a later row arrives; a `missing` anywhere gives `missing`.
+
+# Arguments
+- `column`: the column to weight. Age is counted in rows, in stream order, so
+  rows tied in time have different ages.
+
+```jldoctest
+df = DataFrame(time = 1:4, y = [1.0, 2.0, 3.0, 4.0])
+p = readtable(df) |> addsummarycolumns(AgeWeightedSum(:y))
+DataFrame(load(Context(0, 10), p))
+
+# output
+
+4×3 DataFrame
+ Row │ time   y        y_ageweightedsum
+     │ Int64  Float64  Float64
+─────┼──────────────────────────────────
+   1 │     1      1.0               0.0
+   2 │     2      2.0               1.0
+   3 │     3      3.0               4.0
+   4 │     4      4.0              10.0
+```
+"""
+struct AgeWeightedSum{C} <: GroupSummarizer end
+AgeWeightedSum(column::Symbol) = AgeWeightedSum{column}()
+
+# The state folds three numbers: the row count n, S1 = Σy and S2 = Σk·y. A new
+# row ages every row already folded by one, adding S1 to S2 before joining S1
+# itself at weight 0. Removing the oldest row — the only row `downdate!` is ever
+# handed — takes back its weight n - 1. Combining ages a's rows by b's count. n
+# counts every row, missing and nonfinite included, since age is counted in rows.
+#
+# A `missing` input is counted rather than folded, as the sum family's Optional*
+# states do, but through the flag M (the column admits Missing) instead of a
+# second pair of state types: `missings` is always there, and its test folds away
+# when the column cannot hold `missing`.
+mutable struct AgeSumState{N,C,A,M} <: SummarizerState
+    n::Int
+    s1::A
+    s2::A
+    missings::Int
+end
+
+# The float form keeps S1 as a `Compensated`, so its counters classify each raw
+# NaN and ±Inf input once, on entry. S2 keeps only the finite pair — its counters
+# stay zero — and takes its nonfinite classification from S1's, minus the newest
+# row's (`newest`: 0 finite or missing, 1 NaN, 2 +Inf, 3 -Inf), whose weight is 0.
+mutable struct CompensatedAgeSumState{N,C,A<:AbstractFloat,M} <: SummarizerState
+    n::Int
+    s1::Compensated{A}
+    s2::Compensated{A}
+    newest::Int8
+    missings::Int
+end
+
+agesumname(C::Symbol) = Symbol(C, :_ageweightedsum)
+
+emptyvalue(::AgeWeightedSum{C}) where {C} = NamedTuple{(agesumname(C),)}((0,))
+fresh(::AgeWeightedSum{C}, intypes::NamedTuple) where {C} =
+    agesumfresh(Val(agesumname(C)), Val(C), sumtype(intypes[C]))
+
+# The representation for accumulator type A, as `accumfresh` picks it: the
+# non-missing type carries the fold, compensated when it is a fixed-precision
+# float.
+function agesumfresh(::Val{N}, ::Val{C}, ::Type{A}) where {N,C,A}
+    M = Missing <: A && nonmissingtype(A) !== Union{}
+    An = M ? nonmissingtype(A) : A
+    compensable(An) && return CompensatedAgeSumState{N,C,An,M}(0, compzero(An),
+        compzero(An), Int8(0), 0)
+    return AgeSumState{N,C,An,M}(0, convert(An, 0), convert(An, 0), 0)
+end
+
+@inline agesumtype(::Type{A}, M::Bool) where {A} = M ? Union{Missing,A} : A
+
+fresh(::AgeSumState{N,C,A,M}) where {N,C,A,M} =
+    AgeSumState{N,C,A,M}(0, convert(A, 0), convert(A, 0), 0)
+@inline function fresh!(st::AgeSumState{N,C,A}) where {N,C,A}
+    st.n = 0
+    st.s1 = convert(A, 0)
+    st.s2 = convert(A, 0)
+    st.missings = 0
+    return st
+end
+@inline function update!(st::AgeSumState{N,C,A}, row) where {N,C,A}
+    v = getproperty(row, C)
+    st.s2 += st.s1
+    st.n += 1
+    ismissing(v) ? (st.missings += 1) : (st.s1 += convert(A, v))
+    return nothing
+end
+@inline function downdate!(st::AgeSumState{N,C,A}, row) where {N,C,A}
+    v = getproperty(row, C)
+    if ismissing(v)
+        st.missings -= 1
+    else
+        x = convert(A, v)
+        st.s2 -= convert(A, st.n - 1) * x
+        st.s1 -= x
+    end
+    st.n -= 1
+    return nothing
+end
+function combine!(dest::AgeSumState{N,C,A,M}, a::AgeSumState{N,C,A,M},
+    b::AgeSumState{N,C,A,M}) where {N,C,A,M}
+    n = a.n + b.n
+    s1 = a.s1 + b.s1
+    s2 = a.s2 + a.s1 * convert(A, b.n) + b.s2
+    missings = a.missings + b.missings
+    dest.n, dest.s1, dest.s2, dest.missings = n, s1, s2, missings
+    return nothing
+end
+value(st::AgeSumState{N,C,A,M}) where {N,C,A,M} =
+    NamedTuple{(N,),Tuple{agesumtype(A, M)}}((
+        M && st.missings > 0 ? missing : st.s2,))
+function widenstate(st::AgeSumState{N,C,A,M}, intypes::NamedTuple) where {N,C,A,M}
+    w = agesumfresh(Val(N), Val(C), sumtype(intypes[C]))
+    typeof(w) === typeof(st) && return st
+    return agesumfrom(w, st.n, st.s1, st.s2, st.missings)
+end
+
+# Carry a plain state's numbers into a freshly built wider one. Integer and
+# plain-float totals are finite as far as the counters know, which is all a
+# plain state ever tracked.
+function agesumfrom(w::AgeSumState{N,C,A,M}, n, s1, s2, missings) where {N,C,A,M}
+    return AgeSumState{N,C,A,M}(n, convert(A, s1), convert(A, s2), missings)
+end
+function agesumfrom(w::CompensatedAgeSumState{N,C,A,M}, n, s1, s2,
+    missings) where {N,C,A,M}
+    return CompensatedAgeSumState{N,C,A,M}(n, compadd(compzero(A), convert(A, s1)),
+        compadd(compzero(A), convert(A, s2)), Int8(0), missings)
+end
+
+@inline agesumclass(x::AbstractFloat) =
+    isfinite(x) ? Int8(0) : isnan(x) ? Int8(1) : x > 0 ? Int8(2) : Int8(3)
+
+# S2's finite pair plus another pair (S1's, or a scaled one): the two Neumaier
+# steps `compmerge` takes, leaving S2's unused counters at zero.
+@inline function pairadd(a::Compensated{A}, total::A, comp::A) where {A}
+    t, c = neumaier(a.total, a.comp, total)
+    t, c = neumaier(t, c, comp)
+    return Compensated{A}(t, c, 0, 0, 0)
+end
+
+fresh(::CompensatedAgeSumState{N,C,A,M}) where {N,C,A,M} =
+    CompensatedAgeSumState{N,C,A,M}(0, compzero(A), compzero(A), Int8(0), 0)
+@inline function fresh!(st::CompensatedAgeSumState{N,C,A}) where {N,C,A}
+    st.n = 0
+    st.s1 = compzero(A)
+    st.s2 = compzero(A)
+    st.newest = Int8(0)
+    st.missings = 0
+    return st
+end
+@inline function update!(st::CompensatedAgeSumState{N,C,A}, row) where {N,C,A}
+    v = getproperty(row, C)
+    st.s2 = pairadd(st.s2, st.s1.total, st.s1.comp)
+    st.n += 1
+    if ismissing(v)
+        st.missings += 1
+        st.newest = Int8(0)
+    else
+        x = convert(A, v)
+        st.s1 = compadd(st.s1, x)
+        st.newest = agesumclass(x)
+    end
+    return nothing
+end
+@inline function downdate!(st::CompensatedAgeSumState{N,C,A}, row) where {N,C,A}
+    v = getproperty(row, C)
+    if ismissing(v)
+        st.missings -= 1
+    else
+        x = convert(A, v)
+        isfinite(x) && (st.s2 = pairadd(st.s2, -(convert(A, st.n - 1) * x), zero(A)))
+        st.s1 = compsub(st.s1, x)
+    end
+    st.n -= 1
+    st.n == 0 && (st.newest = Int8(0))
+    return nothing
+end
+function combine!(dest::CompensatedAgeSumState{N,C,A,M},
+    a::CompensatedAgeSumState{N,C,A,M},
+    b::CompensatedAgeSumState{N,C,A,M}) where {N,C,A,M}
+    k = convert(A, b.n)
+    s2 = pairadd(pairadd(a.s2, a.s1.total * k, a.s1.comp * k), b.s2.total, b.s2.comp)
+    s1 = compmerge(a.s1, b.s1)
+    newest = b.n > 0 ? b.newest : a.newest
+    n = a.n + b.n
+    missings = a.missings + b.missings
+    dest.n, dest.s1, dest.s2, dest.newest, dest.missings = n, s1, s2, newest, missings
+    return nothing
+end
+# S2's nonfinite terms are S1's less the newest row's, whose weight is 0: a NaN
+# or ±Inf joins S2 only once a later row has aged it.
+@inline function agesumvalue(st::CompensatedAgeSumState{N,C,A}) where {N,C,A}
+    s1 = st.s1
+    return compvalue(
+        Compensated{A}(st.s2.total, st.s2.comp,
+            s1.nans - (st.newest == 1), s1.posinf - (st.newest == 2),
+            s1.neginf - (st.newest == 3)),
+    )
+end
+value(st::CompensatedAgeSumState{N,C,A,M}) where {N,C,A,M} =
+    NamedTuple{(N,),Tuple{agesumtype(A, M)}}((
+        M && st.missings > 0 ? missing : agesumvalue(st),))
+function widenstate(st::CompensatedAgeSumState{N,C,A,M},
+    intypes::NamedTuple) where {N,C,A,M}
+    w = agesumfresh(Val(N), Val(C), sumtype(intypes[C]))
+    typeof(w) === typeof(st) && return st
+    return agesumwiden(w, st)
+end
+function agesumwiden(w::CompensatedAgeSumState{N,C,A2,M2},
+    st::CompensatedAgeSumState) where {N,C,A2,M2}
+    return CompensatedAgeSumState{N,C,A2,M2}(st.n, widencomp(A2, st.s1),
+        widencomp(A2, st.s2), st.newest, st.missings)
+end
+# To an arbitrary-precision float: the plain state, from the IEEE values.
+agesumwiden(w::AgeSumState, st::CompensatedAgeSumState) =
+    agesumfrom(w, st.n, compvalue(st.s1), agesumvalue(st), st.missings)
 
 """
     Moment(column::Symbol, n::Integer) -> Summarizer
@@ -1283,8 +1568,9 @@ end
 
 # The derived states are fieldless — the summary is computed from the
 # dependencies' values at emission time — so combining and downdating them is
-# a no-op; their group structure is exactly that of their (transitively all
-# group) dependencies, which the transforms fold alongside them.
+# a no-op. The window transforms give such a state no tier at all (tiers.jl);
+# these methods serve the one case where it keeps one, a set of nothing but
+# fieldless states.
 const DerivedState = Union{AliasState,MomentState,MeanState,VarianceState,
     StdState,CovarianceState,CorrelationState,LinearRegressionState}
 combine!(::DerivedState, ::DerivedState, ::DerivedState) = nothing
@@ -1358,13 +1644,81 @@ function widenstate(st::TrackState{C,N,T,F}, intypes::NamedTuple) where {C,N,T,F
            TrackState{C,N,T2,F}()
 end
 
+# The windowed state of Min, Max and First: a monotonic deque of the window's
+# candidate values, oldest at the front. A new value `v` first drops every value `b` at the
+# back that it makes redundant — those with `F(b, v)` equal to `v`, which cannot
+# be the window's answer while `v` is in it — so the front is always the fold of
+# the window. That relies on `F` selecting one of its arguments associatively,
+# which `min` and `max` do under `isequal` (NaN, ±0.0 and `missing` included),
+# as does `keepfirst` (nothing is ever redundant, so the deque is the window).
+# `keeplast` would qualify too — everything is redundant, so the deque holds one
+# value — but Last has a cheaper state of its own below.
+#
+# Rows leave oldest first (the `downdate!` law), so each row's sequence number
+# is all eviction needs: the front goes when its row does, and a row already
+# dropped as redundant is simply not there. Dead front slots are reclaimed once
+# they dominate, the rolling buffer's amortized compaction, so a steady window
+# neither grows the vectors nor allocates.
+mutable struct WindowTrackState{C,N,T,F} <: SummarizerState
+    vals::Vector{T}
+    seqs::Vector{Int}  # each live value's row number, counted from the last zero
+    front::Int         # first live slot
+    pushed::Int        # rows folded since the last zero
+    popped::Int        # rows removed since the last zero
+end
+
+WindowTrackState{C,N,T,F}() where {C,N,T,F} =
+    WindowTrackState{C,N,T,F}(T[], Int[], 1, 0, 0)
+
+fresh(::WindowTrackState{C,N,T,F}) where {C,N,T,F} = WindowTrackState{C,N,T,F}()
+@inline function fresh!(st::WindowTrackState)
+    empty!(st.vals)
+    empty!(st.seqs)
+    st.front = 1
+    st.pushed = 0
+    st.popped = 0
+    return st
+end
+@inline function update!(st::WindowTrackState{C,N,T,F}, row) where {C,N,T,F}
+    v = getproperty(row, C)
+    vals, seqs = st.vals, st.seqs
+    while length(vals) >= st.front && isequal(F.instance(@inbounds(vals[end]), v), v)
+        pop!(vals)
+        pop!(seqs)
+    end
+    push!(vals, v)
+    push!(seqs, st.pushed += 1)
+    return nothing
+end
+@inline function downdate!(st::WindowTrackState, row)
+    st.popped += 1
+    seqs = st.seqs
+    if st.front <= length(seqs) && @inbounds(seqs[st.front]) == st.popped
+        st.front += 1
+        dead = st.front - 1
+        if dead == length(seqs)
+            empty!(st.vals)
+            empty!(seqs)
+            st.front = 1
+        elseif dead >= 32 && 2 * dead >= length(seqs)
+            deleteat!(st.vals, 1:dead)
+            deleteat!(seqs, 1:dead)
+            st.front = 1
+        end
+    end
+    return nothing
+end
+value(st::WindowTrackState{C,N,T}) where {C,N,T} =
+    NamedTuple{(N,),Tuple{T}}((@inbounds(st.vals[st.front]),))
+
 """
     Min(column::Symbol) -> Summarizer
 
 The minimum of `column`, in `:{column}_min`, with `column`'s element type
-(`missing` for no rows).
+(`missing` for no rows). In a sliding window it keeps the values that could
+still become the minimum, up to the whole window when `column` rises.
 """
-struct Min{C} <: MonoidSummarizer end
+struct Min{C} <: GroupSummarizer end
 Min(column::Symbol) = Min{column}()
 
 emptyvalue(::Min{C}) where {C} = NamedTuple{(Symbol(C, :_min),)}((missing,))
@@ -1375,9 +1729,10 @@ fresh(::Min{C}, intypes::NamedTuple) where {C} =
     Max(column::Symbol) -> Summarizer
 
 The maximum of `column`, in `:{column}_max`, with `column`'s element type
-(`missing` for no rows).
+(`missing` for no rows). In a sliding window it keeps the values that could
+still become the maximum, up to the whole window when `column` falls.
 """
-struct Max{C} <: MonoidSummarizer end
+struct Max{C} <: GroupSummarizer end
 Max(column::Symbol) = Max{column}()
 
 emptyvalue(::Max{C}) where {C} = NamedTuple{(Symbol(C, :_max),)}((missing,))
@@ -1388,9 +1743,10 @@ fresh(::Max{C}, intypes::NamedTuple) where {C} =
     First(column::Symbol) -> Summarizer
 
 The value of `column` in the first row folded, in `:{column}_first`, with
-`column`'s element type (`missing` for no rows).
+`column`'s element type (`missing` for no rows). In a sliding window it keeps
+every value in the window, O(window) memory per key.
 """
-struct First{C} <: MonoidSummarizer end
+struct First{C} <: GroupSummarizer end
 First(column::Symbol) = First{column}()
 
 emptyvalue(::First{C}) where {C} = NamedTuple{(Symbol(C, :_first),)}((missing,))
@@ -1403,12 +1759,47 @@ fresh(::First{C}, intypes::NamedTuple) where {C} =
 The value of `column` in the last row folded, in `:{column}_last`, with
 `column`'s element type (`missing` for no rows).
 """
-struct Last{C} <: MonoidSummarizer end
+struct Last{C} <: GroupSummarizer end
 Last(column::Symbol) = Last{column}()
 
 emptyvalue(::Last{C}) where {C} = NamedTuple{(Symbol(C, :_last),)}((missing,))
 fresh(::Last{C}, intypes::NamedTuple) where {C} =
     TrackState{C,Symbol(C, :_last),intypes[C],typeof(keeplast)}()
+
+# Min, Max and First slide the deque above: the TrackState they fold everywhere
+# else has no inverse, but a window removes its rows oldest first, which the
+# deque can.
+freshwindowed(s::Union{Min,Max,First}, intypes::NamedTuple) =
+    windowtrack(fresh(s, intypes))
+windowtrack(::TrackState{C,N,T,F}) where {C,N,T,F} = WindowTrackState{C,N,T,F}()
+
+# Last's windowed state: the newest value and a count of the rows in the window.
+# Removing the oldest row can only change the last value by emptying the
+# window, so a count is all eviction needs — a count rather than the last row's
+# time, which could not tell tied rows apart. As TrackState's `seen` does, the
+# count guards the value field, which is left undefined until the first row
+# and stale once the window empties; `value` is only read with rows folded.
+# Measured against the deque (which, under `keeplast`, would hold one value but
+# still pop and push two vectors per row): 1.1-2.2 ns per row against 5.7-8.4,
+# and 23 ms against 38 ms for a keyless summarizewindows of `Last` over the
+# benchmark's million rows.
+mutable struct WindowLastState{C,N,T} <: SummarizerState
+    n::Int
+    val::T
+    WindowLastState{C,N,T}() where {C,N,T} = new{C,N,T}(0)
+end
+
+freshwindowed(::Last{C}, intypes::NamedTuple) where {C} =
+    WindowLastState{C,Symbol(C, :_last),intypes[C]}()
+fresh(::WindowLastState{C,N,T}) where {C,N,T} = WindowLastState{C,N,T}()
+@inline fresh!(st::WindowLastState) = (st.n = 0; st)
+@inline function update!(st::WindowLastState{C}, row) where {C}
+    st.val = getproperty(row, C)
+    st.n += 1
+    return nothing
+end
+@inline downdate!(st::WindowLastState, row) = (st.n -= 1; nothing)
+value(st::WindowLastState{C,N,T}) where {C,N,T} = NamedTuple{(N,),Tuple{T}}((st.val,))
 
 """
     FittedModel{P,M}

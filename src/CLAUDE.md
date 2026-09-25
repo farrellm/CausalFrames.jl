@@ -102,21 +102,35 @@ design rationale and performance constraints behind each module.
 - `src/summarizers.jl` — `Summarizer` (immutable config, output column name in
   a type parameter) and `SummarizerState` (running state, typed from the input
   schema), plus their unexported interface: `emptyvalue`, `fresh`, `fresh!`,
-  `update!`, `value`, `widenstate`, `dependencies`, `combine!`, `downdate!`,
-  `isinvertible`. Within that:
+  `freshwindowed`, `update!`, `value`, `widenstate`, `dependencies`,
+  `combine!`, `downdate!`, `isinvertible`. Within that:
   - `fresh!` zeroes a state in place and returns it (default `fresh(st)`, so
     it is opt-in for a custom summarizer). It exists because the transforms
     zero a state tuple per cycle, per interval, and per window query — see
     DESIGN.md's "Reusing state". Callers must use the return value
   - the structured subtypes are `MonoidSummarizer` (states combine
     associatively over stream-ordered ranges via `combine!`, fresh state as
-    the identity) and `GroupSummarizer <: MonoidSummarizer` (also invertible,
-    via `downdate!`). This split is what `rolling.jl` dispatches its window
-    algorithm on, so which one a new summarizer claims is a performance
-    decision, not a taxonomy one
-  - `Min`/`Max`/`First`/`Last` share one state type (`TrackState`,
-    parameterized by the combiner) and are monoids only, as is `Product`; the
-    accumulators and every dependent summarizer are groups
+    the identity) and `GroupSummarizer <: MonoidSummarizer` (the windowed state
+    removes rows via `downdate!`). This split is what `tiers.jl` puts each
+    accumulator's window tier on, so which one a new summarizer claims is a
+    performance decision, not a taxonomy one
+  - `downdate!` is only ever handed the **oldest** row still folded — every
+    caller evicts FIFO per group, and any new caller must too. States rely on
+    it: `AgeWeightedSum` takes back the evicted row's weight `n - 1`, and the
+    windowed deques pop their front by sequence number, and windowed `Last`
+    only counts
+  - `freshwindowed` (default `fresh`) is the state only the running window tier
+    slides, so a group whose ordinary state cannot invert keeps a fixed-size
+    state everywhere else. `Min`/`Max`/`First`/`Last` share one ordinary state
+    (`TrackState`, parameterized by the combiner) and one windowed state
+    (`WindowTrackState`, a monotonic deque under the same combiner; First keeps
+    the whole window) — except Last, whose windowed state is a count plus the
+    newest value (`WindowLastState`), measured 3-4x cheaper per row than the
+    deque holding its one value. `CountDistinct` folds a `Set` but slides
+    a `Dict{T,Int}` of counts: measured, a public-API count increment hashes
+    twice and is 1.4-1.7x slower than `push!` on the non-window folds (DESIGN.md
+    has the table). A windowed state is never combined or widened. `Product`
+    is the only built-in monoid that is not a group
   - the dependent summarizers (`Moment`, `Mean`, `Variance`, `Std`,
     `Covariance`, `Correlation`, `LinearRegression`) carry no state of their
     own — their state structs are empty. They declare `dependencies` and read
@@ -137,6 +151,12 @@ design rationale and performance constraints behind each module.
     takes a closed form over scalars. It reads its dependencies back through
     `NamedTuple{names}(vals)` projections rather than by indexing with a
     symbol, so no name is a runtime value on the emission path
+  - `AgeWeightedSum` (`Σ k·y`, k the row's age) cannot be a term functor — its
+    update reads its own `S₁` — so it has its own plain and compensated states,
+    reusing the `Compensated` helpers, with `missing` counted through a type
+    flag `M` rather than two more Optional* types. `S₂`'s nonfinite
+    classification is `S₁`'s minus the newest row's (`newest`), whose weight is
+    an exact 0
   - the sum family `Sum`/`SumPower`/`DotProduct` shares one plain and one
     compensated state over a term functor (`ColumnTerm`/`PowerTerm`/
     `PairProductTerm`, terms formed at accumulator width). The `Compensated`
@@ -235,7 +255,7 @@ design rationale and performance constraints behind each module.
   `tolerance` widens the input context as `asofjoin` does, so `clipstart!` has
   to drop the pre-`start` rows the fill was allowed to see
 - `src/segtree.jl` — the monoid segment tree behind the rolling and window
-  tree modes: implicit array tree of `combine!`d partial state tuples,
+  tree tiers: implicit array tree of `combine!`d partial state tuples,
   append-only rows, logical front expiry (`head`), amortized rebuilds,
   order-preserving two-accumulator range queries (`treequery`,
   `windowstart`). Appending (`treeappend!`, a bare leaf) and recombining
@@ -249,15 +269,29 @@ design rationale and performance constraints behind each module.
   capacity just swaps the live leaves' tuples to the front by reference — the
   steady state under a short window, where rebuilds fire every few appends
   rather than amortizing away
-- `src/rolling.jl` — `addrollingcolumns` picks its window algorithm from the
-  expanded prototype tuple's structure: all-group → per-key running states
-  with per-window eviction heads, O(1)/row (`rollsegmentrunning!`);
-  all-monoid → per-key segment trees, O(log n)/row (`rollsegmenttree!`);
-  otherwise the re-fold baseline (`rollsegment!`, the differential-test
-  oracle). Running demotes to tree when widening lets `missing` into an
-  accumulator (`isinvertible`); float sums stay running because the
-  compensated states evict NaN/±Inf rows cleanly; widening rebuilds
-  structures from live rows
+- `src/tiers.jl` — the per-accumulator window tiers shared by
+  `addrollingcolumns` and `summarizewindows`. `tiering` partitions the realized
+  states once per run and per widening: running (a group whose `freshwindowed`
+  state is `isinvertible`), tree (another monoid), refold (anything else), and
+  no tier for a singleton-typed (fieldless, dependent) state — unless every
+  state is one, when they keep their structural tier so something tracks
+  membership. `mergestates` splices the tiers' tuples back into topological
+  order by a generated, compile-time permutation, so emission is the ordinary
+  `summaryvalues` and dependents read across tiers. An absent tier is
+  `nothing`/`()`, so a single-tier call compiles to the old single-mode code.
+  `RunningTable` pools retired groups (windowed trackers own vectors). Tiers
+  only demote, so a rebuild's buffer was already there; `replayrunning!`,
+  `replaytrees!`, `replayoldtrees!` rebuild from the live rows
+- `src/rolling.jl` — `addrollingcolumns`: one kernel, `rollsegment!`, over a
+  `RollTiers` (shared row buffer with per-window eviction heads, per-window
+  running tables, per-key trees owning their rows, refold templates). Per row:
+  admit into every tier, advance each window's head (downdating running
+  groups), then emit each window from the three tiers' states for the key — a
+  `nothing` from any tier is the empty window. Re-fold folds from the window's
+  own head, so it needs no time test. Widening rebuilds every tier from the
+  live rows, re-partitioning (a non-invertible widening demotes only that
+  accumulator); float sums stay running because the compensated states evict
+  NaN/±Inf rows cleanly
 - `src/intervalize.jl` — `intervalize`, the third binary transform: summarize
   over the intervals a `clock` pipeline defines (`[bₖ, bₖ₊₁)`, timestamped at
   `bₖ₊₁`). The `summarizecycles` fold with the close trigger driven by clock
@@ -269,22 +303,22 @@ design rationale and performance constraints behind each module.
   whole; `closelast` closes the trailing partial at `stop`
 - `src/windows.jl` — `summarizewindows`, the clock-sampled trailing window
   (`[τ - lookback, τ)` at each tick): `intervalize`'s driver (`IntervalCursor`,
-  a concrete tick vector per chunk) over `addrollingcolumns`' row buffer and
-  eviction head. Running mode (`RunningGroup`s, update!/downdate!) for
-  invertible group sets; per-key segment trees for monoid sets, with rows
-  appended as bare leaves and synced once per tick — windows are queried per
-  tick, not per row, so rolling's eager per-append ancestor update (log₂ of
-  the window in combines per row) would squander that; re-fold through a
-  `GroupTable` pool otherwise. Keyed
+  a concrete tick vector per chunk) over `addrollingcolumns`' row buffer, eviction
+  head and tiers. One admission kernel (`windowrows!`) and one tick close
+  (`closewindow!`): evict (downdating the running table), move tree heads and
+  drop emptied trees, sync the rest once per tick — windows are queried per
+  tick, not per row, so rolling's eager per-append ancestor update (log₂ of the
+  window in combines per row) would squander that — fold the refold
+  `GroupTable` from the live rows, emit, retire. Presence means rows in the
+  window in every tier, so the first tier present (running, tree, refold) gives
+  the keys to emit and the others are looked up by key (`tiervalues`). Keyed
   output is sparse plus one *vanish* row of empty values when a key's window
   empties, decided against the previous tick's *emitted* keys; that row is what
   stops a per-key as-of consumer (`applymodels`) from using a stale summary.
   A declared `keyset` rides in `WindowConfig`'s type (`Nothing` otherwise) and
   replaces the sort and vanish merge with `emitdense!`, a lookup per declared key
-  per tick in whichever structure the mode keeps. The modes keep their
-  structures rather than going slot-indexed, because presence already means
-  rows in the window in all three. The declaration is checked where a group or
-  tree is made (a key's first row); re-fold groups only at ticks, so it checks
+  per tick. The declaration is checked where the primary tier makes a group or
+  tree (a key's first row); a refold primary groups only at ticks, so it checks
   on admission instead
 - `src/models.jl` — the MLJ operators (`applymodels`, `addpredictions`,
   `modelreports`) and the five hooks the extension implements (`ismodel`,

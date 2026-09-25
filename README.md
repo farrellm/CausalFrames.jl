@@ -171,11 +171,12 @@ Most summarize no rows as `missing`; the rest give the identity shown.
 | Summarizer | Output | Structure | Semantics |
 |---|---|---|---|
 | [`Count()`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#Count) | `:count` | group | number of rows; `0` |
-| [`CountDistinct(:x)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#CountDistinct) | `:x_countdistinct` | monoid | distinct values, `missing` included; `0` |
+| [`CountDistinct(:x)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#CountDistinct) | `:x_countdistinct` | group | distinct values, `missing` included; `0` |
 | [`Sum(:x)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#Sum) | `:x_sum` | group | `Σx`; `0` |
 | [`SumPower(:x, n)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#SumPower) | `:x_sumpower_n` | group | `Σxⁿ`; `0` |
 | [`Product(:x)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#Product) | `:x_product` | monoid | `Πx`; `1` |
 | [`DotProduct(:x, :y)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#DotProduct) | `:x_y_dotproduct` | group | `Σxy`; `0` |
+| [`AgeWeightedSum(:x)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#AgeWeightedSum) | `:x_ageweightedsum` | group | `Σk·x`, `k` the row's age (newest `0`); `0` |
 | [`Moment(:x, n)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#Moment) | `:x_moment_n` | group | `n`-th raw moment |
 | [`Mean(:x)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#Mean) | `:x_mean` | group | mean |
 | [`Variance(:x; corrected)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#Variance) | `:x_variance` | group | variance, as `Statistics.var` |
@@ -183,10 +184,10 @@ Most summarize no rows as `missing`; the rest give the identity shown.
 | [`Covariance(:x, :y; corrected)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#Covariance) | `:x_y_covariance` | group | covariance, as `Statistics.cov` |
 | [`Correlation(:x, :y)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#Correlation) | `:x_y_correlation` | group | Pearson correlation |
 | [`LinearRegression(predictors, response; intercept, name)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#LinearRegression) | `n`, `r2`, `stderr`, and a beta and t statistic per term | group | ordinary least squares |
-| [`Min(:x)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#Min) | `:x_min` | monoid | minimum |
-| [`Max(:x)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#Max) | `:x_max` | monoid | maximum |
-| [`First(:x)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#First) | `:x_first` | monoid | value in the first row |
-| [`Last(:x)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#Last) | `:x_last` | monoid | value in the last row |
+| [`Min(:x)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#Min) | `:x_min` | group | minimum |
+| [`Max(:x)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#Max) | `:x_max` | group | maximum |
+| [`First(:x)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#First) | `:x_first` | group | value in the first row |
+| [`Last(:x)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#Last) | `:x_last` | group | value in the last row |
 | [`FitModel(model, predictors, response; name, verbosity)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#FitModel) | `:model` | — | a fitted MLJ model (needs `using MLJ`, where `Count` must be written `CausalFrames.Count`) |
 
 ```julia
@@ -210,9 +211,11 @@ appear in the output only if requested. An output column takes its element type
 from the input: `Min`, `Max`, `First` and `Last` keep it, and `Sum` widens as
 `Base.sum` does.
 
-The structure column sets the window algorithm in `addrollingcolumns` and
-`summarizewindows`: a group summarizer slides in O(1) per row, a monoid folds a
-segment tree in O(log window), and anything else re-folds each window. See
+The structure column sets each summarizer's window algorithm in
+`addrollingcolumns` and `summarizewindows`: a group slides in O(1) per row, a
+monoid folds a segment tree in O(log window), and anything else re-folds each
+window. It is chosen per summarizer, so one slow summarizer does not slow the
+rest of a call. See
 [DESIGN.md](DESIGN.md) for the interface a custom summarizer implements.
 
 ## Causality

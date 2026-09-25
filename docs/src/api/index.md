@@ -23,7 +23,7 @@ The [summarizers](summarizers.md) the summarizing transforms take:
 | Category | Summarizers |
 |---|---|
 | Counting | [`Count`](@ref "Count"), [`CountDistinct`](@ref "CountDistinct") |
-| Accumulating | [`Sum`](@ref "Sum"), [`SumPower`](@ref "SumPower"), [`Product`](@ref "Product"), [`DotProduct`](@ref "DotProduct") |
+| Accumulating | [`Sum`](@ref "Sum"), [`SumPower`](@ref "SumPower"), [`Product`](@ref "Product"), [`DotProduct`](@ref "DotProduct"), [`AgeWeightedSum`](@ref "AgeWeightedSum") |
 | Moments | [`Moment`](@ref "Moment"), [`Mean`](@ref "Mean"), [`Variance`](@ref "Variance"), [`Std`](@ref "Std") |
 | Relating two columns | [`Covariance`](@ref "Covariance"), [`Correlation`](@ref "Correlation"), [`LinearRegression`](@ref "LinearRegression") |
 | Tracking a single row | [`Min`](@ref "Min"), [`Max`](@ref "Max"), [`First`](@ref "First"), [`Last`](@ref "Last") |

@@ -1,4 +1,4 @@
-# The monoid segment tree behind the rolling and window tree modes: an
+# The monoid segment tree behind the rolling and window tree tiers: an
 # implicit array-based tree whose leaves are single admitted rows and whose
 # inner nodes hold the combine! of their children, so any contiguous row
 # range — in particular a trailing window — folds from O(log n) partial

@@ -335,22 +335,24 @@ end
     rolled(p, ss; kwargs...) = DataFrame(load(Context(0, 1000),
         p |> addrollingcolumns(windows, ss; kwargs...)))
 
+    # The sets exercise each window tier (tiers.jl) alone and together.
     # DotProduct(:y, :x) and Covariance(:y, :x) are the reversed (non-canonical)
     # argument order, so they fold through the alias over the canonical
     # accumulator — the differential is what proves that path keeps the running
-    # structure rather than quietly demoting the whole set.
+    # tier. The trackers and CountDistinct run through their windowed states.
     groupset = [Count(), Sum(:x), Mean(:x), Variance(:x), Correlation(:x, :y),
-        DotProduct(:y, :x), Covariance(:y, :x),
+        DotProduct(:y, :x), Covariance(:y, :x), AgeWeightedSum(:x),
         LinearRegression(:x, :y; name = :m1),
         LinearRegression([:x, :y], :y; name = :m2)]
-    monoidset = [Min(:x), Max(:x), First(:x), Last(:x), Product(:x),
-        CountDistinct(:x)]
-    mixedset = [Sum(:x), Min(:x), MinMax(:y)]     # group ⊂ monoid: tree path
-    plainset = [Sum(:x), TestVar(:x)]             # plain present: re-fold
+    trackset = [Min(:x), Max(:x), First(:x), Last(:x), CountDistinct(:x)]
+    monoidset = [Product(:x), MinMax(:y)]                 # the tree alone
+    mixedset = [Sum(:x), Min(:x), MinMax(:y), Product(:x)] # running + tree
+    plainset = [Sum(:x), TestVar(:x), PlainSum(:y)]       # running + re-fold
+    spanset = [TierSpan(:x), Mean(:y), Last(:y)]          # every tier at once
+    allsets = (groupset, trackset, monoidset, mixedset, plainset, spanset)
 
     @testset "differential against the re-fold oracle" begin
-        for p in (intdata, floatdata), ss in (groupset, monoidset, mixedset,
-                plainset)
+        for p in (intdata, floatdata), ss in allsets
 
             agrees(rolled(p, ss), rolled(p, map(Opaque, ss)))
             agrees(rolled(p, ss; key = :k),
@@ -362,7 +364,9 @@ end
         # the running path (groups) must equal the re-fold oracle even with
         # missing in the summarized column — the counting states keep it on the
         # running path rather than demoting to the tree
-        for p in (missingintdata, missingfloatdata), ss in (groupset, mixedset)
+        for p in (missingintdata, missingfloatdata),
+            ss in (groupset, trackset, mixedset, spanset)
+
             agrees(rolled(p, ss), rolled(p, map(Opaque, ss)))
             agrees(rolled(p, ss; key = :k),
                 rolled(p, map(Opaque, ss); key = :k))
@@ -370,7 +374,7 @@ end
     end
 
     @testset "streaming agrees with loading" begin
-        for ss in (groupset, monoidset)
+        for ss in (groupset, trackset, spanset)
             t = addrollingcolumns(windows, ss; key = :k)
             loaded = DataFrame(load(Context(0, 1000), intdata |> t))
             streamed = reduce(vcat,
@@ -444,26 +448,19 @@ end
         df = DataFrame(load(Context(0, 10),
             p |> addrollingcolumns((w1 = 1,), Sum(:x))))
         @test df.w1_x_sum[3] == 2.0
-
-        # the tree path combines the same compensated states
-        p = onechunk(time = [1, 2, 3, 4], x = [1.0, 1e100, 1.0, -1e100])
-        df = DataFrame(
-            load(Context(0, 10),
-                p |> addrollingcolumns((w9 = 9,), [Sum(:x), Min(:x)])),
-        )
-        @test df.w9_x_sum[4] == 2.0
     end
 
-    @testset "tree path order sensitivity" begin
+    @testset "order sensitivity through ties" begin
         # First/Last through ties: every row at time t sees all rows tied
-        # at t, in stream order
+        # at t, in stream order — on the running tier's windowed states and
+        # on the re-fold oracle alike
         p = onechunk(time = [1, 2, 2, 3], x = [1, 2, 3, 4])
-        df = DataFrame(
-            load(Context(0, 10),
-                p |> addrollingcolumns((w1 = 1,), [First(:x), Last(:x)])),
-        )
-        @test isequal(df.w1_x_first, [1, 1, 1, 2])
-        @test isequal(df.w1_x_last, [1, 3, 3, 4])
+        for ss in ([First(:x), Last(:x)], [Opaque(First(:x)), Opaque(Last(:x))])
+            df = DataFrame(
+                load(Context(0, 10), p |> addrollingcolumns((w1 = 1,), ss)))
+            @test isequal(df.w1_x_first, [1, 1, 1, 2])
+            @test isequal(df.w1_x_last, [1, 3, 3, 4])
+        end
     end
 
     @testset "fast paths widen like the re-fold path" begin
@@ -482,11 +479,82 @@ end
         @test eltype(df.w5_y_sum) == Float64
         df = DataFrame(
             load(Context(0, 10),
-                p |> addrollingcolumns((w5 = 5,), [Sum(:y), Min(:y)];
+                p |> addrollingcolumns((w5 = 5,), [Sum(:y), Min(:y), Product(:y)];
                     from = src)),
         )
         @test df.w5_y_sum == [1.0, 3.0, 5.5]
         @test isequal(df.w5_y_min, [1.0, 1.0, 1.0])
+        @test df.w5_y_product == [1.0, 2.0, 5.0]
+    end
+
+    @testset "tiers are chosen per accumulator" begin
+        tiers(ss, types) = CausalFrames.tiernames(
+            CausalFrames.tiering(
+                first(CausalFrames.prototypes(CausalFrames.tosummarizers(ss),
+                        Symbol[])), types),
+        )
+        it = (time = Int, k = String, x = Int, y = Int)
+        # in expansion order: TierSpan's dependencies, TierSpan (fieldless, so
+        # no tier), then Mean's Count and Sum, Mean, and Last
+        @test tiers(spanset, it) == (:running, :tree, :refold, :derived,
+            :running, :running, :derived, :running)
+        # Last is a group, so beside Mean the whole call slides
+        @test tiers([Last(:x), Mean(:x)], it) ==
+              (:running, :running, :running, :derived)
+        # a widening that defeats isinvertible demotes only its accumulator
+        @test tiers([FragileSum(:x), Sum(:y)], it) == (:running, :running)
+        @test tiers([FragileSum(:x), Sum(:y)], merge(it, (; x = Float64))) ==
+              (:tree, :running)
+
+        # Last beside Mean, keyed, over ties and windows that empty and refill
+        for p in (intdata, floatdata)
+            agrees(rolled(p, [Last(:x), Mean(:x)]; key = :k),
+                rolled(p, map(Opaque, [Last(:x), Mean(:x)]); key = :k))
+        end
+
+        # the demotion mid-stream, beside each other tier: x turns Float64 in
+        # the second chunk, so FragileSum rebuilds into the tree from the
+        # buffer (beside a running Sum), from the old trees (beside Product),
+        # or beside a re-fold PlainSum
+        widening = CausalPipeline(
+            ctx -> [
+                DataFrame(time = times[r], k = ks[r],
+                    x = r == 1:100 ? xs[r] : Float64.(xs[r]) ./ 4, y = ys[r])
+                for r in ranges
+            ])
+        # LateSum goes the other way, promoted from a tree-only call that kept
+        # no buffer, so the running tier gathers one from the old trees
+        @test tiers([LateSum(:x)], it) == (:tree,)
+        @test tiers([LateSum(:x)], merge(it, (; x = Float64))) == (:running,)
+        for ss in ([FragileSum(:x), Sum(:y), Last(:x)],
+                [FragileSum(:x), Product(:y)], [FragileSum(:x), PlainSum(:y)],
+                [LateSum(:x)], [LateSum(:x), Product(:y)]),
+            key in (nothing, :k)
+
+            agrees(rolled(widening, ss; key), rolled(widening, map(Opaque, ss); key))
+        end
+    end
+
+    @testset "allocations do not grow with rows" begin
+        # Per tier and mixed: the running groups are pooled, the windowed
+        # states and trees reuse their storage, and re-fold threads one scratch
+        # tuple, so quadrupling the rows adds only the logarithmic growth of
+        # the buffers. (Not MinMax: it leaves `fresh!` to the allocating
+        # default, which a tree query calls per window.)
+        function rollallocs(ss, n)
+            src = DataFrame(time = 1:n, k = repeat(["a", "b"], n ÷ 2),
+                x = mod.(1:n, 7), y = mod.(1:n, 5))
+            p = CausalPipeline(ctx -> [src])
+            t = addrollingcolumns((w5 = 5, w50 = 50), ss; key = :k)
+            load(Context(0, n + 1), p |> t)
+            return @allocations load(Context(0, n + 1), p |> t)
+        end
+        for ss in ([Sum(:x), Mean(:x), Last(:x), Min(:x), CountDistinct(:x),
+            AgeWeightedSum(:x)], [Product(:x)], [PlainSum(:x)],
+            spanset)
+
+            @test rollallocs(ss, 8000) - rollallocs(ss, 2000) < 200
+        end
     end
 
     @testset "fast paths over dates and mixed periods" begin

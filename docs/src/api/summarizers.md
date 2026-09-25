@@ -46,6 +46,12 @@ Product
 DotProduct
 ```
 
+## `AgeWeightedSum`
+
+```@docs
+AgeWeightedSum
+```
+
 ## `Mean`
 
 ```@docs
@@ -125,6 +131,7 @@ SummarizerState
 CausalFrames.emptyvalue
 CausalFrames.fresh
 CausalFrames.fresh!
+CausalFrames.freshwindowed
 CausalFrames.update!
 CausalFrames.value
 CausalFrames.widenstate

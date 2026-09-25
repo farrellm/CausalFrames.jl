@@ -1,18 +1,14 @@
 # The rolling-window summarization transform. The augmented stream drives a
 # chunkmap; the summarized stream is pulled on demand from inside the step.
-# The window algorithm follows the summarizers' structure, classified over
-# the expanded prototype tuple: all GroupSummarizers slide per-key running
-# states in O(1) amortized per row (update! entering rows, downdate!
-# exiting ones); all MonoidSummarizers fold each window from a per-key
-# segment tree of partial combine!s in O(log window); anything less re-folds
-# fresh states over a buffer of the window rows, O(window) per row. The
-# running mode additionally demotes to the tree when the realized
-# accumulator types defeat downdate! (isinvertible) — a widening can
-# introduce that mid-stream (rarely: the sum family counts NaN, ±Inf, and
-# missing terms rather than folding them in, so those stay on the running
-# path and recover on expiry). Per the summarize.jl conventions, the
-# type-unstable setup happens once per chunk and the folding kernels take
-# concretely typed arguments behind function barriers.
+# Each summarizer's window algorithm follows its own structure (tiers.jl):
+# groups slide per-key running states in O(1) amortized per row (update!
+# entering rows, downdate! exiting ones, oldest first), other monoids fold
+# each window from a per-key segment tree of partial combine!s in O(log
+# window), and anything less re-folds fresh states over a buffer of the window
+# rows, O(window) per row. One kernel drives all three tiers, emitting each
+# window from their states merged back into dependency order. Per the
+# summarize.jl conventions, the type-unstable setup happens once per chunk and
+# the kernel takes concretely typed arguments behind a function barrier.
 
 """
     addrollingcolumns(windows, summarizers; key = nothing,
@@ -75,7 +71,7 @@ function addrollingcolumns(windows, summarizers; key = nothing,
             source = from === nothing ? p : from
             cfg = RollingConfig(windownames, lookbacks, keycols,
                 Val(Tuple(keycols)), protos, Val(requested),
-                prefixednames, candidatemode(protos))
+                prefixednames)
             rs = RollingState(source.run(rollingcontext(ctx, lookbacks)))
             return chunkmap(c -> rollchunk!(rs, cfg, c), p.run(ctx))
         end
@@ -110,30 +106,7 @@ function rollingcontext(ctx::Context, lookbacks::Tuple)
     return Context(minimum(starts), ctx.stop)
 end
 
-# Window-algorithm selection. The candidate mode is classified over the
-# expanded prototype tuple at construction time; the effective mode is
-# re-derived from the realized states whenever they are built or widened,
-# because some widenings produce an accumulator that defeats downdate!
-# (isinvertible) — the running mode then demotes to the tree, whose queries
-# never combine an expired (possibly poisoned) leaf. (The sum family counts
-# NaN, ±Inf, and missing terms rather than folding them in, so those widenings
-# do not demote.) Widening only ever promotes, so the effective mode can demote
-# but never return.
-abstract type RollMode end
-struct RefoldMode <: RollMode end
-struct RunningMode <: RollMode end
-struct TreeMode <: RollMode end
-
-candidatemode(protos::Tuple) =
-    all(p -> p isa GroupSummarizer, protos) ? RunningMode() :
-    all(p -> p isa MonoidSummarizer, protos) ? TreeMode() : RefoldMode()
-
-effectivemode(::RefoldMode, stateprotos::Tuple) = RefoldMode()
-effectivemode(::TreeMode, stateprotos::Tuple) = TreeMode()
-effectivemode(::RunningMode, stateprotos::Tuple) =
-    all(isinvertible, stateprotos) ? RunningMode() : TreeMode()
-
-struct RollingConfig{KN,LB<:Tuple,P<:Tuple,O,M<:RollMode}
+struct RollingConfig{KN,LB<:Tuple,P<:Tuple,O}
     windownames::Tuple{Vararg{Symbol}}
     lookbacks::LB
     keycols::Vector{Symbol}
@@ -141,7 +114,6 @@ struct RollingConfig{KN,LB<:Tuple,P<:Tuple,O,M<:RollMode}
     protos::P
     outs::Val{O}
     prefixednames::Vector{Symbol}
-    mode::M
 end
 
 # Per-run mutable state, in fields rather than reassigned closure captures
@@ -155,38 +127,81 @@ mutable struct RollingState
     snt::Any           # current summarized column table (nothing until pulled)
     spos::Int          # index of the next unadmitted summarized row in snt
     stypes::Union{Nothing,NamedTuple}  # promotion of summarized schemas seen
-    stateprotos::Any   # state tuple template, fresh-cloned per row per window
-    buffer::Any        # Vector{R}: admitted rows, time-ordered (refold/running)
-    bufhead::Int       # first buffered row inside some window (refold mode)
+    tiers::Any         # RollTiers for the realized state types
     valtype::Any       # output value NamedTuple type (summary ∪ empty values)
     emptyrow::Any      # emptyvalues converted to valtype
     vals::Any          # per-window value vectors for the chunk in progress
-    mode::Any          # effective RollMode for the realized state types
-    winheads::Any      # Vector{Int}: per-window eviction head (running mode)
-    rgroups::Any       # NTuple{W,Dict{K,RunningGroup{S}}} (running mode)
-    trees::Any         # Dict{K,SegTree{S,R,T}} (tree mode; owns its rows)
     passthrough::Bool  # the summarized stream produced no chunks at all
     checked::Bool      # augmented-side name/key validation done
     RollingState(schunks) = new(schunks, nothing, false, false, nothing, 1,
-        nothing, nothing, nothing, 1, nothing, nothing,
-        nothing, RefoldMode(), nothing, nothing,
-        nothing, false, false)
+        nothing, nothing, nothing, nothing, nothing, false, false)
 end
 
-# One key's running window state: the states with every in-window row folded
-# in, and how many rows that is — zero-row groups are deleted rather than
-# kept, so presence in the dict implies live >= 1 and an absent key emits
-# the empty row, exactly as the re-fold path's `seen` flag decides it.
-mutable struct RunningGroup{S<:Tuple}
-    states::S
-    live::Int
+# The window structures for one tiering (tiers.jl), R being the stored row
+# type. The buffer holds every admitted row still inside some window, in time
+# order, with a per-window eviction head; the running tier downdates rows as
+# its window's head passes them, and the refold tier folds each window from
+# its head. The trees own their rows, so a call with only tree and derived
+# states keeps no buffer (`nothing`); one mixing the tree with another tier
+# stores its rows twice.
+struct RollTiers{R,B,G,TR,SR<:Tuple,ST<:Tuple,SF<:Tuple,SD<:Tuple,P}
+    buffer::B              # Vector{R}, or nothing
+    winheads::Vector{Int}  # per window, the first buffered row inside it
+    running::G             # NTuple{W,RunningTable{K,SR}}, or nothing
+    trees::TR              # Dict{K,SegTree{ST,R,T}}, or nothing
+    runprotos::SR
+    treeprotos::ST
+    refoldprotos::SF
+    derived::SD
+    perm::Val{P}
 end
+
+# Build the tiers for the realized types, from scratch or — after a widening —
+# from the old tiers' live rows, always rebuilding rather than widening in
+# place: rare, O(live), and correct for every transition, including an
+# accumulator the widening demotes from the running tier to the tree. The trees
+# replay from the old trees when there were any, from the buffer when they are
+# new; a buffer the old tiers did not keep is gathered from the old trees (see
+# `treebuffer`). Type-unstable, once per run and per widening.
+function rolltiers(tg::Tiering, types::NamedTuple, keynames::Val, nwindows::Int,
+    old)
+    K = storekeytype(types, keynames)
+    R = storerowtype(types)
+    T = types.time
+    oldbuffer = old === nothing ? nothing : old.buffer
+    buffer, winheads =
+        isempty(tg.running) && isempty(tg.refold) ? (nothing, Int[]) :
+        oldbuffer !== nothing ?
+        (convert(Vector{R}, oldbuffer), copy(old.winheads)) :
+        (old === nothing ? R[] : treebuffer(R, old.trees), ones(Int, nwindows))
+    running =
+        isempty(tg.running) ? nothing :
+        ntuple(
+            w -> replayrunning!(RunningTable{K,typeof(tg.running)}(),
+                buffer, winheads[w], tg.running, keynames), nwindows)
+    trees = nothing
+    if !isempty(tg.tree)
+        trees = Dict{K,SegTree{typeof(tg.tree),R,T}}()
+        if old !== nothing && old.trees !== nothing
+            replayoldtrees!(trees, old.trees, tg.tree, keynames)
+        elseif oldbuffer !== nothing
+            replaytrees!(trees, oldbuffer, minimum(old.winheads), tg.tree,
+                keynames)
+        end
+    end
+    return RollTiers{R}(buffer, winheads, running, trees, tg.running, tg.tree,
+        tg.refold, tg.derived, tg.perm)
+end
+
+RollTiers{R}(buffer::B, winheads::Vector{Int}, running::G, trees::TR,
+    runprotos::SR, treeprotos::ST, refoldprotos::SF, derived::SD,
+    perm::Val{P}) where {R,B,G,TR,SR,ST,SF,SD,P} =
+    RollTiers{R,B,G,TR,SR,ST,SF,SD,P}(buffer, winheads, running, trees,
+        runprotos, treeprotos, refoldprotos, derived, perm)
 
 # Pull the next summarized chunk (type-unstable, once per summarized chunk):
-# create or widen the state prototypes and buffer when the promoted schema
-# moves. States are folded fresh per output row, so widening rebuilds only
-# the prototypes — there is no accumulated state to carry — but the buffered
-# rows and any half-filled value vectors convert along.
+# build the tiers on the first one and rebuild them when the promoted schema
+# moves, re-typing any half-filled value vectors along the way.
 function pullsummarized!(rs::RollingState, cfg::RollingConfig)
     next = rs.sstarted ? iterate(rs.schunks, rs.sstate) : iterate(rs.schunks)
     rs.sstarted = true
@@ -206,114 +221,24 @@ function pullsummarized!(rs::RollingState, cfg::RollingConfig)
         end
     end
     types = promotetypes(rs.stypes, chunktypes(chunk))
-    widened = rs.stypes !== nothing && types != rs.stypes
+    moved = rs.stypes === nothing || types != rs.stypes
     rs.stypes = types
     rs.snt = Tables.columntable(chunk)
     rs.spos = 1
-    if rs.stateprotos === nothing
-        rs.stateprotos = newstates(cfg.protos, types)
-        rs.buffer = storerowtype(types)[]
-        rs.bufhead = 1
-        setvaltype!(rs, cfg)
-        setupmode!(rs, cfg, types)
-    elseif widened
-        oldmode = rs.mode
-        rs.stateprotos = widenstates(rs.stateprotos, types)
-        rs.buffer = convert(Vector{storerowtype(types)}, rs.buffer)
-        setvaltype!(rs, cfg)
-        widenmode!(rs, cfg, types, oldmode)
+    if moved
+        tg = tiering(cfg.protos, types)
+        rs.tiers = rolltiers(tg, types, cfg.keynames, length(cfg.lookbacks),
+            rs.tiers)
+        setvaltype!(rs, cfg, tg)
     end
     return nothing
-end
-
-# Build the effective mode's structures for the first realized state types
-# (type-unstable, once per run). Refold needs nothing beyond the buffer.
-function setupmode!(rs::RollingState, cfg::RollingConfig, types::NamedTuple)
-    rs.mode = effectivemode(cfg.mode, rs.stateprotos)
-    if rs.mode isa RunningMode
-        rs.winheads = ones(Int, length(cfg.lookbacks))
-        rs.rgroups = newrgroups(rs.stateprotos,
-            storekeytype(types, cfg.keynames),
-            length(cfg.lookbacks))
-    elseif rs.mode isa TreeMode
-        rs.trees = newtrees(rs.stateprotos, storekeytype(types, cfg.keynames),
-            storerowtype(types), types.time)
-    end
-    return nothing
-end
-
-newrgroups(stateprotos::S, ::Type{K}, w::Int) where {S<:Tuple,K} =
-    ntuple(_ -> Dict{K,RunningGroup{S}}(), w)
-newtrees(stateprotos::S, ::Type{K}, ::Type{R}, ::Type{T}) where {S<:Tuple,K,R,T} =
-    Dict{K,SegTree{S,R,T}}()
-
-# Rebuild the incremental structures after a widening (type-unstable, rare):
-# always from the live rows, the simple choice that is correct for every
-# transition — including a running -> tree demotion (when a widening produces a
-# non-invertible accumulator), after which the buffer goes unused.
-function widenmode!(rs::RollingState, cfg::RollingConfig, types::NamedTuple,
-    oldmode::RollMode)
-    rs.mode = effectivemode(cfg.mode, rs.stateprotos)
-    K = storekeytype(types, cfg.keynames)
-    if rs.mode isa RunningMode
-        rs.rgroups = ntuple(length(cfg.lookbacks)) do w
-            replaygroups!(Dict{K,RunningGroup{typeof(rs.stateprotos)}}(),
-                rs.buffer, rs.winheads[w], rs.stateprotos,
-                cfg.keynames)
-        end
-    elseif rs.mode isa TreeMode
-        trees = newtrees(rs.stateprotos, K, storerowtype(types), types.time)
-        if oldmode isa RunningMode
-            replaytrees!(trees, rs.buffer, minimum(rs.winheads),
-                rs.stateprotos, cfg.keynames)
-            empty!(rs.buffer)
-            rs.rgroups = nothing
-            rs.winheads = nothing
-        else
-            for (_, old) in rs.trees
-                replaytrees!(trees, old.rows, old.head, rs.stateprotos,
-                    cfg.keynames)
-            end
-        end
-        rs.trees = trees
-    end
-    return nothing
-end
-
-# Fold the live rows (from head on) back into fresh per-key running groups;
-# a function barrier so the per-row work is concretely typed.
-function replaygroups!(d::Dict{K,RunningGroup{S}}, buffer::Vector, head::Int,
-    stateprotos::S, keynames::Val{KN}) where {K,S<:Tuple,KN}
-    for j in head:length(buffer)
-        row = @inbounds buffer[j]
-        g = get!(() -> RunningGroup(map(fresh, stateprotos), 0), d,
-            keyvalues(row, keynames))
-        updateall!(g.states, row)
-        g.live += 1
-    end
-    return d
-end
-
-# Push the live rows (from head on) into per-key trees, converting each to
-# the trees' row type; a function barrier like replaygroups!.
-function replaytrees!(trees::Dict{K,SegTree{S,R,T}}, rows::Vector, head::Int,
-    stateprotos::S,
-    keynames::Val{KN}) where {K,S<:Tuple,R,T,KN}
-    for j in head:length(rows)
-        row = convert(R, @inbounds rows[j])
-        tr = get!(() -> newsegtree(stateprotos, R, T), trees,
-            keyvalues(row, keynames))
-        treepush!(tr, stateprotos, row)
-    end
-    return trees
 end
 
 # The output value type (summary values promoted field-wise with the empty
-# values an empty window emits) is the shared `promotedvaluetype`; caching it
-# with the converted empty row and re-typing any half-filled value vectors is
-# rolling-specific.
-function setvaltype!(rs::RollingState, cfg::RollingConfig)
-    V = promotedvaluetype(typeof(rs.stateprotos), cfg.protos, cfg.outs)
+# values an empty window emits), cached with the converted empty row; any
+# half-filled value vectors are re-typed.
+function setvaltype!(rs::RollingState, cfg::RollingConfig, tg::Tiering)
+    V = tieredvaluetype(tg, cfg.protos, cfg.outs)
     rs.valtype = V
     rs.emptyrow = convert(V, emptyvalues(cfg.protos, cfg.outs))
     rs.vals === nothing ||
@@ -347,33 +272,14 @@ function rollchunk!(rs::RollingState, cfg::RollingConfig, c::DataFrame)
     rs.vals = map(_ -> newvals(rs.valtype, rs.emptyrow, nrow(c)),
         cfg.lookbacks)
     i = 1
-    # The mode is re-read each pass: a widening inside pullsummarized! can
-    # demote running to tree mid-chunk.
+    # The tiers are re-read each pass: a widening inside pullsummarized!
+    # rebuilds them, possibly with a different partition, mid-chunk.
     while true
-        if rs.mode isa RunningMode
-            i, rs.spos, needpull =
-                rollsegmentrunning!(rs.vals, rs.buffer, rs.winheads, lnt, i,
-                    rs.snt, rs.spos, rs.sdone, cfg.lookbacks,
-                    cfg.keynames, rs.stateprotos, rs.rgroups,
-                    cfg.outs, rs.emptyrow)
-        elseif rs.mode isa TreeMode
-            i, rs.spos, needpull =
-                rollsegmenttree!(rs.vals, rs.trees, lnt, i, rs.snt, rs.spos,
-                    rs.sdone, cfg.lookbacks, cfg.keynames,
-                    rs.stateprotos, cfg.outs, rs.emptyrow)
-        else
-            i, rs.spos, rs.bufhead, needpull =
-                rollsegment!(rs.vals, rs.buffer, rs.bufhead, lnt, i, rs.snt,
-                    rs.spos, rs.sdone, cfg.lookbacks, cfg.keynames,
-                    rs.stateprotos, cfg.outs, rs.emptyrow)
-        end
+        i, rs.spos, needpull = rollsegment!(rs.vals, rs.tiers, lnt, i, rs.snt,
+            rs.spos, rs.sdone, cfg.lookbacks, cfg.keynames, cfg.outs,
+            rs.emptyrow)
         needpull || break
         pullsummarized!(rs, cfg)
-    end
-    if rs.mode isa RunningMode
-        compactrunning!(rs.buffer, rs.winheads)
-    elseif rs.mode isa RefoldMode
-        rs.bufhead = compact!(rs.buffer, rs.bufhead)
     end
     return assemble(cfg, rs, c)
 end
@@ -381,21 +287,11 @@ end
 newvals(::Type{V}, emptyrow, n::Int) where {V} =
     fill!(Vector{V}(undef, n), emptyrow)
 
-# Dead rows accumulate at the front of the buffer as the head advances;
-# dropping them only when they dominate keeps the cost amortized O(1) per
-# admitted row.
-function compact!(buffer::Vector{R}, head::Int) where {R}
-    dead = head - 1
-    if dead >= 64 && 2 * dead >= length(buffer)
-        deleteat!(buffer, 1:dead)
-        return 1
-    end
-    return head
-end
-
-# The running-mode analogue: a row is dead once the laggiest window's head
-# has passed it, and the per-window heads shift down with the drop.
-function compactrunning!(buffer::Vector{R}, winheads::Vector{Int}) where {R}
+# Dead rows accumulate at the front of the buffer as the heads advance; a row
+# is dead once the laggiest window's head has passed it. Dropping them only when
+# they dominate keeps the cost amortized O(1) per admitted row.
+@inline compactbuffer!(::Nothing, winheads::Vector{Int}) = nothing
+@inline function compactbuffer!(buffer::Vector{R}, winheads::Vector{Int}) where {R}
     dead = minimum(winheads) - 1
     if dead >= 64 && 2 * dead >= length(buffer)
         deleteat!(buffer, 1:dead)
@@ -404,215 +300,165 @@ function compactrunning!(buffer::Vector{R}, winheads::Vector{Int}) where {R}
     return nothing
 end
 
-# --- folding kernel --------------------------------------------------------
+# --- the kernel ------------------------------------------------------------
 #
 # Called with concretely typed arguments; the per-row work compiles down to
-# direct column access. Processes augmented rows from index i, admitting
-# summarized rows from snt starting at spos into the buffer. Returns
-# (i, spos, head, needpull): needpull means the current summarized chunk is
-# consumed but the stream may still hold rows with time <= row i's time —
-# the driver must pull the next summarized chunk before row i can be folded.
-function rollsegment!(vals::Tuple, buffer::Vector{R}, head::Int,
-    lnt::NamedTuple, i::Int, snt::NamedTuple, spos::Int,
-    sdone::Bool, lookbacks::Tuple, keynames::Val{KN},
-    stateprotos::S, outs::Val,
-    emptyrow) where {R,KN,S<:Tuple}
-    n = length(lnt.time)
-    slen = length(snt.time)
-    # One state tuple for the whole segment: every window of every row folds
-    # into it and `summaryvalues` copies the result out before it is zeroed
-    # again, so the re-fold baseline allocates per segment, not per row.
-    scratch = map(fresh, stateprotos)
-    while i <= n
-        t = @inbounds lnt.time[i]
-        # Admit summarized rows not after t — equal times included, so every
-        # row tied at t is buffered before any row at t is folded.
-        while spos <= slen && @inbounds(snt.time[spos]) <= t
-            push!(buffer, rowat(R, snt, spos))
-            spos += 1
-        end
-        spos > slen && !sdone && return (i, spos, head, true)
-        # Times are non-decreasing, so a row outside every window now is
-        # outside forever.
-        while head <= length(buffer) &&
-              outsideall(t - @inbounds(buffer[head]).time, lookbacks...)
-            head += 1
-        end
-        scratch = foldwindows!(vals, i, t, buffer, head,
-            keyat(lnt, i, keynames), keynames, scratch, outs, emptyrow,
-            lookbacks...)
-        i += 1
-    end
-    return (i, spos, head, false)
-end
-
-@inline outsideall(d) = true
-@inline outsideall(d, lb, rest...) = d > lb && outsideall(d, rest...)
-
-# One window per call, peeling the value vectors and look-backs in step
-# (vararg style, so inference tracks the heterogeneous look-back types).
-# Zeroed states per window per row: accumulate-only states cannot evict, so
-# re-folding the window is the simple correct baseline. The state tuple is
-# `scratch`, threaded through the recursion and owned by the caller, so the
-# baseline costs no allocation per row either — `summaryvalues` copies the
-# values out before the next window zeroes it. `seen` guards value:
-# Min/Max/First/Last leave their value field meaningless until a row is
-# folded in.
-@inline foldwindows!(::Tuple{}, i, t, buffer, head, k, keynames, scratch,
-    outs, emptyrow) = scratch
-@inline function foldwindows!(vals::Tuple, i::Int, t, buffer::Vector,
-    head::Int, k::NamedTuple, keynames::Val,
-    scratch::Tuple, outs::Val, emptyrow,
-    lb, rest...)
-    states = freshall!(scratch)
-    seen = false
-    for j in head:length(buffer)
-        s = @inbounds buffer[j]
-        t - s.time <= lb || continue
-        isequal(keyvalues(s, keynames), k) || continue
-        updateall!(states, s)
-        seen = true
-    end
-    v = first(vals)
-    @inbounds v[i] = seen ? summaryvalues(states, outs) : emptyrow
-    return foldwindows!(Base.tail(vals), i, t, buffer, head, k, keynames,
-        states, outs, emptyrow, rest...)
-end
-
-# --- running (group) kernel ------------------------------------------------
+# direct column access, and an absent tier to nothing at all. Processes
+# augmented rows from index i, admitting summarized rows from snt starting at
+# spos. Returns (i, spos, needpull): needpull means the current summarized
+# chunk is consumed but the stream may still hold rows with time <= row i's
+# time — the driver must pull the next summarized chunk before row i can be
+# emitted.
 #
-# The same admit/evict/emit protocol as rollsegment!, but incremental: every
-# admitted row is update!d into its key's running group in every window, and
-# each window's eviction head downdate!s rows as they age out — O(1)
-# amortized per row per window. The per-window dicts and value vectors are
-# homogeneous tuples (indexing them by an Int is type-stable); only the
-# heterogeneous look-backs peel vararg-style, carrying the window index w
-# alongside.
-function rollsegmentrunning!(vals::Tuple, buffer::Vector{R},
-    winheads::Vector{Int}, lnt::NamedTuple, i::Int,
-    snt::NamedTuple, spos::Int, sdone::Bool,
-    lookbacks::Tuple, keynames::Val{KN},
-    stateprotos::S, rgroups::G, outs::Val,
-    emptyrow) where {R,KN,S<:Tuple,G<:Tuple}
+# Per augmented row at time t: admit the summarized rows not after t (equal
+# times included, so every row tied at t is in before any row at t is emitted)
+# into every tier; advance each window's eviction head past the rows older than
+# its look-back, downdating them out of the running tier; then emit each window
+# from the three tiers' states for the row's key.
+function rollsegment!(vals::Tuple, tiers::RollTiers{R}, lnt::NamedTuple, i::Int,
+    snt::NamedTuple, spos::Int, sdone::Bool, lookbacks::Tuple,
+    keynames::Val, outs::Val, emptyrow) where {R}
     n = length(lnt.time)
     slen = length(snt.time)
+    # One refold state tuple for the whole segment: every window of every row
+    # folds into it and `summaryvalues` copies the result out before it is
+    # zeroed again, so re-folding allocates per segment, not per row.
+    scratch = map(fresh, tiers.refoldprotos)
     while i <= n
         t = @inbounds lnt.time[i]
         while spos <= slen && @inbounds(snt.time[spos]) <= t
-            row = rowat(R, snt, spos)
-            push!(buffer, row)
-            # A row already outside a short window still enters its group;
-            # the eviction sweep below downdates it right back out, keeping
-            # the invariant that window w's groups hold exactly the rows in
-            # buffer[winheads[w]:end], per key.
-            admitrunning!(row, keynames, stateprotos, rgroups)
+            admitroll!(tiers, rowat(R, snt, spos), keynames)
             spos += 1
         end
         spos > slen && !sdone && return (i, spos, true)
-        evictrunning!(t, buffer, winheads, keynames, rgroups, 1, lookbacks...)
+        # Times are non-decreasing, so a row outside a window now is outside it
+        # forever. A row admitted already outside a short window enters its
+        # running group and is downdated right back out here.
+        evictroll!(t, tiers, tiers.buffer, keynames, 1, lookbacks...)
+        # Compacting here rather than once per chunk keeps the buffer at the
+        # window's size instead of the chunk's, which is what its growth costs.
+        compactbuffer!(tiers.buffer, tiers.winheads)
         k = keyat(lnt, i, keynames)
-        for w in 1:length(vals)
-            g = get(rgroups[w], k, nothing)
-            v = vals[w]
-            @inbounds v[i] = g === nothing ? emptyrow :
-                             summaryvalues(g.states, outs)
-        end
+        tr = keytree(tiers.trees, k)
+        scratch, minlo = emitroll!(vals, i, t, k, tiers, tr, scratch, keynames,
+            outs, emptyrow, typemax(Int), 1, lookbacks...)
+        advancetree!(tr, minlo)
         i += 1
     end
     return (i, spos, false)
 end
 
-@inline function admitrunning!(row, keynames::Val, stateprotos::Tuple,
-    rgroups::Tuple)
-    for w in 1:length(rgroups)
-        g = get!(() -> RunningGroup(map(fresh, stateprotos), 0), rgroups[w],
-            keyvalues(row, keynames))
-        updateall!(g.states, row)
-        g.live += 1
+@inline function admitroll!(tiers::RollTiers, row, keynames::Val)
+    pushrow!(tiers.buffer, row)
+    k = keyvalues(row, keynames)
+    admitrunning!(tiers.running, tiers.runprotos, k, row)
+    admittree!(tiers.trees, tiers.treeprotos, k, row)
+    return nothing
+end
+
+# The per-window tables are a homogeneous tuple, so indexing it by an Int is
+# type-stable.
+@inline admitrunning!(::Nothing, stateprotos, k, row) = nothing
+@inline function admitrunning!(tables::Tuple, stateprotos::Tuple, k, row)
+    for w in 1:length(tables)
+        admitgroup!(tables[w], stateprotos, k, row)
     end
     return nothing
 end
 
-# One window per recursion step, peeling the look-backs with the window
-# index in tow. Deleting a group when its last row leaves keeps the dicts
-# bounded by the keys currently in some window, and makes "absent key" mean
-# "empty window" for the emission above.
-@inline evictrunning!(t, buffer::Vector, winheads::Vector{Int}, keynames::Val,
-    rgroups::Tuple, w::Int) = nothing
-@inline function evictrunning!(t, buffer::Vector, winheads::Vector{Int},
-    keynames::Val, rgroups::Tuple, w::Int, lb,
-    rest...)
-    d = rgroups[w]
-    head = @inbounds winheads[w]
+@inline admittree!(::Nothing, stateprotos, k, row) = nothing
+@inline admittree!(trees::Dict{K,SegTree{S,R,T}}, stateprotos::S, k,
+    row) where {K,S,R,T} =
+    treepush!(get!(() -> newsegtree(stateprotos, R, T), trees, k), stateprotos,
+        row)
+
+# One window per recursion step, peeling the (possibly heterogeneous)
+# look-backs with the window index in tow.
+@inline evictroll!(t, tiers::RollTiers, ::Nothing, keynames::Val, w::Int,
+    lookbacks...) = nothing
+@inline evictroll!(t, tiers::RollTiers, buffer::Vector, keynames::Val,
+    w::Int) = nothing
+@inline function evictroll!(t, tiers::RollTiers, buffer::Vector, keynames::Val,
+    w::Int, lb, rest...)
+    head = @inbounds tiers.winheads[w]
     while head <= length(buffer) && t - @inbounds(buffer[head]).time > lb
-        row = @inbounds buffer[head]
-        k = keyvalues(row, keynames)
-        g = d[k]
-        downdateall!(g.states, row)
-        g.live -= 1
-        g.live == 0 && delete!(d, k)
+        evictrunning!(tiers.running, w, @inbounds(buffer[head]), keynames)
         head += 1
     end
-    @inbounds winheads[w] = head
-    return evictrunning!(t, buffer, winheads, keynames, rgroups, w + 1,
-        rest...)
+    @inbounds tiers.winheads[w] = head
+    return evictroll!(t, tiers, buffer, keynames, w + 1, rest...)
 end
 
-# --- tree (monoid) kernel --------------------------------------------------
-#
-# The same protocol again, over per-key segment trees that own their rows —
-# the shared buffer goes unused. Each admitted row appends to its key's
-# tree; each output row binary-searches its window's start per look-back and
-# folds the suffix from O(log n) partial combinations. The row minimum of
-# the window starts then advances the tree's head: times are non-decreasing,
-# so a row older than every window is expired for good, and the tree drops
-# the prefix at its next rebuild.
-function rollsegmenttree!(vals::Tuple, trees::Dict{K,SegTree{S,R,T}},
-    lnt::NamedTuple, i::Int, snt::NamedTuple, spos::Int,
-    sdone::Bool, lookbacks::Tuple, keynames::Val{KN},
-    stateprotos::S, outs::Val,
-    emptyrow) where {K,S<:Tuple,R,T,KN}
-    n = length(lnt.time)
-    slen = length(snt.time)
-    while i <= n
-        t = @inbounds lnt.time[i]
-        while spos <= slen && @inbounds(snt.time[spos]) <= t
-            row = rowat(R, snt, spos)
-            tr = get!(() -> newsegtree(stateprotos, R, T), trees,
-                keyvalues(row, keynames))
-            treepush!(tr, stateprotos, row)
-            spos += 1
-        end
-        spos > slen && !sdone && return (i, spos, true)
-        k = keyat(lnt, i, keynames)
-        tr = get(trees, k, nothing)
-        if tr === nothing
-            for w in 1:length(vals)
-                v = vals[w]
-                @inbounds v[i] = emptyrow
-            end
-        else
-            minlo = emittree!(vals, i, t, tr, outs, emptyrow,
-                length(tr.rows) + 1, 1, lookbacks...)
-            tr.head = max(tr.head, minlo)
-        end
-        i += 1
-    end
-    return (i, spos, false)
+@inline evictrunning!(::Nothing, w::Int, row, keynames::Val) = nothing
+@inline evictrunning!(tables::Tuple, w::Int, row, keynames::Val) =
+    evictgroup!(tables[w], keyvalues(row, keynames), row)
+
+# A tier's states for one window: `()` when the call has no such tier, `nothing`
+# when the window holds no rows of the key, the state tuple otherwise.
+@inline keytree(::Nothing, k) = ()
+@inline keytree(trees::AbstractDict, k) = get(trees, k, nothing)
+
+@inline runningstates(::Nothing, w::Int, k) = ()
+@inline function runningstates(tables::Tuple, w::Int, k)
+    g = get(tables[w].groups, k, nothing)
+    return g === nothing ? nothing : g.states
 end
 
-@inline emittree!(vals::Tuple, i::Int, t, tr::SegTree, outs::Val, emptyrow,
-    minlo::Int, w::Int) = minlo
-@inline function emittree!(vals::Tuple, i::Int, t, tr::SegTree, outs::Val,
-    emptyrow, minlo::Int, w::Int, lb, rest...)
+# The window's first live row, searched with the rolling membership predicate
+# verbatim (segtree.jl's `windowstart`), and the borrowed query result.
+@inline treestates(::Tuple{}, t, lb) = ((), typemax(Int))
+@inline treestates(::Nothing, t, lb) = (nothing, typemax(Int))
+@inline function treestates(tr::SegTree, t, lb)
     lo = windowstart(tr.times, tr.head, t, lb)
     hi = length(tr.rows)
+    return (lo > hi ? nothing : treequery(tr, lo, hi)), lo
+end
+
+# The row minimum of the window starts advances the tree's head: a row older
+# than every window is expired for good, and the tree drops it at its next
+# rebuild.
+@inline advancetree!(tr, minlo::Int) = nothing
+@inline advancetree!(tr::SegTree, minlo::Int) = (tr.head = max(tr.head, minlo); nothing)
+
+# Fold the window's rows of key k, from its eviction head, into the zeroed
+# scratch — the rows past the head are exactly the window's. Returns the states
+# (or nothing, for no rows) and the scratch to thread on.
+@inline refoldstates(scratch::Tuple{}, buffer, winheads::Vector{Int}, w::Int, k,
+    keynames::Val) = ((), scratch)
+@inline function refoldstates(scratch::Tuple{Any,Vararg}, buffer::Vector,
+    winheads::Vector{Int}, w::Int, k, keynames::Val)
+    states = freshall!(scratch)
+    seen = false
+    for j in (@inbounds winheads[w]):length(buffer)
+        s = @inbounds buffer[j]
+        isequal(keyvalues(s, keynames), k) || continue
+        updateall!(states, s)
+        seen = true
+    end
+    return (seen ? states : nothing), states
+end
+
+# One window per recursion step. Every tier holds the same rows per key, so a
+# `nothing` from any of them is the empty window; otherwise the tiers' states
+# are merged back into topological order and summarized.
+@inline emitroll!(vals::Tuple, i::Int, t, k, tiers::RollTiers, tr, scratch,
+    keynames::Val, outs::Val, emptyrow, minlo::Int, w::Int) = (scratch, minlo)
+@inline function emitroll!(vals::Tuple, i::Int, t, k, tiers::RollTiers, tr,
+    scratch, keynames::Val, outs::Val, emptyrow, minlo::Int, w::Int, lb,
+    rest...)
+    rs = runningstates(tiers.running, w, k)
+    ts, lo = treestates(tr, t, lb)
+    fs, scratch = refoldstates(scratch, tiers.buffer, tiers.winheads, w, k,
+        keynames)
     v = vals[w]
-    @inbounds v[i] =
-        lo > hi ? emptyrow :
-        summaryvalues(treequery(tr, lo, hi), outs)
-    return emittree!(vals, i, t, tr, outs, emptyrow, min(minlo, lo), w + 1,
-        rest...)
+    if rs === nothing || ts === nothing || fs === nothing
+        @inbounds v[i] = emptyrow
+    else
+        @inbounds v[i] = summaryvalues(
+            mergestates(tiers.perm, (rs, ts, fs, tiers.derived)), outs)
+    end
+    return emitroll!(vals, i, t, k, tiers, tr, scratch, keynames, outs,
+        emptyrow, min(minlo, lo), w + 1, rest...)
 end
 
 # --- output assembly -------------------------------------------------------

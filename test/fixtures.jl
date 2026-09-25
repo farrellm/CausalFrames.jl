@@ -92,6 +92,94 @@ function CausalFrames.value(::TestVarState{C,N,M1,M2},
     return NamedTuple{(N,),Tuple{V}}((vals[M2] - vals[M1]^2,))
 end
 
+# A group summarizer whose state reports itself non-invertible once its column
+# widens to Float64. Every built-in accumulator stays invertible under
+# widening, so this is the only way to drive the window transforms' demotion
+# of an accumulator from the running tier to the tree. The output name rides in a type parameter, as the
+# interface requires for `value` to infer.
+struct FragileSum{C} <: GroupSummarizer end
+FragileSum(column::Symbol) = FragileSum{column}()
+mutable struct FragileSumState{C,N,T} <: SummarizerState
+    total::T
+end
+CausalFrames.emptyvalue(::FragileSum{C}) where {C} =
+    NamedTuple{(Symbol(C, :_fragile),)}((0,))
+CausalFrames.fresh(::FragileSum{C}, intypes::NamedTuple) where {C} =
+    FragileSumState{C,Symbol(C, :_fragile),intypes[C]}(zero(intypes[C]))
+CausalFrames.fresh(::FragileSumState{C,N,T}) where {C,N,T} =
+    FragileSumState{C,N,T}(zero(T))
+CausalFrames.update!(st::FragileSumState{C}, row) where {C} =
+    (st.total += getproperty(row, C); nothing)
+CausalFrames.downdate!(st::FragileSumState{C}, row) where {C} =
+    (st.total -= getproperty(row, C); nothing)
+CausalFrames.combine!(dest::FragileSumState, a, b) =
+    (dest.total = a.total + b.total; nothing)
+CausalFrames.value(st::FragileSumState{C,N,T}) where {C,N,T} =
+    NamedTuple{(N,),Tuple{T}}((st.total,))
+CausalFrames.widenstate(st::FragileSumState{C,N}, intypes::NamedTuple) where {C,N} =
+    FragileSumState{C,N,intypes[C]}(convert(intypes[C], st.total))
+CausalFrames.isinvertible(::FragileSumState{C,N,Float64}) where {C,N} = false
+
+# FragileSum's mirror: non-invertible while its column is Int, invertible once
+# it widens to Float64, so a widening *promotes* it from the tree to the running
+# tier — which no built-in does — and the running tier needs a buffer the
+# tree-only call never kept.
+struct LateSum{C} <: GroupSummarizer end
+LateSum(column::Symbol) = LateSum{column}()
+mutable struct LateSumState{C,N,T} <: SummarizerState
+    total::T
+end
+CausalFrames.emptyvalue(::LateSum{C}) where {C} =
+    NamedTuple{(Symbol(C, :_late),)}((0,))
+CausalFrames.fresh(::LateSum{C}, intypes::NamedTuple) where {C} =
+    LateSumState{C,Symbol(C, :_late),intypes[C]}(zero(intypes[C]))
+CausalFrames.fresh(::LateSumState{C,N,T}) where {C,N,T} = LateSumState{C,N,T}(zero(T))
+CausalFrames.update!(st::LateSumState{C}, row) where {C} =
+    (st.total += getproperty(row, C); nothing)
+CausalFrames.downdate!(st::LateSumState{C}, row) where {C} =
+    (st.total -= getproperty(row, C); nothing)
+CausalFrames.combine!(dest::LateSumState, a, b) =
+    (dest.total = a.total + b.total; nothing)
+CausalFrames.value(st::LateSumState{C,N,T}) where {C,N,T} =
+    NamedTuple{(N,),Tuple{T}}((st.total,))
+CausalFrames.widenstate(st::LateSumState{C,N}, intypes::NamedTuple) where {C,N} =
+    LateSumState{C,N,intypes[C]}(convert(intypes[C], st.total))
+CausalFrames.isinvertible(::LateSumState{C,N,Int}) where {C,N} = false
+
+# A dependent spanning every window tier: its dependencies are a group (Sum,
+# running), a monoid (Product, tree) and a plain summarizer (Opaque(Sum) under
+# its own name, re-fold), and its own state is fieldless, so it sits in no tier
+# and reads all three at emission.
+struct TierSpan{C} <: Summarizer end
+TierSpan(column::Symbol) = TierSpan{column}()
+
+struct TierSpanState{C,N,S,P,Q} <: SummarizerState end
+
+# The re-fold dependency: Sum under another name, hidden from the structure.
+struct PlainSum{C} <: Summarizer end
+PlainSum(column::Symbol) = PlainSum{column}()
+CausalFrames.emptyvalue(::PlainSum{C}) where {C} =
+    NamedTuple{(Symbol(C, :_plainsum),)}((0,))
+CausalFrames.fresh(::PlainSum{C}, intypes::NamedTuple) where {C} =
+    CausalFrames.accumfresh(CausalFrames.ColumnTerm{C}(), Symbol(C, :_plainsum),
+        CausalFrames.sumtype(intypes[C]))
+
+CausalFrames.dependencies(::TierSpan{C}) where {C} =
+    (Sum(C), Product(C), PlainSum(C))
+CausalFrames.emptyvalue(::TierSpan{C}) where {C} =
+    NamedTuple{(Symbol(C, :_span),)}((missing,))
+CausalFrames.fresh(::TierSpan{C}, ::NamedTuple) where {C} =
+    TierSpanState{C,Symbol(C, :_span),Symbol(C, :_sum),Symbol(C, :_product),
+        Symbol(C, :_plainsum)}()
+CausalFrames.fresh(st::TierSpanState) = st
+CausalFrames.update!(::TierSpanState, row) = nothing
+function CausalFrames.value(::TierSpanState{C,N,S,P,Q},
+    vals::NamedTuple) where {C,N,S,P,Q}
+    V = Base.promote_op((s, p, q) -> s + p - 2q, fieldtype(typeof(vals), S),
+        fieldtype(typeof(vals), P), fieldtype(typeof(vals), Q))
+    return NamedTuple{(N,),Tuple{V}}((vals[S] + vals[P] - 2 * vals[Q],))
+end
+
 # A test-local summarizer that depends on itself, for cycle detection.
 struct Loopy <: Summarizer end
 CausalFrames.dependencies(::Loopy) = (Loopy(),)

@@ -16,7 +16,7 @@ export Context, CausalFrame, CausalPipeline, load, stream, scan, context,
     sortcycles,
     forwardfill, fillmissing,
     Summarizer, MonoidSummarizer, GroupSummarizer, SummarizerState,
-    Count, CountDistinct, Sum, SumPower, Moment, Product,
+    Count, CountDistinct, Sum, SumPower, AgeWeightedSum, Moment, Product,
     DotProduct, Mean, Variance, Std, Covariance, Correlation,
     LinearRegression, Min, Max,
     First, Last, FitModel, FittedModel, summarize, summarizecycles,
@@ -40,6 +40,7 @@ include("lastrow.jl")
 include("sortcycles.jl")
 include("fill.jl")
 include("segtree.jl")
+include("tiers.jl")
 include("rolling.jl")
 include("intervalize.jl")
 include("windows.jl")
