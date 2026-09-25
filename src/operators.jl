@@ -229,13 +229,37 @@ function readcsv(path::AbstractString; types = nothing, time = nothing,
                 concrete type via `types`, or a `time` function to produce it"))
     end
     return CausalPipeline() do ctx::Context
-        return ChunkSource(
-            CSVProducer{timetype(ctx)}(String(path), Int(chunkbytes),
-                ctx.start, ctx.stop, types, time, rename, delim, sort, closed,
-                skipmissing),
-        )
+        clip = SourceClip(ctx, path, "CSV file", time, rename, closed,
+            skipmissing)
+        return ChunkSource(CSVProducer(clip, Int(chunkbytes), types, delim, sort))
     end
 end
+
+# The configuration and running state every file source shares, and the one
+# argument `clipchunk!` and `gatherchunk!` take: where the rows come from
+# (`path`, and `what` it is, for messages), how `:time` is resolved (`time`,
+# `rename`), which rows are kept (`closed`, `skipmissing`, the window), and —
+# carried across chunks — the last raw time seen, for the cross-chunk order
+# check, and whether the stream is done. A new file-source keyword that bears
+# on the clip is a field here. The dynamically typed fields are per-chunk setup
+# state; the per-row work sits behind `clipchunk!`'s function barriers.
+mutable struct SourceClip{T}
+    const path::String
+    const what::String  # the format, for messages: "CSV file", "parquet file", …
+    const time::Any     # Nothing | Symbol (column name) | Function (row -> time)
+    const rename::Any   # Nothing | AbstractDict/map | Function (name -> name)
+    const closed::Bool
+    const skipmissing::Bool
+    const start::T
+    const stop::T
+    prevtime::Any       # last raw time seen, for cross-chunk sortedness
+    done::Bool          # a time past the window was seen, or the input ended
+end
+
+SourceClip(ctx::Context{T}, path::AbstractString, what::String, time, rename,
+    closed::Bool, skipmissing::Bool) where {T} =
+    SourceClip{T}(String(path), what, time, rename, closed, skipmissing,
+        ctx.start, ctx.stop, nothing, false)
 
 # The stateful producer behind readcsv's ChunkSource. The pull-to-pull state
 # lives in fields rather than captured locals (captured variables that are
@@ -243,25 +267,16 @@ end
 # state, not per-row state — the per-row `time` function runs behind a
 # function barrier (`maptime`).
 mutable struct CSVProducer{T}
-    const path::String
+    const clip::SourceClip{T}
     const chunkbytes::Int
-    const start::T
-    const stop::T
     const types::Any    # CSV.Chunks `types` argument, or nothing
-    const time::Any     # Nothing | Symbol (column name) | Function (row -> time)
-    const rename::Any   # Nothing | AbstractDict/map | Function (name -> name)
     const delim::Any    # CSV.Chunks `delim` argument, or nothing
     const sort::Bool
-    const closed::Bool
-    const skipmissing::Bool
     chunks::Any         # PullCursor over the file chunks, created on first pull
-    prevtime::Any       # last raw time seen, for cross-chunk sortedness
-    done::Bool
-    CSVProducer{T}(path, chunkbytes, start, stop, types, time, rename,
-        delim, sort, closed, skipmissing) where {T} =
-        new{T}(path, chunkbytes, start, stop, types, time, rename, delim, sort,
-            closed, skipmissing, nothing, nothing, false)
 end
+CSVProducer(clip::SourceClip{T}, chunkbytes::Int, types, delim,
+    sort::Bool) where {T} =
+    CSVProducer{T}(clip, chunkbytes, types, delim, sort, nothing)
 
 # The user's `types` (or nothing) as a CSV.jl per-column `types` function that
 # defaults every unspecified column to `String` — so nothing is ever inferred.
@@ -304,65 +319,61 @@ end
 # typed rows of the column table, so `f` specializes and the eltype is inferred.
 maptime(f, nt::NamedTuple) = map(f, Tables.rows(nt))
 
+tochunk(filechunk) = filechunk isa DataFrame ? filechunk : DataFrame(filechunk)
+
 function (p::CSVProducer{T})() where {T}
-    p.done && return nothing
-    p.chunks === nothing &&
-        (p.chunks = PullCursor(csvchunks(p.path, p.chunkbytes, p.types, p.delim)))
+    clip = p.clip
+    clip.done && return nothing
     if p.sort
-        p.done = true
+        clip.done = true
         kept = DataFrame[]
-        for filechunk in p.chunks.iter
-            df = filechunk isa DataFrame ? filechunk : DataFrame(filechunk)
-            gatherchunk!(kept, df, p.time, p.rename, p.path, "CSV file",
-                p.closed, p.skipmissing, p.start, p.stop)
+        for filechunk in csvchunks(clip.path, p.chunkbytes, p.types, p.delim)
+            gatherchunk!(kept, clip, tochunk(filechunk))
         end
         return sortgathered(kept, T)
     end
-    while true
+    p.chunks === nothing &&
+        (p.chunks = PullCursor(csvchunks(clip.path, p.chunkbytes, p.types, p.delim)))
+    while !clip.done
         filechunk = pull!(p.chunks)
-        if filechunk === nothing
-            p.done = true
-            return nothing
-        end
-        df = filechunk isa DataFrame ? filechunk : DataFrame(filechunk)
-        clipped, sawstop, p.prevtime = clipchunk!(df, p.time, p.rename, p.path,
-            "CSV file", p.prevtime, p.closed, p.skipmissing, p.start, p.stop)
-        sawstop && (p.done = true)
-        nrow(clipped) > 0 && return clipped
-        p.done && return nothing
+        filechunk === nothing && break
+        out = clipchunk!(clip, tochunk(filechunk))
+        out === nothing || return out
     end
+    clip.done = true
+    return nothing
 end
 
 # Shared by the file sources: rename the columns, materialize `:time`, drop (or
 # refuse) the rows whose time is missing, check sortedness within the chunk and
 # against the last time of the previous one, clip to [start, stop) (or
 # [start, stop] when closed), and convert `:time` to the context's time type.
-# `what` names the format in error messages. Returns the clipped chunk (which
-# may have no rows), whether a time past the window was seen (the source is then
-# done), and the last raw time of this chunk, to be carried to the next call.
-function clipchunk!(df::DataFrame, time, rename, path::String, what::String,
-    prevtime, closed::Bool, skipmissing::Bool, start::T, stop::T) where {T}
-    renamecolumns!(df, rename)
-    resolvetime!(df, time, path, what)
+# Returns the clipped chunk, or nothing when no row is in the window; a time
+# past the window marks the clip done, which ends the source.
+function clipchunk!(clip::SourceClip{T}, df::DataFrame) where {T}
+    what, path = clip.what, clip.path
+    renamecolumns!(df, clip.rename)
+    resolvetime!(df, clip.time, path, what)
     # Missing rows are folded into the clip's row index rather than deleted
     # first, so a chunk holding some costs one copy of its in-window rows.
-    present = presentrows(df.time, skipmissing, what, path)
+    present = presentrows(df.time, clip.skipmissing, what, path)
     times = present === nothing ? df.time : view(df.time, present)
     issorted(times) || throw(ArgumentError(unordered(what, path)))
     if !isempty(times)
-        prevtime !== nothing && first(times) < prevtime &&
+        clip.prevtime !== nothing && first(times) < clip.prevtime &&
             throw(ArgumentError(unordered(what, path)))
-        prevtime = last(times)
+        clip.prevtime = last(times)
     end
-    lo, hi = windowbounds(times, closed, start, stop)
-    sawstop = hi < length(times)   # saw a time past the window
+    lo, hi = windowbounds(times, clip.closed, clip.start, clip.stop)
+    hi < length(times) && (clip.done = true)   # saw a time past the window
+    hi < lo && return nothing
     # The chunk is freshly materialized and owned, so a clip that keeps every
     # row needs no copy.
     clipped =
         present !== nothing ? df[present[lo:hi], :] :
         lo == 1 && hi == nrow(df) ? df : df[lo:hi, :]
     clipped[!, :time] = convert(Vector{T}, clipped.time)
-    return (clipped, sawstop, prevtime)
+    return clipped
 end
 
 # `clipchunk!`'s counterpart for a source asked to `sort`, shared by readcsv and
@@ -370,11 +381,12 @@ end
 # not the file's promise, so there is no order check, no binary search and no
 # early stop — the in-window rows are found by a scan and pushed onto `kept`
 # (when there are any), to be sorted once the file is exhausted.
-function gatherchunk!(kept::Vector{DataFrame}, df::DataFrame, time, rename,
-    path::String, what::String, closed::Bool, skipmissing::Bool, start, stop)
-    renamecolumns!(df, rename)
-    resolvetime!(df, time, path, what)
-    present = presentrows(df.time, skipmissing, what, path)
+function gatherchunk!(kept::Vector{DataFrame}, clip::SourceClip, df::DataFrame)
+    what, path = clip.what, clip.path
+    renamecolumns!(df, clip.rename)
+    resolvetime!(df, clip.time, path, what)
+    present = presentrows(df.time, clip.skipmissing, what, path)
+    closed, start, stop = clip.closed, clip.start, clip.stop
     rows =
         present === nothing ? windowrows(df.time, closed, start, stop) :
         present[windowrows(view(df.time, present), closed, start, stop)]

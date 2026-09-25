@@ -13,8 +13,8 @@ using DuckDB
 using Tables
 
 using CausalFrames:
-    ChunkSink, Context, PullCursor, clipchunk!, gatherchunk!, pull!,
-    sortgathered, timesourcename, timetype
+    ChunkSink, PullCursor, SourceClip, clipchunk!, gatherchunk!, pull!,
+    sortgathered, timesourcename
 
 CausalFrames.backendloaded(::Val{:duckdb}) = true
 
@@ -39,47 +39,30 @@ end
 # typed fields are per-chunk setup state, not per-row state — the per-row
 # `time` function runs behind a function barrier (`maptime`, via `clipchunk!`).
 mutable struct ParquetProducer{T}
-    const path::String
-    const start::T
-    const stop::T
-    const time::Any     # Nothing | Symbol (column name) | Function (row -> time)
-    const rename::Any   # Nothing | AbstractDict/map | Function (name -> name)
+    const clip::SourceClip{T}
     const sort::Bool
-    const closed::Bool
-    const skipmissing::Bool
     gather::Bool        # sort in Julia, the query being unable to
     con::Any            # DuckDB connection, opened on first pull
     parts::Any          # PullCursor over the result chunks
-    prevtime::Any       # last raw time seen, for cross-chunk sortedness
-    done::Bool
-    ParquetProducer{T}(path, start, stop, time, rename, sort, closed,
-        skipmissing) where {T} =
-        new{T}(path, start, stop, time, rename, sort, closed, skipmissing, false,
-            nothing, nothing, nothing, false)
 end
 
-CausalFrames.parquetproducer(::Val{:duckdb}, ctx::Context, path::AbstractString,
-    time, rename, sort::Bool, closed::Bool, skipmissing::Bool) =
-    ParquetProducer{timetype(ctx)}(String(path), ctx.start, ctx.stop, time, rename,
-        sort, closed, skipmissing)
+CausalFrames.parquetproducer(::Val{:duckdb}, clip::SourceClip{T},
+    sort::Bool) where {T} =
+    ParquetProducer{T}(clip, sort, false, nothing, nothing)
 
-function (p::ParquetProducer{T})() where {T}
-    p.done && return nothing
+function (p::ParquetProducer)()
+    clip = p.clip
+    clip.done && return nothing
     p.parts === nothing && startquery!(p)
     p.gather && return gatherread!(p)
-    while true
+    while !clip.done
         chunk = pull!(p.parts)
-        if chunk === nothing
-            p.done = true
-            return nothing
-        end
-        clipped, sawstop, p.prevtime = clipchunk!(DataFrame(chunk), p.time,
-            p.rename, p.path, "parquet file", p.prevtime, p.closed,
-            p.skipmissing, p.start, p.stop)
-        sawstop && (p.done = true)
-        nrow(clipped) > 0 && return clipped
-        p.done && return nothing
+        chunk === nothing && break
+        out = clipchunk!(clip, DataFrame(chunk))
+        out === nothing || return out
     end
+    clip.done = true
+    return nothing
 end
 
 # Open the connection and start the streaming scan. The window is pushed down
@@ -92,18 +75,19 @@ end
 # that name, which shadows it (names are case-insensitive in SQL). Without a
 # nameable time column or a usable tiebreak, the rows are sorted in Julia.
 function startquery!(p::ParquetProducer)
+    clip = p.clip
     p.con = connection()
-    filenames = columnnames(p.con, p.path)
-    src = timesourcename(filenames, p.time, p.rename)
+    filenames = columnnames(p.con, clip.path)
+    src = timesourcename(filenames, clip.time, clip.rename)
     p.gather =
         p.sort &&
         (src === nothing || any(n -> lowercase(n) == "file_row_number", filenames))
     res = if src === nothing
-        execstream(p.con, "SELECT * FROM read_parquet(?)", Any[p.path])
+        execstream(p.con, "SELECT * FROM read_parquet(?)", Any[clip.path])
     else
         col = "\"" * replace(src, "\"" => "\"\"") * "\""
         order = p.sort && !p.gather ? " ORDER BY $col, file_row_number" : ""
-        upper = p.closed ? "<=" : "<"
+        upper = clip.closed ? "<=" : "<"
         # The WHERE drops null times along with the rest of the outside, so
         # without `skipmissing` they go unreported here. An `OR $col IS NULL`
         # to surface them costs the row-group skip (see
@@ -111,12 +95,12 @@ function startquery!(p::ParquetProducer)
         try
             execstream(p.con,
                 "SELECT * FROM read_parquet(?) WHERE $col >= ? AND $col $upper ?$order",
-                Any[p.path, p.start, p.stop])
+                Any[clip.path, clip.start, clip.stop])
         catch
             # A time type DuckDB cannot bind, or cannot compare against this
             # column: read the whole file and let the clip do the work. A
             # genuinely unreadable file fails again below, with its own error.
-            execstream(p.con, "SELECT * FROM read_parquet(?)$order", Any[p.path])
+            execstream(p.con, "SELECT * FROM read_parquet(?)$order", Any[clip.path])
         end
     end
     p.parts = PullCursor(Tables.partitions(res))
@@ -126,11 +110,10 @@ end
 # The `sort = true` read the query could not sort: every result chunk is
 # scanned for its in-window rows, which are sorted once, into a single chunk.
 function gatherread!(p::ParquetProducer{T}) where {T}
-    p.done = true
+    p.clip.done = true
     kept = DataFrame[]
     for chunk in p.parts.iter
-        gatherchunk!(kept, DataFrame(chunk), p.time, p.rename, p.path,
-            "parquet file", p.closed, p.skipmissing, p.start, p.stop)
+        gatherchunk!(kept, p.clip, DataFrame(chunk))
     end
     return sortgathered(kept, T)
 end

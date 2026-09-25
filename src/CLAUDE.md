@@ -28,9 +28,11 @@ design rationale and performance constraints behind each module.
   curried (`filterrows(pred)` returns `CausalPipeline -> CausalPipeline`)
   so both chain with `|>`; row functions run over concretely typed column
   table rows behind a per-chunk function barrier, never `DataFrameRow`s.
-  - shared with the parquet and JLS operators: `clipchunk!` (rename, resolve
-    `:time`, missing times via `table.jl`'s `presentrows` barrier, sortedness,
-    clip, convert) and the `ChunkSink` background writer. `sinkchunk` queues
+  - shared with the parquet and JLS operators: `SourceClip` (every file
+    source's clip options, window, carried `prevtime` and `done` flag — the one
+    argument besides the chunk), `clipchunk!` (rename, resolve `:time`, missing
+    times via `table.jl`'s `presentrows` barrier, sortedness, clip, convert) and
+    the `ChunkSink` background writer. `sinkchunk` queues
     the chunk for the writer and passes downstream `DataFrame(c; copycols =
     false)`, a private index over the same vectors: consumers may mutate a
     chunk's column index, but no operator mutates a column vector in place, so

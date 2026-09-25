@@ -79,58 +79,47 @@ first time past the window; there is no index, so a read costs the file up to
 """
 function readjls(path::AbstractString; closed::Bool = false)
     return CausalPipeline() do ctx::Context
-        return ChunkSource(
-            JLSProducer{timetype(ctx)}(String(path), ctx.start, ctx.stop,
-                closed),
-        )
+        # a written stream's times are resolved and never missing: no `time`,
+        # `rename` or `skipmissing` to take
+        clip = SourceClip(ctx, path, "jls file", nothing, nothing, closed, false)
+        return ChunkSource(JLSProducer(clip))
     end
 end
 
 # The stateful producer behind readjls's ChunkSource, in CSVProducer's shape:
 # the pull-to-pull state lives in fields rather than reassigned closure
-# captures (which would be boxed). `prevtime` is dynamically typed, but it is
-# per-chunk setup state; the per-row work is clipchunk!'s.
+# captures (which would be boxed); the per-row work is clipchunk!'s.
 mutable struct JLSProducer{T}
-    const path::String
-    const start::T
-    const stop::T
-    const closed::Bool
+    const clip::SourceClip{T}
     io::Union{Nothing,IOStream}   # opened on the first pull
-    prevtime::Any                 # last raw time seen, for cross-chunk order
-    done::Bool
-    JLSProducer{T}(path, start, stop, closed) where {T} =
-        new{T}(path, start, stop, closed, nothing, nothing, false)
 end
+JLSProducer(clip::SourceClip{T}) where {T} = JLSProducer{T}(clip, nothing)
 
-function (p::JLSProducer{T})() where {T}
-    p.done && return nothing
-    p.io === nothing && (p.io = openjls(p.path))
+function (p::JLSProducer)()
+    clip = p.clip
+    clip.done && return nothing
+    p.io === nothing && (p.io = openjls(clip.path))
     io = p.io::IOStream
-    while true
-        if eof(io)
-            finishjls!(p)
-            return nothing
-        end
-        df = readrecord(io, p.path)
+    while !clip.done && !eof(io)
+        df = readrecord(io, clip.path)
         df isa DataFrame || (
             finishjls!(p);
             throw(
                 ArgumentError(
-                    "jls file $(p.path) holds a $(typeof(df)) record where a chunk was expected",
+                    "jls file $(clip.path) holds a $(typeof(df)) record where a chunk was expected",
                 ),
             )
         )
-        # a written stream's times are never missing: no skipmissing to take
-        clipped, sawstop, p.prevtime = clipchunk!(df, nothing, nothing, p.path,
-            "jls file", p.prevtime, p.closed, false, p.start, p.stop)
-        sawstop && finishjls!(p)
-        nrow(clipped) > 0 && return clipped
-        p.done && return nothing
+        out = clipchunk!(clip, df)
+        clip.done && finishjls!(p)
+        out === nothing || return out
     end
+    finishjls!(p)
+    return nothing
 end
 
 function finishjls!(p::JLSProducer)
-    p.done = true
+    p.clip.done = true
     p.io === nothing || close(p.io)
     return nothing
 end

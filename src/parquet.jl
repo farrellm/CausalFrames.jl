@@ -41,8 +41,7 @@ end
 
 # Backend hooks. The extensions' methods are more specific than these, so the
 # fallbacks only ever run when the backend is not loaded.
-parquetproducer(::Val, ::Any, ::Any, ::Any, ::Any, ::Any, ::Any, ::Any) =
-    throw(ArgumentError(READHINT))
+parquetproducer(::Val, ::Any, ::Any) = throw(ArgumentError(READHINT))
 parquetsink(::Val, ::Any, ::Any, ::Any, ::Any) = throw(ArgumentError(WRITEHINT))
 
 """
@@ -88,10 +87,11 @@ function readparquet(path::AbstractString; time = nothing, rename = nothing,
     checksourcetimespec(time, "readparquet")
     resolvebackend(backend, :duckdb, READHINT)   # eager: fail at the call site
     return CausalPipeline() do ctx::Context
+        clip = SourceClip(ctx, path, "parquet file", time, rename, closed,
+            skipmissing)
         return ChunkSource(
-            parquetproducer(resolvebackend(backend, :duckdb,
-                READHINT), ctx, String(path), time, rename, sort, closed,
-                skipmissing),
+            parquetproducer(resolvebackend(backend, :duckdb, READHINT), clip,
+                sort),
         )
     end
 end
