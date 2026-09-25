@@ -29,6 +29,8 @@
     tr = CausalFrames.newsegtree(stateprotos, R, Int64)
     rows = R[]
     t = 0
+    # one assertion per walk, naming every (lo, hi) query that disagreed
+    bad = Tuple{Int,Int}[]
     for i in 1:100
         t += steps[i]
         row = (time = t, x = xs[i])
@@ -36,10 +38,11 @@
         CausalFrames.treepush!(tr, stateprotos, row)
         lo = 1 + picks[2i-1] % i
         hi = lo + picks[2i] % (i - lo + 1)
-        @test queryvals(tr, lo, hi) == naive(rows[lo:hi])
-        @test queryvals(tr, i, i) == naive(rows[i:i])
-        @test queryvals(tr, 1, i) == naive(rows)
+        for (a, b) in ((lo, hi), (i, i), (1, i))
+            queryvals(tr, a, b) == naive(rows[a:b]) || push!(bad, (a, b))
+        end
     end
+    @test isempty(bad)
     @test @inferred(CausalFrames.treequery(tr, 1, length(rows))) isa Tuple
 
     # The query accumulators are the tree's own scratch, so the cost of a
@@ -85,6 +88,7 @@
     tr = CausalFrames.newsegtree(stateprotos, R, Int64)
     rows = R[]
     swapped = 0
+    bad = Tuple{Int,Int,Int}[]
     for step in 1:80
         before, nodes0 = length(tr.rows), tr.nodes
         k = runs[step] + 1
@@ -100,11 +104,13 @@
         CausalFrames.treesync!(tr)
         off = length(rows) - n
         for lo in tr.head:n
-            @test queryvals(tr, lo, n) == naive(rows[(off+lo):end])
-            @test queryvals(tr, tr.head, lo) ==
-                  naive(rows[(off+tr.head):(off+lo)])
+            queryvals(tr, lo, n) == naive(rows[(off+lo):end]) ||
+                push!(bad, (step, lo, n))
+            queryvals(tr, tr.head, lo) == naive(rows[(off+tr.head):(off+lo)]) ||
+                push!(bad, (step, tr.head, lo))
         end
     end
+    @test isempty(bad)
     @test swapped > 0
 
     # windowstart uses the kernel's exact membership predicate

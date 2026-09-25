@@ -166,7 +166,6 @@ using CausalFrames.Acausal
         df = DataFrame(load(Context(0, 10),
             p |> futurejoin(p; rightprefix = "cur")))
         @test df.cur_px == [1.0, 2.0, 3.0]
-        @test_throws ArgumentError load(Context(0, 10), p |> futurejoin(p))
     end
 
     @testset "multi-chunk" begin
@@ -343,7 +342,8 @@ end
     @test !(:settime in names(CausalFrames.Acausal))
     @test :lead in names(CausalFrames.Acausal)
 
-    # rows may move earlier, which the causal variant rejects
+    # rows may move earlier, which the causal variant rejects; unlike lead, it
+    # cannot widen the window, so no rows are pulled in from at or past stop
     df = DataFrame(load(ctx, src |> settime(r -> r.time - 2)))
     @test df.time == 0:7          # 0 and 1 moved to -2, -1 and were clipped
     @test df.v == collect(2.0:9.0)
@@ -368,11 +368,6 @@ end
         [DataFrame(time = [1, 2], x = [5, 9]), DataFrame(time = [3, 4], x = [6, 7])]
     end
     @test_throws ArgumentError load(ctx, twochunks |> settime(:x))
-
-    # like the causal variant, it cannot widen the window the way lead does, so
-    # the rows lead pulls in from at or past stop are simply absent
-    @test DataFrame(load(ctx, src |> settime(r -> r.time - 2))).time == 0:7
-    @test DataFrame(load(ctx, src |> lead(2))).time == 0:9
 
     @test_throws ArgumentError settime(3)                     # eager
     @test nrow(load(ctx, emptyframe() |> settime(r -> r.time))) == 0

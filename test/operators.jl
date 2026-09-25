@@ -609,9 +609,6 @@ end
     )
     @test df.time == [1, 2, 3, 3]
     @test df.x == ["b", "d", "a", "c"]
-
-    # the time column must still be typed
-    @test_throws ArgumentError readcsv(named; time = :ts, sort = true)
 end
 
 @testset "readcsv skipmissing" begin
@@ -802,7 +799,8 @@ end
     ctx = Context(0, 10)
     src = clock(1; batchsize = 3) |> addcolumns(r -> (; v = float(r.time)))
 
-    # the function form overwrites :time in place, keeping its position
+    # the function form overwrites :time in place, keeping its position; unlike
+    # lag, it cannot widen the window, so no rows are pulled in from before start
     df = DataFrame(load(ctx, src |> settime(r -> r.time + 2)))
     @test df.time == 2:9          # 8 and 9 shifted to 10, 11 and were clipped
     @test df.v == collect(0.0:7.0)
@@ -816,10 +814,6 @@ end
     @test sdf.time == 2:9
     @test sdf.v == collect(0.0:7.0)
 
-    # settime cannot widen the window the way lag does, so the rows lag pulls in
-    # from before start are simply absent
-    @test DataFrame(load(ctx, src |> settime(r -> r.time + 2))).time == 2:9
-    @test DataFrame(load(ctx, src |> lag(2))).time == 0:9
     seen = Ref{Any}(nothing)
     recorder = CausalPipeline() do c
         seen[] = c

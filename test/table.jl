@@ -6,8 +6,7 @@
         # the DataFrame path, and the generic path over columns and over rows
         for t in (df, Tables.columntable(copy(df)), Tables.rowtable(df))
             got = DataFrame(load(Context(2, 8), readtable(t)))
-            @test got == df[2:4, :]
-            @test names(got) == ["time", "x", "s"]
+            @test got == df[2:4, :]     # == compares names and their order too
             @test DataFrame(load(Context(2, 8), readtable(t; closed = true))) ==
                   df[2:5, :]
             got = DataFrame(load(Context(0.0, 100.0), readtable(t)))

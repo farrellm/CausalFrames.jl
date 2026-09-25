@@ -59,15 +59,12 @@ function windowsagree(a::DataFrame, b::DataFrame)
     nrow(a) == nrow(b) == 0 && return
     @test names(a) == names(b)
     (nrow(a) == nrow(b) && names(a) == names(b)) || return
-    for n in names(a)
-        x, y = a[!, n], b[!, n]
-        if nonmissingtype(eltype(x)) <: AbstractFloat ||
-           nonmissingtype(eltype(y)) <: AbstractFloat
-            @test all(map(windowsame, x, y))
-        else
-            @test isequal(x, y)
-        end
-    end
+    # one assertion for the columns, naming every one that disagreed
+    colagrees(x, y) =
+        nonmissingtype(eltype(x)) <: AbstractFloat ||
+        nonmissingtype(eltype(y)) <: AbstractFloat ?
+        all(map(windowsame, x, y)) : isequal(x, y)
+    @test isempty([n for n in names(a) if !colagrees(a[!, n], b[!, n])])
 end
 
 @testset "summarizewindows" begin
@@ -252,21 +249,14 @@ end
         end
     end
 
-    @testset "running agrees with re-fold" begin
-        for x in (intx, floatx), ss in (groupset, trackset), opts in layouts
-            windowsagree(windowed(mkdata(x), 11, ss; opts...),
-                windowed(mkdata(x), 11, map(Opaque, ss); opts...))
-        end
-    end
-
     @testset "tree and mixed tiers agree with re-fold" begin
-        # L = 40 spans eight ticks, so trees grow, rebuild and slide, and
-        # running groups empty and refill between ticks at L = 3
+        # L = 40 spans eight ticks, so trees grow, rebuild and slide; the
+        # oracle differential already covers every set at L = 3 and 11
         for x in (intx, floatx), ss in (monoidset, mixedset, plainset, spanset),
-            L in (3, 11, 40), opts in layouts
+            opts in layouts
 
-            windowsagree(windowed(mkdata(x), L, ss; opts...),
-                windowed(mkdata(x), L, map(Opaque, ss); opts...))
+            windowsagree(windowed(mkdata(x), 40, ss; opts...),
+                windowed(mkdata(x), 40, map(Opaque, ss); opts...))
         end
     end
 

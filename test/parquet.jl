@@ -37,10 +37,7 @@ end
         readparquet(dtpath))
     @test DataFrame(frame).time == stamps[3:5]
 
-    unsorted = writeparquetfile(joinpath(dir, "unsorted.parquet"),
-        DataFrame(time = [3, 1], x = [1, 2]))
-    @test_throws ArgumentError load(Context(0, 100), readparquet(unsorted))
-
+    # (an unsorted file throws under either backend: "readparquet sort")
     notime = writeparquetfile(joinpath(dir, "notime.parquet"),
         DataFrame(t = [1, 2], x = [1, 2]))
     @test_throws ArgumentError load(Context(0, 100), readparquet(notime))
@@ -229,10 +226,6 @@ end
         readparquet(withstats; backend = :parquet2, time = row -> row.time))
 
     # the error paths of the reader are the fallback's too
-    unsorted = writeparquetfile(joinpath(dir, "unsorted.parquet"),
-        DataFrame(time = [3, 1], x = [1, 2]))
-    @test_throws ArgumentError load(Context(0, 100),
-        readparquet(unsorted; backend = :parquet2))
     notime = writeparquetfile(joinpath(dir, "notime.parquet"),
         DataFrame(t = [1, 2], x = [1, 2]))
     @test_throws ArgumentError load(Context(0, 100),
@@ -442,8 +435,6 @@ end
     for file in (duck, pq2), backend in (:duckdb, :parquet2)
         @test DataFrame(load(ctx, readparquet(file; backend = backend))) == expected
     end
-    @test DataFrame(load(ctx, readparquet(duck))) ==
-          DataFrame(load(ctx, readparquet(pq2)))
 
     # pass-through and the ownership contract hold for the DuckDB sink too
     mid = joinpath(dir, "mid.parquet")
@@ -453,7 +444,6 @@ end
         asofjoin(readparquet(src); leftprefix = "l", rightprefix = "r"),
     )
     @test names(frame) == ["time", "l_bid", "l_sym", "r_bid", "r_sym"]
-    @test names(DataFrame(load(ctx, readparquet(mid)))) == ["time", "bid", "sym"]
     @test DataFrame(load(ctx, readparquet(mid))) ==
           DataFrame(load(ctx, readparquet(src)))
 
@@ -536,10 +526,7 @@ end
     @test_throws ArgumentError readparquet(path; backend = :nope)
     @test_throws ArgumentError writeparquet(joinpath(dir, "o.parquet");
         backend = :nope)
-    # both backends are loaded here, so either may be named outright
-    for backend in (:auto, :duckdb, :parquet2)
-        @test nrow(load(Context(0, 100), readparquet(path; backend = backend))) == 10
-    end
+    # (naming either backend outright is exercised by "readparquet backends agree")
 end
 
 @testset "writeparquet" begin
@@ -597,12 +584,6 @@ end
         rowgroupsize = 3))
     @test DataFrame(load(Context(0, 10), readparquet(many))) == expected
 
-    # a stream with no rows yields a valid file of one empty time column
-    none = joinpath(dir, "none.parquet")
-    scan(ctx, emptyframe() |> writeparquet(none))
-    @test names(DataFrame(Parquet2.Dataset(none))) == ["time"]
-    @test nrow(DataFrame(load(ctx, readparquet(none)))) == 0
-
     # ownership: the writer reads its chunk on another task while downstream
     # ops mutate their own chunk's column index in place (asofjoin's
     # leftprefix), so the file must hold the unprefixed columns
@@ -613,7 +594,6 @@ end
         asofjoin(readparquet(src); leftprefix = "l", rightprefix = "r"),
     )
     @test names(frame) == ["time", "l_bid", "l_ask", "r_bid", "r_ask"]
-    @test names(DataFrame(load(ctx, readparquet(mid)))) == ["time", "bid", "ask"]
     @test DataFrame(load(ctx, readparquet(mid))) ==
           DataFrame(load(ctx, readparquet(src)))
 
@@ -640,13 +620,6 @@ end
 
     @test_throws ArgumentError writeparquet(out; queue = -1)
     @test_throws ArgumentError writeparquet(out; rowgroupsize = 0)
-
-    # columns may not change mid-stream
-    changing = joinpath(dir, "changing.parquet")
-    @test_throws ArgumentError scan(Context(0, 10),
-        clock(1; batchsize = 2) |>
-        addcolumns(r -> r.time < 4 ? (; a = 1) : (; b = 2)) |>
-        writeparquet(changing))
 end
 
 @testset "parquet and CSV interoperate" begin

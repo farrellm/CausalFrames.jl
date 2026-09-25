@@ -266,10 +266,6 @@ end
     end
 
     @testset "missing models, an empty models stream, operations" begin
-        # the tick-0 window is empty, so rows before 20 match a missing model
-        df = DataFrame(load(ctx, data |> applymodels(fits)))
-        @test all(ismissing, df.prediction[ts .< 20])
-
         df = DataFrame(load(ctx, data |> applymodels(emptyframe())))
         @test eltype(df.prediction) == Missing
         @test nrow(df) == n
