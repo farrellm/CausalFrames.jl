@@ -88,6 +88,30 @@ Correlation
 LinearRegression
 ```
 
+## `Quantile`
+
+```@docs
+Quantile
+```
+
+## `Median`
+
+```@docs
+Median
+```
+
+## `PercentRank`
+
+```@docs
+PercentRank
+```
+
+## `SortedValues`
+
+```@docs
+CausalFrames.SortedValues
+```
+
 ## `Min`
 
 ```@docs

@@ -64,6 +64,19 @@ CausalFrames.fresh(o::Opaque, intypes::NamedTuple) =
 CausalFrames.dependencies(o::Opaque) =
     map(Opaque, CausalFrames.dependencies(o.inner))
 
+# Opaque's monoid counterpart: a group hidden down to a monoid, so its
+# accumulators take the window transforms' segment tree rather than the running
+# tier. It is the only way to put a built-in group's `combine!` under a window.
+struct AsMonoid{S<:Summarizer} <: MonoidSummarizer
+    inner::S
+end
+
+CausalFrames.emptyvalue(o::AsMonoid) = CausalFrames.emptyvalue(o.inner)
+CausalFrames.fresh(o::AsMonoid, intypes::NamedTuple) =
+    CausalFrames.fresh(o.inner, intypes)
+CausalFrames.dependencies(o::AsMonoid) =
+    map(AsMonoid, CausalFrames.dependencies(o.inner))
+
 # A test-local summarizer whose output column is illegally named :time.
 struct BadTime <: Summarizer end
 CausalFrames.emptyvalue(::BadTime) = (; time = 0)

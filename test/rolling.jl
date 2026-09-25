@@ -330,7 +330,11 @@ end
     mixedset = [Sum(:x), Min(:x), MinMax(:y), Product(:x)] # running + tree
     plainset = [Sum(:x), TestVar(:x), PlainSum(:y)]       # running + re-fold
     spanset = [TierSpan(:x), Mean(:y), Last(:y)]          # every tier at once
-    allsets = (groupset, trackset, monoidset, mixedset, plainset, spanset)
+    # the sorted accumulator and its dependents, PercentRank through Last
+    orderset = [Quantile(:x, [0.1, 0.5, 0.9]), Median(:x), PercentRank(:x),
+        Quantile(:y, [0.07, 0.25, 1.0]; interpolation = :nearestrank)]
+    allsets = (groupset, trackset, monoidset, mixedset, plainset, spanset,
+        orderset)
 
     @testset "differential against the re-fold oracle" begin
         for p in (intdata, floatdata), ss in allsets
@@ -346,7 +350,7 @@ end
         # missing in the summarized column — the counting states keep it on the
         # running path rather than demoting to the tree
         for p in (missingintdata, missingfloatdata),
-            ss in (groupset, trackset, mixedset, spanset)
+            ss in (groupset, trackset, mixedset, spanset, orderset)
 
             agrees(rolled(p, ss), rolled(p, map(Opaque, ss)))
             agrees(rolled(p, ss; key = :k),
@@ -354,8 +358,16 @@ end
         end
     end
 
+    @testset "the tree tier agrees with the running one" begin
+        # AsMonoid hides the groups down to monoids, so the sorted accumulator
+        # merges through the segment tree's combine! instead of sliding
+        for p in (intdata, floatdata, missingfloatdata), key in (nothing, :k)
+            agrees(rolled(p, orderset; key), rolled(p, map(AsMonoid, orderset); key))
+        end
+    end
+
     @testset "streaming agrees with loading" begin
-        for ss in (groupset, trackset, spanset)
+        for ss in (groupset, trackset, spanset, orderset)
             t = addrollingcolumns(windows, ss; key = :k)
             loaded = DataFrame(load(Context(0, 1000), intdata |> t))
             streamed = reduce(vcat,
@@ -421,6 +433,21 @@ end
         end
     end
 
+    @testset "order statistics recover in running mode" begin
+        # missing and NaN are counted, not stored, so either poisons only the
+        # windows holding its row
+        for bad in (NaN, missing)
+            p = onechunk(time = [1, 2, 3, 10],
+                y = Union{Missing,Float64}[1.0, 2.0, bad, 5.0])
+            df = DataFrame(
+                load(Context(0, 20),
+                    p |> addrollingcolumns((w2 = 2,), [Median(:y), PercentRank(:y)])),
+            )
+            @test isequal(df.w2_y_median, [1.0, 1.5, bad, 5.0])
+            @test isequal(df.w2_y_percentrank, [NaN, 1.0, bad, NaN])
+        end
+    end
+
     @testset "compensated sliding accuracy" begin
         # once the large value leaves the window, the compensation term is
         # all that remains — the naive running sum would emit 0.0, which not
@@ -481,6 +508,11 @@ end
         # no tier), then Mean's Count and Sum, Mean, and Last
         @test tiers(spanset, it) == (:running, :tree, :refold, :derived,
             :running, :running, :derived, :running)
+        # the sorted accumulator is a group, and so is Last beside it
+        @test tiers([PercentRank(:x), Quantile(:x, 0.5)], it) ==
+              (:running, :running, :derived, :derived)
+        @test tiers(map(AsMonoid, [PercentRank(:x)]), it) ==
+              (:tree, :tree, :derived)
         # Last is a group, so beside Mean the whole call slides
         @test tiers([Last(:x), Mean(:x)], it) ==
               (:running, :running, :running, :derived)
@@ -534,7 +566,7 @@ end
         end
         for ss in ([Sum(:x), Mean(:x), Last(:x), Min(:x), CountDistinct(:x),
             AgeWeightedSum(:x)], [Product(:x)], [PlainSum(:x)],
-            spanset)
+            spanset, orderset)
 
             @test rollallocs(ss, 8000) - rollallocs(ss, 2000) < 200
         end

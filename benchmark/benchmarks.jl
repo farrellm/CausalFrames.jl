@@ -263,6 +263,9 @@ SUITE["rolling"]["tracking"] = @benchmarkable load(RCTX,
     RSRC |> addrollingcolumns((; w25 = 25), [Min(:qty), Max(:qty)]))
 SUITE["rolling"]["countdistinct"] = @benchmarkable load(RCTX,
     RSRC |> addrollingcolumns((; w25 = 25), [CountDistinct(:qty)]))
+SUITE["rolling"]["quantile"] = @benchmarkable load(RCTX,
+    RSRC |> addrollingcolumns((; w25 = 25),
+        [Quantile(:qty, [0.25, 0.5, 0.75]), PercentRank(:qty)]))
 SUITE["rolling"]["tree"] = @benchmarkable load(RCTX,
     RSRC |> addrollingcolumns((; w25 = 25), [Product(:qty)]))
 for (nm, w) in (("w0", 0), ("w5", 5), ("w250", 250))

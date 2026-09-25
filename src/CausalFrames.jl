@@ -18,7 +18,7 @@ export Context, CausalFrame, CausalPipeline, load, stream, scan, context,
     Summarizer, MonoidSummarizer, GroupSummarizer, SummarizerState,
     Count, CountDistinct, Sum, SumPower, AgeWeightedSum, Moment, Product,
     DotProduct, Mean, Variance, Std, Covariance, Correlation,
-    LinearRegression, Min, Max,
+    LinearRegression, Quantile, Median, PercentRank, Min, Max,
     First, Last, FitModel, FittedModel, summarize, summarizecycles,
     addsummarycolumns, addrollingcolumns, asofjoin, lookupjoin, intervalize,
     summarizewindows, applymodels, addpredictions, modelreports

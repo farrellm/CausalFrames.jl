@@ -166,6 +166,19 @@ design rationale and performance constraints behind each module.
     running path. `BigFloat` is excluded on purpose: compensation buys nothing
     at arbitrary precision, and a non-isbits `Compensated` would allocate per
     row
+  - the order statistics (`Quantile`, `Median`, `PercentRank`) are fieldless
+    dependents over one accumulator, the unexported `SortedValues`: a sorted
+    `Vector` (binary search plus memmove: under 300 ns per row to a 1,000-row
+    window, growing linearly past ~10,000 — DESIGN.md has the table) with `missing` and NaN
+    counted, not stored, so it stays a group and every window slides it. Its
+    value is the state itself, *borrowed* like `treequery`'s scratch: dependents
+    read it within the emission and the projection drops it, so emission
+    allocates nothing. `combine!` merges into `scratch` and swaps, which is what
+    tolerates `dest` aliasing an input. `linearquantile` copies Statistics'
+    type-7 arithmetic because `quantile(v; sorted = true)` scans all of `v` per
+    call; `nearestrank` corrects `ceil(p * n)` to TA-Lib's exact rank.
+    `PercentRank` reads the newest value from `Last`, a group via
+    `WindowLastState`, so it keeps the running tier too
   - `FitModel` (MLJ) is the one summarizer whose value is an object: its state
     buffers the folded rows in concretely typed vectors and fits at `value`
     time through the `fitmodel` hook (src/models.jl), building the
