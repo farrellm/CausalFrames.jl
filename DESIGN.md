@@ -763,12 +763,14 @@ barrier — with three inversions:
   indices, so compaction never invalidates an emitted match (see "Representing
   a match" below).
 
-The op-agnostic helpers (`normprefix`, `prefixed`, `storerowtype`,
-`storekeytype`, `rowat`, `keyat`, `matchcolumn`, `convertmatches`, plus
-`chunkmap`, `tokeycolumns`, `chunktypes`, `promotetypes`) are imported from the
-parent module; only the small config/state-typed helpers (`checkkeys`,
-`checknames`, `prefixleft!`, `assemble`) are duplicated, to carry `futurejoin`
-in their error messages.
+Nothing of the driver is duplicated. `asofjoin`, `applymodels` and
+`futurejoin` share one join engine in join.jl — `JoinConfig` (whose `op` names
+the operator in every error message), `JoinState`, `pullright!`,
+`matchchunk!`, `joinchunk!`, `checknames` and `assemble` — and differ only in a
+direction singleton carried by the config: `Backward` picks the `SlotStore`
+and `joinsegment!`, while the submodule's `Forward` extends `newstore`,
+`widenstore` and `segment!` with the `KeyBuffer` store and `futuresegment!`,
+so everything forward-looking stays in `Acausal`.
 
 ## Representing a match
 
@@ -1344,8 +1346,8 @@ key under `summarizewindows`.
 
 **`applymodels`** is `asofjoin`'s machinery with a different assembly. The
 models pipeline, narrowed to its model and key columns, is the right side of
-the as-of store: `AsofJoinState`, `pullright!` and `joinsegment!` are
-unchanged, and `AsofJoinConfig` carries the operator's name for error messages.
+the as-of store: `JoinState`, `pullright!`, `matchchunk!` and `joinsegment!`
+are unchanged, and `JoinConfig` carries the operator's name for error messages.
 - Once a chunk's matches are known, its rows are grouped by model identity (an
   `IdDict` typed at a function barrier), and each distinct model is applied
   once, to views of its rows' predictor columns — one dynamic call per model
@@ -1428,7 +1430,8 @@ What `lastrow` does *not* need is the join's `found` mask: every slot a key
 claims is written the same instant, so the store is never half-filled and a
 widening is a plain `convert(Vector{V}, slots)` rather than `convertmatches`.
 Slot numbers do not move under a widening either, so only the dict's keys are
-rebuilt — `pullright!`'s pattern. Because the store is one concretely typed
+rebuilt — the store is the join's own `SlotStore`, widened by the same
+`widenstore`. Because the store is one concretely typed
 vector, the flush builds the output through a `DataFrame(rows)` over it directly:
 no `vcat` of per-key frames, and so no `cols = :union` question and no promotion
 pass. Element types may drift chunk to chunk, as everywhere else, and the store
@@ -2251,7 +2254,7 @@ the second.
 | `src/table.jl` | the in-memory source (`readtable`): the generic Tables.jl path, the eagerly resolved DataFrame path, and the frame path |
 | `src/summarizers.jl` | `Summarizer`/`SummarizerState` interface and the concrete summarizers |
 | `src/summarize.jl` | folding kernels and the summarization transforms |
-| `src/join.jl` | the as-of join transform (`asofjoin`) |
+| `src/join.jl` | the as-of join transform (`asofjoin`) and the join engine it shares with `applymodels` and `futurejoin` |
 | `src/lookupjoin.jl` | the key-only join against a timeless table (`lookupjoin`) |
 | `src/lastrow.jl` | the last-row-per-key transform (`lastrow`), over the join's store |
 | `src/sortcycles.jl` | the within-timestamp stable sort (`sortcycles`) and its `cycleperm!` barrier |
@@ -2263,7 +2266,7 @@ the second.
 | `src/windows.jl` | the clock-sampled trailing-window summarization transform (`summarizewindows`) |
 | `src/models.jl` | the MLJ operators (`applymodels`, `addpredictions`, `modelreports`), the extension hooks and their fallbacks, and `FittedModel`'s serializer |
 | `ext/CausalFramesMLJModelInterfaceExt.jl` | the MLJ hooks for `MLJModelInterface.Model`: fit, predict, save/restore |
-| `src/acausal.jl` | the `Acausal` submodule: the forward join (`futurejoin`), the acausal time shift (`lead`), and the permissive retiming (`settime`, not exported even from the submodule) |
+| `src/acausal.jl` | the `Acausal` submodule: the forward join (`futurejoin`, the join engine's `Forward` store and kernel), the acausal time shift (`lead`), and the permissive retiming (`settime`, not exported even from the submodule) |
 | `src/precompile.jl` | PrecompileTools workload covering the main pipeline paths |
 
 Exports: `Context`, `CausalFrame`, `CausalPipeline`, `load`, `stream`,

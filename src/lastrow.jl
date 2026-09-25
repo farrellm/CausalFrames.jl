@@ -71,12 +71,11 @@ mutable struct LastRowState
     const keycols::Vector{Symbol}
     names::Union{Nothing,Vector{String}}  # column names, fixed by the first chunk
     types::Union{Nothing,NamedTuple}      # promotion of every input schema seen
-    index::Any    # Dict{K,Int}: per-key slot holding that key's last row
-    slots::Any    # Vector{V}: those rows, one slot per key ever seen
+    store::Any    # SlotStore{K,V}: per-key slot holding that key's last row
     row::Any      # keyless: the last row seen, as a V
 end
 LastRowState(keycols::Vector{Symbol}) =
-    LastRowState(keycols, nothing, nothing, nothing, nothing, nothing)
+    LastRowState(keycols, nothing, nothing, nothing, nothing)
 
 function lastrowchunk!(st::LastRowState, ::Val{KN}, c::DataFrame) where {KN}
     checkschema!(st, c)
@@ -91,17 +90,12 @@ function lastrowchunk!(st::LastRowState, ::Val{KN}, c::DataFrame) where {KN}
         st.row = rowat(V, nt, length(nt.time))
         return nothing
     end
-    if st.index === nothing
-        st.index = Dict{storekeytype(types, Val(KN)),Int}()
-        st.slots = V[]
+    if st.store === nothing
+        st.store = SlotStore{storekeytype(types, Val(KN)),V}()
     elseif widened
-        # Slot numbers do not move, so only the keys are rebuilt; every slot is
-        # occupied, so that vector converts wholesale (join.jl's pullright!).
-        K = storekeytype(types, Val(KN))
-        st.index = Dict{K,Int}(convert(K, k) => j for (k, j) in st.index)
-        st.slots = convert(Vector{V}, st.slots)
+        st.store = widenstore(st.store, storekeytype(types, Val(KN)), V)
     end
-    lastsegment!(st.index, st.slots, nt, Val(KN))
+    lastsegment!(st.store.index, st.store.slots, nt, Val(KN))
     return nothing
 end
 
@@ -128,15 +122,12 @@ end
 
 # Function barrier: called with concretely typed arguments, so the per-row work
 # compiles to direct column access with nothing boxed. Last write wins, which is
-# exactly "each key's last row"; `get!` claims the next slot on a miss, so a row
-# costs one hash whether or not its key is new — joinsegment!'s admission loop
-# without the tolerance and ordering machinery.
+# exactly "each key's last row" — joinsegment!'s admission loop without the
+# tolerance and ordering machinery.
 function lastsegment!(index::Dict{K,Int}, slots::Vector{V}, nt::NamedTuple,
     ::Val{KN}) where {K,V,KN}
     for i in eachindex(nt.time)
-        row = rowat(V, nt, i)
-        j = get!(index, keyat(nt, i, Val(KN)), length(slots) + 1)
-        j > length(slots) ? push!(slots, row) : (@inbounds slots[j] = row)
+        admitslot!(index, slots, keyat(nt, i, Val(KN)), rowat(V, nt, i))
     end
     return nothing
 end
@@ -146,10 +137,10 @@ function flushlastrow(st::LastRowState, ::Val{KN}, stop) where {KN}
         st.row === nothing && return nothing
         return DataFrame([retime(st.row, stop)])
     end
-    st.index === nothing && return nothing
-    ordered = sortedgroups(st.index)
+    st.store === nothing && return nothing
+    ordered = sortedgroups(st.store.index)
     isempty(ordered) && return nothing
-    return DataFrame(emitlast(st.slots, ordered, stop))
+    return DataFrame(emitlast(st.store.slots, ordered, stop))
 end
 
 # Function barrier: the emitted rows are concretely typed, so DataFrame builds

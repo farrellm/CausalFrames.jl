@@ -63,7 +63,7 @@ end
 
 # One input's read head: the buffered chunk, the row reached in it, and the
 # lazily refilled iterator behind it. The dynamically typed fields are per-chunk
-# setup state, in the shape of AsofJoinState's right stream; `times` is the
+# setup state, in the shape of JoinState's right stream; `times` is the
 # chunk's time column as the context's time type, which is what every ordering
 # comparison touches, so it is the one field that must stay concrete.
 mutable struct MergeCursor{T}

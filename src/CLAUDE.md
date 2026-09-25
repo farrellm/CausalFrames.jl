@@ -217,7 +217,13 @@ design rationale and performance constraints behind each module.
   over the left stream pulls right chunks on demand (two-pointer merge, per
   left row) into a concretely typed per-key store; `tolerance` widens the
   right context by `start - tolerance` (the one place times are subtracted).
-  The store is a `Dict{K,Int}` of slot numbers over a `Vector{V}` of rows, and
+  It is also the join engine `applymodels` and `Acausal.futurejoin` run on:
+  `JoinConfig` (with `op` for messages and a direction singleton, `Backward`
+  here), `JoinState`, `pullright!`, `matchchunk!` and `joinchunk!`, the store
+  and kernel picked by dispatch (`newstore`/`widenstore`/`segment!`). A new
+  join direction adds those three methods, never a second driver.
+  The store is a `SlotStore` — a `Dict{K,Int}` of slot numbers over a
+  `Vector{V}` of rows, shared with `lastrow` through `admitslot!` — and
   a match is a `Vector{V}` plus a `Vector{Bool}` mask (unmatched slots left
   undefined, hence `convertmatches` for a mid-chunk widening) — both to keep
   `V` out of a `Union`, which Julia cannot store inline unless every member is
@@ -341,8 +347,8 @@ design rationale and performance constraints behind each module.
   `modelreports`) and the five hooks the extension implements (`ismodel`,
   `fitmodel`, `predictmodel`, `savefitresult`, `restorefitresult`). It names no
   MLJ type, the `parquet.jl` split.
-  - `applymodels` is `asofjoin`'s store and kernel unchanged
-    (`AsofJoinConfig.op` names it in errors), plus a predict step: matched rows
+  - `applymodels` is `asofjoin`'s join engine unchanged, driven through
+    `matchchunk!` (`JoinConfig.op` names it in errors), plus a predict step: matched rows
     are grouped by model identity behind a function barrier, each distinct
     model gets one `predictmodel` call per chunk over views, and the results
     are scattered into one promoted `Union{Missing,E}` column.
@@ -358,9 +364,11 @@ design rationale and performance constraints behind each module.
   a name exported by two `using`d modules is an error to use unqualified — so
   exporting it here would break the *causal* `settime` for anyone who also
   imported `Acausal`. Reach it as `CausalFrames.Acausal.settime`; a test pins
-  its absence from `names(Acausal)`. `futurejoin` mirrors `asofjoin`'s
-  streaming machinery with the match direction, the tie-break, and the context
-  widening (`stop + tolerance`) all inverted; because it matches the *earliest*
+  its absence from `names(Acausal)`. `futurejoin` runs on `asofjoin`'s join
+  engine, supplying only the `Forward` direction's `newstore`/`widenstore`/
+  `segment!` methods (so the forward-looking code stays in the submodule), with
+  the match direction, the tie-break, and the context widening
+  (`stop + tolerance`) all inverted; because it matches the *earliest*
   qualifying right row it must buffer right rows per key until a left row
   consumes or outruns them, and proving a key has no future match drains the
   right stream — worst case O(right rows), against `asofjoin`'s O(keys) store.

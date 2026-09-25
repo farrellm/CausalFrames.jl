@@ -60,9 +60,9 @@ function asofjoin(right::CausalPipeline; key = nothing, tolerance = nothing,
     rp = normprefix(rightprefix)
     return function (left::CausalPipeline)
         return CausalPipeline() do ctx::Context
-            cfg = AsofJoinConfig(keycols, Val(Tuple(keycols)), tolerance,
-                strict ? (<) : (<=), lp, rp, righttime, "asofjoin")
-            js = AsofJoinState(right.run(rightcontext(ctx, tolerance)))
+            cfg = JoinConfig(keycols, Val(Tuple(keycols)), tolerance,
+                strict ? (<) : (<=), Backward(), lp, rp, righttime, "asofjoin")
+            js = JoinState(right.run(rightcontext(ctx, tolerance)))
             return chunkmap(c -> joinchunk!(js, cfg, c), left.run(ctx))
         end
     end
@@ -86,14 +86,21 @@ function rightcontext(ctx::Context, tolerance, op::String = "asofjoin")
     return Context(start, ctx.stop)
 end
 
-# strict and tolerance ride in type parameters (`before` is `<` or `<=`), so
-# the kernel specializes and neither costs a per-row branch. `op` names the
-# operator in error messages, since applymodels drives the same store.
-struct AsofJoinConfig{KN,Tol,B}
+# The join engine shared by `asofjoin`, `applymodels` and the acausal
+# `futurejoin`. The direction `D` is a singleton type picking the store and its
+# kernel by dispatch: `Backward` here (the latest right row at or before each
+# left row), `Acausal.Forward` in the submodule. strict and tolerance ride in
+# type parameters (`cmp` is `<`/`<=` backward, `>`/`>=` forward), so the kernel
+# specializes and neither costs a per-row branch. `op` names the operator in
+# error messages.
+struct Backward end
+
+struct JoinConfig{KN,Tol,C,D}
     keycols::Vector{Symbol}
     keynames::Val{KN}
     tolerance::Tol
-    before::B
+    cmp::C
+    direction::D
     leftprefix::Union{Nothing,String}
     rightprefix::Union{Nothing,String}
     righttime::Union{Nothing,Symbol}
@@ -102,23 +109,50 @@ end
 
 # Per-run mutable state, in fields rather than reassigned closure captures
 # (those get boxed). The dynamically typed fields are per-chunk setup state;
-# everything per-row sits behind the joinsegment! function barrier.
-mutable struct AsofJoinState
+# everything per-row sits behind the `segment!` function barrier.
+mutable struct JoinState
     const right::PullCursor  # the right chunks; `done` once exhausted
     rnt::Any           # current right column table (nothing until first pull)
     rpos::Int          # index of the next unadmitted right row in rnt
     rvaluenames::Any   # Vector{Symbol}: right columns minus keys minus time
     rtypes::Union{Nothing,NamedTuple}  # promotion of right schemas seen
-    index::Any         # Dict{K,Int}: per-key slot holding its most recent row
-    slots::Any         # Vector{V}: those rows, one slot per key ever seen
+    store::Any         # the direction's store (`newstore`), keyed by K over rows V
     matches::Any       # Vector{V}: per-left-row match, reused; see `found`
     found::Vector{Bool} # which matches slots hold a match; the rest are undef
     passthrough::Bool  # the right stream produced no chunks at all
     leftchecked::Bool  # key validation against the left schema done
     checked::Bool      # output-name duplicate validation done
-    AsofJoinState(rchunks) = new(PullCursor(rchunks), nothing, 1,
-        nothing, nothing, nothing, nothing, nothing,
-        Bool[], false, false, false)
+    JoinState(rchunks) = new(PullCursor(rchunks), nothing, 1, nothing,
+        nothing, nothing, nothing, Bool[], false, false, false)
+end
+
+# The backward store, shared with `lastrow`: a `Dict{K,Int}` of slot numbers
+# over a `Vector{V}` of rows rather than a Dict of rows, because a Dict of rows
+# can only answer a lookup as `Union{Nothing,V}` — and building that Union out
+# of an inline-stored V heap-allocates it whenever V is not an isbits type (any
+# String or Missing-admitting column is enough). An Int slot number is isbits,
+# so the lookup is free and the row is read back inline.
+struct SlotStore{K,V}
+    index::Dict{K,Int}
+    slots::Vector{V}
+end
+SlotStore{K,V}() where {K,V} = SlotStore{K,V}(Dict{K,Int}(), V[])
+
+newstore(::Backward, ::Type{K}, ::Type{V}) where {K,V} = SlotStore{K,V}()
+
+# Slot numbers do not move, so only the keys are rebuilt; every slot is
+# occupied, so that vector converts wholesale.
+widenstore(st::SlotStore, ::Type{K}, ::Type{V}) where {K,V} =
+    SlotStore{K,V}(Dict{K,Int}(convert(K, k) => j for (k, j) in st.index),
+        convert(Vector{V}, st.slots))
+
+# Store `row` as key `k`'s latest. `get!` claims the next slot number on a
+# miss, so this costs one hash whether or not the key is new.
+@inline function admitslot!(index::Dict{K,Int}, slots::Vector{V}, k,
+    row::V) where {K,V}
+    j = get!(index, k, length(slots) + 1)
+    j > length(slots) ? push!(slots, row) : (@inbounds slots[j] = row)
+    return nothing
 end
 
 # The concrete row and key NamedTuple types for the store, from the promoted
@@ -142,7 +176,7 @@ function convertmatches(::Type{V2}, matches::Vector,
 end
 
 function checkkeys(keycols::Vector{Symbol}, c::DataFrame, side::String,
-    op::String = "asofjoin")
+    op::String)
     for k in keycols
         String(k) in names(c) || throw(ArgumentError(
             "$op key column $(repr(k)) not found in the $side input"))
@@ -156,7 +190,7 @@ end
 # buffer may be half-filled mid-left-chunk when this runs, so it is converted
 # along with the store — through `convertmatches`, since its unmatched slots
 # are undefined.
-function pullright!(js::AsofJoinState, cfg::AsofJoinConfig)
+function pullright!(js::JoinState, cfg::JoinConfig)
     chunk = pull!(js.right)
     if chunk === nothing
         js.rnt === nothing && (js.passthrough = true)
@@ -172,26 +206,21 @@ function pullright!(js::AsofJoinState, cfg::AsofJoinConfig)
     js.rtypes = types
     js.rnt = Tables.columntable(chunk)
     js.rpos = 1
-    if js.index === nothing
+    if js.store === nothing
         V = storerowtype(types)
-        js.index = Dict{storekeytype(types, cfg.keynames),Int}()
-        js.slots = V[]
+        js.store = newstore(cfg.direction, storekeytype(types, cfg.keynames), V)
         js.matches = V[]
     elseif widened
-        K = storekeytype(types, cfg.keynames)
         V = storerowtype(types)
-        # Slot numbers do not move, so only the keys are rebuilt; every slot is
-        # occupied, so that vector converts wholesale.
-        js.index = Dict{K,Int}(convert(K, k) => j for (k, j) in js.index)
-        js.slots = convert(Vector{V}, js.slots)
+        js.store = widenstore(js.store, storekeytype(types, cfg.keynames), V)
         js.matches = convertmatches(V, js.matches, js.found)
     end
     return nothing
 end
 
-function joinchunk!(js::AsofJoinState, cfg::AsofJoinConfig, c::DataFrame)
+function joinchunk!(js::JoinState, cfg::JoinConfig, c::DataFrame)
     if !js.leftchecked
-        checkkeys(cfg.keycols, c, "left")
+        checkkeys(cfg.keycols, c, "left", cfg.op)
         js.leftchecked = true
     end
     js.rnt === nothing && !js.right.done && pullright!(js, cfg)
@@ -200,20 +229,27 @@ function joinchunk!(js::AsofJoinState, cfg::AsofJoinConfig, c::DataFrame)
         checknames(cfg, c, js.rvaluenames)
         js.checked = true
     end
-    nt = Tables.columntable(c)
-    resize!(js.matches, nrow(c))
-    resize!(js.found, nrow(c))
+    matchchunk!(js, cfg, Tables.columntable(c))
+    return assemble(cfg, js, prefixleft!(cfg, c))
+end
+
+# Match every row of the left column table `nt` into `js.matches`/`js.found`,
+# pulling right chunks as the kernel asks for them. The fields are re-read on
+# each pass: a widening inside `pullright!` replaces the store and the buffer.
+function matchchunk!(js::JoinState, cfg::JoinConfig, nt::NamedTuple)
+    n = length(nt.time)
+    resize!(js.matches, n)
+    resize!(js.found, n)
     fill!(js.found, false)   # the only reset needed; matches slots are guarded
     i = 1
     while true
-        i, js.rpos, needpull = joinsegment!(js.matches, js.found, js.index,
-            js.slots, nt, i, js.rnt, js.rpos,
-            js.right.done, cfg.keynames, cfg.before,
+        i, js.rpos, needpull = segment!(js.store, js.matches, js.found, nt, i,
+            js.rnt, js.rpos, js.right.done, cfg.keynames, cfg.cmp,
             cfg.tolerance)
         needpull || break
         pullright!(js, cfg)
     end
-    return assemble(cfg, js, prefixleft!(cfg, c))
+    return nothing
 end
 
 # --- merge kernel ----------------------------------------------------------
@@ -224,12 +260,12 @@ end
 # needpull means the current right chunk is consumed but the stream may still
 # hold rows admissible for left row i — the driver must pull the next right
 # chunk before row i can be matched.
-# The store is an index and a slot vector rather than a Dict of rows, because a
-# Dict of rows can only answer a lookup as `Union{Nothing,V}` — and building
-# that Union out of an inline-stored V heap-allocates it, once per left row,
-# whenever V is not an isbits type (any String or Missing-admitting right
-# column is enough). An Int slot number is isbits, so the lookup is free and
-# the row is read back inline.
+segment!(st::SlotStore{K,V}, matches::Vector{V}, found::Vector{Bool},
+    lnt::NamedTuple, i::Int, rnt::NamedTuple, rpos::Int, rdone::Bool,
+    keynames::Val, before, tolerance) where {K,V} =
+    joinsegment!(matches, found, st.index, st.slots, lnt, i, rnt, rpos, rdone,
+        keynames, before, tolerance)
+
 function joinsegment!(matches::Vector{V}, found::Vector{Bool},
     index::Dict{K,Int}, slots::Vector{V}, lnt::NamedTuple,
     i::Int, rnt::NamedTuple, rpos::Int, rdone::Bool,
@@ -240,12 +276,10 @@ function joinsegment!(matches::Vector{V}, found::Vector{Bool},
         t = @inbounds lnt.time[i]
         # Admit right rows not after (strict: strictly before) t; equal right
         # times overwrite the key's slot, so the later row in stream order
-        # wins. `get!` claims the next slot number on a miss, so admitting a
-        # row costs one hash whether or not the key is new.
+        # wins.
         while rpos <= rlen && before(@inbounds(rnt.time[rpos]), t)
-            row = rowat(V, rnt, rpos)
-            j = get!(index, keyat(rnt, rpos, keynames), length(slots) + 1)
-            j > length(slots) ? push!(slots, row) : (@inbounds slots[j] = row)
+            admitslot!(index, slots, keyat(rnt, rpos, keynames),
+                rowat(V, rnt, rpos))
             rpos += 1
         end
         rpos > rlen && !rdone && return (i, rpos, true)
@@ -277,7 +311,7 @@ end
 # One rename! over every pair, not one call per column: each call rebuilds the
 # chunk's column index, which made this O(ncols^2) per chunk. The field form is
 # shared with lookupjoin.
-prefixleft!(cfg::AsofJoinConfig, c::DataFrame) =
+prefixleft!(cfg::JoinConfig, c::DataFrame) =
     prefixleft!(cfg.leftprefix, cfg.keycols, c)
 function prefixleft!(leftprefix::Union{Nothing,String}, keycols::Vector{Symbol},
     c::DataFrame)
@@ -292,12 +326,12 @@ end
 
 # Needs both schemas, so it runs once the first right chunk has been seen and
 # before the first chunk is emitted.
-function checknames(cfg::AsofJoinConfig, c::DataFrame, rvaluenames)
+function checknames(cfg::JoinConfig, c::DataFrame, rvaluenames)
     seen = Set{Symbol}()
     function check(n)
         n in seen && throw(
             ArgumentError(
-                "asofjoin output column $(repr(n)) appears more than once; use `leftprefix`/`rightprefix` to disambiguate",
+                "$(cfg.op) output column $(repr(n)) appears more than once; use `leftprefix`/`rightprefix` to disambiguate",
             ),
         )
         push!(seen, n)
@@ -316,7 +350,7 @@ function checknames(cfg::AsofJoinConfig, c::DataFrame, rvaluenames)
     return nothing
 end
 
-function assemble(cfg::AsofJoinConfig, js::AsofJoinState, c::DataFrame)
+function assemble(cfg::JoinConfig, js::JoinState, c::DataFrame)
     rdf = DataFrame()
     for n in js.rvaluenames
         rdf[!, prefixed(cfg.rightprefix, n)] =
