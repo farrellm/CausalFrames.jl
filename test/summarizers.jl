@@ -979,27 +979,25 @@ end
 
     # n = 2 is *not* bit-identical to the runtime power over floats, and the
     # honest claim is stronger than equality: x * x is the correctly rounded
-    # square, which the runtime ^ misses by 1 ULP near underflow. Assert the
-    # correct rounding, and bound the disagreement — a real regression (a wrong
-    # exponent, a dropped convert) would miss by far more than one ULP.
+    # square. Assert that, and bound the disagreement — a real regression (a
+    # wrong exponent, a dropped convert) would miss by far more than one ULP.
+    # How often, and on which inputs, the runtime ^ misses is Base's business
+    # and not asserted: on 1.10 its error terms go through `muladd` and a
+    # `have_fma` branch, so near underflow the last bit depends on the CPU (a CI
+    # runner in another region once disagreed on 169 of these 50,000 patterns
+    # where the local machine, on 1.12, disagreed on 5).
     setprecision(BigFloat, 512) do
         @test all(x -> same(x * x, Float64(BigFloat(x)^2)), rnd)
         # concrete inputs whose square lands just above floatmin, where the two
-        # genuinely disagree — pinned rather than searched for, so the property
-        # is asserted deterministically
+        # can disagree — pinned rather than searched for
         nearunderflow = Float64[-2.6128464698398773e-154, 4.055521534318182e-154,
             2.3402388344754422e-154, -3.731470536494672e-154, 4.20214231599087e-154]
-        @test all(x -> !same(runtimepow(x, 2), x * x), nearunderflow)
         @test all(x -> same(x * x, Float64(BigFloat(x)^2)), nearunderflow)
-        @test all(x -> !same(runtimepow(x, 2), Float64(BigFloat(x)^2)),
-            nearunderflow)          # the runtime power is the inaccurate one
         @test all(x -> abs(runtimepow(x, 2) - x * x) <= eps(x * x), nearunderflow)
         @test all(x -> floatmin(Float64) < abs(x * x) < 1e-300, nearunderflow)
     end
-    # across the sample the disagreement is rare and never more than one ULP —
-    # a real regression (a wrong exponent, a dropped convert) misses by far more
+    # wherever the two disagree it is by at most one ULP, near underflow
     differing = [x for x in rnd if !same(runtimepow(x, 2), x * x)]
-    @test length(differing) < length(rnd) ÷ 1000
     @test all(x -> abs(runtimepow(x, 2) - x * x) <= eps(x * x), differing)
     @test all(x -> abs(x * x) < 1e-300, differing)
 

@@ -87,6 +87,15 @@ in **all 66** cases `x*x` is the correctly rounded square and the runtime `x^2`
 is the one that is 1 ULP off. So the specialization is *more* accurate — but it
 is a change in output, and worth saying plainly.
 
+**The rate is the machine's, not a constant.** A later CI run on Julia 1.10.12
+landed on a runner where the five pinned near-underflow inputs came out
+correctly rounded from `^` too, and 169 of the test's 50,000 bit patterns
+disagreed (5 locally, on 1.12). `pow_body` forms its error terms with `muladd` and
+`two_mul`, which branches on `Core.Intrinsics.have_fma`, so the last bit near
+underflow depends on the CPU. The test therefore no longer asserts that `^`
+misses, or how often: only that `x*x` is correctly rounded and that any
+disagreement is ≤ 1 ULP and near underflow, which held on that runner too.
+
 What the accumulators actually depend on is unaffected. The compensated states
 classify NaN and ±Inf *terms* separately and `Compensated` carries the sign of
 zero through the running total, so those are the values whose bits matter — and

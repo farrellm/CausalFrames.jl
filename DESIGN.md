@@ -1725,8 +1725,11 @@ an implementation detail: the output column keeps its own name and the
 accumulator type is unchanged (`powertype(T, 1) === sumtype(T)` and
 `powertype(T, 2) === dottype(T, T)`), so no schema moves. The term value is
 bit-identical at `n = 1` and for integers; at `n = 2` over floats `x * x` is
-the correctly rounded square, which the runtime `^` misses by 1 ULP for inputs
-whose square lands near underflow — more accurate, but a change. It does not
+the correctly rounded square, which the runtime `^` can miss by 1 ULP for
+inputs whose square lands near underflow (how often depends on the CPU, since
+`^` rounds its error terms differently with and without FMA, so the tests bound
+the difference rather than asserting where it falls) — more accurate, but a
+change. It does not
 disturb what the compensated states rely on, since they classify NaN and ±Inf
 *terms* and carry the sign of zero, and no nonfinite or signed-zero case
 differs. `notes/sumpower-terms.md` records the measurements.

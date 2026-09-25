@@ -684,10 +684,11 @@ emptyvalue(s::SumPower{C}) where {C} =
 #
 # The *value* is bit-identical for `n = 1`, and for integers and Bool at both
 # exponents. At `n = 2` over floats it is not quite: `x * x` is the correctly
-# rounded square, while the runtime `^` is 1 ULP off it for a small fraction of
-# inputs whose square lands near underflow (66 of 500k random Float64 bit
-# patterns). The specialization is the more accurate of the two there — but it
-# is a change, so it is stated rather than glossed. What the compensated states
+# rounded square, while the runtime `^` can be 1 ULP off it for inputs whose
+# square lands near underflow (66 of 500k random Float64 bit patterns where it
+# was measured; how many depends on the CPU, since `^` rounds its error terms
+# differently with and without FMA). The specialization is the more accurate of
+# the two there — but it is a change, so it is stated rather than glossed. What the compensated states
 # actually require is unaffected: they classify NaN and ±Inf *terms* and carry
 # the sign of zero, and no nonfinite or subnormal case differs at either
 # exponent. (On Julia 1.10 only, `(-0.0)^1` returns `0.0` — a `^` bug fixed in
