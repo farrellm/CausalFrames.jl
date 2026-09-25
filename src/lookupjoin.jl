@@ -50,10 +50,8 @@ DataFrame(load(Context(0, 10), trades |> lookupjoin(dim; key = :sym)))
 """
 function lookupjoin(table; key = nothing, unmatched::Symbol = :missing,
     leftprefix = nothing, rightprefix = nothing)
-    keycols = tokeycolumns(key)
+    keycols = keycolumns(key, "lookupjoin")
     isempty(keycols) && throw(ArgumentError("lookupjoin requires a key"))
-    allunique(keycols) ||
-        throw(ArgumentError("lookupjoin key columns must be unique"))
     mode = unmatchedmode(unmatched)
     Tables.istable(table) || throw(
         ArgumentError("lookupjoin table must be a Tables.jl table, got $(typeof(table))"),

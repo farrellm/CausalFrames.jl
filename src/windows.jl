@@ -56,13 +56,7 @@ Each summarizer's window slides in O(1) per row when it is a
 """
 function summarizewindows(clk::CausalPipeline, lookback, summarizers;
     key = nothing, keyset = nothing)
-    keycols = tokeycolumns(key)
-    allunique(keycols) ||
-        throw(ArgumentError("summarizewindows key columns must be unique"))
-    :time in keycols && throw(
-        ArgumentError(
-            ":time is the window dimension and may not be a summarizewindows key"),
-    )
+    keycols = keycolumns(key, "summarizewindows")
     protos, requested = prototypes(tosummarizers(summarizers), keycols, "summarizewindows")
     ks = tokeyset(keyset, keycols, "summarizewindows")
     cfg = WindowConfig(keycols, Val(Tuple(keycols)), lookback, protos,

@@ -8,7 +8,7 @@
 module Acausal
 
 using ..CausalFrames: CausalPipeline, Context, chunkmap, shiftchunk!,
-    settimechunk!, SetTimeState, checktimespec, timetype, tokeycolumns,
+    settimechunk!, SetTimeState, checktimespec, timetype, keycolumns,
     normprefix, rowat, keyat, JoinConfig, JoinState, joinchunk!
 import ..CausalFrames: newstore, widenstore, segment!
 
@@ -54,11 +54,7 @@ function futurejoin(right::CausalPipeline; key = nothing, tolerance = nothing,
     strict::Bool = false, leftprefix = nothing,
     rightprefix = nothing,
     righttime::Union{Nothing,Symbol} = nothing)
-    keycols = tokeycolumns(key)
-    allunique(keycols) ||
-        throw(ArgumentError("futurejoin key columns must be unique"))
-    :time in keycols && throw(ArgumentError(
-        ":time is the as-of dimension and may not be a futurejoin key"))
+    keycols = keycolumns(key, "futurejoin")
     righttime === :time && throw(
         ArgumentError(
             "futurejoin righttime may not be :time; it would collide with the left time column",

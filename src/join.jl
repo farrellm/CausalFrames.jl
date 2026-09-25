@@ -41,11 +41,7 @@ function asofjoin(right::CausalPipeline; key = nothing, tolerance = nothing,
     strict::Bool = false, leftprefix = nothing,
     rightprefix = nothing,
     righttime::Union{Nothing,Symbol} = nothing)
-    keycols = tokeycolumns(key)
-    allunique(keycols) ||
-        throw(ArgumentError("asofjoin key columns must be unique"))
-    :time in keycols && throw(ArgumentError(
-        ":time is the as-of dimension and may not be an asofjoin key"))
+    keycols = keycolumns(key, "asofjoin")
     righttime === :time && throw(
         ArgumentError(
             "asofjoin righttime may not be :time; it would collide with the left time column",
@@ -175,15 +171,6 @@ function convertmatches(::Type{V2}, matches::Vector,
     return out
 end
 
-function checkkeys(keycols::Vector{Symbol}, c::DataFrame, side::String,
-    op::String)
-    for k in keycols
-        String(k) in names(c) || throw(ArgumentError(
-            "$op key column $(repr(k)) not found in the $side input"))
-    end
-    return nothing
-end
-
 # Pull the next right chunk (type-unstable, once per right chunk): create or
 # widen the store when the promoted right schema moves — a source may hand a
 # column a different element type from one chunk to the next. The matches
@@ -197,7 +184,7 @@ function pullright!(js::JoinState, cfg::JoinConfig)
         return nothing
     end
     if js.rvaluenames === nothing
-        checkkeys(cfg.keycols, chunk, "right", cfg.op)
+        checkkeycolumns(cfg.keycols, chunk, cfg.op, "the right input")
         js.rvaluenames = Symbol[n for n in propertynames(chunk)
                      if n !== :time && !(n in cfg.keycols)]
     end
@@ -220,7 +207,7 @@ end
 
 function joinchunk!(js::JoinState, cfg::JoinConfig, c::DataFrame)
     if !js.leftchecked
-        checkkeys(cfg.keycols, c, "left", cfg.op)
+        checkkeycolumns(cfg.keycols, c, cfg.op, "the left input")
         js.leftchecked = true
     end
     js.rnt === nothing && !js.right.done && pullright!(js, cfg)

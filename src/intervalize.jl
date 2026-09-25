@@ -42,13 +42,7 @@ Empty values widen the output types (`Mean` gives `Union{Missing, Float64}`).
 """
 function intervalize(clk::CausalPipeline, summarizers; key = nothing,
     keyset = nothing, closelast::Bool = false)
-    keycols = tokeycolumns(key)
-    allunique(keycols) ||
-        throw(ArgumentError("intervalize key columns must be unique"))
-    :time in keycols && throw(
-        ArgumentError(
-            ":time is the interval dimension and may not be an intervalize key"),
-    )
+    keycols = keycolumns(key, "intervalize")
     protos, requested = prototypes(tosummarizers(summarizers), keycols, "intervalize")
     ks = tokeyset(keyset, keycols, "intervalize")
     keynames = Val(Tuple(keycols))

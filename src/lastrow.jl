@@ -42,11 +42,7 @@ A chunk whose column names differ from the first chunk's is an
 `ArgumentError`.
 """
 function lastrow(; key = nothing)
-    keycols = tokeycolumns(key)
-    allunique(keycols) || throw(ArgumentError("lastrow key columns must be unique"))
-    :time in keycols && throw(
-        ArgumentError(":time is the ordering dimension and may not be a lastrow key"),
-    )
+    keycols = keycolumns(key, "lastrow")
     keynames = Val(Tuple(keycols))
     return function (p::CausalPipeline)
         return CausalPipeline() do ctx::Context
@@ -106,10 +102,7 @@ end
 function checkschema!(st::LastRowState, c::DataFrame)
     cols = names(c)
     if st.names === nothing
-        for k in st.keycols
-            String(k) in cols ||
-                throw(ArgumentError("lastrow key column $(repr(k)) not found in the input"))
-        end
+        checkkeycolumns(st.keycols, c, "lastrow")
         st.names = cols
     elseif st.names != cols
         throw(

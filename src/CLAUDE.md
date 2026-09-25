@@ -195,7 +195,10 @@ design rationale and performance constraints behind each module.
     compensated states count nonfinites, so the accumulator stays invertible —
     no `Union{Missing,_}` accumulation field, only in `value`'s return
 - `src/summarize.jl` — the folding kernels and the transforms `summarize`,
-  `summarizecycles`, `addsummarycolumns`; `prototypes` expands dependencies
+  `summarizecycles`, `addsummarycolumns`; also the key validators every keyed
+  transform shares, `keycolumns` (eager: unique, never `:time`) and
+  `checkkeycolumns` (first chunk: present in the input, naming which input for
+  the binary transforms); `prototypes` expands dependencies
   topologically and returns the requested output names, which ride through
   the kernels in a `Val` to project hidden dependencies out of the output;
   per-run mutable state lives in the `SummaryFold` struct, never in

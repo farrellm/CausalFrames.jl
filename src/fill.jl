@@ -57,11 +57,7 @@ DataFrame(load(Context(t0, t0 + Hour(1)), p))
 """
 function forwardfill(selectors...; key = nothing, tolerance = nothing)
     checkselectors(selectors, "forwardfill", false)
-    keycols = tokeycolumns(key)
-    allunique(keycols) || throw(ArgumentError("forwardfill key columns must be unique"))
-    :time in keycols && throw(
-        ArgumentError(":time is the ordering dimension and may not be a forwardfill key"),
-    )
+    keycols = keycolumns(key, "forwardfill")
     keynames = Val(Tuple(keycols))
     return function (p::CausalPipeline)
         return CausalPipeline() do ctx::Context
@@ -137,10 +133,7 @@ end
 function resolvefill!(st::ForwardFillState, c::DataFrame)
     cols = names(c)
     st.lastnames == cols && return nothing
-    for k in st.keycols
-        String(k) in cols ||
-            throw(ArgumentError("forwardfill key column $(repr(k)) not found in the input"))
-    end
+    checkkeycolumns(st.keycols, c, "forwardfill")
     foreachliteral(st.selectors) do n
         n in cols ||
             throw(ArgumentError("forwardfill: no column named $(repr(Symbol(n)))"))

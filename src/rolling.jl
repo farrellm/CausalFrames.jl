@@ -48,13 +48,7 @@ function addrollingcolumns(windows, summarizers; key = nothing,
         throw(ArgumentError("addrollingcolumns requires at least one window"))
     allunique(windownames) ||
         throw(ArgumentError("addrollingcolumns window names must be unique"))
-    keycols = tokeycolumns(key)
-    allunique(keycols) ||
-        throw(ArgumentError("addrollingcolumns key columns must be unique"))
-    :time in keycols && throw(
-        ArgumentError(
-            ":time is the window dimension and may not be an addrollingcolumns key"),
-    )
+    keycols = keycolumns(key, "addrollingcolumns")
     protos, requested =
         prototypes(tosummarizers(summarizers), Symbol[], "addrollingcolumns")
     prefixednames = Symbol[]
@@ -205,15 +199,8 @@ function pullsummarized!(rs::RollingState, cfg::RollingConfig)
         rs.snt === nothing && (rs.passthrough = true)
         return nothing
     end
-    if rs.stypes === nothing
-        for k in cfg.keycols
-            String(k) in names(chunk) || throw(
-                ArgumentError(
-                    "addrollingcolumns key column $(repr(k)) not found in the summarized input",
-                ),
-            )
-        end
-    end
+    rs.stypes === nothing && checkkeycolumns(cfg.keycols, chunk,
+        "addrollingcolumns", "the summarized input")
     types = promotetypes(rs.stypes, chunktypes(chunk))
     moved = rs.stypes === nothing || types != rs.stypes
     rs.stypes = types
@@ -242,13 +229,7 @@ end
 
 function rollchunk!(rs::RollingState, cfg::RollingConfig, c::DataFrame)
     if !rs.checked
-        for k in cfg.keycols
-            String(k) in names(c) || throw(
-                ArgumentError(
-                    "addrollingcolumns key column $(repr(k)) not found in the augmented input",
-                ),
-            )
-        end
+        checkkeycolumns(cfg.keycols, c, "addrollingcolumns", "the augmented input")
         for pn in cfg.prefixednames
             String(pn) in names(c) && throw(
                 ArgumentError(

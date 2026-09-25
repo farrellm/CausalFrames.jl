@@ -90,13 +90,7 @@ MLJModelInterface (`using MLJ`).
 function applymodels(models::CausalPipeline; column::Symbol = :model,
     key = nothing, tolerance = nothing, strict::Bool = false,
     name::Symbol = :prediction, operation::Symbol = :predict)
-    keycols = tokeycolumns(key)
-    allunique(keycols) ||
-        throw(ArgumentError("applymodels key columns must be unique"))
-    :time in keycols && throw(
-        ArgumentError(
-            ":time is the as-of dimension and may not be an applymodels key"),
-    )
+    keycols = keycolumns(key, "applymodels")
     (column === :time || column in keycols) && throw(
         ArgumentError(
             "applymodels column $(repr(column)) may not be :time or a key column"),
@@ -133,7 +127,7 @@ applymodels(p::CausalPipeline, models::CausalPipeline; kwargs...) =
 function predictchunk!(js::JoinState, cfg::JoinConfig, column::Symbol,
     name::Symbol, op::Symbol, c::DataFrame)
     if !js.leftchecked
-        checkkeys(cfg.keycols, c, "left", cfg.op)
+        checkkeycolumns(cfg.keycols, c, cfg.op, "the left input")
         String(name) in names(c) && throw(
             ArgumentError(
                 "applymodels output column $(repr(name)) collides with an existing column",
