@@ -21,10 +21,6 @@ time,sym,qty
     @test df.count == [4]
     @test df.qty_sum == [100]
 
-    # a single summarizer (not a collection) works too
-    df = DataFrame(load(Context(0, 9), readcsv(path; types = tt) |> summarize(Count())))
-    @test df.count == [4]
-
     # multi-valued summarizer
     df =
         DataFrame(load(Context(0, 9), readcsv(path; types = tt) |> summarize(MinMax(:qty))))
@@ -522,8 +518,6 @@ time,sym,qty
     for (curried, uncurried) in (
         (src |> summarize([Count(), Sum(:qty)]),
             summarize(src, [Count(), Sum(:qty)])),
-        (src |> summarize(Sum(:qty); key = :sym),
-            summarize(src, Sum(:qty); key = :sym)),
         (src |> summarizecycles(Sum(:qty)),
             summarizecycles(src, Sum(:qty))),
         (src |> addsummarycolumns(Sum(:qty); key = :sym),

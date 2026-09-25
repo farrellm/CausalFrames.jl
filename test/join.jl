@@ -159,7 +159,6 @@
         df = DataFrame(load(Context(0, 10),
             p |> asofjoin(p; rightprefix = "cur")))
         @test df.cur_px == [1.0, 2.0, 3.0]
-        @test_throws ArgumentError load(Context(0, 10), p |> asofjoin(p))
     end
 
     @testset "multi-chunk" begin

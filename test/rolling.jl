@@ -191,22 +191,6 @@
         @test streamed == loaded
     end
 
-    @testset "schema widening across summarized chunks" begin
-        # Int then Float64: prototypes, buffer, and the half-filled value
-        # vectors all widen mid-augmented-chunk
-        p = onechunk(time = [1, 2, 3], x = [0, 0, 0])
-        src = CausalPipeline(
-            ctx -> [DataFrame(time = [1, 2], y = [1, 2]),
-                DataFrame(time = [3], y = [2.5])],
-        )
-        df = DataFrame(
-            load(Context(0, 10),
-                p |> addrollingcolumns((w5 = 5,), Sum(:y); from = src)),
-        )
-        @test df.w5_y_sum == [1.0, 3.0, 5.5]
-        @test eltype(df.w5_y_sum) == Float64
-    end
-
     @testset "empty streams" begin
         p = onechunk(time = [1, 2], x = [1, 2])
         # a summarized stream with no chunks yields the empty values
@@ -293,19 +277,16 @@ end
     # Column-wise agreement, exact for everything but floats, which may
     # carry sliding-sum drift on the running path (and NaN, e.g. a
     # single-row corrected variance, which isapprox rejects).
+    # One assertion per comparison, naming every column that disagreed.
     function agrees(fast, slow)
         @test names(fast) == names(slow)
         same(x, y) =
             ismissing(x) ? ismissing(y) :
             !ismissing(y) && (isapprox(x, y) || (isnan(x) && isnan(y)))
-        for n in names(fast)
-            a, b = fast[!, n], slow[!, n]
-            if nonmissingtype(eltype(a)) <: AbstractFloat
-                @test all(map(same, a, b))
-            else
-                @test isequal(a, b)
-            end
-        end
+        colagrees(a, b) =
+            nonmissingtype(eltype(a)) <: AbstractFloat ? all(map(same, a, b)) :
+            isequal(a, b)
+        @test isempty([n for n in names(fast) if !colagrees(fast[!, n], slow[!, n])])
     end
 
     # A pseudo-random three-chunk stream with tied times and three keys;
@@ -464,7 +445,9 @@ end
     end
 
     @testset "fast paths widen like the re-fold path" begin
-        # Int then Float64 across summarized chunks, on both fast paths
+        # Int then Float64 across summarized chunks, on both fast paths:
+        # prototypes, buffer, and the half-filled value vectors all widen
+        # mid-augmented-chunk
         p = onechunk(time = [1, 2, 3], x = [0, 0, 0])
         src = CausalPipeline(
             ctx -> [DataFrame(time = [1, 2], y = [1, 2]),
@@ -561,14 +544,13 @@ end
         t0 = DateTime(2024, 1, 1)
         p = onechunk(time = [t0, t0 + Minute(30), t0 + Minute(62)],
             x = [1, 2, 3])
-        for (ss, sumcol, expect) in
-            (([Sum(:x), Mean(:x)], :h1_x_sum, [1, 3, 5]),
-            ([Min(:x), Sum(:x)], :h1_x_min, [1, 1, 2]))
-            df = DataFrame(
-                load(Context(t0, t0 + Hour(2)),
-                    p |> addrollingcolumns((m5 = Minute(5), h1 = Hour(1)), ss)),
-            )
-            @test df[!, sumcol] == expect
-        end
+        # (the running path's Sum over the same data is pinned in "dates and
+        # mixed periods")
+        df = DataFrame(
+            load(Context(t0, t0 + Hour(2)),
+                p |> addrollingcolumns((m5 = Minute(5), h1 = Hour(1)),
+                    [Min(:x), Sum(:x)])),
+        )
+        @test df.h1_x_min == [1, 1, 2]
     end
 end

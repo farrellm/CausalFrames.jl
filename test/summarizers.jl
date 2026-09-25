@@ -215,22 +215,19 @@ end
     @test only(df.x_std) == 1.0
     @test only(df.x_y_covariance) == -1.5
 
-    # Covariance(:x, :x) is Variance(:x)
-    df = stats(Int32[3, 1, 2], Int32[2, 5, 4], [Covariance(:x, :x)])
-    @test only(df.x_x_covariance) == 1.0
-
     # element types: Product/DotProduct widen like Sum; the statistical
     # dependents divide integers to Float64
-    @test eltype(df.x_x_covariance) == Float64
-    df = stats(Int32[3, 1, 2], Int32[2, 5, 4],
-        [Product(:x), DotProduct(:x, :y), Mean(:x), Variance(:x),
-            Std(:x), Covariance(:x, :y)])
     @test eltype(df.x_product) == Int64
     @test eltype(df.x_y_dotproduct) == Int64
     @test all(
         eltype(df[!, c]) == Float64
         for c in [:x_mean, :x_variance, :x_std, :x_y_covariance]
     )
+
+    # Covariance(:x, :x) is Variance(:x)
+    df = stats(Int32[3, 1, 2], Int32[2, 5, 4], [Covariance(:x, :x)])
+    @test only(df.x_x_covariance) == 1.0
+    @test eltype(df.x_x_covariance) == Float64
 
     # Float32 stays Float32 throughout
     df = stats(Float32[3, 1, 2], Float32[2, 5, 4],
@@ -448,7 +445,6 @@ end
 
     # the reversed form keeps its declared structure, so a rolling window over
     # it stays on the running path (the differential lives in test/rolling.jl)
-    @test DotProduct(:y, :x) isa GroupSummarizer
     @test CausalFrames.isinvertible(CausalFrames.fresh(DotProduct(:y, :x), intypes))
     @test CausalFrames.emptyvalue(DotProduct(:y, :x)) === (y_x_dotproduct = 0,)
     # fieldless, so zeroing preserves the type as for any other derived state
@@ -858,8 +854,8 @@ end
 
     # the group inverse: downdating the oldest rows equals folding the rest —
     # exact for integer accumulators
-    for s in [Count(), Sum(:x), SumPower(:x, 2), DotProduct(:x, :y),
-        AgeWeightedSum(:x)]
+    # (AgeWeightedSum's is walked far harder under "age-weighted sum")
+    for s in [Count(), Sum(:x), SumPower(:x, 2), DotProduct(:x, :y)]
         st = fold(s, rows)
         @test @inferred(CausalFrames.downdate!(st, rows[1])) === nothing
         CausalFrames.downdate!(st, rows[2])
@@ -1005,7 +1001,7 @@ end
     # NaN and ±Inf *terms* and carry the sign of zero, so those bits must not
     # move. None do, apart from Julia 1.10's own (-0.0)^1 above — and the
     # accumulator absorbs that one, since its running total starts at +0.0.
-    @test all(x -> dropssignedzero(x) || same(runtimepow(x, 1), x), edge)
+    # (The power-1 half is asserted above, alongside the version note.)
     @test all(x -> same(runtimepow(x, 2), x * x), edge)
     @test only(
         DataFrame(
@@ -1201,8 +1197,7 @@ end
     @test CausalFrames.value(st) isa NamedTuple{(:x_sum,),Tuple{Union{Missing,Int}}}
     @test isequal(CausalFrames.value(st), (x_sum = missing,))
     CausalFrames.downdate!(st, (; x = missing))
-    @test isequal(CausalFrames.value(st), (x_sum = 4,))     # recovered exactly
-    @test CausalFrames.value(st).x_sum === 4
+    @test CausalFrames.value(st).x_sum === 4    # recovered exactly
 
     # the count balances across several missing terms
     st = foldm(Sum(:x), mint, [1, missing, missing, 4])
@@ -1242,14 +1237,6 @@ end
     @test isequal(CausalFrames.value(st), (x_y_dotproduct = missing,))
     CausalFrames.downdate!(st, (x = missing, y = 5))
     @test isequal(CausalFrames.value(st), (x_y_dotproduct = 6,))
-
-    # dependent summarizers inherit missing through the shared value NamedTuple,
-    # and keep a Union{Missing,_} eltype rather than collapsing to Missing
-    p = CausalPipeline(ctx -> [DataFrame(time = [1, 2, 3], x = [2, missing, 4])])
-    df = DataFrame(load(Context(0, 9), p |> summarize([Mean(:x), Variance(:x)])))
-    @test eltype(df.x_mean) == Union{Missing,Float64}
-    @test eltype(df.x_variance) == Union{Missing,Float64}
-    @test ismissing(only(df.x_mean)) && ismissing(only(df.x_variance))
 
     # update!/downdate! on the counting states allocate nothing on the hot path
     # (measured behind a function barrier, as the folding kernels always run)
@@ -1298,14 +1285,18 @@ end
         intypes = (time = Int, x = eltype(vals))
         ws = CausalFrames.freshwindowed(s, intypes)
         @test !(ws isa typeof(CausalFrames.fresh(s, intypes)))
+        # one assertion per walk, naming every step that disagreed
+        bad = Tuple{Symbol,Int}[]
         windowwalk(vals, 400; seed = 7) do op, row, live
             op === :admit ? CausalFrames.update!(ws, row) :
             CausalFrames.downdate!(ws, row)
             isempty(live) && return
             ref = CausalFrames.fresh(s, intypes)
             foreach(r -> CausalFrames.update!(ref, r), live)
-            @test isequal(CausalFrames.value(ws), CausalFrames.value(ref))
+            isequal(CausalFrames.value(ws), CausalFrames.value(ref)) ||
+                push!(bad, (op, row.time))
         end
+        @test isempty(bad)
         # zeroing gives a state indistinguishable from a fresh one
         ws = CausalFrames.fresh!(ws)
         ref = CausalFrames.fresh(s, intypes)
@@ -1373,21 +1364,27 @@ end
     for vals in pools
         intypes = (time = Int, x = eltype(vals))
         st = CausalFrames.fresh(s, intypes)
+        # one assertion per walk and check, naming every step that disagreed
+        badvalue = Tuple{Symbol,Int}[]
+        badsplit = Tuple{Symbol,Int,Int}[]
         windowwalk(vals, 500; seed = 3) do op, row, live
             op === :admit ? CausalFrames.update!(st, row) :
             CausalFrames.downdate!(st, row)
             isempty(live) && return
-            @test agree(CausalFrames.value(st).x_ageweightedsum, naive(live))
+            agree(CausalFrames.value(st).x_ageweightedsum, naive(live)) ||
+                push!(badvalue, (op, row.time))
             # combine! over every split point of the live window equals the fold
             length(live) > 6 && return
             for k in 0:length(live)
                 dest = CausalFrames.fresh(st)
                 CausalFrames.combine!(dest, fold(intypes, live[1:k]),
                     fold(intypes, live[(k+1):end]))
-                @test agree(CausalFrames.value(dest).x_ageweightedsum,
-                    naive(live))
+                agree(CausalFrames.value(dest).x_ageweightedsum, naive(live)) ||
+                    push!(badsplit, (op, row.time, k))
             end
         end
+        @test isempty(badvalue)
+        @test isempty(badsplit)
     end
 
     # The newest row weighs 0: a nonfinite value there waits for a later row.

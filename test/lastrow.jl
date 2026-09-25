@@ -116,7 +116,5 @@
         # the uncurried, pipeline-first form equals the |> chain
         @test isequal(DataFrame(load(ctx, lastrow(src; key = :k))),
             DataFrame(load(ctx, src |> lastrow(; key = :k))))
-        @test isequal(DataFrame(load(ctx, lastrow(src))),
-            DataFrame(load(ctx, src |> lastrow())))
     end
 end

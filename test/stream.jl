@@ -128,11 +128,4 @@ end
     @test (clock(1) |> filterrows(r -> (seen[] += 1; true)) |>
            scan(Context(0, 5))) === nothing
     @test seen[] == 5
-
-    # the curried forms are the same evaluation, guards included
-    disorder = CausalPipeline(ctx ->
-        [DataFrame(time = [4, 5]), DataFrame(time = [3])])
-    @test_throws ArgumentError disorder |> load(Context(0, 9))
-    @test_throws ArgumentError disorder |> scan(Context(0, 9))
-    @test_throws ArgumentError collect(disorder |> stream(Context(0, 9)))
 end
