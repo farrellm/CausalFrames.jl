@@ -1051,10 +1051,10 @@ compiles to the single-algorithm kernel: an absent tier's structure is
 Measured over the benchmark's 100,000 rows (four per time unit, 100 keys), the
 per-accumulator choice leaves single-structure calls where they were and
 speeds up everything that used to fall to the weakest summarizer: an
-OHLC-style `[First, Max, Min, Last, Mean, Std]` goes from 52 ms to 17 ms at a
-250-unit look-back (it used to take the tree whole) and from 28 ms to 17 ms at
-5 units; `[Min, Max]` from 14.4 ms (tree) to 7.6 ms (deques); and
-`CountDistinct` from 218 ms (a set copied per combine) to 7.8 ms.
+OHLC-style `[First, Max, Min, Last, Mean, Std]` goes from 52 ms to 15 ms at a
+250-unit look-back (it used to take the tree whole) and from 28 ms to 15 ms at
+5 units; `[Min, Max]` from 14.3 ms (tree) to 7.0 ms (deques); and
+`CountDistinct` from 239 ms (a set copied per combine) to 7.2 ms.
 
 The partition is re-derived from the realized states whenever they are built
 or widened. A widening that produces an accumulator defeating `downdate!`
@@ -1209,18 +1209,22 @@ The window algorithm is chosen per accumulator, by `addrollingcolumns`' tiers
 
 Measured over the benchmark's million rows with 1,000-unit ticks, the tiers
 keep single-structure calls at parity and speed up mixed ones: the OHLC-style
-set above goes from 145 ms to 122 ms keyless and 296 ms to 190 ms keyed at a
-5,000-unit look-back, and from 289 ms to 119 ms keyless at a 20-unit look-back
-(shorter than the tick spacing, where the old tree was rebuilt at every tick).
-The one loss is keyless `[Min, Max]` alone, 48 ms to 51 ms. Per tracker and
-row, the deque's `update!` on admission and `downdate!` on eviction cost 8.6–10.2
-ns — a `pop!` and a `push!` on each of its two vectors, and the counters — where
-the old tree zeroed and folded a leaf and recombined its share of ancestors at
-the tick in 3.1–3.6 ns. The tree's own overheads (rebuilds allocating fresh
-states, a window-start search per tick) win back most of that difference; the
-key lookups, of the empty key, barely register. Keyed, the same set goes from
-119 ms to 91 ms, since a hundred trees each rebuild and search while the
-deque's cost per row is unchanged, so no heuristic chooses between them. (The buffer is
+set above goes from 127 ms to 100 ms keyless and 267 ms to 159 ms keyed at a
+5,000-unit look-back, and from 238 ms to 96 ms keyless at a 20-unit look-back
+(shorter than the tick spacing, where the old tree was rebuilt at every tick);
+`Last` alone goes from 34 ms to 21 ms. The one loss is keyless `[Min, Max]`
+alone, about 46 ms to 55 ms (minimum of samples; the gap measured 7–20% across
+sessions). Per tracker and row, the deque's `update!` on admission and
+`downdate!` on eviction cost 8.6–10.2 ns — a `pop!` and a `push!` on each of its
+two vectors, and the counters — where the old tree zeroed and folded a leaf and
+recombined its share of ancestors at the tick in 3.1–3.6 ns. The tree's own
+overheads (rebuilds allocating fresh states, a window-start search per tick)
+win back only part of that difference; the key lookups, of the empty key,
+barely register. Keyed, the same set goes from about 106 ms to 99 ms (5–22%
+faster across sessions), since a hundred trees each rebuild and search while
+the deque's cost per row is unchanged, so no heuristic chooses between them.
+Keeping the deque's values and sequence numbers in one vector for isbits
+values, halving its pushes and pops, is the obvious next step. (The buffer is
 compacted at every tick's eviction, and rolling's after every row's, so it
 stays near the window's size rather than growing through a whole chunk — which
 is what keeps the running tier at or ahead of its old single-mode kernel.)
@@ -1807,8 +1811,8 @@ It is a group through its windowed state. The ordinary state's `Set` combines
 still appears elsewhere in the window is unknowable from the set. The windowed
 state counts the rows per distinct value in a `Dict{T,Int}` instead and drops a
 value when its count reaches zero, so a sliding window costs O(1) per row where
-the segment tree it used to take copied a set on every combine — 218 ms over
-the benchmark's 100,000 rows at a 25-unit look-back. The two stay separate
+the segment tree it used to take copied a set on every combine — 239 ms against
+7.2 ms over the benchmark's 100,000 rows at a 25-unit look-back. The two stay separate
 because the count costs the folds that never remove a row: incrementing a count
 through the public `Dict` API hashes twice per row, which measured 1.4–1.7×
 slower than `push!` on a Set over a million-row fold (1.62× for 100 distinct
