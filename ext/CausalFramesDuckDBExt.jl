@@ -13,8 +13,8 @@ using DuckDB
 using Tables
 
 using CausalFrames:
-    ChunkSink, Context, clipchunk!, gatherchunk!, sortgathered,
-    timesourcename, timetype
+    ChunkSink, Context, PullCursor, clipchunk!, gatherchunk!, pull!,
+    sortgathered, timesourcename, timetype
 
 CausalFrames.backendloaded(::Val{:duckdb}) = true
 
@@ -49,15 +49,13 @@ mutable struct ParquetProducer{T}
     const skipmissing::Bool
     gather::Bool        # sort in Julia, the query being unable to
     con::Any            # DuckDB connection, opened on first pull
-    parts::Any          # result chunk iterator
-    state::Any          # its iteration state
-    started::Bool
+    parts::Any          # PullCursor over the result chunks
     prevtime::Any       # last raw time seen, for cross-chunk sortedness
     done::Bool
     ParquetProducer{T}(path, start, stop, time, rename, sort, closed,
         skipmissing) where {T} =
         new{T}(path, start, stop, time, rename, sort, closed, skipmissing, false,
-            nothing, nothing, nothing, false, nothing, false)
+            nothing, nothing, nothing, false)
 end
 
 CausalFrames.parquetproducer(::Val{:duckdb}, ctx::Context, path::AbstractString,
@@ -70,13 +68,11 @@ function (p::ParquetProducer{T})() where {T}
     p.parts === nothing && startquery!(p)
     p.gather && return gatherread!(p)
     while true
-        next = p.started ? iterate(p.parts, p.state) : iterate(p.parts)
-        if next === nothing
+        chunk = pull!(p.parts)
+        if chunk === nothing
             p.done = true
             return nothing
         end
-        chunk, p.state = next
-        p.started = true
         clipped, sawstop, p.prevtime = clipchunk!(DataFrame(chunk), p.time,
             p.rename, p.path, "parquet file", p.prevtime, p.closed,
             p.skipmissing, p.start, p.stop)
@@ -123,7 +119,7 @@ function startquery!(p::ParquetProducer)
             execstream(p.con, "SELECT * FROM read_parquet(?)$order", Any[p.path])
         end
     end
-    p.parts = Tables.partitions(res)
+    p.parts = PullCursor(Tables.partitions(res))
     return nothing
 end
 
@@ -132,7 +128,7 @@ end
 function gatherread!(p::ParquetProducer{T}) where {T}
     p.done = true
     kept = DataFrame[]
-    for chunk in p.parts
+    for chunk in p.parts.iter
         gatherchunk!(kept, DataFrame(chunk), p.time, p.rename, p.path,
             "parquet file", p.closed, p.skipmissing, p.start, p.stop)
     end

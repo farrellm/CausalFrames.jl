@@ -91,26 +91,16 @@ intervalize(p::CausalPipeline, clk::CausalPipeline, summarizers; kwargs...) =
 # indexing of the concrete Vector{T} is typed. Clock order is trusted to the
 # chunk protocol, exactly as asofjoin trusts its right stream.
 mutable struct IntervalCursor{T}
-    chunks::Any
-    state::Any
-    started::Bool
-    done::Bool
+    const chunks::PullCursor
     times::Vector{T}
     pos::Int
 end
-IntervalCursor{T}(chunks) where {T} =
-    IntervalCursor{T}(chunks, nothing, false, false, T[], 1)
+IntervalCursor{T}(chunks) where {T} = IntervalCursor{T}(PullCursor(chunks), T[], 1)
 
 function nextboundary!(cur::IntervalCursor{T}) where {T}
     while cur.pos > length(cur.times)
-        cur.done && return nothing
-        next = cur.started ? iterate(cur.chunks, cur.state) : iterate(cur.chunks)
-        cur.started = true
-        if next === nothing
-            cur.done = true
-            return nothing
-        end
-        chunk, cur.state = next
+        chunk = pull!(cur.chunks)
+        chunk === nothing && return nothing
         cur.times = convert(Vector{T}, chunk.time)
         cur.pos = 1
     end

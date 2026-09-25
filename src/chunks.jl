@@ -22,6 +22,35 @@ function Base.iterate(it::ChunkSource, _ = nothing)
     end
 end
 
+# The pull side of an iterator driven one element at a time from a stateful
+# owner: a producer draining its input, or a binary transform pulling its second
+# stream on demand. Stateful rather than a captured local (captured variables
+# that are reassigned get boxed), and sticky: once the iterator is exhausted,
+# every later `pull!` returns `nothing` without touching it again. `state` is
+# dynamically typed, but it is touched once per element — per chunk, never per
+# row — so callers annotate what they pull (`::DataFrame`) where inference needs
+# it.
+mutable struct PullCursor{I}
+    const iter::I
+    state::Any
+    started::Bool
+    done::Bool
+end
+PullCursor(iter::I) where {I} = PullCursor{I}(iter, nothing, false, false)
+
+# The next element, or `nothing` once the iterator is exhausted.
+function pull!(c::PullCursor)
+    c.done && return nothing
+    next = c.started ? iterate(c.iter, c.state) : iterate(c.iter)
+    c.started = true
+    if next === nothing
+        c.done = true
+        return nothing
+    end
+    x, c.state = next
+    return x
+end
+
 # Iteration-state sentinel: this ChunkMap's flush has already run.
 struct Flushed end
 

@@ -60,38 +60,32 @@ concatenate(ps::CausalPipeline...) =
 # readcsv's CSVProducer: the pull-to-pull state lives in fields rather than
 # captured locals (captured variables that are reassigned get boxed). The
 # dynamically typed fields are per-pipeline setup state — one dynamic index
-# into the (heterogeneous) pipeline tuple and one iterator hand-off per
-# pipeline; nothing here runs per row.
+# into the (heterogeneous) pipeline tuple and one cursor per pipeline; nothing
+# here runs per row.
 mutable struct ConcatProducer{P<:Tuple,C<:Context}
     const pipelines::P
     const ctx::C
     index::Int          # the pipeline currently being drained
-    chunks::Any         # its chunk iterator; nothing until it is reached
-    state::Any          # its iteration state
-    started::Bool
+    cursor::Any         # a PullCursor over its chunks; nothing until reached
     names::Union{Nothing,Vector{String}}  # column names of the first chunk
     prevtime::Any       # last time emitted, for cross-pipeline ordering
     previndex::Int      # which pipeline emitted it, for the error message
     ConcatProducer(ps::P, ctx::C) where {P<:Tuple,C<:Context} =
-        new{P,C}(ps, ctx, 1, nothing, nothing, false, nothing, nothing, 0)
+        new{P,C}(ps, ctx, 1, nothing, nothing, nothing, 0)
 end
 
 function (p::ConcatProducer)()
     while p.index <= length(p.pipelines)
-        if p.chunks === nothing
-            p.chunks = p.pipelines[p.index].run(p.ctx)
-            p.started = false
-        end
-        next = p.started ? iterate(p.chunks, p.state) : iterate(p.chunks)
-        if next === nothing
+        p.cursor === nothing &&
+            (p.cursor = PullCursor(p.pipelines[p.index].run(p.ctx)))
+        chunk = pull!(p.cursor)
+        if chunk === nothing
             p.index += 1
-            p.chunks = nothing
+            p.cursor = nothing
             continue
         end
-        chunk, p.state = next
-        p.started = true
         nrow(chunk) == 0 && continue
-        checkconcat!(p, chunk)
+        checkconcat!(p, chunk::DataFrame)
         return chunk
     end
     return nothing
@@ -260,15 +254,13 @@ mutable struct CSVProducer{T}
     const sort::Bool
     const closed::Bool
     const skipmissing::Bool
-    chunks::Any         # file-chunk iterator, created on first pull
-    state::Any          # its iteration state
-    started::Bool
+    chunks::Any         # PullCursor over the file chunks, created on first pull
     prevtime::Any       # last raw time seen, for cross-chunk sortedness
     done::Bool
     CSVProducer{T}(path, chunkbytes, start, stop, types, time, rename,
         delim, sort, closed, skipmissing) where {T} =
         new{T}(path, chunkbytes, start, stop, types, time, rename, delim, sort,
-            closed, skipmissing, nothing, nothing, false, nothing, false)
+            closed, skipmissing, nothing, nothing, false)
 end
 
 # The user's `types` (or nothing) as a CSV.jl per-column `types` function that
@@ -315,11 +307,11 @@ maptime(f, nt::NamedTuple) = map(f, Tables.rows(nt))
 function (p::CSVProducer{T})() where {T}
     p.done && return nothing
     p.chunks === nothing &&
-        (p.chunks = csvchunks(p.path, p.chunkbytes, p.types, p.delim))
+        (p.chunks = PullCursor(csvchunks(p.path, p.chunkbytes, p.types, p.delim)))
     if p.sort
         p.done = true
         kept = DataFrame[]
-        for filechunk in p.chunks
+        for filechunk in p.chunks.iter
             df = filechunk isa DataFrame ? filechunk : DataFrame(filechunk)
             gatherchunk!(kept, df, p.time, p.rename, p.path, "CSV file",
                 p.closed, p.skipmissing, p.start, p.stop)
@@ -327,13 +319,11 @@ function (p::CSVProducer{T})() where {T}
         return sortgathered(kept, T)
     end
     while true
-        next = p.started ? iterate(p.chunks, p.state) : iterate(p.chunks)
-        if next === nothing
+        filechunk = pull!(p.chunks)
+        if filechunk === nothing
             p.done = true
             return nothing
         end
-        filechunk, p.state = next
-        p.started = true
         df = filechunk isa DataFrame ? filechunk : DataFrame(filechunk)
         clipped, sawstop, p.prevtime = clipchunk!(df, p.time, p.rename, p.path,
             "CSV file", p.prevtime, p.closed, p.skipmissing, p.start, p.stop)
@@ -785,27 +775,24 @@ head(p::CausalPipeline, n::Integer) = head(n)(p)
 # `advance` loops until upstream returns nothing — so it drives the upstream
 # iterator itself, in the shape of readcsv's CSVProducer: the pull-to-pull state
 # lives in fields rather than captured locals (captured variables that are
-# reassigned get boxed). The dynamically typed `state` field is touched once per
-# chunk, never per row, exactly as ConcatProducer's is.
+# reassigned get boxed). The cursor's dynamically typed state is touched once
+# per chunk, never per row, exactly as ConcatProducer's is.
 mutable struct HeadProducer{U}
-    const upstream::U
+    const upstream::PullCursor{U}
     remaining::Int
-    state::Any          # the upstream iteration state
-    started::Bool
 end
-HeadProducer(upstream::U, n::Int) where {U} = HeadProducer{U}(upstream, n, nothing, false)
+HeadProducer(upstream, n::Int) = HeadProducer(PullCursor(upstream), n)
 
 function (p::HeadProducer)()
     p.remaining > 0 || return nothing
-    next = p.started ? iterate(p.upstream, p.state) : iterate(p.upstream)
-    p.started = true
-    if next === nothing
+    chunk = pull!(p.upstream)
+    if chunk === nothing
         p.remaining = 0     # ChunkSource requires nothing to be sticky
         return nothing
     end
-    chunk, p.state = next
     # The chunk protocol guarantees the annotation, which is what lets produce()
-    # infer Union{Nothing, DataFrame} through the dynamically typed state.
+    # infer Union{Nothing, DataFrame} through the cursor's dynamically typed
+    # state.
     return takerows!(p, chunk::DataFrame)
 end
 

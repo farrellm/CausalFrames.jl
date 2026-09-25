@@ -140,7 +140,7 @@ function predictchunk!(js::AsofJoinState, cfg::AsofJoinConfig, column::Symbol,
         )
         js.leftchecked = true
     end
-    js.rnt === nothing && !js.rdone && pullright!(js, cfg)
+    js.rnt === nothing && !js.right.done && pullright!(js, cfg)
     if js.passthrough
         c[!, name] = fill(missing, nrow(c))
         return c
@@ -159,7 +159,7 @@ function predictchunk!(js::AsofJoinState, cfg::AsofJoinConfig, column::Symbol,
     i = 1
     while true
         i, js.rpos, needpull = joinsegment!(js.matches, js.found, js.index,
-            js.slots, nt, i, js.rnt, js.rpos, js.rdone, cfg.keynames,
+            js.slots, nt, i, js.rnt, js.rpos, js.right.done, cfg.keynames,
             cfg.before, cfg.tolerance)
         needpull || break
         pullright!(js, cfg)

@@ -13,7 +13,8 @@ using Tables
 using ..CausalFrames: CausalPipeline, Context, chunkmap, shiftchunk!,
     settimechunk!, SetTimeState, checktimespec, timetype,
     tokeycolumns, chunktypes, promotetypes, normprefix, prefixed,
-    storerowtype, storekeytype, rowat, keyat, matchcolumn, convertmatches
+    storerowtype, storekeytype, rowat, keyat, matchcolumn, convertmatches,
+    PullCursor, pull!
 
 export futurejoin, lead
 
@@ -140,10 +141,7 @@ end
 # (those get boxed). The dynamically typed fields are per-chunk setup state;
 # everything per-row sits behind the futuresegment! function barrier.
 mutable struct FutureJoinState
-    rchunks::Any       # right chunk iterator
-    rstate::Any        # its iteration state
-    rstarted::Bool
-    rdone::Bool        # right stream exhausted
+    const right::PullCursor  # the right chunks; `done` once exhausted
     rnt::Any           # current right column table (nothing until first pull)
     rpos::Int          # index of the next undrained right row in rnt
     rvaluenames::Any   # Vector{Symbol}: right columns minus keys minus time
@@ -154,7 +152,7 @@ mutable struct FutureJoinState
     passthrough::Bool  # the right stream produced no chunks at all
     leftchecked::Bool  # key validation against the left schema done
     checked::Bool      # output-name duplicate validation done
-    FutureJoinState(rchunks) = new(rchunks, nothing, false, false, nothing, 1,
+    FutureJoinState(rchunks) = new(PullCursor(rchunks), nothing, 1,
         nothing, nothing, nothing, nothing, Bool[],
         false, false, false)
 end
@@ -174,14 +172,11 @@ end
 # the per-key buffers may be half-consumed mid-left-chunk when this runs, so
 # they are converted along with the store's key and value types.
 function pullright!(js::FutureJoinState, cfg::FutureJoinConfig)
-    next = js.rstarted ? iterate(js.rchunks, js.rstate) : iterate(js.rchunks)
-    js.rstarted = true
-    if next === nothing
-        js.rdone = true
+    chunk = pull!(js.right)
+    if chunk === nothing
         js.rnt === nothing && (js.passthrough = true)
         return nothing
     end
-    chunk, js.rstate = next
     if js.rvaluenames === nothing
         checkkeys(cfg.keycols, chunk, "right")
         js.rvaluenames = Symbol[n for n in propertynames(chunk)
@@ -213,7 +208,7 @@ function joinchunk!(js::FutureJoinState, cfg::FutureJoinConfig, c::DataFrame)
         checkkeys(cfg.keycols, c, "left")
         js.leftchecked = true
     end
-    js.rnt === nothing && !js.rdone && pullright!(js, cfg)
+    js.rnt === nothing && !js.right.done && pullright!(js, cfg)
     js.passthrough && return prefixleft!(cfg, c)
     if !js.checked
         checknames(cfg, c, js.rvaluenames)
@@ -226,7 +221,7 @@ function joinchunk!(js::FutureJoinState, cfg::FutureJoinConfig, c::DataFrame)
     i = 1
     while true
         i, js.rpos, needpull = futuresegment!(js.matches, js.found, js.store,
-            nt, i, js.rnt, js.rpos, js.rdone,
+            nt, i, js.rnt, js.rpos, js.right.done,
             cfg.keynames, cfg.after,
             cfg.tolerance)
         needpull || break

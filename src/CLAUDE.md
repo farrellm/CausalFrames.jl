@@ -7,7 +7,11 @@ design rationale and performance constraints behind each module.
   evaluation window, and the internal chunk protocol (`ChunkSource`,
   `chunkmap`): a single-pass lazy iterator of non-empty DataFrame chunks,
   consumers taking ownership of what they're yielded; empty chunks are
-  filtered out here so all downstream code may assume a chunk has rows
+  filtered out here so all downstream code may assume a chunk has rows.
+  `PullCursor` is the one way to drive an iterator by hand (a producer
+  draining its input, a binary transform pulling its second stream): sticky
+  `pull!`, state in fields, touched per chunk only. Not `Iterators.Stateful`,
+  which on Julia 1.10 prefetches and would break `head`'s early exit
 - `src/frame.jl` — `CausalFrame{T}`: opaque, backed by a vector of
   time-disjoint DataFrame chunks; invariants checked in the public inner
   constructor, while `load`/`stream` build through a `Trusted`-token

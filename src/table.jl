@@ -125,28 +125,24 @@ mutable struct TableProducer{T,X}
     const skipmissing::Bool
     const start::T
     const stop::T
-    parts::Any           # the partition iterator, created on the first pull
-    state::Any           # its iteration state
-    started::Bool
+    parts::Any           # PullCursor over the partitions, created on first pull
     prevtime::Any        # last time of the previous partition, for its order
     done::Bool
     TableProducer{T}(table::X, time, checkorder, sort, closed, skipmissing,
         start, stop) where {T,X} =
         new{T,X}(table, time, checkorder, sort, closed, skipmissing, start,
-            stop, nothing, nothing, false, nothing, false)
+            stop, nothing, nothing, false)
 end
 
 function (p::TableProducer{T})() where {T}
     p.done && return nothing
-    p.parts === nothing && (p.parts = tablepartitions(p.table, p.sort))
+    p.parts === nothing && (p.parts = PullCursor(tablepartitions(p.table, p.sort)))
     while true
-        next = p.started ? iterate(p.parts, p.state) : iterate(p.parts)
-        if next === nothing
+        part = pull!(p.parts)
+        if part === nothing
             p.done = true
             return nothing
         end
-        part, p.state = next
-        p.started = true
         chunk, sawstop, p.prevtime = tablechunk(part, p.time, p.checkorder,
             p.sort, p.closed, p.skipmissing, p.prevtime, p.start, p.stop)
         sawstop && (p.done = true)

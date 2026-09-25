@@ -120,10 +120,7 @@ end
 # (those get boxed). The dynamically typed fields are per-chunk setup state;
 # everything per-row sits behind the rollsegment! function barrier.
 mutable struct RollingState
-    schunks::Any       # summarized chunk iterator
-    sstate::Any        # its iteration state
-    sstarted::Bool
-    sdone::Bool        # summarized stream exhausted
+    const summarized::PullCursor  # the summarized chunks; `done` once exhausted
     snt::Any           # current summarized column table (nothing until pulled)
     spos::Int          # index of the next unadmitted summarized row in snt
     stypes::Union{Nothing,NamedTuple}  # promotion of summarized schemas seen
@@ -133,7 +130,7 @@ mutable struct RollingState
     vals::Any          # per-window value vectors for the chunk in progress
     passthrough::Bool  # the summarized stream produced no chunks at all
     checked::Bool      # augmented-side name/key validation done
-    RollingState(schunks) = new(schunks, nothing, false, false, nothing, 1,
+    RollingState(schunks) = new(PullCursor(schunks), nothing, 1,
         nothing, nothing, nothing, nothing, nothing, false, false)
 end
 
@@ -203,14 +200,11 @@ RollTiers{R}(buffer::B, winheads::Vector{Int}, running::G, trees::TR,
 # build the tiers on the first one and rebuild them when the promoted schema
 # moves, re-typing any half-filled value vectors along the way.
 function pullsummarized!(rs::RollingState, cfg::RollingConfig)
-    next = rs.sstarted ? iterate(rs.schunks, rs.sstate) : iterate(rs.schunks)
-    rs.sstarted = true
-    if next === nothing
-        rs.sdone = true
+    chunk = pull!(rs.summarized)
+    if chunk === nothing
         rs.snt === nothing && (rs.passthrough = true)
         return nothing
     end
-    chunk, rs.sstate = next
     if rs.stypes === nothing
         for k in cfg.keycols
             String(k) in names(chunk) || throw(
@@ -264,7 +258,7 @@ function rollchunk!(rs::RollingState, cfg::RollingConfig, c::DataFrame)
         end
         rs.checked = true
     end
-    rs.snt === nothing && !rs.sdone && pullsummarized!(rs, cfg)
+    rs.snt === nothing && !rs.summarized.done && pullsummarized!(rs, cfg)
     rs.passthrough && return assembleempty(cfg, c)
     lnt = Tables.columntable(c)
     # Pre-filled with the empty row so a mid-chunk widen never converts an
@@ -276,7 +270,7 @@ function rollchunk!(rs::RollingState, cfg::RollingConfig, c::DataFrame)
     # rebuilds them, possibly with a different partition, mid-chunk.
     while true
         i, rs.spos, needpull = rollsegment!(rs.vals, rs.tiers, lnt, i, rs.snt,
-            rs.spos, rs.sdone, cfg.lookbacks, cfg.keynames, cfg.outs,
+            rs.spos, rs.summarized.done, cfg.lookbacks, cfg.keynames, cfg.outs,
             rs.emptyrow)
         needpull || break
         pullsummarized!(rs, cfg)
