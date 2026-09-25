@@ -1676,6 +1676,10 @@ Concrete summarizers provided, for an input column of element type `T`:
 | `Covariance(a, b; corrected)` | `:a_b_covariance` | division result | `missing` |
 | `Correlation(a, b)` | `:a_b_correlation` | division result | `missing` |
 | `LinearRegression(predictors, response; intercept, name)` | `:n`, `:r2`, `:stderr`, `:intercept_beta`, `:intercept_tstat`, and `:x_beta`/`:x_tstat` per predictor | `Int` for `:n`, the division result for the rest | `0` for `:n`, `missing` for the rest |
+| `Quantile(column, p; interpolation)` | `:x_quantile_50` for `p = 0.5`, one per `p` | `Float64` for integers (linear), `T` (nearest rank) | `missing` |
+| `Median(column)` | `:x_median` | as linear `Quantile` | `missing` |
+| `PercentRank(column)` | `:x_percentrank` | `Float64` | `missing` |
+| `SortedValues(column)` (unexported) | `:x_sortedvalues` | the state itself, borrowed | `missing` |
 | `Min(column)` | `:x_min` | `T` | `missing` |
 | `Max(column)` | `:x_max` | `T` | `missing` |
 | `First(column)` | `:x_first` | `T` | `missing` |
@@ -1819,6 +1823,63 @@ slower than `push!` on a Set over a million-row fold (1.62× for 100 distinct
 `Int`s, 1.39× for 100,000, 1.71× for 1,000 `Float64`s, 1.56× for 100
 `String`s). A single-hash increment needs `Base`'s non-public `ht_keyindex2!`,
 so `summarize`, `intervalize` and the cycle folds keep the `Set`.
+
+The order statistics are the other summarizers whose state is not O(1). One
+accumulator, `SortedValues(column)` (unexported, but documented so an outside
+summarizer can depend on it), keeps the column's values in a sorted `Vector`,
+and `Quantile`, `Median` and `PercentRank` are fieldless dependents reading it.
+A sorted multiset is a lawful group: an insert is undone by deleting one copy,
+and two multisets merge, so every order statistic of a window stays on the
+running tier at a binary search plus a memmove per row (`insert!`/`deleteat!`
+shift the shorter side), never a re-fold. It is O(window) memory per key, as
+the windowed `First` is. It is a sorted `Vector` rather than a balanced tree or
+skip list, which keeps it cache-friendly and dependency-free. Measured with
+`addrollingcolumns` of `Quantile(:x, 0.5)` over 200,000 random `Float64` rows,
+single-threaded:
+
+| window (rows) | 10 | 100 | 1,000 | 10,000 | 100,000 |
+|---|---|---|---|---|---|
+| `Quantile`, ns per row | 149 | 186 | 278 | 741 | 5,500 |
+| `Sum`, ns per row | 67 | 48 | 48 | 50 | 50 |
+| re-fold, ns per row | 411 | 4,915 | — | — | — |
+
+The memmove only dominates past about ten thousand rows. A tree would pay off
+there, and has not been measured, since indicator windows are far shorter. Its value is the state itself,
+*borrowed* as `treequery`'s scratch is: dependents read it within the emission
+and the projection drops it, so emitting allocates nothing — and requesting it
+as an output column would alias one state across every row, which its
+docstring forbids. `combine!` merges into a scratch vector and swaps it in, so
+`dest` may alias either input.
+
+`missing` and NaN are counted rather than stored, as the sum family counts
+them, so the vector is totally ordered by `isless` (±0.0 stay distinct; equal
+values are `isequal`, so which copy `downdate!` removes does not matter). A
+`missing` in the rows gives `missing` and a NaN gives NaN — `Statistics.median`'s
+propagation, where `Statistics.quantile` raises — and both recover once their
+row leaves a window.
+
+`Quantile(column, p)` takes one probability or several, one output column each
+named by its percentage to twelve significant digits (`:x_quantile_2_5` for
+`0.025`); several `Quantile`s of a column share the accumulator by the
+name-keyed deduplication. `interpolation = :linear` is `Statistics.quantile`'s
+default type 7, written out rather than called because `quantile(v; sorted =
+true)` still scans the whole vector for NaN and `missing` per call; it follows
+Statistics 1.11.5's `fma` form, which older Statistics releases differ from in
+the last bit. `:nearestrank` is TA-Lib's `PERCENTILE` (at its pin `2aa8eb0`):
+the `k`-th smallest value for the smallest `k` with `k/n ≥ p`, which TA-Lib
+computes as `ceil(P·n/100)` in exact integer arithmetic. `ceil(p·n)` in floating
+point would be one rank high where `p·n` rounds up across an integer (`0.07 ·
+100`), so the rank is corrected until `k/n`, correctly rounded, is compared with
+`p` directly — equal whenever the exact ratio is `p`'s decimal. Like `Variance`'s
+`corrected`, the interpolation is not part of the name. `Median(column)` is the
+linear quantile at `0.5` under its own name.
+
+`PercentRank(column)` is `count(v < newest) / (n − 1)`: TA-Lib's `PERCENTRANK`
+compares the newest value strictly against the `N` rows before it and scales by
+100, so this is that divided by 100 over a window one row longer, and Excel's
+`PERCENTRANK.INC`. A single row is `0/0 = NaN`, as a one-row corrected
+variance is. It reads the newest value from `Last(column)`, which is a group
+through its windowed state, so a call containing it stays on the running tier.
 
 `Sum`, `SumPower`, `Product`, `DotProduct`, and `CountDistinct` have an
 identity element, so they summarize no rows as `0` (`Product` as `1`). The
@@ -2078,6 +2139,9 @@ this structure (see "Rolling windows" and "Window summarization"). The classific
   1.1–2.2 ns per row against the deque's 5.7–8.4, and 23 ms against 38 ms for a
   keyless `summarizewindows` of `Last` over the benchmark's million rows.
   `CountDistinct` counts rows per value (see above).
+- **Groups through a sorted multiset**: `SortedValues`, and so `Quantile`,
+  `Median` and `PercentRank` (with `Last`). One ordinary state serves every
+  tier: insertion and one-copy deletion invert, and a merge combines.
 - **Monoids only**: `Product` — dividing a row back out fails outright at
   zero (the total is `0` regardless of what else was folded), truncates for
   integers, and compounds round-off for floats.
@@ -2208,8 +2272,8 @@ Exports: `Context`, `CausalFrame`, `CausalPipeline`, `load`, `stream`,
 `addcolumns`, `selectcolumns`, `dropcolumns`, `reordercolumns`, `Summarizer`, `MonoidSummarizer`, `GroupSummarizer`,
 `SummarizerState`, `Count`, `CountDistinct`, `Sum`, `SumPower`, `AgeWeightedSum`,
 `Moment`, `Product`, `DotProduct`, `Mean`, `Variance`, `Std`, `Covariance`,
-`Correlation`, `LinearRegression`, `Min`, `Max`, `First`, `Last`, `FitModel`,
-`FittedModel`, `applymodels`, `addpredictions`, `modelreports`, `summarize`,
+`Correlation`, `LinearRegression`, `Quantile`, `Median`, `PercentRank`, `Min`,
+`Max`, `First`, `Last`, `FitModel`, `FittedModel`, `applymodels`, `addpredictions`, `modelreports`, `summarize`,
 `summarizecycles`, `intervalize`, `summarizewindows`, `addsummarycolumns`,
 `addrollingcolumns`,
 `asofjoin`, `lookupjoin`, `lag`, `settime`, `head`, `lastrow`, `sortcycles`, `forwardfill`,

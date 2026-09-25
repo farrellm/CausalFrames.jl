@@ -1447,3 +1447,182 @@ end
     @test agealloc(CausalFrames.fresh(s, (time = Int, x = Union{Missing,Float64})),
         (time = 9, x = 2.0)) == 0
 end
+
+@testset "order statistics" begin
+    SV = CausalFrames.SortedValues
+    fold(s, intypes, xs) = foldl(xs; init = CausalFrames.fresh(s, intypes)) do st, x
+        CausalFrames.update!(st, (time = 0, x = x))
+        st
+    end
+    summarized(xs, ss) = DataFrame(
+        load(Context(0, 99),
+            readtable(DataFrame(time = eachindex(xs), x = xs)) |> summarize(ss)),
+    )
+
+    # names carry the percentage, 0.07 included (100 * 0.07 is not 7), in the
+    # order the probabilities were given
+    @test CausalFrames.emptyvalue(Quantile(:x, 0.5)) === (x_quantile_50 = missing,)
+    @test keys(CausalFrames.emptyvalue(Quantile(:x, [0.9, 0.025, 0.07, 0, 1]))) ==
+          (:x_quantile_90, :x_quantile_2_5, :x_quantile_7, :x_quantile_0,
+        :x_quantile_100)
+    @test CausalFrames.emptyvalue(Median(:x)) === (x_median = missing,)
+    @test CausalFrames.emptyvalue(PercentRank(:x)) === (x_percentrank = missing,)
+    @test CausalFrames.emptyvalue(SV(:x)) === (x_sortedvalues = missing,)
+    @test all(s -> s isa GroupSummarizer,
+        [SV(:x), Quantile(:x, 0.5), Median(:x), PercentRank(:x)])
+    @test :SortedValues ∉ names(CausalFrames)
+
+    @test_throws ArgumentError("Quantile requires at least one probability") Quantile(
+        :x, Float64[])
+    @test_throws ArgumentError("Quantile probabilities must be unique, got (0.5, 0.5)") Quantile(
+        :x, [0.5, 0.5])
+    for p in (-0.1, 1.5, NaN)
+        @test_throws ArgumentError("Quantile probability must be in [0, 1], got $p") Quantile(
+            :x, p)
+    end
+    @test_throws ArgumentError(
+        "Quantile interpolation must be :linear or :nearestrank, got :cubic") Quantile(
+        :x, 0.5; interpolation = :cubic)
+    @test_throws ArgumentError Quantile(:x, [0.1, 0.1 + 1e-15])
+    # one probability requested twice is the ordinary name clash
+    @test_throws ArgumentError summarized([1, 2],
+        [Quantile(:x, [0.25, 0.5]), Quantile(:x, 0.5)])
+
+    # every order statistic of a column shares the one accumulator
+    protos, requested = CausalFrames.prototypes(
+        CausalFrames.tosummarizers([Quantile(:x, 0.25), Median(:x),
+            Quantile(:x, 0.9; interpolation = :nearestrank), PercentRank(:x)]),
+        Symbol[])
+    @test count(s -> s isa SV, protos) == 1
+    @test requested == (:x_quantile_25, :x_median, :x_quantile_90, :x_percentrank)
+
+    # Against the definitions over every prefix of a sequence with ties: the
+    # linear rule is Statistics.quantile's (to rounding: its last bit moved
+    # between versions), the nearest rank is TA-Lib's PERCENTILE in exact
+    # integer arithmetic, and the percent rank is TA-Lib's PERCENTRANK / 100
+    # over the rows before the newest.
+    xs = map(v -> v - 5, lcgsequence(11, 60, 11))
+    Ps = (0, 7, 25, 50, 90, 100)
+    ps = map(P -> P / 100, Ps)
+    qnames = keys(CausalFrames.emptyvalue(Quantile(:x, ps)))
+    running(ss) = DataFrame(
+        load(Context(0, 99),
+            readtable(DataFrame(time = eachindex(xs), x = xs)) |> addsummarycolumns(ss),
+        ),
+    )
+    lin = running([Quantile(:x, ps), Median(:x), PercentRank(:x)])
+    near = running(Quantile(:x, ps; interpolation = :nearestrank))
+    bad = Int[]
+    for n in eachindex(xs)
+        w = xs[1:n]
+        s = sort(w)
+        ok =
+            all(i -> lin[n, qnames[i]] ≈ Statistics.quantile(w, ps[i]), eachindex(ps)) &&
+            lin.x_median[n] ≈ Statistics.median(w) &&
+            isequal(lin.x_percentrank[n], count(<(w[end]), w[1:(end-1)]) / (n - 1)) &&
+            all(i -> near[n, qnames[i]] == s[clamp(cld(Ps[i] * n, 100), 1, n)],
+                eachindex(Ps))
+        ok || push!(bad, n)
+    end
+    @test isempty(bad)
+    # 0.07 over 100 rows is the 7th value, where ceil(0.07 * 100) would be 8
+    st = fold(SV(:x), (time = Int, x = Int), 1:100)
+    q = CausalFrames.fresh(Quantile(:x, 0.07; interpolation = :nearestrank),
+        (time = Int, x = Int))
+    @test CausalFrames.value(q, CausalFrames.value(st)) === (x_quantile_7 = 7,)
+
+    # element types: linear interpolation floats, the nearest rank keeps the
+    # column's type, the percent rank is a Float64 fraction; a Missing-admitting
+    # column admits missing
+    for (T, lin, near) in ((Int, Float64, Int), (Float32, Float64, Float32),
+        (Union{Missing,Int}, Union{Missing,Float64}, Union{Missing,Int}))
+        df = summarized(
+            T[3, 1, 2],
+            [Quantile(:x, 0.5), PercentRank(:x),
+                Quantile(:x, 0.25; interpolation = :nearestrank)],
+        )
+        @test eltype(df.x_quantile_50) == lin
+        @test eltype(df.x_quantile_25) == near
+        @test eltype(df.x_percentrank) ==
+              (Missing <: T ? Union{Missing,Float64} : Float64)
+        @test isequal(Vector(df[1, 2:end]), [2.0, 0.5, 1])
+    end
+    # nearest rank needs only an order
+    df = summarized(["b", "c", "a"], Quantile(:x, [0, 1]; interpolation = :nearestrank))
+    @test (only(df.x_quantile_0), only(df.x_quantile_100)) == ("a", "c")
+
+    # a missing gives missing and a NaN gives NaN, everywhere; one row ranks NaN
+    ss = [Quantile(:x, [0.1, 0.9]), Median(:x), PercentRank(:x),
+        Quantile(:x, 0.5; interpolation = :nearestrank)]
+    @test all(ismissing, summarized([1.0, missing, 3.0], ss)[1, 2:end])
+    @test all(isnan, summarized([1.0, NaN, 3.0], ss)[1, 2:end])
+    @test all(isnan, summarized([1.0, 2.0, NaN], ss)[1, 2:end])
+    @test isnan(only(summarized([4], PercentRank(:x)).x_percentrank))
+    # no rows: the empty values
+    df = DataFrame(load(Context(0, 9), emptyframe() |> summarize(ss)))
+    @test all(ismissing, df[1, 2:end])
+
+    # The accumulator slid over a live window against a fresh fold of it: ties
+    # (downdate! removes exactly one copy), ±0.0 kept apart, NaN and missing
+    # counted, strings ordered.
+    pools = [
+        Union{Missing,Float64}[1.0, 2.0, 2.0, -0.0, 0.0, NaN, missing, 3.0, -1.0],
+        [3, 1, 4, 1, 5, 9, 2, 6, 1],
+        ["b", "a", "c", "a"],
+    ]
+    snapshot(st) = (copy(st.vals), st.nans, st.missings)
+    for vals in pools
+        intypes = (time = Int, x = eltype(vals))
+        ws = CausalFrames.freshwindowed(SV(:x), intypes)
+        bad = Tuple{Symbol,Int}[]
+        windowwalk(vals, 400; seed = 5) do op, row, live
+            op === :admit ? CausalFrames.update!(ws, row) :
+            CausalFrames.downdate!(ws, row)
+            ref = fold(SV(:x), intypes, [r.x for r in live])
+            isequal(snapshot(ws), snapshot(ref)) || push!(bad, (op, row.time))
+        end
+        @test isempty(bad)
+        @test isequal(snapshot(CausalFrames.fresh!(ws)),
+            snapshot(CausalFrames.fresh(SV(:x), intypes)))
+
+        # combine! is the fold of both, whichever state it overwrites
+        a1, b1 = vals[1:(end÷2)], vals[(end÷2+1):end]
+        whole = snapshot(fold(SV(:x), intypes, vals))
+        for alias in (:none, :a, :b)
+            a, b = fold(SV(:x), intypes, a1), fold(SV(:x), intypes, b1)
+            dest = alias === :a ? a : alias === :b ? b :
+                                      fold(SV(:x), intypes, vals[1:2])
+            CausalFrames.combine!(dest, a, b)
+            @test isequal(snapshot(dest), whole)
+        end
+    end
+
+    # widening keeps the order and the counts
+    st = fold(SV(:x), (time = Int, x = Int), [3, 1, 2])
+    st = CausalFrames.widenstate(st, (time = Int, x = Union{Missing,Float64}))
+    @test st isa CausalFrames.SortedState{:x,:x_sortedvalues,Float64,true}
+    CausalFrames.update!(st, (time = 4, x = missing))
+    CausalFrames.update!(st, (time = 5, x = 1.5))
+    @test isequal(snapshot(st), ([1.0, 1.5, 2.0, 3.0], 0, 1))
+
+    # a steady window slides, and emits, without allocating
+    protos, requested = CausalFrames.prototypes(
+        CausalFrames.tosummarizers(
+            [Quantile(:x, [0.1, 0.5]), Median(:x), PercentRank(:x),
+            Quantile(:x, 0.9; interpolation = :nearestrank)]), Symbol[])
+    intypes = (time = Int, x = Union{Missing,Float64})
+    states = map(s -> CausalFrames.freshwindowed(s, intypes), protos)
+    outs = Val(requested)
+    slrow(t) = (time = t, x = Float64(mod(t * 7, 17)))
+    function slide(states, from, n)
+        for t in from:(from+n-1)
+            CausalFrames.updateall!(states, slrow(t))
+            CausalFrames.downdateall!(states, slrow(t - 50))
+            CausalFrames.summaryvalues(states, outs)
+        end
+        return nothing
+    end
+    foreach(t -> CausalFrames.updateall!(states, slrow(t)), -49:0)
+    slide(states, 1, 1000)
+    @test (@allocated slide(states, 1001, 1000)) == 0
+end

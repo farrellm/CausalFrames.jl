@@ -8,6 +8,7 @@ using DuckDB
 import MLJModelInterface
 using Parquet2
 using Serialization
+import Statistics
 using Tables
 using Test
 

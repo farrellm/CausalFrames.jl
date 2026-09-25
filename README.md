@@ -184,6 +184,10 @@ Most summarize no rows as `missing`; the rest give the identity shown.
 | [`Covariance(:x, :y; corrected)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#Covariance) | `:x_y_covariance` | group | covariance, as `Statistics.cov` |
 | [`Correlation(:x, :y)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#Correlation) | `:x_y_correlation` | group | Pearson correlation |
 | [`LinearRegression(predictors, response; intercept, name)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#LinearRegression) | `n`, `r2`, `stderr`, and a beta and t statistic per term | group | ordinary least squares |
+| [`Quantile(:x, p; interpolation)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#Quantile) | `:x_quantile_50` for `p = 0.5`, one per `p` | group | quantiles, linear as `Statistics.quantile` or nearest-rank as TA-Lib's `PERCENTILE` |
+| [`Median(:x)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#Median) | `:x_median` | group | median |
+| [`PercentRank(:x)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#PercentRank) | `:x_percentrank` | group | fraction of the other rows below the newest |
+| [`CausalFrames.SortedValues(:x)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#SortedValues) | `:x_sortedvalues` | group | the sorted values the three above read (unexported, for summarizers of your own) |
 | [`Min(:x)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#Min) | `:x_min` | group | minimum |
 | [`Max(:x)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#Max) | `:x_max` | group | maximum |
 | [`First(:x)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#First) | `:x_first` | group | value in the first row |

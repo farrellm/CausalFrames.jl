@@ -234,7 +234,10 @@ end
     mixedset = [Sum(:x), Min(:x), MinMax(:y), Product(:y)] # running + tree
     plainset = [Sum(:x), TestVar(:x), PlainSum(:y)]       # running + re-fold
     spanset = [TierSpan(:y), Mean(:x), Last(:x)]          # every tier at once
-    allsets = (groupset, trackset, monoidset, mixedset, plainset, spanset)
+    orderset = [Quantile(:x, [0.1, 0.5]), Median(:y), PercentRank(:x),
+        Quantile(:y, 0.25; interpolation = :nearestrank)]
+    allsets = (groupset, trackset, monoidset, mixedset, plainset, spanset,
+        orderset)
     windowed(p, L, ss; kwargs...) = DataFrame(load(ctx,
         p |> summarizewindows(clock(5), L, ss; kwargs...)))
 
@@ -257,6 +260,11 @@ end
 
             windowsagree(windowed(mkdata(x), 40, ss; opts...),
                 windowed(mkdata(x), 40, map(Opaque, ss); opts...))
+        end
+        # the sorted accumulator merged through the tree
+        for x in (intx, floatx), opts in layouts
+            windowsagree(windowed(mkdata(x), 40, orderset; opts...),
+                windowed(mkdata(x), 40, map(AsMonoid, orderset); opts...))
         end
     end
 

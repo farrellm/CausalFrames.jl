@@ -115,6 +115,25 @@ end
     end
 end
 
+@testset "order statistics" begin
+    # the sorted accumulator's fold and its dependents' emission, over a plain
+    # and a Missing-admitting column, and its merge
+    for T in (Int, Union{Missing,Float64})
+        protos, requested = CausalFrames.prototypes(
+            CausalFrames.tosummarizers(
+                [Quantile(:x, [0.1, 0.5]), Median(:x), PercentRank(:x),
+                Quantile(:x, 0.9; interpolation = :nearestrank)]), Symbol[])
+        states = CausalFrames.newstates(protos, (time = Int, x = T))
+        row = (time = 1, x = one(nonmissingtype(T)))
+        JET.@test_opt CausalFrames.updateall!(states, row)
+        CausalFrames.updateall!(states, row)
+        JET.@test_opt CausalFrames.downdateall!(states, row)
+        JET.@test_opt CausalFrames.summaryvalues(states, Val(requested))
+        st = first(states)
+        JET.@test_opt CausalFrames.combine!(st, st, CausalFrames.fresh(st))
+    end
+end
+
 @testset "segment tree" begin
     protos, _ = CausalFrames.prototypes(
         CausalFrames.tosummarizers([Min(:x), Max(:x)]), Symbol[])
