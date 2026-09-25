@@ -1530,6 +1530,11 @@ end
     q = CausalFrames.fresh(Quantile(:x, 0.07; interpolation = :nearestrank),
         (time = Int, x = Int))
     @test CausalFrames.value(q, CausalFrames.value(st)) === (x_quantile_7 = 7,)
+    # and the other way: nextfloat(1/3) * 3 rounds down to 1.0, but 1/3 < p, so
+    # the rank is 2
+    near(p) = only(summarized([10, 20, 30],
+        Quantile(:x, p; interpolation = :nearestrank))[!, 2])
+    @test (near(1 / 3), near(nextfloat(1 / 3))) == (10, 20)
 
     # element types: linear interpolation floats, the nearest rank keeps the
     # column's type, the percent rank is a Float64 fraction; a Missing-admitting

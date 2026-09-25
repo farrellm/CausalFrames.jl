@@ -117,18 +117,25 @@ end
 
 @testset "order statistics" begin
     # the sorted accumulator's fold and its dependents' emission, over a plain
-    # and a Missing-admitting column, and its merge
+    # and a Missing-admitting column, and its merge. A window slides the
+    # windowed states (Last's ordinary TrackState has no downdate!), so the
+    # slide is checked over those and the rest over the ordinary ones.
     for T in (Int, Union{Missing,Float64})
         protos, requested = CausalFrames.prototypes(
             CausalFrames.tosummarizers(
                 [Quantile(:x, [0.1, 0.5]), Median(:x), PercentRank(:x),
                 Quantile(:x, 0.9; interpolation = :nearestrank)]), Symbol[])
-        states = CausalFrames.newstates(protos, (time = Int, x = T))
+        intypes = (time = Int, x = T)
+        states = CausalFrames.newstates(protos, intypes)
+        windowed = map(s -> CausalFrames.freshwindowed(s, intypes), protos)
         row = (time = 1, x = one(nonmissingtype(T)))
         JET.@test_opt CausalFrames.updateall!(states, row)
         CausalFrames.updateall!(states, row)
-        JET.@test_opt CausalFrames.downdateall!(states, row)
         JET.@test_opt CausalFrames.summaryvalues(states, Val(requested))
+        JET.@test_opt CausalFrames.updateall!(windowed, row)
+        CausalFrames.updateall!(windowed, row)
+        JET.@test_opt CausalFrames.downdateall!(windowed, row)
+        JET.@test_opt CausalFrames.summaryvalues(windowed, Val(requested))
         st = first(states)
         JET.@test_opt CausalFrames.combine!(st, st, CausalFrames.fresh(st))
     end
