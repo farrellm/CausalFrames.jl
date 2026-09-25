@@ -2056,18 +2056,24 @@ this structure (see "Rolling windows" and "Window summarization"). The classific
   `First`/`Last` *because* the ranges are ordered, which is why the law
   requires it), and fold everywhere but a sliding window at a fixed size.
   In a window they slide `freshwindowed` states instead, which the oldest-first
-  law makes cheap. The four trackers share a *monotonic deque*: a new value
+  law makes cheap. `Min`, `Max` and `First` share a *monotonic deque*: a new value
   first drops every value at the back it makes redundant (those `b` with
   `F(b, v)` `isequal` to `v`), so the front is always the fold of the window,
   and eviction pops the front only when the evicted row's sequence number is
   the front's. That relies on `F` selecting one of its arguments
   associatively, which `min` and `max` do under `isequal` — `NaN`, `±0.0` and
-  `missing` included — as do `keepfirst` (nothing is redundant, so the deque is
-  the window: O(window) memory per key) and `keeplast` (everything is, so it
-  holds one value). `Min` and `Max` hold between one value and the whole window
-  (a monotone column). `CountDistinct` counts rows per value (see above). Dead
-  front slots are reclaimed in place once they dominate, so a steady window
-  allocates nothing.
+  `missing` included — as does `keepfirst` (nothing is redundant, so the deque
+  is the window: O(window) memory per key). `Min` and `Max` hold between one
+  value and the whole window (a monotone column). Dead front slots are
+  reclaimed in place once they dominate, so a steady window allocates nothing.
+  `Last` could share the deque — under `keeplast` everything is redundant, so
+  it holds one value — but still pays a pop and a push on two vectors per row.
+  It keeps the newest value and a count of the window's rows instead: evicting
+  the oldest row changes the last value only by emptying the window, and a
+  count, unlike the last row's time, tells tied rows apart. That measured
+  1.1–2.2 ns per row against the deque's 5.7–8.4, and 23 ms against 38 ms for a
+  keyless `summarizewindows` of `Last` over the benchmark's million rows.
+  `CountDistinct` counts rows per value (see above).
 - **Monoids only**: `Product` — dividing a row back out fails outright at
   zero (the total is `0` regardless of what else was folded), truncates for
   integers, and compounds round-off for floats.

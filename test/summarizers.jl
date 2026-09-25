@@ -1314,6 +1314,12 @@ end
         @test isequal(CausalFrames.value(ws), CausalFrames.value(ref))
     end
 
+    # Min/Max/First slide the deque; Last only needs a count and the newest value
+    @test CausalFrames.freshwindowed(Last(:x), (time = Int, x = Float64)) isa
+          CausalFrames.WindowLastState
+    @test CausalFrames.freshwindowed(First(:x), (time = Int, x = Float64)) isa
+          CausalFrames.WindowTrackState
+
     # Every summarizer without its own windowed state gets its ordinary one.
     intypes = (time = Int, x = Int)
     @test CausalFrames.freshwindowed(Sum(:x), intypes) isa

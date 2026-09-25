@@ -117,13 +117,16 @@ design rationale and performance constraints behind each module.
   - `downdate!` is only ever handed the **oldest** row still folded — every
     caller evicts FIFO per group, and any new caller must too. States rely on
     it: `AgeWeightedSum` takes back the evicted row's weight `n - 1`, and the
-    windowed trackers pop their front by sequence number
+    windowed deques pop their front by sequence number, and windowed `Last`
+    only counts
   - `freshwindowed` (default `fresh`) is the state only the running window tier
     slides, so a group whose ordinary state cannot invert keeps a fixed-size
     state everywhere else. `Min`/`Max`/`First`/`Last` share one ordinary state
     (`TrackState`, parameterized by the combiner) and one windowed state
-    (`WindowTrackState`, a monotonic deque under the same combiner: First keeps
-    the whole window, Last one value). `CountDistinct` folds a `Set` but slides
+    (`WindowTrackState`, a monotonic deque under the same combiner; First keeps
+    the whole window) — except Last, whose windowed state is a count plus the
+    newest value (`WindowLastState`), measured 3-4x cheaper per row than the
+    deque holding its one value. `CountDistinct` folds a `Set` but slides
     a `Dict{T,Int}` of counts: measured, a public-API count increment hashes
     twice and is 1.4-1.7x slower than `push!` on the non-window folds (DESIGN.md
     has the table). A windowed state is never combined or widened. `Product`
