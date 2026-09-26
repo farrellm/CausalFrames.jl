@@ -161,13 +161,15 @@ design rationale and performance constraints behind each module.
     symbol, so no name is a runtime value on the emission path
   - `AgeWeightedSum` (`Σ k·y`, k the row's age) cannot be a term functor — its
     update reads its own `S₁` — so it has its own plain and compensated states,
-    reusing the `Compensated` helpers, with `missing` counted through a type
-    flag `M` rather than two more Optional* types. `S₂`'s nonfinite
+    reusing the `Compensated` helpers, with `missing` counted through the
+    sum family's type flag `M`. `S₂`'s nonfinite
     classification is `S₁`'s minus the newest row's (`newest`), whose weight is
     an exact 0
-  - the sum family `Sum`/`SumPower`/`DotProduct` shares one plain and one
-    compensated state over a term functor (`ColumnTerm`/`PowerTerm`/
-    `PairProductTerm`, terms formed at accumulator width). The `Compensated`
+  - the sum family `Sum`/`SumPower`/`DotProduct` shares one state,
+    `AccumState{N,A,T,M,S}`, over a term functor `T` (`ColumnTerm`/`PowerTerm`/
+    `PairProductTerm`, terms formed at accumulator width). Its storage `S` is
+    the plain `A` or a `Compensated{A}`, every fold operation (`accadd`,
+    `accsub`, `accmerge`, `accvalue`) dispatching on it. The `Compensated`
     pair runs Neumaier summation over the finite terms and counts NaN/±Inf
     separately, reconstructing the IEEE result in `value` — that separation is
     what lets a rolling window evict a nonfinite row cleanly and stay on the
@@ -194,10 +196,11 @@ design rationale and performance constraints behind each module.
     column is concrete though the fit is opaque. It is plain `Summarizer`
     (re-fold everywhere). `fresh!` empties the buffers keeping capacity, which
     is only safe because `value` hands the model copies
-  - a `Missing`-admitting accumulator type gets the flat `Optional*` counting
-    states over the non-missing type, counting `missing` terms exactly as the
-    compensated states count nonfinites, so the accumulator stays invertible —
-    no `Union{Missing,_}` accumulation field, only in `value`'s return
+  - a `Missing`-admitting accumulator type sets the sum state's flag `M` and
+    folds at the non-missing type, counting `missing` terms exactly as the
+    compensated storage counts nonfinites, so the accumulator stays invertible —
+    no `Union{Missing,_}` accumulation field, only in `value`'s return. With
+    `M` false the count is never touched, and its tests compile away
 - `src/summarize.jl` — the folding kernels and the transforms `summarize`,
   `summarizecycles`, `addsummarycolumns`; also the key validators every keyed
   transform shares, `keycolumns` (eager: unique, never `:time`) and

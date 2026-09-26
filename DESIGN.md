@@ -1721,8 +1721,8 @@ a plain `+` that cannot overflow the way accumulating in the input's own type
 would. `Product` is the same story with `Base.prod`'s widening and a `*` fold.
 
 The whole sum family (`Sum`, `SumPower`, `DotProduct`) is backed by one
-shared plain state and one shared compensated state, parameterized by a
-*term functor* — the same idiom as the `Min`/`Max`/`First`/`Last` state, but
+shared state, `AccumState`, whose storage is plain or compensated (below) and
+which is parameterized by a *term functor* — the same idiom as the `Min`/`Max`/`First`/`Last` state, but
 for the folded quantity: the functor's type names the family and its input
 columns (`ColumnTerm{:x}`, `PowerTerm{:x}`, `PairProductTerm{:a,:b}`), its
 fields carry runtime config (`SumPower`'s exponent), and `update!` inlines
@@ -1747,13 +1747,15 @@ inputs whose square lands near underflow (how often depends on the CPU, since
 `^` rounds its error terms differently with and without FMA, so the tests bound
 the difference rather than asserting where it falls) — more accurate, but a
 change. It does not
-disturb what the compensated states rely on, since they classify NaN and ±Inf
+disturb what the compensated storage relies on, since they classify NaN and ±Inf
 *terms* and carry the sign of zero, and no nonfinite or signed-zero case
 differs. `notes/sumpower-terms.md` records the measurements.
 
 When the realized accumulator type is a fixed-precision float (a non-BigFloat
 `AbstractFloat`), the sum accumulators (`Sum`, `SumPower`, `DotProduct`) switch
-to a compensated state: Kahan-Babuška-Neumaier summation over the finite terms
+to compensated storage, a `Compensated` in place of the plain total (the
+storage type is a parameter of the one state, and every fold operation
+dispatches on it): Kahan-Babuška-Neumaier summation over the finite terms
 only, with `NaN`, `+Inf`, and `-Inf` terms counted in separate `Int` fields
 rather than folded in. The classified term is the folded one — the value after
 `SumPower`'s power, the per-row product for `DotProduct` (so `Inf * 0.0` counts
@@ -1768,9 +1770,10 @@ compensation buys nothing at arbitrary precision and a non-isbits compensated
 pair would allocate on every row.
 
 A `Missing`-admitting column gets the same treatment for `missing` that the
-compensated state gives nonfinites: two flat `Optional*` states (one mirroring
-the plain state, one the compensated) hold the accumulation at the *non-missing*
-type and count the `missing` terms in an `Int`, folding only present terms in.
+compensated storage gives nonfinites: a type flag `M` on the state holds the
+accumulation at the *non-missing* type and counts the `missing` terms in an
+`Int`, folding only present terms in (without the flag the count stays zero
+and every test of it compiles away).
 `value` returns `missing` while that count is positive and the ordinary
 reconstructed total otherwise, at the declared element type `Union{Missing, A}`
 — identical results to the old absorbing behaviour, but the count subtracts
@@ -1778,9 +1781,10 @@ away under `downdate!`, so the accumulator stays invertible and a rolling window
 recovers on the running path once the missing row expires (no tree demotion).
 The accumulation field is never itself `Union{Missing, …}`; only the `value`
 return is. `widenstate` carries the whole representation across schema
-promotions — plain→compensated (an `Int` column promoted to float), and, when
-`missing` first appears, plain/compensated→`Optional*` (missings start at zero,
-the existing total carried) and widening within the `Optional*` family.
+promotions — plain→compensated storage (an `Int` column promoted to float),
+and, when `missing` first appears, onto the counting path (missings start at
+zero, the existing total carried) — by rebuilding the state for the new types
+and carrying the accumulator across with `widenacc`.
 
 `AgeWeightedSum(column)` is the sum family's one accumulator that the term
 functor cannot express, because its update reads its own running total: it
@@ -1798,9 +1802,8 @@ compensation over `S₁` and `S₂`, with `S₁`'s counters classifying each raw
 `NaN`/`±Inf` input once. `S₂`'s nonfinite terms are `S₁`'s less the newest
 row's, whose weight is `0`, so a nonfinite value contributes nothing until a
 later row ages it (a weight of zero is exact, not IEEE's `0·Inf = NaN`), and a
-window recovers once it leaves. A `missing` input is counted as the `Optional*`
-states count it, but through a type flag on the two states rather than two
-more state types.
+window recovers once it leaves. A `missing` input is counted as the sum
+family's state counts it, through the same type flag `M`.
 
 `CountDistinct` is the one summarizer that departs from both of the rules
 above, and the one whose state is not O(1). It holds a `Set` of the values it
