@@ -1,8 +1,7 @@
-# Targeted JET checks: the folding kernels sit behind function barriers and
-# must stay free of runtime dispatch end to end. Whole-package analysis is
-# deliberately not used — the dynamically typed per-run setup fields
-# (SummaryFold, RollingState, JoinState) are intended dynamism and would
-# flood a package-level report.
+# Targeted JET checks: the kernels behind the function barriers must stay free
+# of runtime dispatch. Whole-package analysis isn't used, since the untyped
+# per-run setup fields (SummaryFold, RollingState, JoinState) are intended
+# dynamism and would flood the report.
 
 using JET
 
@@ -28,13 +27,11 @@ using JET
 end
 
 @testset "dependent summarizer emission" begin
-    # A dependent summarizer's `value` runs per emitted row on the
-    # addsummarycolumns and addrollingcolumns paths, so it has to stay
-    # dispatch-free too. `@inferred` is not enough on its own: it proves the
-    # *return* type is concrete while saying nothing about the body, and the
-    # missing-admitting regression passed it while every line inside went
-    # dynamic — because the element type was derived from `typeof` of the
-    # dependency values, which is value-dependent and so not a constant.
+    # A dependent summarizer's `value` runs per emitted row under
+    # addsummarycolumns and addrollingcolumns, so it must be dispatch-free too.
+    # `@inferred` isn't enough: it checks only the return type, and a body that
+    # derives an element type from `typeof` of the dependency values goes
+    # dynamic while still returning a concrete type.
     lr = (time = Int, x = Float64, z = Float64, y = Float64)
     st = CausalFrames.fresh(LinearRegression(:x, :y), lr)
     JET.@test_opt CausalFrames.value(st,
@@ -51,10 +48,9 @@ end
             x_y_dotproduct = 100.0, y_z_dotproduct = 90.0,
             x_sum = 15.0, z_sum = 15.0, y_sum = 30.0))
 
-    # The Missing-admitting variants, where the early-return branch is live and
-    # the dependency values are Union-typed. Both arities are checked on
-    # purpose: a one-element tuple of Union values union-splits and looks fine,
-    # so K = 1 stayed clean while the K >= 2 cross-product tuple went dynamic.
+    # The Missing-admitting variants, where the early return is live and the
+    # dependency values are Union-typed. Both arities are checked, since a
+    # one-element tuple of Union values union-splits but a K >= 2 tuple may not.
     MF = Union{Missing,Float64}
     st = CausalFrames.fresh(LinearRegression(:x, :y),
         (time = Int, x = MF, y = Float64))
@@ -195,9 +191,7 @@ end
 end
 
 @testset "asofjoin kernel" begin
-    # a String field makes V non-isbits, which is the case the index/slots
-    # store exists for: a Dict of rows could only answer as Union{Nothing,V},
-    # boxing once per left row
+    # a String field makes V non-isbits, the case the slot store exists for
     V = typeof((time = 1, sym = "a", y = 1.0))
     K = typeof((sym = "a",))
     index = Dict{K,Int}()
@@ -224,8 +218,7 @@ end
 end
 
 @testset "lastrow kernel" begin
-    # the same non-isbits V the asofjoin store exists for: a Dict{K,V} would
-    # answer every lookup as Union{Nothing,V} and box it once per row
+    # the same non-isbits V the slot store exists for
     V = typeof((time = 1, sym = "a", y = 1.0))
     K = typeof((sym = "a",))
     index = Dict{K,Int}()

@@ -197,7 +197,7 @@
 
     @testset "kernel allocates nothing per row" begin
         # Only Ints are stored per row, so a String key costs no box; nothing
-        # else in the suite would notice if that regressed.
+        # else in the suite checks this.
         function lookupalloc()
             n = 200
             syms = ["s" * string(i % 7) for i in 1:n]   # s5, s6 unmatched

@@ -371,12 +371,10 @@ time,sym,qty
         @test isequal(dense[dense.count .> 0, :], sparse)
     end
 
-    # State tuples are recycled between cycles rather than rebuilt, so a key
-    # that reappears after an absence must start from zero and must not carry
-    # anything over from whichever key last used that tuple. Min/Max/First/Last
-    # are the sharp case: their value field cannot be un-defined, so only the
-    # `seen` flag is cleared, and a leak here would surface as a stale value
-    # rather than an error.
+    # State tuples are recycled between cycles, so a key reappearing after an
+    # absence must start from zero, carrying nothing from the tuple's previous
+    # key. Min/Max/First/Last are the sharp case: only their `seen` flag is
+    # cleared, so a leak would show as a stale value rather than an error.
     reuse = CausalPipeline(
         ctx -> [
             DataFrame(time = [1, 1, 2, 3, 3],
@@ -398,10 +396,9 @@ time,sym,qty
     @test df.qty_min == [100, 7, 8, 1, 2]
     @test df.qty_max == [100, 7, 8, 1, 2]
 
-    # A wider differential check against a straightforward reference fold, over
-    # many cycles and a key set that churns — the shape that exercises the
-    # recycling pool, the key-ordered emission buffer, and cycles spanning
-    # chunk boundaries all at once.
+    # A differential check against a reference fold over many cycles and a
+    # churning key set, exercising the recycling pool, the key-ordered emission
+    # buffer and cycles spanning chunk boundaries together.
     let times = Int[], syms = String[], qtys = Int[]
         for t in 1:60, k in 0:(t%5)
             push!(times, t)

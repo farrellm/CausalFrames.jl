@@ -274,10 +274,10 @@ end
 @testset "rolling fast paths" begin
     onechunk(; cols...) = CausalPipeline(ctx -> [DataFrame(; cols...)])
 
-    # Column-wise agreement, exact for everything but floats, which may
-    # carry sliding-sum drift on the running path (and NaN, e.g. a
-    # single-row corrected variance, which isapprox rejects).
-    # One assertion per comparison, naming every column that disagreed.
+    # Column-wise agreement, exact but for floats, which may carry sliding-sum
+    # round-off on the running path (and NaN, e.g. a single-row corrected
+    # variance, which isapprox rejects). One assertion per comparison, naming
+    # every column that disagreed.
     function agrees(fast, slow)
         @test names(fast) == names(slow)
         same(x, y) =
@@ -317,10 +317,9 @@ end
         p |> addrollingcolumns(windows, ss; kwargs...)))
 
     # The sets exercise each window tier (tiers.jl) alone and together.
-    # DotProduct(:y, :x) and Covariance(:y, :x) are the reversed (non-canonical)
-    # argument order, so they fold through the alias over the canonical
-    # accumulator — the differential is what proves that path keeps the running
-    # tier. The trackers and CountDistinct run through their windowed states.
+    # DotProduct(:y, :x) and Covariance(:y, :x) use the reversed argument
+    # order, so they fold through the alias over the canonical accumulator, on
+    # the running tier. The trackers and CountDistinct use their windowed states.
     groupset = [Count(), Sum(:x), Mean(:x), Variance(:x), Correlation(:x, :y),
         DotProduct(:y, :x), Covariance(:y, :x), AgeWeightedSum(:x),
         LinearRegression(:x, :y; name = :m1),
@@ -346,9 +345,8 @@ end
     end
 
     @testset "differential over missing inputs" begin
-        # the running path (groups) must equal the re-fold oracle even with
-        # missing in the summarized column — the counting states keep it on the
-        # running path rather than demoting to the tree
+        # the running path must equal the re-fold oracle with missing in the
+        # summarized column, which the counting states keep on the running path
         for p in (missingintdata, missingfloatdata),
             ss in (groupset, trackset, mixedset, spanset, orderset)
 
@@ -393,11 +391,10 @@ end
     end
 
     @testset "missing rows recover in running mode" begin
-        # chunk two widens the sum accumulator to admit missing; because the
-        # accumulator counts missing terms instead of folding them in (like
-        # NaN/±Inf), the running path stays running — the missing row reports
-        # missing over its own windows but recovers exactly once it expires,
-        # with no demotion to the tree
+        # chunk two widens the sum accumulator to admit missing, which it counts
+        # rather than folds (like NaN/±Inf), so it stays on the running path:
+        # the missing row's windows report missing, and later windows recover
+        # exactly
         p = onechunk(time = [1, 2, 3, 10], x = [0, 0, 0, 0])
         src = CausalPipeline(
             ctx ->
@@ -416,10 +413,9 @@ end
     end
 
     @testset "nonfinite rows recover in running mode" begin
-        # a float accumulator counts NaN and ±Inf inputs instead of folding
-        # them in, so the running path stays running (no demotion) and the
-        # window recovers exactly once the nonfinite row expires — a naive
-        # running sum would emit NaN forever
+        # a float accumulator counts NaN and ±Inf inputs rather than folding
+        # them, so it stays on the running path and the window recovers exactly
+        # once the nonfinite row expires (a naive running sum stays NaN)
         for bad in (NaN, Inf)
             p = onechunk(time = [1, 2, 3, 10], y = [1.0, 2.0, bad, 5.0])
             df = DataFrame(
@@ -449,9 +445,8 @@ end
     end
 
     @testset "compensated sliding accuracy" begin
-        # once the large value leaves the window, the compensation term is
-        # all that remains — the naive running sum would emit 0.0, which not
-        # even the oracle's isapprox would accept
+        # once the large value leaves the window only the compensation term
+        # remains; a naive running sum would give 0.0, which isapprox rejects
         p = onechunk(time = [1, 2, 3], x = [1e16, 1.0, 1.0])
         df = DataFrame(load(Context(0, 10),
             p |> addrollingcolumns((w1 = 1,), Sum(:x))))
@@ -459,9 +454,8 @@ end
     end
 
     @testset "order sensitivity through ties" begin
-        # First/Last through ties: every row at time t sees all rows tied
-        # at t, in stream order — on the running tier's windowed states and
-        # on the re-fold oracle alike
+        # First/Last through ties: every row at time t sees all rows tied at
+        # t, in stream order, on the running tier and the re-fold oracle alike
         p = onechunk(time = [1, 2, 2, 3], x = [1, 2, 3, 4])
         for ss in ([First(:x), Last(:x)], [Opaque(First(:x)), Opaque(Last(:x))])
             df = DataFrame(
@@ -472,9 +466,8 @@ end
     end
 
     @testset "fast paths widen like the re-fold path" begin
-        # Int then Float64 across summarized chunks, on both fast paths:
-        # prototypes, buffer, and the half-filled value vectors all widen
-        # mid-augmented-chunk
+        # Int then Float64 across summarized chunks, on both fast paths: the
+        # states, buffer and half-filled value vectors widen mid-augmented-chunk
         p = onechunk(time = [1, 2, 3], x = [0, 0, 0])
         src = CausalPipeline(
             ctx -> [DataFrame(time = [1, 2], y = [1, 2]),
@@ -529,8 +522,8 @@ end
 
         # the demotion mid-stream, beside each other tier: x turns Float64 in
         # the second chunk, so FragileSum rebuilds into the tree from the
-        # buffer (beside a running Sum), from the old trees (beside Product),
-        # or beside a re-fold PlainSum
+        # buffer (beside a running Sum), from the previous trees (beside
+        # Product), or beside a refold PlainSum
         widening = CausalPipeline(
             ctx -> [
                 DataFrame(time = times[r], k = ks[r],
@@ -538,7 +531,7 @@ end
                 for r in ranges
             ])
         # LateSum goes the other way, promoted from a tree-only call that kept
-        # no buffer, so the running tier gathers one from the old trees
+        # no buffer, so the running tier gathers one from the previous trees
         @test tiers([LateSum(:x)], it) == (:tree,)
         @test tiers([LateSum(:x)], merge(it, (; x = Float64))) == (:running,)
         for ss in ([FragileSum(:x), Sum(:y), Last(:x)],
@@ -551,11 +544,11 @@ end
     end
 
     @testset "allocations do not grow with rows" begin
-        # Per tier and mixed: the running groups are pooled, the windowed
-        # states and trees reuse their storage, and re-fold threads one scratch
-        # tuple, so quadrupling the rows adds only the logarithmic growth of
-        # the buffers. (Not MinMax: it leaves `fresh!` to the allocating
-        # default, which a tree query calls per window.)
+        # Per tier and mixed: running groups are pooled, windowed states and
+        # trees reuse their storage, and the refold tier threads one scratch
+        # tuple, so quadrupling the rows adds only logarithmic buffer growth.
+        # (Not MinMax: its `fresh!` is the allocating default, which a tree
+        # query calls per window.)
         function rollallocs(ss, n)
             src = DataFrame(time = 1:n, k = repeat(["a", "b"], n ÷ 2),
                 x = mod.(1:n, 7), y = mod.(1:n, 5))

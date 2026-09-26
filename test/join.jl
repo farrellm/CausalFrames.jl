@@ -199,11 +199,10 @@
         )
         @test isequal(df.qty, [1, 1])
 
-        # ... and the same widening with an *unmatched* left row already
-        # behind it: the match buffer's unmatched slots are undefined rather
-        # than `missing`, so the widening conversion has to skip them. Left
-        # row 1 precedes every right row, so its slot is still undef when the
-        # second right chunk widens qty from Int to Float64.
+        # ... and the same widening with an *unmatched* left row behind it:
+        # unmatched slots are undefined, so the widening must skip them. Left
+        # row 1 precedes every right row, so its slot is still undefined when
+        # the second right chunk widens qty from Int to Float64.
         latewide = CausalPipeline(
             ctx -> [DataFrame(time = [2], qty = [1]),
                 DataFrame(time = [3], qty = [2.5])],
@@ -232,10 +231,9 @@
     end
 
     @testset "kernel allocates nothing per row" begin
-        # The store is an index and a slot vector, and the match buffer is a
-        # Vector{V} plus a mask, precisely so that a right row type carrying a
-        # String — i.e. not isbits — costs no box per left row. Nothing else in
-        # the suite would notice if that regressed.
+        # The slot store and the masked match buffer exist so a non-isbits
+        # right row (carrying a String) costs no box per left row; nothing else
+        # checks this.
         function joinalloc()
             n = 200
             V = typeof((time = 1, sym = "a", qty = 1.0))

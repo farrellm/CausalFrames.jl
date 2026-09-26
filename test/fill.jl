@@ -157,8 +157,8 @@
     end
 
     @testset "element types across chunks" begin
-        # a source may hand a column a different element type per chunk; the
-        # cells track the promotion and widen in place
+        # a column's element type may differ per chunk; the cells track the
+        # promotion and are rebuilt at the wider type
         drifting = CausalPipeline() do _
             [DataFrame(time = [1, 2], k = ["a", "b"], v = [1, missing]),
                 DataFrame(time = [3, 4], k = ["b", "a"], v = [3.5, missing])]
@@ -216,9 +216,8 @@
     end
 
     @testset "kernel allocates nothing per row" begin
-        # The cells are mutable and live in a NamedTuple, precisely so that a
-        # carried value that is not isbits — a String — costs no box per row.
-        # Nothing else in the suite would notice if that regressed.
+        # The cells are mutable, in a NamedTuple, so a non-isbits carried
+        # value (a String) costs no box per row; nothing else checks this.
         function fillalloc(n = 200)
             C = CausalFrames.FillCell{String,Int}
             times = collect(1:n)

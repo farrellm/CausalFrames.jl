@@ -209,9 +209,9 @@ using CausalFrames.Acausal
 
     @testset "kernel allocates nothing per row" begin
         # The match buffer is a Vector{V} plus a mask rather than a
-        # Vector{Union{Missing,V}}, so a right row carrying a String — not
-        # isbits — costs no box per left row. (Unlike asofjoin, the store here
-        # needs no rework: KeyBuffer is mutable, so its lookup is already free.)
+        # Vector{Union{Missing,V}}, so a non-isbits right row (carrying a
+        # String) costs no box per left row; KeyBuffer is mutable, so its
+        # lookup costs none either.
         function futurealloc()
             n = 200
             V = typeof((time = 1, sym = "a", qty = 1.0))

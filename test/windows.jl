@@ -164,8 +164,8 @@ end
     end
 
     @testset "declared keyset is dense" begin
-        # the sparse test's stream: every tick now emits both declared keys, in
-        # declared order, and there is no separate vanish row
+        # the sparse test's stream: here every tick emits both declared keys,
+        # in declared order, with no separate vanish row
         p = onechunk(time = [1, 1, 12], k = ["a", "b", "b"], x = [1, 2, 3])
         df = DataFrame(
             load(Context(5, 25),
@@ -192,7 +192,7 @@ end
         @test all(ismissing, df.x_mean)
 
         # an undeclared key throws whichever tier is primary: running, tree,
-        # re-fold
+        # refold
         for ss in ([Count(), Sum(:x)], Product(:x), Opaque(Sum(:x)))
             @test_throws ArgumentError load(Context(5, 25),
                 p |> summarizewindows(clock(5), 5, ss; key = :k, keyset = ["a"]))
@@ -278,9 +278,9 @@ end
             ])
         whole = frame(Float64.(xs))
         # running stays running; FragileSum alone demotes to the tree, rebuilt
-        # from the buffer beside a running Count, from the old trees beside
-        # Product, and beside a re-fold PlainSum; the tree widens within the
-        # tree, re-fold within re-fold
+        # from the buffer beside a running Count, from the previous trees beside
+        # Product, and beside a refold PlainSum; tree and refold states widen
+        # within their tiers
         for ss in ([Sum(:x), Mean(:x)], [FragileSum(:x), Count()],
                 [FragileSum(:x), Product(:y)], [FragileSum(:x), PlainSum(:y)],
                 [LateSum(:x)], [LateSum(:x), Product(:y)],
@@ -303,10 +303,9 @@ end
     end
 
     @testset "allocations do not grow with rows" begin
-        # as in the rolling tests: pooled running groups, reused windowed
-        # states and trees, one refold table pool — quadrupling the rows (and
-        # with them the ticks) adds only logarithmic buffer growth and the
-        # emitted rows' vector
+        # as in the rolling tests: with pooled running groups, reused windowed
+        # states and trees, and one refold table pool, quadrupling the rows
+        # (and ticks) adds only logarithmic buffer growth and the emitted rows
         function windowallocs(ss, n; opts...)
             src = DataFrame(time = 1:n, k = repeat(["a", "b"], n ÷ 2),
                 x = mod.(1:n, 7), y = mod.(1:n, 5))
