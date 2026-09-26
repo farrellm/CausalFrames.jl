@@ -749,7 +749,7 @@ barrier — with three inversions:
 - **Context widening.** With `tolerance` the match requires
   `rtime - time <= tolerance` and the right pipeline runs over the widened
   context `[start, stop + tolerance)` — the only place times are *added*
-  (`futurecontext`, mirror of `rightcontext`'s subtraction; an explicit guard
+  (`futurecontext`, mirror of `widenstart`'s subtraction; an explicit guard
   rejects negative tolerance, which the `Context` constructor would accept).
   Without `tolerance` the right sees only `[start, stop)`, so left rows near
   `stop` may find no later right row (mirror of `asofjoin` near `start`).
@@ -868,7 +868,7 @@ time outside `[start, stop]`, the upstream pipeline is run over an
 - `lag(offset)` (`t -> t + offset`) runs upstream over `[start - offset,
   stop - offset)` and adds `offset`. Output at `t` depends only on input at
   `t - offset <= t`, so it is **causal**, lives in `src/operators.jl`, and is
-  exported. `lagcontext` mirrors `asofjoin`'s `rightcontext`.
+  exported. `lagcontext` mirrors the shared `widenstart`.
 - `lead(offset)` (`t -> t - offset`) runs upstream over `[start + offset,
   stop + offset)` and subtracts `offset`. Output at `t` depends on input at
   `t + offset > t`, so it is **acausal** and lives in the `CausalFrames.Acausal`
@@ -877,7 +877,7 @@ time outside `[start, stop]`, the upstream pipeline is run over an
 
 Both require the time type to support adding and subtracting the offset (numbers
 and `Dates` types do), reject a negative `offset` when the pipeline runs (the
-guard `rightcontext`/`futurecontext` use, since a negative shift would flip the
+guard `widenstart`/`futurecontext` use, since a negative shift would flip the
 causality contract), and treat `offset == 0` as the identity. The shared
 `shiftchunk!`/`shifttime` (broadcast add behind a function barrier) lives in
 `src/operators.jl` and is imported into the submodule; `lead` shifts by
@@ -1168,7 +1168,8 @@ the gap — fitting a model per key at every tick is the motivating case (see
 The mechanism is `intervalize`'s driver over `addrollingcolumns`' bookkeeping.
 A `chunkmap` over the data stream pulls ticks on demand through
 `intervalize.jl`'s `IntervalCursor`. Before each chunk it fills a concrete
-`Vector{T}` of pending ticks up to just past the chunk's last time, so the
+`Vector{T}` of pending ticks up to just past the chunk's last time (the
+cursor's `pullpast!`, which `intervalize` fills its boundaries with too), so the
 per-row kernel never touches the clock. For each row at time `s`, every pending
 tick `τ ≤ s` is closed first — the row belongs to no window of a tick at or
 before it — and then the row is admitted into a buffer of concretely typed
@@ -2241,7 +2242,7 @@ the second.
 | File | Content |
 |---|---|
 | `src/CausalFrames.jl` | module, includes, exports |
-| `src/context.jl` | `Context{T}` |
+| `src/context.jl` | `Context{T}`, and `widenstart`, the input context of every operator that reads before `start` |
 | `src/frame.jl` | `CausalFrame{T}`, invariants, Tables.jl interface |
 | `src/chunks.jl` | internal chunk-iterator machinery (`ChunkSource`, `chunkmap`, `PullCursor`) |
 | `src/pipeline.jl` | `CausalPipeline{F}`, `load`, `stream`, `scan` |

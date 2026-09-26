@@ -63,23 +63,15 @@ function forwardfill(selectors...; key = nothing, tolerance = nothing)
         return CausalPipeline() do ctx::Context
             st = ForwardFillState(keycols, selectors)
             step = c -> fillchunk!(st, keynames, tolerance, ctx.start, c)
-            return chunkmap(step, p.run(fillcontext(ctx, tolerance)))
+            return chunkmap(
+                step,
+                p.run(widenstart(ctx, tolerance, "forwardfill tolerance")),
+            )
         end
     end
 end
 forwardfill(p::CausalPipeline, selectors...; kwargs...) =
     forwardfill(selectors...; kwargs...)(p)
-
-# The mirror of asofjoin's `rightcontext`: non-negativity is probed by
-# subtracting rather than by comparing against zero, so a time type with no
-# zero of its own (a `Period`, say) still works.
-fillcontext(ctx::Context, ::Nothing) = ctx
-function fillcontext(ctx::Context, tolerance)
-    start = ctx.start - tolerance
-    start <= ctx.start || throw(ArgumentError(
-        "forwardfill tolerance must be non-negative, got $tolerance"))
-    return Context(start, ctx.stop)
-end
 
 # One carried value per (key, filled column): the last non-missing value, the
 # time of the row it came from, and whether there has been one. Mutable, so a

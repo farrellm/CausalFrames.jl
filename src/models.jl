@@ -112,8 +112,7 @@ function applymodels(models::CausalPipeline; column::Symbol = :model,
             cfg = JoinConfig(keycols, Val(Tuple(keycols)), tolerance,
                 strict ? (<) : (<=), Backward(), nothing, nothing, nothing,
                 "applymodels")
-            js = JoinState(right.run(rightcontext(ctx, tolerance,
-                "applymodels")))
+            js = JoinState(right.run(widenstart(ctx, tolerance, "applymodels tolerance")))
             return chunkmap(c -> predictchunk!(js, cfg, column, name, operation, c),
                 p.run(ctx))
         end

@@ -734,9 +734,9 @@ end
 lag(p::CausalPipeline, offset) = lag(offset)(p)
 
 # A negative offset would shift rows earlier, making lag acausal; reject it at
-# run time the way rightcontext validates tolerance (probe start - offset <=
-# start). This is the mirror of asofjoin's rightcontext: the whole window slides
-# back by the offset so the +offset shift lands the output in [start, stop).
+# run time the way `widenstart` validates a tolerance (probe start - offset <=
+# start). Unlike `widenstart`, the whole window slides back by the offset, so
+# the +offset shift lands the output in [start, stop).
 function lagcontext(ctx::Context, offset)
     start = ctx.start - offset
     start <= ctx.start ||

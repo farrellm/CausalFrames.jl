@@ -66,24 +66,13 @@ function summarizewindows(clk::CausalPipeline, lookback, summarizers;
             T = timetype(ctx)
             st = WindowState{T}(IntervalCursor{T}(clk.run(ctx)))
             return chunkmap(c -> windowstep!(st, cfg, c),
-                p.run(windowcontext(ctx, lookback));
+                p.run(widenstart(ctx, lookback, "summarizewindows lookback"));
                 flush = () -> windowflush!(st, cfg))
         end
     end
 end
 summarizewindows(p::CausalPipeline, clk::CausalPipeline, lookback, summarizers;
     kwargs...) = summarizewindows(clk, lookback, summarizers; kwargs...)(p)
-
-# Non-negativity falls out of `start - lookback <= start`, the rollingcontext
-# precedent, so the look-back type never has to be compared with zero.
-function windowcontext(ctx::Context, lookback)
-    start = ctx.start - lookback
-    start <= ctx.start || throw(
-        ArgumentError(
-            "summarizewindows lookback must be non-negative, got $lookback"),
-    )
-    return Context(start, ctx.stop)
-end
 
 # `grid` (keyless) and the declared key set (`Nothing` unless dense) ride in
 # type parameters, so the kernels specialize on them and neither costs a per-row
@@ -104,14 +93,13 @@ end
 mutable struct WindowState{T}
     cur::IntervalCursor{T}
     ticks::Vector{T}    # pulled ticks not yet closed
-    doneticks::Bool     # the clock is exhausted
     types::Union{Nothing,NamedTuple}  # promotion of every input schema seen
     tiers::Any          # WindowTiers for the realized state types
     valtype::Any        # the emitted value type
     head::Int           # first buffered row not yet evicted
     prevkeys::Any       # Vector{K}: keys emitted with rows at the previous tick
     checked::Bool       # key columns validated against the input
-    WindowState{T}(cur) where {T} = new{T}(cur, T[], false, nothing, nothing,
+    WindowState{T}(cur) where {T} = new{T}(cur, T[], nothing, nothing,
         nothing, 1, nothing, false)
 end
 
@@ -146,25 +134,6 @@ WindowTiers{R}(buffer::B, running::G, trees::TR, refold::GT, runprotos::SR,
 @inline primarygroups(rt::RunningTable, trees, refold) = rt.groups
 @inline primarygroups(::Nothing, trees::AbstractDict, refold) = trees
 @inline primarygroups(::Nothing, ::Nothing, gt::GroupTable) = gt.table
-
-# Pull ticks until the last one is strictly past `tmax`, so every tick a row of
-# the chunk (all `<= tmax`) can close is known, or the clock is exhausted.
-# Type-unstable (the clock pull), run once per chunk.
-function fillticks!(st::WindowState{T}, tmax::T) where {T}
-    while !st.doneticks && (isempty(st.ticks) || @inbounds(st.ticks[end]) <= tmax)
-        b = nextboundary!(st.cur)
-        b === nothing ? (st.doneticks = true) : push!(st.ticks, b)
-    end
-    return nothing
-end
-
-function drainticks!(st::WindowState)
-    while !st.doneticks
-        b = nextboundary!(st.cur)
-        b === nothing ? (st.doneticks = true) : push!(st.ticks, b)
-    end
-    return nothing
-end
 
 # Build the tiers for the first realized schema, or rebuild them for a widened
 # one, always from the live rows — correct for every transition, including an
@@ -229,20 +198,20 @@ function windowstep!(st::WindowState{T}, cfg::WindowConfig,
     end
     # The clock is exhausted and every tick closed, so no row from here on can
     # fall in any window: drop the chunk rather than admit rows nothing evicts.
-    st.doneticks && isempty(st.ticks) && return nothing
+    exhausted(st.cur) && isempty(st.ticks) && return nothing
     types = promotetypes(st.types, chunktypes(c))
     moved = st.types === nothing || types != st.types
     st.types = types
     moved && preparewindows!(st, cfg, types)
     nt = Tables.columntable(c)
-    fillticks!(st, last(nt.time))
+    pullpast!(st.ticks, st.cur, last(nt.time))
     RT, emptyrow = windowtypes(st, cfg)
     rows = RT[]
     st.head, closed = windowrows!(rows, st.tiers, st.head, nt, st.ticks,
         st.prevkeys, cfg.lookback, cfg.keynames, cfg.outs, emptyrow, cfg.grid,
         cfg.ks)
     deleteat!(st.ticks, 1:closed)
-    st.doneticks && isempty(st.ticks) && releasewindows!(st)
+    exhausted(st.cur) && isempty(st.ticks) && releasewindows!(st)
     return isempty(rows) ? nothing : DataFrame(rows)
 end
 
@@ -285,7 +254,7 @@ function emptywindowgrid(ticks::Vector{T}, ks::KeySet{K}, e) where {T,K}
 end
 
 function windowflush!(st::WindowState{T}, cfg::WindowConfig) where {T}
-    drainticks!(st)
+    pullpast!(st.ticks, st.cur, nothing)
     isempty(st.ticks) && return nothing
     if st.tiers === nothing
         # No data ever arrived, so no states were built: the grid of empty rows

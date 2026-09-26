@@ -90,13 +90,10 @@ end
 
 # Look-backs are never compared to each other (they may be of incomparable
 # types); the widened starts all live in the time type, so the earliest one
-# is found there, and non-negativity falls out of `start - lb <= start`.
+# is found there.
 function rollingcontext(ctx::Context, lookbacks::Tuple)
-    starts = map(lb -> ctx.start - lb, lookbacks)
-    for (lb, s) in zip(lookbacks, starts)
-        s <= ctx.start || throw(ArgumentError(
-            "addrollingcolumns lookback must be non-negative, got $lb"))
-    end
+    starts = map(lb -> widenstart(ctx, lb, "addrollingcolumns lookback").start,
+        lookbacks)
     return Context(minimum(starts), ctx.stop)
 end
 

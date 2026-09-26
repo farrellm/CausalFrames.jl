@@ -58,7 +58,8 @@ function asofjoin(right::CausalPipeline; key = nothing, tolerance = nothing,
         return CausalPipeline() do ctx::Context
             cfg = JoinConfig(keycols, Val(Tuple(keycols)), tolerance,
                 strict ? (<) : (<=), Backward(), lp, rp, righttime, "asofjoin")
-            js = JoinState(right.run(rightcontext(ctx, tolerance)))
+            js = JoinState(right.run(widenstart(ctx, tolerance,
+                "asofjoin tolerance")))
             return chunkmap(c -> joinchunk!(js, cfg, c), left.run(ctx))
         end
     end
@@ -71,16 +72,6 @@ normprefix(p::Union{Symbol,AbstractString}) = String(p)
 
 prefixed(::Nothing, n::Symbol) = n
 prefixed(p::String, n::Symbol) = Symbol(p, '_', n)
-
-# `op` names the operator in the error: applymodels widens its models' context
-# through here too.
-rightcontext(ctx::Context, ::Nothing, op::String = "asofjoin") = ctx
-function rightcontext(ctx::Context, tolerance, op::String = "asofjoin")
-    start = ctx.start - tolerance
-    start <= ctx.start || throw(ArgumentError(
-        "$op tolerance must be non-negative, got $tolerance"))
-    return Context(start, ctx.stop)
-end
 
 # The join engine shared by `asofjoin`, `applymodels` and the acausal
 # `futurejoin`. The direction `D` is a singleton type picking the store and its

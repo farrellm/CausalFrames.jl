@@ -52,7 +52,7 @@ function intervalize(clk::CausalPipeline, summarizers; key = nothing,
         return CausalPipeline() do ctx::Context
             T = timetype(ctx)
             st = IntervalizeState{T}(IntervalCursor{T}(clk.run(ctx)), T[], 2,
-                false, SummaryFold(), false, false)
+                SummaryFold(), false, false)
             step = function (c)
                 if ks !== nothing
                     intervalstepdense!(st, protos, ks, keycols, keynames, outs,
@@ -103,6 +103,22 @@ function nextboundary!(cur::IntervalCursor{T}) where {T}
     return b
 end
 
+# Every boundary has been handed out and the clock is exhausted.
+exhausted(cur::IntervalCursor) = cur.chunks.done && cur.pos > length(cur.times)
+
+# Pull boundaries onto `buf` until its last one is strictly past `tmax`, so
+# every boundary a row at or before `tmax` needs is known, or the clock is
+# exhausted; `tmax = nothing` drains the clock. Shared by intervalize's bounds
+# and summarizewindows' ticks. Type-unstable (the clock pull), once per chunk.
+function pullpast!(buf::Vector{T}, cur::IntervalCursor{T}, tmax) where {T}
+    while tmax === nothing || isempty(buf) || @inbounds(buf[end]) <= tmax
+        b = nextboundary!(cur)
+        b === nothing && return nothing
+        push!(buf, b)
+    end
+    return nothing
+end
+
 # Per-run mutable state, in fields rather than reassigned closure captures
 # (those get boxed). `bounds` holds the pulled boundaries not yet fully behind
 # the current interval, whose end is `bounds[bi]` (its begin `bounds[bi-1]`);
@@ -113,21 +129,9 @@ mutable struct IntervalizeState{T}
     cur::IntervalCursor{T}
     bounds::Vector{T}
     bi::Int          # index of the current interval's end in `bounds`
-    donebounds::Bool # the clock has been drained into `bounds`
     fold::SummaryFold
     folded::Bool     # keyless: the current interval has folded a row
     checked::Bool    # keyed: key columns validated against the input schema
-end
-
-# Pull boundaries until the last one is strictly past `tmax`, so every data row
-# in the chunk (all `<= tmax`) has a known enclosing interval, or the clock is
-# exhausted. Type-unstable (the clock pull), run once per chunk.
-function fillbounds!(st::IntervalizeState{T}, tmax::T) where {T}
-    while !st.donebounds && (isempty(st.bounds) || @inbounds(st.bounds[end]) <= tmax)
-        b = nextboundary!(st.cur)
-        b === nothing ? (st.donebounds = true) : push!(st.bounds, b)
-    end
-    return nothing
 end
 
 # Drop boundaries fully behind the current interval's begin (`bounds[bi-1]`),
@@ -137,15 +141,6 @@ function trimbounds!(st::IntervalizeState)
     st.bi > 2 || return nothing
     deleteat!(st.bounds, 1:(st.bi-2))
     st.bi = 2
-    return nothing
-end
-
-# Pull every remaining boundary into `bounds` (type-unstable; only at flush).
-function drainbounds!(st::IntervalizeState)
-    while !st.donebounds
-        b = nextboundary!(st.cur)
-        b === nothing ? (st.donebounds = true) : push!(st.bounds, b)
-    end
     return nothing
 end
 
@@ -168,7 +163,7 @@ end
 function intervalstep!(st::IntervalizeState, protos::Tuple, keynames::Val,
     outs::Val, closelast::Bool, c::DataFrame)
     nt = preparechunk!(st.fold, protos, false, keynames, c)
-    fillbounds!(st, last(nt.time))
+    pullpast!(st.bounds, st.cur, last(nt.time))
     rows, st.fold.states, st.bi, st.folded =
         foldintervals!(st.fold.states, protos, nt,
             st.bounds, st.bi, st.folded, closelast, outs)
@@ -215,7 +210,7 @@ end
 
 function intervalflush!(st::IntervalizeState{T}, protos::Tuple, stop::T,
     closelast::Bool, outs::Val) where {T}
-    drainbounds!(st)
+    pullpast!(st.bounds, st.cur, nothing)
     isempty(st.bounds) && return nothing           # empty clock
     # No data ever arrived, so no states were built: the grid is all empty
     # values, typed from the summarizer configs alone.
@@ -277,7 +272,7 @@ function intervalstepgrouped!(st::IntervalizeState, protos::Tuple,
         st.checked = true
     end
     nt = preparechunk!(st.fold, protos, true, keynames, c)
-    fillbounds!(st, last(nt.time))
+    pullpast!(st.bounds, st.cur, last(nt.time))
     rows, st.bi = foldintervalsgrouped!(st.fold.groups, st.fold.stateprotos, nt,
         st.bounds, st.bi, keynames, closelast, outs)
     trimbounds!(st)
@@ -309,7 +304,7 @@ end
 
 function intervalflushgrouped!(st::IntervalizeState{T}, stop::T, closelast::Bool,
     outs::Val) where {T}
-    drainbounds!(st)
+    pullpast!(st.bounds, st.cur, nothing)
     isempty(st.bounds) && return nothing
     st.fold.groups === nothing && return nothing   # no data ever: emit nothing
     RT = rowtype(T, keytype(st.fold.groups), valtype(st.fold.groups), outs)
@@ -343,7 +338,7 @@ function intervalstepdense!(st::IntervalizeState{T}, protos::Tuple, ks::KeySet,
         st.checked = true
     end
     nt = preparechunk!(st.fold, protos, true, keynames, c; keyset = ks)
-    fillbounds!(st, last(nt.time))
+    pullpast!(st.bounds, st.cur, last(nt.time))
     RT, emptyrow = densetypes(T, st.fold.stateprotos, protos, ks, outs)
     rows = RT[]
     st.bi = foldintervalsdense!(rows, st.fold.groups, ks, nt, st.bounds, st.bi,
@@ -376,7 +371,7 @@ end
 
 function intervalflushdense!(st::IntervalizeState{T}, protos::Tuple,
     ks::KeySet, stop::T, closelast::Bool, outs::Val) where {T}
-    drainbounds!(st)
+    pullpast!(st.bounds, st.cur, nothing)
     isempty(st.bounds) && return nothing
     st.fold.stateprotos === nothing &&
         return flushemptygrid!(st, protos, ks, stop, closelast, outs)

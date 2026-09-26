@@ -79,7 +79,7 @@ end
 futurejoin(left::CausalPipeline, right::CausalPipeline; kwargs...) =
     futurejoin(right; kwargs...)(left)
 
-# The mirror of asofjoin's rightcontext: forward tolerance widens the right
+# The mirror of `widenstart`: forward tolerance widens the right
 # window forward, so lookahead past the window end is covered — the one place
 # times are added. The explicit guard rejects a negative tolerance, which the
 # Context constructor (only start <= stop) would otherwise accept.

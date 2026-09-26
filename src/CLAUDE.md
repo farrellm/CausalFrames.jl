@@ -4,7 +4,8 @@ DESIGN.md's "Module layout" table is the canonical index; this file records the
 design rationale and performance constraints behind each module.
 
 - `src/context.jl` / `src/chunks.jl` — `Context{T}`, the `[start, stop)`
-  evaluation window, and the internal chunk protocol (`ChunkSource`,
+  evaluation window (with `widenstart`, which every operator reading before
+  `start` — a tolerance, a look-back — uses to widen and validate it), and the internal chunk protocol (`ChunkSource`,
   `chunkmap`): a single-pass lazy iterator of non-empty DataFrame chunks,
   consumers taking ownership of what they're yielded; empty chunks are
   filtered out here so all downstream code may assume a chunk has rows.
@@ -330,8 +331,8 @@ design rationale and performance constraints behind each module.
   only dynamism; the per-row kernel stays dispatch-free), reusing `SummaryFold`
   whole; `closelast` closes the trailing partial at `stop`
 - `src/windows.jl` — `summarizewindows`, the clock-sampled trailing window
-  (`[τ - lookback, τ)` at each tick): `intervalize`'s driver (`IntervalCursor`,
-  a concrete tick vector per chunk) over `addrollingcolumns`' row buffer, eviction
+  (`[τ - lookback, τ)` at each tick): `intervalize`'s driver (`IntervalCursor`
+  and its `pullpast!`, a concrete tick vector per chunk) over `addrollingcolumns`' row buffer, eviction
   head and tiers. One admission kernel (`windowrows!`) and one tick close
   (`closewindow!`): evict (downdating the running table), move tree heads and
   drop emptied trees, sync the rest once per tick — windows are queried per
