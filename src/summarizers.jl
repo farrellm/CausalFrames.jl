@@ -667,15 +667,14 @@ end
 # already computed under the name D. It folds nothing: the summarizer that
 # claims it declares that other one as a dependency, and the topological
 # expansion guarantees D is in `vals` by the time this runs. Fieldless, so it
-# joins DerivedState below and inherits the no-op combine!/downdate!/fresh!.
+# joins DerivedState below and inherits its no-op fresh/update!/combine!/
+# downdate!.
 #
 # This is what lets a summarizer whose value is symmetric in two columns fold
 # under one canonical argument order while still answering to the name the
 # caller asked for — see DESIGN.md's "Symmetric summarizers".
 struct AliasState{N,D} <: SummarizerState end
 
-fresh(st::AliasState) = st
-@inline update!(::AliasState, row) = nothing
 # The value type comes from the dependency's declared field type, never from
 # `typeof` of the value, so a missing-poisoned accumulator keeps the output
 # column's Union{Missing,...} eltype instead of collapsing it to Missing.
@@ -959,28 +958,28 @@ struct Moment{C} <: GroupSummarizer
 end
 Moment(column::Symbol, order::Integer) = Moment{column}(Int(order))
 
-# The state is fieldless: the moment is derived entirely from its
-# dependencies' values at emission time, so its own name N and the power
-# sum's name D are all it needs, baked as type parameters so the two-argument
-# `value` infers.
-struct MomentState{C,N,D} <: SummarizerState end
+# A sum over the row count, emitted as N: Moment's power sum and Mean's plain
+# sum. The state is fieldless — the value is derived entirely from the
+# dependencies' values at emission time — so its own name N and the sum's name
+# D are all it needs, baked as type parameters so the two-argument `value`
+# infers.
+struct CountRatioState{N,D} <: SummarizerState end
+
+# The value type comes from the dependencies' declared field types, not from
+# `typeof` of the runtime quotient — a missing-poisoned sum would otherwise
+# collapse the output column's Union{Missing,...} eltype to Missing.
+@inline function value(::CountRatioState{N,D}, vals::NamedTuple) where {N,D}
+    V = Base.promote_op(/, fieldtype(typeof(vals), D),
+        fieldtype(typeof(vals), :count))
+    return NamedTuple{(N,),Tuple{V}}((vals[D] / vals.count,))
+end
 
 dependencies(m::Moment{C}) where {C} = (Count(), SumPower(C, m.order))
 emptyvalue(m::Moment{C}) where {C} =
     NamedTuple{(Symbol(C, :_moment_, m.order),)}((missing,))
 fresh(m::Moment{C}, ::NamedTuple) where {C} =
-    MomentState{C,Symbol(C, :_moment_, m.order),
+    CountRatioState{Symbol(C, :_moment_, m.order),
         Symbol(C, :_sumpower_, m.order)}()
-fresh(st::MomentState) = st
-@inline update!(::MomentState, row) = nothing
-# The value type comes from the dependencies' declared field types, not from
-# `typeof` of the runtime quotient — a missing-poisoned power sum would
-# otherwise collapse the output column's Union{Missing,...} eltype to Missing.
-@inline function value(::MomentState{C,N,D}, vals::NamedTuple) where {C,N,D}
-    V = Base.promote_op(/, fieldtype(typeof(vals), D),
-        fieldtype(typeof(vals), :count))
-    return NamedTuple{(N,),Tuple{V}}((vals[D] / vals.count,))
-end
 
 """
     Mean(column::Symbol) -> Summarizer
@@ -992,18 +991,10 @@ The mean of `column`, in `:{column}_mean` (`missing` for no rows). Computed from
 struct Mean{C} <: GroupSummarizer end
 Mean(column::Symbol) = Mean{column}()
 
-struct MeanState{C,N,S} <: SummarizerState end
-
 dependencies(::Mean{C}) where {C} = (Count(), Sum(C))
 emptyvalue(::Mean{C}) where {C} = NamedTuple{(Symbol(C, :_mean),)}((missing,))
 fresh(::Mean{C}, ::NamedTuple) where {C} =
-    MeanState{C,Symbol(C, :_mean),Symbol(C, :_sum)}()
-fresh(st::MeanState) = st
-@inline update!(::MeanState, row) = nothing
-@inline function value(::MeanState{C,N,S}, vals::NamedTuple) where {C,N,S}
-    V = Base.promote_op(/, fieldtype(typeof(vals), S), fieldtype(typeof(vals), :count))
-    return NamedTuple{(N,),Tuple{V}}((vals[S] / vals.count,))
-end
+    CountRatioState{Symbol(C, :_mean),Symbol(C, :_sum)}()
 
 """
     Variance(column::Symbol; corrected = true) -> Summarizer
@@ -1022,10 +1013,6 @@ struct Variance{C} <: GroupSummarizer
 end
 Variance(column::Symbol; corrected::Bool = true) = Variance{column}(corrected)
 
-# R (the corrected flag) is baked into the state type so the derived value
-# stays fieldless and inferrable; the divisor is `n - Int(R)`.
-struct VarianceState{C,N,S,Q,R} <: SummarizerState end
-
 # The compile-time value type of the shared (co)variance identity
 # `(q - sa * sb / n) / (n - corrected)`, from the dependencies' declared
 # field types (a runtime `typeof` would let one missing collapse the type).
@@ -1037,20 +1024,12 @@ _covtype(::Type{Q}, ::Type{Sa}, ::Type{Sb}) where {Q,Sa,Sb} =
 dependencies(::Variance{C}) where {C} = (Count(), Sum(C), SumPower(C, 2))
 emptyvalue(::Variance{C}) where {C} =
     NamedTuple{(Symbol(C, :_variance),)}((missing,))
+# A variance is the covariance of a column with itself, the power sum standing
+# in for the dot product, so it takes Covariance's state (defined below; the
+# arithmetic is the same identity, operation for operation).
 fresh(v::Variance{C}, ::NamedTuple) where {C} =
-    VarianceState{C,Symbol(C, :_variance),Symbol(C, :_sum),
-        Symbol(C, :_sumpower_, 2),v.corrected}()
-fresh(st::VarianceState) = st
-@inline update!(::VarianceState, row) = nothing
-@inline function value(::VarianceState{C,N,S,Q,R}, vals::NamedTuple) where {C,N,S,Q,R}
-    Sf = fieldtype(typeof(vals), S)
-    Qf = fieldtype(typeof(vals), Q)
-    V = _covtype(Qf, Sf, Sf)
-    s = vals[S]
-    q = vals[Q]
-    n = vals.count
-    return NamedTuple{(N,),Tuple{V}}(((q - s * s / n) / (n - Int(R)),))
-end
+    CovarianceState{C,C,Symbol(C, :_variance),Symbol(C, :_sumpower_, 2),
+        Symbol(C, :_sum),Symbol(C, :_sum),v.corrected}()
 
 """
     Std(column::Symbol; corrected = true) -> Summarizer
@@ -1076,8 +1055,6 @@ dependencies(s::Std{C}) where {C} = (Variance(C; corrected = s.corrected),)
 emptyvalue(::Std{C}) where {C} = NamedTuple{(Symbol(C, :_std),)}((missing,))
 fresh(::Std{C}, ::NamedTuple) where {C} =
     StdState{C,Symbol(C, :_std),Symbol(C, :_variance)}()
-fresh(st::StdState) = st
-@inline update!(::StdState, row) = nothing
 @inline function value(::StdState{C,N,V}, vals::NamedTuple) where {C,N,V}
     T = Base.promote_op(sqrt, fieldtype(typeof(vals), V))
     return NamedTuple{(N,),Tuple{T}}((_stdsqrt(vals[V]),))
@@ -1100,6 +1077,9 @@ end
 Covariance(a::Symbol, b::Symbol; corrected::Bool = true) =
     Covariance{a,b}(corrected)
 
+# R (the corrected flag) is baked into the state type so the derived value
+# stays fieldless and inferrable; the divisor is `n - Int(R)`. Variance uses it
+# too, with A = B.
 struct CovarianceState{A,B,N,D,SA,SB,R} <: SummarizerState end
 
 covname(a, b) = Symbol(a, :_, b, :_covariance)
@@ -1113,8 +1093,6 @@ emptyvalue(::Covariance{A,B}) where {A,B} =
 fresh(c::Covariance{A,B}, ::NamedTuple) where {A,B} =
     CovarianceState{A,B,covname(A, B),canonicaldotname(A, B),Symbol(A, :_sum),
         Symbol(B, :_sum),c.corrected}()
-fresh(st::CovarianceState) = st
-@inline update!(::CovarianceState, row) = nothing
 @inline function value(::CovarianceState{A,B,N,D,SA,SB,R},
     vals::NamedTuple) where {A,B,N,D,SA,SB,R}
     Df = fieldtype(typeof(vals), D)
@@ -1152,8 +1130,6 @@ emptyvalue(::Correlation{A,B}) where {A,B} =
 fresh(::Correlation{A,B}, ::NamedTuple) where {A,B} =
     CorrelationState{A,B,corname(A, B),covname(A, B),Symbol(A, :_std),
         Symbol(B, :_std)}()
-fresh(st::CorrelationState) = st
-@inline update!(::CorrelationState, row) = nothing
 @inline function value(::CorrelationState{A,B,N,CV,SA,SB},
     vals::NamedTuple) where {A,B,N,CV,SA,SB}
     Cvf = fieldtype(typeof(vals), CV)
@@ -1327,8 +1303,6 @@ function fresh(r::LinearRegression{P,Y}, ::NamedTuple) where {P,Y}
     return LinearRegressionState{first(ns),Base.tail(ns),an,sp,sy,qy,gn,dn,
         r.intercept}()
 end
-fresh(st::LinearRegressionState) = st
-@inline update!(::LinearRegressionState, row) = nothing
 
 # The dependency values this regression reads, and — separately — the tuple
 # type they are *declared* to have. The two must not be confused: `typeof` of
@@ -1759,8 +1733,6 @@ emptyvalue(::Median{C}) where {C} = NamedTuple{(Symbol(C, :_median),)}((missing,
 fresh(::Median{C}, ::NamedTuple) where {C} =
     QuantileState{(Symbol(C, :_median),),sortedname(C),(0.5,),:linear}()
 
-fresh(st::QuantileState) = st
-@inline update!(::QuantileState, row) = nothing
 @inline value(::QuantileState{NS,D,PS,I}, vals::NamedTuple) where {NS,D,PS,I} =
     quantilevalue(Val(NS), vals[D], Val(PS), Val(I))
 
@@ -1875,8 +1847,6 @@ emptyvalue(::PercentRank{C}) where {C} =
     NamedTuple{(Symbol(C, :_percentrank),)}((missing,))
 fresh(::PercentRank{C}, ::NamedTuple) where {C} =
     PercentRankState{Symbol(C, :_percentrank),sortedname(C),Symbol(C, :_last)}()
-fresh(st::PercentRankState) = st
-@inline update!(::PercentRankState, row) = nothing
 @inline value(::PercentRankState{N,D,L}, vals::NamedTuple) where {N,D,L} =
     percentrank(Val(N), vals[D], vals[L])
 
@@ -1897,9 +1867,10 @@ end
 # a no-op. The window transforms give such a state no tier at all (tiers.jl);
 # these methods serve the one case where it keeps one, a set of nothing but
 # fieldless states.
-const DerivedState = Union{AliasState,MomentState,MeanState,VarianceState,
-    StdState,CovarianceState,CorrelationState,LinearRegressionState,
-    QuantileState,PercentRankState}
+const DerivedState = Union{AliasState,CountRatioState,StdState,CovarianceState,
+    CorrelationState,LinearRegressionState,QuantileState,PercentRankState}
+fresh(st::DerivedState) = st
+@inline update!(::DerivedState, row) = nothing
 combine!(::DerivedState, ::DerivedState, ::DerivedState) = nothing
 @inline downdate!(::DerivedState, row) = nothing
 # Fieldless, so already zero — and immutable, so returning `st` is the whole

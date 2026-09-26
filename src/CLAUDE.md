@@ -142,7 +142,11 @@ design rationale and performance constraints behind each module.
   - the dependent summarizers (`Moment`, `Mean`, `Variance`, `Std`,
     `Covariance`, `Correlation`, `LinearRegression`) carry no state of their
     own — their state structs are empty. They declare `dependencies` and read
-    those values back through the two-argument `value(st, vals)`
+    those values back through the two-argument `value(st, vals)`. Such a state
+    joins the `DerivedState` union, which gives it the no-op `fresh`,
+    `update!`, `combine!` and `downdate!`; states are shared by shape, not
+    summarizer (`Mean` and `Moment` are one `CountRatioState`, and `Variance`
+    is `Covariance`'s state over a column and itself)
   - a summarizer whose value is symmetric in two columns (`DotProduct`,
     `Covariance`, every pairwise term in `LinearRegression`) folds under the
     `isless`-sorted argument order via `canonicaldot`/`canonicaldotname`, but
