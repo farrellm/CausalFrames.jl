@@ -33,10 +33,10 @@ function operatorheaders(apidir)
 end
 
 # The README's operator and summarizer tables and the API overview must each
-# link to every one of those headers. Nothing else enforces those tables — they
-# are hand-maintained prose that used to drift silently — so the docs build
-# does, before the README is rewritten into the home page. The README links are
-# absolute (that is what GitHub renders), so the page has to match too.
+# link to every one of those headers; this check is the only thing keeping the
+# hand-maintained tables in sync. It runs before the README is rewritten into
+# the home page. The README links are absolute (as GitHub renders them), so the
+# page must match too.
 function checkapilinks(readme, apidir, overviewfile)
     headers = operatorheaders(apidir)
     overview = read(overviewfile, String)
@@ -65,21 +65,16 @@ function checkapilinks(readme, apidir, overviewfile)
     return nothing
 end
 
-# The home page IS the README, generated here rather than kept as a second copy.
-# The two were hand-maintained duplicates and had silently drifted several
-# operators and a whole section apart; nothing enforced the sync, so the fix is
-# to remove the opportunity rather than to re-sync. `docs/src/index.md` is
-# generated and gitignored — edit README.md.
+# The home page is the README, generated here so there is no second copy to
+# drift. `docs/src/index.md` is generated and gitignored; edit README.md.
 #
-# Five rewrites separate the GitHub audience from the docs-site one: the docs
-# title carries the .jl, the badges are GitHub furniture (one of them links to
-# this very site), the DESIGN.md link is a repo path that would 404 here, the
-# README's links into the deployed site — Recipes, and every operator and
-# summarizer link in its tables — should stay inside the site rather than
-# round-tripping through the deployed URL, and the examples become doctests.
-# GitHub renders a `jldoctest` block as plain text, so the README writes them as
-# `julia` blocks with a `# output` section, and they become one doctest session
-# here, sharing their variables in order.
+# Five rewrites separate the GitHub audience from the docs site: the title
+# gains the .jl, the badges (GitHub furniture) go, the DESIGN.md link (a repo
+# path that would 404) points at GitHub, links into the site (Recipes and
+# the table links) become site-relative, and the examples become doctests.
+# GitHub renders a `jldoctest` block as plain text, so the README writes them
+# as `julia` blocks with a `# output` section, and they become one doctest
+# session here, sharing their variables in order.
 function readme_as_index(readme, index)
     text = read(readme, String)
     text = replace(text, r"^# CausalFrames\n" => "# CausalFrames.jl\n")
