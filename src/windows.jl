@@ -148,25 +148,13 @@ function preparewindows!(st::WindowState, cfg::WindowConfig, types::NamedTuple)
     st.prevkeys =
         st.prevkeys === nothing ? K[] : convert(Vector{K}, st.prevkeys)
     old = st.tiers
-    oldbuffer = old === nothing ? nothing : old.buffer
-    buffer =
-        isempty(tg.running) && isempty(tg.refold) ? nothing :
-        oldbuffer !== nothing ? convert(Vector{R}, oldbuffer) :
-        old === nothing ? R[] : treebuffer(R, old.trees)
-    oldbuffer === nothing && (st.head = 1)
+    buffer = rebuildbuffer(tg, R, old)
+    (old === nothing || old.buffer === nothing) && (st.head = 1)
     running =
         isempty(tg.running) ? nothing :
         replayrunning!(RunningTable{K,typeof(tg.running)}(), buffer, st.head,
             tg.running, cfg.keynames)
-    trees = nothing
-    if !isempty(tg.tree)
-        trees = Dict{K,SegTree{typeof(tg.tree),R,types.time}}()
-        if old !== nothing && old.trees !== nothing
-            replayoldtrees!(trees, old.trees, tg.tree, cfg.keynames)
-        elseif oldbuffer !== nothing
-            replaytrees!(trees, oldbuffer, st.head, tg.tree, cfg.keynames)
-        end
-    end
+    trees = rebuildtrees(tg, K, R, types.time, old, st.head, cfg.keynames)
     refold = isempty(tg.refold) ? nothing : GroupTable{K,typeof(tg.refold)}()
     buffer === nothing && (st.head = 1)
     groups = primarygroups(running, trees, refold)

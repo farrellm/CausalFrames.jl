@@ -309,8 +309,9 @@ design rationale and performance constraints behind each module.
   `summaryvalues` and dependents read across tiers. An absent tier is
   `nothing`/`()`, so a single-tier call compiles to the old single-mode code.
   `RunningTable` pools retired groups (windowed trackers own vectors). Tiers
-  only demote, so a rebuild's buffer was already there; `replayrunning!`,
-  `replaytrees!`, `replayoldtrees!` rebuild from the live rows
+  only demote, so a rebuild's buffer was already there; `rebuildbuffer` and
+  `rebuildtrees` choose the rebuild's buffer and trees for both transforms, and
+  `replayrunning!`, `replaytrees!`, `replayoldtrees!` rebuild from the live rows
 - `src/rolling.jl` — `addrollingcolumns`: one kernel, `rollsegment!`, over a
   `RollTiers` (shared row buffer with per-window eviction heads, per-window
   running tables, per-key trees owning their rows, refold templates). Per row:

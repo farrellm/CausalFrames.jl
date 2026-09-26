@@ -155,28 +155,18 @@ function rolltiers(tg::Tiering, types::NamedTuple, keynames::Val, nwindows::Int,
     old)
     K = storekeytype(types, keynames)
     R = storerowtype(types)
-    T = types.time
-    oldbuffer = old === nothing ? nothing : old.buffer
-    buffer, winheads =
-        isempty(tg.running) && isempty(tg.refold) ? (nothing, Int[]) :
-        oldbuffer !== nothing ?
-        (convert(Vector{R}, oldbuffer), copy(old.winheads)) :
-        (old === nothing ? R[] : treebuffer(R, old.trees), ones(Int, nwindows))
+    oldbuffered = old !== nothing && old.buffer !== nothing
+    buffer = rebuildbuffer(tg, R, old)
+    winheads =
+        buffer === nothing ? Int[] :
+        oldbuffered ? copy(old.winheads) : ones(Int, nwindows)
     running =
         isempty(tg.running) ? nothing :
         ntuple(
             w -> replayrunning!(RunningTable{K,typeof(tg.running)}(),
                 buffer, winheads[w], tg.running, keynames), nwindows)
-    trees = nothing
-    if !isempty(tg.tree)
-        trees = Dict{K,SegTree{typeof(tg.tree),R,T}}()
-        if old !== nothing && old.trees !== nothing
-            replayoldtrees!(trees, old.trees, tg.tree, keynames)
-        elseif oldbuffer !== nothing
-            replaytrees!(trees, oldbuffer, minimum(old.winheads), tg.tree,
-                keynames)
-        end
-    end
+    trees = rebuildtrees(tg, K, R, types.time, old,
+        oldbuffered ? minimum(old.winheads) : 1, keynames)
     return RollTiers{R}(buffer, winheads, running, trees, tg.running, tg.tree,
         tg.refold, tg.derived, tg.perm)
 end
