@@ -17,12 +17,23 @@ tokeycolumns(k::Symbol) = Symbol[k]
 tokeycolumns(k::AbstractString) = Symbol[Symbol(k)]
 tokeycolumns(ks) = collect(Symbol, ks)
 
+# A keyed transform's `key`, normalized and checked eagerly: the time column
+# orders the stream, so it is never a key.
+function keycolumns(key, op::String)
+    keycols = tokeycolumns(key)
+    allunique(keycols) || throw(ArgumentError("$op key columns must be unique"))
+    :time in keycols && throw(ArgumentError("$op key may not be :time"))
+    return keycols
+end
+
 # A missing key column would otherwise surface as a getproperty error deep in a
-# kernel; the transforms that check call this on their first chunk.
-function checkkeycolumns(keycols::Vector{Symbol}, c::DataFrame, op::String)
+# kernel; the transforms that check call this on their first chunk. `input`
+# names the stream, for the binary transforms that read two.
+function checkkeycolumns(keycols::Vector{Symbol}, c::DataFrame, op::String,
+    input::String = "the input")
     for k in keycols
         String(k) in names(c) ||
-            throw(ArgumentError("$op key column $(repr(k)) not found in the input"))
+            throw(ArgumentError("$op key column $(repr(k)) not found in $input"))
     end
     return nothing
 end

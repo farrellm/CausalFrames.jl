@@ -749,7 +749,7 @@ barrier — with three inversions:
 - **Context widening.** With `tolerance` the match requires
   `rtime - time <= tolerance` and the right pipeline runs over the widened
   context `[start, stop + tolerance)` — the only place times are *added*
-  (`futurecontext`, mirror of `rightcontext`'s subtraction; an explicit guard
+  (`futurecontext`, mirror of `widenstart`'s subtraction; an explicit guard
   rejects negative tolerance, which the `Context` constructor would accept).
   Without `tolerance` the right sees only `[start, stop)`, so left rows near
   `stop` may find no later right row (mirror of `asofjoin` near `start`).
@@ -763,12 +763,14 @@ barrier — with three inversions:
   indices, so compaction never invalidates an emitted match (see "Representing
   a match" below).
 
-The op-agnostic helpers (`normprefix`, `prefixed`, `storerowtype`,
-`storekeytype`, `rowat`, `keyat`, `matchcolumn`, `convertmatches`, plus
-`chunkmap`, `tokeycolumns`, `chunktypes`, `promotetypes`) are imported from the
-parent module; only the small config/state-typed helpers (`checkkeys`,
-`checknames`, `prefixleft!`, `assemble`) are duplicated, to carry `futurejoin`
-in their error messages.
+Nothing of the driver is duplicated. `asofjoin`, `applymodels` and
+`futurejoin` share one join engine in join.jl — `JoinConfig` (whose `op` names
+the operator in every error message), `JoinState`, `pullright!`,
+`matchchunk!`, `joinchunk!`, `checknames` and `assemble` — and differ only in a
+direction singleton carried by the config: `Backward` picks the `SlotStore`
+and `joinsegment!`, while the submodule's `Forward` extends `newstore`,
+`widenstore` and `segment!` with the `KeyBuffer` store and `futuresegment!`,
+so everything forward-looking stays in `Acausal`.
 
 ## Representing a match
 
@@ -866,7 +868,7 @@ time outside `[start, stop]`, the upstream pipeline is run over an
 - `lag(offset)` (`t -> t + offset`) runs upstream over `[start - offset,
   stop - offset)` and adds `offset`. Output at `t` depends only on input at
   `t - offset <= t`, so it is **causal**, lives in `src/operators.jl`, and is
-  exported. `lagcontext` mirrors `asofjoin`'s `rightcontext`.
+  exported. `lagcontext` mirrors the shared `widenstart`.
 - `lead(offset)` (`t -> t - offset`) runs upstream over `[start + offset,
   stop + offset)` and subtracts `offset`. Output at `t` depends on input at
   `t + offset > t`, so it is **acausal** and lives in the `CausalFrames.Acausal`
@@ -875,7 +877,7 @@ time outside `[start, stop]`, the upstream pipeline is run over an
 
 Both require the time type to support adding and subtracting the offset (numbers
 and `Dates` types do), reject a negative `offset` when the pipeline runs (the
-guard `rightcontext`/`futurecontext` use, since a negative shift would flip the
+guard `widenstart`/`futurecontext` use, since a negative shift would flip the
 causality contract), and treat `offset == 0` as the identity. The shared
 `shiftchunk!`/`shifttime` (broadcast add behind a function barrier) lives in
 `src/operators.jl` and is imported into the submodule; `lead` shifts by
@@ -1166,7 +1168,8 @@ the gap — fitting a model per key at every tick is the motivating case (see
 The mechanism is `intervalize`'s driver over `addrollingcolumns`' bookkeeping.
 A `chunkmap` over the data stream pulls ticks on demand through
 `intervalize.jl`'s `IntervalCursor`. Before each chunk it fills a concrete
-`Vector{T}` of pending ticks up to just past the chunk's last time, so the
+`Vector{T}` of pending ticks up to just past the chunk's last time (the
+cursor's `pullpast!`, which `intervalize` fills its boundaries with too), so the
 per-row kernel never touches the clock. For each row at time `s`, every pending
 tick `τ ≤ s` is closed first — the row belongs to no window of a tick at or
 before it — and then the row is admitted into a buffer of concretely typed
@@ -1344,8 +1347,8 @@ key under `summarizewindows`.
 
 **`applymodels`** is `asofjoin`'s machinery with a different assembly. The
 models pipeline, narrowed to its model and key columns, is the right side of
-the as-of store: `AsofJoinState`, `pullright!` and `joinsegment!` are
-unchanged, and `AsofJoinConfig` carries the operator's name for error messages.
+the as-of store: `JoinState`, `pullright!`, `matchchunk!` and `joinsegment!`
+are unchanged, and `JoinConfig` carries the operator's name for error messages.
 - Once a chunk's matches are known, its rows are grouped by model identity (an
   `IdDict` typed at a function barrier), and each distinct model is applied
   once, to views of its rows' predictor columns — one dynamic call per model
@@ -1428,7 +1431,8 @@ What `lastrow` does *not* need is the join's `found` mask: every slot a key
 claims is written the same instant, so the store is never half-filled and a
 widening is a plain `convert(Vector{V}, slots)` rather than `convertmatches`.
 Slot numbers do not move under a widening either, so only the dict's keys are
-rebuilt — `pullright!`'s pattern. Because the store is one concretely typed
+rebuilt — the store is the join's own `SlotStore`, widened by the same
+`widenstore`. Because the store is one concretely typed
 vector, the flush builds the output through a `DataFrame(rows)` over it directly:
 no `vcat` of per-key frames, and so no `cols = :union` question and no promotion
 pass. Element types may drift chunk to chunk, as everywhere else, and the store
@@ -1717,8 +1721,8 @@ a plain `+` that cannot overflow the way accumulating in the input's own type
 would. `Product` is the same story with `Base.prod`'s widening and a `*` fold.
 
 The whole sum family (`Sum`, `SumPower`, `DotProduct`) is backed by one
-shared plain state and one shared compensated state, parameterized by a
-*term functor* — the same idiom as the `Min`/`Max`/`First`/`Last` state, but
+shared state, `AccumState`, whose storage is plain or compensated (below) and
+which is parameterized by a *term functor* — the same idiom as the `Min`/`Max`/`First`/`Last` state, but
 for the folded quantity: the functor's type names the family and its input
 columns (`ColumnTerm{:x}`, `PowerTerm{:x}`, `PairProductTerm{:a,:b}`), its
 fields carry runtime config (`SumPower`'s exponent), and `update!` inlines
@@ -1743,13 +1747,15 @@ inputs whose square lands near underflow (how often depends on the CPU, since
 `^` rounds its error terms differently with and without FMA, so the tests bound
 the difference rather than asserting where it falls) — more accurate, but a
 change. It does not
-disturb what the compensated states rely on, since they classify NaN and ±Inf
+disturb what the compensated storage relies on, since they classify NaN and ±Inf
 *terms* and carry the sign of zero, and no nonfinite or signed-zero case
 differs. `notes/sumpower-terms.md` records the measurements.
 
 When the realized accumulator type is a fixed-precision float (a non-BigFloat
 `AbstractFloat`), the sum accumulators (`Sum`, `SumPower`, `DotProduct`) switch
-to a compensated state: Kahan-Babuška-Neumaier summation over the finite terms
+to compensated storage, a `Compensated` in place of the plain total (the
+storage type is a parameter of the one state, and every fold operation
+dispatches on it): Kahan-Babuška-Neumaier summation over the finite terms
 only, with `NaN`, `+Inf`, and `-Inf` terms counted in separate `Int` fields
 rather than folded in. The classified term is the folded one — the value after
 `SumPower`'s power, the per-row product for `DotProduct` (so `Inf * 0.0` counts
@@ -1764,9 +1770,10 @@ compensation buys nothing at arbitrary precision and a non-isbits compensated
 pair would allocate on every row.
 
 A `Missing`-admitting column gets the same treatment for `missing` that the
-compensated state gives nonfinites: two flat `Optional*` states (one mirroring
-the plain state, one the compensated) hold the accumulation at the *non-missing*
-type and count the `missing` terms in an `Int`, folding only present terms in.
+compensated storage gives nonfinites: a type flag `M` on the state holds the
+accumulation at the *non-missing* type and counts the `missing` terms in an
+`Int`, folding only present terms in (without the flag the count stays zero
+and every test of it compiles away).
 `value` returns `missing` while that count is positive and the ordinary
 reconstructed total otherwise, at the declared element type `Union{Missing, A}`
 — identical results to the old absorbing behaviour, but the count subtracts
@@ -1774,9 +1781,10 @@ away under `downdate!`, so the accumulator stays invertible and a rolling window
 recovers on the running path once the missing row expires (no tree demotion).
 The accumulation field is never itself `Union{Missing, …}`; only the `value`
 return is. `widenstate` carries the whole representation across schema
-promotions — plain→compensated (an `Int` column promoted to float), and, when
-`missing` first appears, plain/compensated→`Optional*` (missings start at zero,
-the existing total carried) and widening within the `Optional*` family.
+promotions — plain→compensated storage (an `Int` column promoted to float),
+and, when `missing` first appears, onto the counting path (missings start at
+zero, the existing total carried) — by rebuilding the state for the new types
+and carrying the accumulator across with `widenacc`.
 
 `AgeWeightedSum(column)` is the sum family's one accumulator that the term
 functor cannot express, because its update reads its own running total: it
@@ -1794,9 +1802,8 @@ compensation over `S₁` and `S₂`, with `S₁`'s counters classifying each raw
 `NaN`/`±Inf` input once. `S₂`'s nonfinite terms are `S₁`'s less the newest
 row's, whose weight is `0`, so a nonfinite value contributes nothing until a
 later row ages it (a weight of zero is exact, not IEEE's `0·Inf = NaN`), and a
-window recovers once it leaves. A `missing` input is counted as the `Optional*`
-states count it, but through a type flag on the two states rather than two
-more state types.
+window recovers once it leaves. A `missing` input is counted as the sum
+family's state counts it, through the same type flag `M`.
 
 `CountDistinct` is the one summarizer that departs from both of the rules
 above, and the one whose state is not O(1). It holds a `Set` of the values it
@@ -2238,9 +2245,9 @@ the second.
 | File | Content |
 |---|---|
 | `src/CausalFrames.jl` | module, includes, exports |
-| `src/context.jl` | `Context{T}` |
+| `src/context.jl` | `Context{T}`, and `widenstart`, the input context of every operator that reads before `start` |
 | `src/frame.jl` | `CausalFrame{T}`, invariants, Tables.jl interface |
-| `src/chunks.jl` | internal chunk-iterator machinery (`ChunkSource`, `chunkmap`) |
+| `src/chunks.jl` | internal chunk-iterator machinery (`ChunkSource`, `chunkmap`, `PullCursor`) |
 | `src/pipeline.jl` | `CausalPipeline{F}`, `load`, `stream`, `scan` |
 | `src/operators.jl` | sources (including the n-ary `concatenate`), the CSV sink, row-wise transforms, the causal time shift (`lag`) with the shared `shiftchunk!`, the column projections and `reordercolumns` over one shared selector vocabulary, the truncating `head` with its `HeadProducer`, and the causal retiming (`settime`) with the shared `settimechunk!` |
 | `src/merge.jl` | the n-ary time-interleaving source (`Base.merge`) and its per-pipeline cursors |
@@ -2251,7 +2258,7 @@ the second.
 | `src/table.jl` | the in-memory source (`readtable`): the generic Tables.jl path, the eagerly resolved DataFrame path, and the frame path |
 | `src/summarizers.jl` | `Summarizer`/`SummarizerState` interface and the concrete summarizers |
 | `src/summarize.jl` | folding kernels and the summarization transforms |
-| `src/join.jl` | the as-of join transform (`asofjoin`) |
+| `src/join.jl` | the as-of join transform (`asofjoin`) and the join engine it shares with `applymodels` and `futurejoin` |
 | `src/lookupjoin.jl` | the key-only join against a timeless table (`lookupjoin`) |
 | `src/lastrow.jl` | the last-row-per-key transform (`lastrow`), over the join's store |
 | `src/sortcycles.jl` | the within-timestamp stable sort (`sortcycles`) and its `cycleperm!` barrier |
@@ -2263,7 +2270,7 @@ the second.
 | `src/windows.jl` | the clock-sampled trailing-window summarization transform (`summarizewindows`) |
 | `src/models.jl` | the MLJ operators (`applymodels`, `addpredictions`, `modelreports`), the extension hooks and their fallbacks, and `FittedModel`'s serializer |
 | `ext/CausalFramesMLJModelInterfaceExt.jl` | the MLJ hooks for `MLJModelInterface.Model`: fit, predict, save/restore |
-| `src/acausal.jl` | the `Acausal` submodule: the forward join (`futurejoin`), the acausal time shift (`lead`), and the permissive retiming (`settime`, not exported even from the submodule) |
+| `src/acausal.jl` | the `Acausal` submodule: the forward join (`futurejoin`, the join engine's `Forward` store and kernel), the acausal time shift (`lead`), and the permissive retiming (`settime`, not exported even from the submodule) |
 | `src/precompile.jl` | PrecompileTools workload covering the main pipeline paths |
 
 Exports: `Context`, `CausalFrame`, `CausalPipeline`, `load`, `stream`,

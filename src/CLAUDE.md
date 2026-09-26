@@ -4,10 +4,15 @@ DESIGN.md's "Module layout" table is the canonical index; this file records the
 design rationale and performance constraints behind each module.
 
 - `src/context.jl` / `src/chunks.jl` — `Context{T}`, the `[start, stop)`
-  evaluation window, and the internal chunk protocol (`ChunkSource`,
+  evaluation window (with `widenstart`, which every operator reading before
+  `start` — a tolerance, a look-back — uses to widen and validate it), and the internal chunk protocol (`ChunkSource`,
   `chunkmap`): a single-pass lazy iterator of non-empty DataFrame chunks,
   consumers taking ownership of what they're yielded; empty chunks are
-  filtered out here so all downstream code may assume a chunk has rows
+  filtered out here so all downstream code may assume a chunk has rows.
+  `PullCursor` is the one way to drive an iterator by hand (a producer
+  draining its input, a binary transform pulling its second stream): sticky
+  `pull!`, state in fields, touched per chunk only. Not `Iterators.Stateful`,
+  which on Julia 1.10 prefetches and would break `head`'s early exit
 - `src/frame.jl` — `CausalFrame{T}`: opaque, backed by a vector of
   time-disjoint DataFrame chunks; invariants checked in the public inner
   constructor, while `load`/`stream` build through a `Trusted`-token
@@ -24,9 +29,12 @@ design rationale and performance constraints behind each module.
   curried (`filterrows(pred)` returns `CausalPipeline -> CausalPipeline`)
   so both chain with `|>`; row functions run over concretely typed column
   table rows behind a per-chunk function barrier, never `DataFrameRow`s.
-  - shared with the parquet and JLS operators: `clipchunk!` (rename, resolve
-    `:time`, missing times via `table.jl`'s `presentrows` barrier, sortedness,
-    clip, convert) and the `ChunkSink` background writer. `sinkchunk` queues
+  - shared with the parquet and JLS operators: `SourceClip` (every file
+    source's clip options, window, carried `prevtime` and `done` flag — the one
+    argument besides the chunk), `clipchunk!` (rename, resolve `:time`, missing
+    times via `table.jl`'s `presentrows` barrier, sortedness, clip, convert) and
+    the `ChunkSink` background writer, which `sinktransform` wires into a
+    pass-through transform for all three writers. `sinkchunk` queues
     the chunk for the writer and passes downstream `DataFrame(c; copycols =
     false)`, a private index over the same vectors: consumers may mutate a
     chunk's column index, but no operator mutates a column vector in place, so
@@ -134,7 +142,11 @@ design rationale and performance constraints behind each module.
   - the dependent summarizers (`Moment`, `Mean`, `Variance`, `Std`,
     `Covariance`, `Correlation`, `LinearRegression`) carry no state of their
     own — their state structs are empty. They declare `dependencies` and read
-    those values back through the two-argument `value(st, vals)`
+    those values back through the two-argument `value(st, vals)`. Such a state
+    joins the `DerivedState` union, which gives it the no-op `fresh`,
+    `update!`, `combine!` and `downdate!`; states are shared by shape, not
+    summarizer (`Mean` and `Moment` are one `CountRatioState`, and `Variance`
+    is `Covariance`'s state over a column and itself)
   - a summarizer whose value is symmetric in two columns (`DotProduct`,
     `Covariance`, every pairwise term in `LinearRegression`) folds under the
     `isless`-sorted argument order via `canonicaldot`/`canonicaldotname`, but
@@ -153,13 +165,15 @@ design rationale and performance constraints behind each module.
     symbol, so no name is a runtime value on the emission path
   - `AgeWeightedSum` (`Σ k·y`, k the row's age) cannot be a term functor — its
     update reads its own `S₁` — so it has its own plain and compensated states,
-    reusing the `Compensated` helpers, with `missing` counted through a type
-    flag `M` rather than two more Optional* types. `S₂`'s nonfinite
+    reusing the `Compensated` helpers, with `missing` counted through the
+    sum family's type flag `M`. `S₂`'s nonfinite
     classification is `S₁`'s minus the newest row's (`newest`), whose weight is
     an exact 0
-  - the sum family `Sum`/`SumPower`/`DotProduct` shares one plain and one
-    compensated state over a term functor (`ColumnTerm`/`PowerTerm`/
-    `PairProductTerm`, terms formed at accumulator width). The `Compensated`
+  - the sum family `Sum`/`SumPower`/`DotProduct` shares one state,
+    `AccumState{N,A,T,M,S}`, over a term functor `T` (`ColumnTerm`/`PowerTerm`/
+    `PairProductTerm`, terms formed at accumulator width). Its storage `S` is
+    the plain `A` or a `Compensated{A}`, every fold operation (`accadd`,
+    `accsub`, `accmerge`, `accvalue`) dispatching on it. The `Compensated`
     pair runs Neumaier summation over the finite terms and counts NaN/±Inf
     separately, reconstructing the IEEE result in `value` — that separation is
     what lets a rolling window evict a nonfinite row cleanly and stay on the
@@ -186,12 +200,16 @@ design rationale and performance constraints behind each module.
     column is concrete though the fit is opaque. It is plain `Summarizer`
     (re-fold everywhere). `fresh!` empties the buffers keeping capacity, which
     is only safe because `value` hands the model copies
-  - a `Missing`-admitting accumulator type gets the flat `Optional*` counting
-    states over the non-missing type, counting `missing` terms exactly as the
-    compensated states count nonfinites, so the accumulator stays invertible —
-    no `Union{Missing,_}` accumulation field, only in `value`'s return
+  - a `Missing`-admitting accumulator type sets the sum state's flag `M` and
+    folds at the non-missing type, counting `missing` terms exactly as the
+    compensated storage counts nonfinites, so the accumulator stays invertible —
+    no `Union{Missing,_}` accumulation field, only in `value`'s return. With
+    `M` false the count is never touched, and its tests compile away
 - `src/summarize.jl` — the folding kernels and the transforms `summarize`,
-  `summarizecycles`, `addsummarycolumns`; `prototypes` expands dependencies
+  `summarizecycles`, `addsummarycolumns`; also the key validators every keyed
+  transform shares, `keycolumns` (eager: unique, never `:time`) and
+  `checkkeycolumns` (first chunk: present in the input, naming which input for
+  the binary transforms); `prototypes` expands dependencies
   topologically and returns the requested output names, which ride through
   the kernels in a `Val` to project hidden dependencies out of the output;
   per-run mutable state lives in the `SummaryFold` struct, never in
@@ -213,7 +231,13 @@ design rationale and performance constraints behind each module.
   over the left stream pulls right chunks on demand (two-pointer merge, per
   left row) into a concretely typed per-key store; `tolerance` widens the
   right context by `start - tolerance` (the one place times are subtracted).
-  The store is a `Dict{K,Int}` of slot numbers over a `Vector{V}` of rows, and
+  It is also the join engine `applymodels` and `Acausal.futurejoin` run on:
+  `JoinConfig` (with `op` for messages and a direction singleton, `Backward`
+  here), `JoinState`, `pullright!`, `matchchunk!` and `joinchunk!`, the store
+  and kernel picked by dispatch (`newstore`/`widenstore`/`segment!`). A new
+  join direction adds those three methods, never a second driver.
+  The store is a `SlotStore` — a `Dict{K,Int}` of slot numbers over a
+  `Vector{V}` of rows, shared with `lastrow` through `admitslot!` — and
   a match is a `Vector{V}` plus a `Vector{Bool}` mask (unmatched slots left
   undefined, hence `convertmatches` for a mid-chunk widening) — both to keep
   `V` out of a `Union`, which Julia cannot store inline unless every member is
@@ -293,8 +317,9 @@ design rationale and performance constraints behind each module.
   `summaryvalues` and dependents read across tiers. An absent tier is
   `nothing`/`()`, so a single-tier call compiles to the old single-mode code.
   `RunningTable` pools retired groups (windowed trackers own vectors). Tiers
-  only demote, so a rebuild's buffer was already there; `replayrunning!`,
-  `replaytrees!`, `replayoldtrees!` rebuild from the live rows
+  only demote, so a rebuild's buffer was already there; `rebuildbuffer` and
+  `rebuildtrees` choose the rebuild's buffer and trees for both transforms, and
+  `replayrunning!`, `replaytrees!`, `replayoldtrees!` rebuild from the live rows
 - `src/rolling.jl` — `addrollingcolumns`: one kernel, `rollsegment!`, over a
   `RollTiers` (shared row buffer with per-window eviction heads, per-window
   running tables, per-key trees owning their rows, refold templates). Per row:
@@ -315,8 +340,8 @@ design rationale and performance constraints behind each module.
   only dynamism; the per-row kernel stays dispatch-free), reusing `SummaryFold`
   whole; `closelast` closes the trailing partial at `stop`
 - `src/windows.jl` — `summarizewindows`, the clock-sampled trailing window
-  (`[τ - lookback, τ)` at each tick): `intervalize`'s driver (`IntervalCursor`,
-  a concrete tick vector per chunk) over `addrollingcolumns`' row buffer, eviction
+  (`[τ - lookback, τ)` at each tick): `intervalize`'s driver (`IntervalCursor`
+  and its `pullpast!`, a concrete tick vector per chunk) over `addrollingcolumns`' row buffer, eviction
   head and tiers. One admission kernel (`windowrows!`) and one tick close
   (`closewindow!`): evict (downdating the running table), move tree heads and
   drop emptied trees, sync the rest once per tick — windows are queried per
@@ -337,8 +362,8 @@ design rationale and performance constraints behind each module.
   `modelreports`) and the five hooks the extension implements (`ismodel`,
   `fitmodel`, `predictmodel`, `savefitresult`, `restorefitresult`). It names no
   MLJ type, the `parquet.jl` split.
-  - `applymodels` is `asofjoin`'s store and kernel unchanged
-    (`AsofJoinConfig.op` names it in errors), plus a predict step: matched rows
+  - `applymodels` is `asofjoin`'s join engine unchanged, driven through
+    `matchchunk!` (`JoinConfig.op` names it in errors), plus a predict step: matched rows
     are grouped by model identity behind a function barrier, each distinct
     model gets one `predictmodel` call per chunk over views, and the results
     are scattered into one promoted `Union{Missing,E}` column.
@@ -354,9 +379,11 @@ design rationale and performance constraints behind each module.
   a name exported by two `using`d modules is an error to use unqualified — so
   exporting it here would break the *causal* `settime` for anyone who also
   imported `Acausal`. Reach it as `CausalFrames.Acausal.settime`; a test pins
-  its absence from `names(Acausal)`. `futurejoin` mirrors `asofjoin`'s
-  streaming machinery with the match direction, the tie-break, and the context
-  widening (`stop + tolerance`) all inverted; because it matches the *earliest*
+  its absence from `names(Acausal)`. `futurejoin` runs on `asofjoin`'s join
+  engine, supplying only the `Forward` direction's `newstore`/`widenstore`/
+  `segment!` methods (so the forward-looking code stays in the submodule), with
+  the match direction, the tie-break, and the context widening
+  (`stop + tolerance`) all inverted; because it matches the *earliest*
   qualifying right row it must buffer right rows per key until a left row
   consumes or outruns them, and proving a key has no future match drains the
   right stream — worst case O(right rows), against `asofjoin`'s O(keys) store.

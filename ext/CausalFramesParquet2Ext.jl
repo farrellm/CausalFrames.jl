@@ -11,8 +11,8 @@ using DataFrames
 using Parquet2
 
 using CausalFrames:
-    ChunkSink, Context, clipchunk!, gatherchunk!, sortgathered,
-    timesourcename, timetype
+    ChunkSink, SourceClip, clipchunk!, gatherchunk!, sortgathered,
+    timesourcename
 
 CausalFrames.backendloaded(::Val{:parquet2}) = true
 
@@ -74,50 +74,33 @@ end
 # reassigned get boxed), and the dynamically typed fields are per-chunk setup
 # state, not per-row state.
 mutable struct RowGroupProducer{T}
-    const path::String
-    const start::T
-    const stop::T
-    const time::Any     # Nothing | Symbol (column name) | Function (row -> time)
-    const rename::Any   # Nothing | AbstractDict/map | Function (name -> name)
+    const clip::SourceClip{T}
     const sort::Bool
-    const closed::Bool
-    const skipmissing::Bool
     dataset::Any        # Parquet2.Dataset, opened on first pull
     timecol::Any        # file-level name of the time column, or nothing
     index::Int          # next row group
-    prevtime::Any       # last raw time seen, for cross-chunk sortedness
     usestats::Bool      # statistics comparable with this context's times
-    done::Bool
-    RowGroupProducer{T}(path, start, stop, time, rename, sort, closed,
-        skipmissing) where {T} =
-        new{T}(path, start, stop, time, rename, sort, closed, skipmissing,
-            nothing, nothing, 1, nothing, true, false)
 end
 
-CausalFrames.parquetproducer(::Val{:parquet2}, ctx::Context,
-    path::AbstractString, time, rename, sort::Bool, closed::Bool,
-    skipmissing::Bool) =
-    RowGroupProducer{timetype(ctx)}(String(path), ctx.start, ctx.stop, time,
-        rename, sort, closed, skipmissing)
+CausalFrames.parquetproducer(::Val{:parquet2}, clip::SourceClip{T},
+    sort::Bool) where {T} =
+    RowGroupProducer{T}(clip, sort, nothing, nothing, 1, true)
 
-function (p::RowGroupProducer{T})() where {T}
-    p.done && return nothing
+function (p::RowGroupProducer)()
+    clip = p.clip
+    clip.done && return nothing
     p.dataset === nothing && open!(p)
     p.sort && return sortedread!(p)
-    while p.index <= Parquet2.nrowgroups(p.dataset)
+    while !clip.done && p.index <= Parquet2.nrowgroups(p.dataset)
         rg = p.index
         p.index += 1
         skip = rowgroupwindow(p, rg)
-        skip === :after && (p.done = true; return nothing)
+        skip === :after && break
         skip === :before && continue
-        clipped, sawstop, p.prevtime = clipchunk!(DataFrame(p.dataset[rg]),
-            p.time, p.rename, p.path, "parquet file", p.prevtime, p.closed,
-            p.skipmissing, p.start, p.stop)
-        sawstop && (p.done = true)
-        nrow(clipped) > 0 && return clipped
-        p.done && return nothing
+        out = clipchunk!(clip, DataFrame(p.dataset[rg]))
+        out === nothing || return out
     end
-    p.done = true
+    clip.done = true
     return nothing
 end
 
@@ -126,20 +109,19 @@ end
 # still skip the ones wholly outside it, on either side — and the in-window rows
 # are sorted once, into the stream's single chunk.
 function sortedread!(p::RowGroupProducer{T}) where {T}
-    p.done = true
+    p.clip.done = true
     kept = DataFrame[]
     for rg in 1:Parquet2.nrowgroups(p.dataset)
         rowgroupwindow(p, rg) === :overlaps || continue
-        gatherchunk!(kept, DataFrame(p.dataset[rg]), p.time, p.rename, p.path,
-            "parquet file", p.closed, p.skipmissing, p.start, p.stop)
+        gatherchunk!(kept, p.clip, DataFrame(p.dataset[rg]))
     end
     return sortgathered(kept, T)
 end
 
 function open!(p::RowGroupProducer)
-    p.dataset = Parquet2.Dataset(p.path)
+    p.dataset = Parquet2.Dataset(p.clip.path)
     p.timecol = timesourcename(String[String(n) for n in Base.names(p.dataset)],
-        p.time, p.rename)
+        p.clip.time, p.clip.rename)
     return nothing
 end
 
@@ -154,8 +136,9 @@ function rowgroupwindow(p::RowGroupProducer, rg::Int)
     lo, hi = minimum(stats), maximum(stats)
     (lo === nothing || hi === nothing) && return :overlaps
     try
-        hi < p.start && return :before
-        (p.closed ? lo > p.stop : lo >= p.stop) && return :after
+        clip = p.clip
+        hi < clip.start && return :before
+        (clip.closed ? lo > clip.stop : lo >= clip.stop) && return :after
     catch
         # Times this context cannot compare against: stop consulting statistics
         # for the rest of the run rather than failing over an optimization.

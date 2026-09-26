@@ -90,13 +90,7 @@ MLJModelInterface (`using MLJ`).
 function applymodels(models::CausalPipeline; column::Symbol = :model,
     key = nothing, tolerance = nothing, strict::Bool = false,
     name::Symbol = :prediction, operation::Symbol = :predict)
-    keycols = tokeycolumns(key)
-    allunique(keycols) ||
-        throw(ArgumentError("applymodels key columns must be unique"))
-    :time in keycols && throw(
-        ArgumentError(
-            ":time is the as-of dimension and may not be an applymodels key"),
-    )
+    keycols = keycolumns(key, "applymodels")
     (column === :time || column in keycols) && throw(
         ArgumentError(
             "applymodels column $(repr(column)) may not be :time or a key column"),
@@ -115,10 +109,10 @@ function applymodels(models::CausalPipeline; column::Symbol = :model,
     right = models |> selectcolumns(n -> Symbol(n) === column || Symbol(n) in keycols)
     return function (p::CausalPipeline)
         return CausalPipeline() do ctx::Context
-            cfg = AsofJoinConfig(keycols, Val(Tuple(keycols)), tolerance,
-                strict ? (<) : (<=), nothing, nothing, nothing, "applymodels")
-            js = AsofJoinState(right.run(rightcontext(ctx, tolerance,
-                "applymodels")))
+            cfg = JoinConfig(keycols, Val(Tuple(keycols)), tolerance,
+                strict ? (<) : (<=), Backward(), nothing, nothing, nothing,
+                "applymodels")
+            js = JoinState(right.run(widenstart(ctx, tolerance, "applymodels tolerance")))
             return chunkmap(c -> predictchunk!(js, cfg, column, name, operation, c),
                 p.run(ctx))
         end
@@ -129,10 +123,10 @@ applymodels(p::CausalPipeline, models::CausalPipeline; kwargs...) =
 
 # joinchunk!'s driver, with the prediction column in place of the right
 # table's columns. The as-of match itself is join.jl's, unchanged.
-function predictchunk!(js::AsofJoinState, cfg::AsofJoinConfig, column::Symbol,
+function predictchunk!(js::JoinState, cfg::JoinConfig, column::Symbol,
     name::Symbol, op::Symbol, c::DataFrame)
     if !js.leftchecked
-        checkkeys(cfg.keycols, c, "left", cfg.op)
+        checkkeycolumns(cfg.keycols, c, cfg.op, "the left input")
         String(name) in names(c) && throw(
             ArgumentError(
                 "applymodels output column $(repr(name)) collides with an existing column",
@@ -140,7 +134,7 @@ function predictchunk!(js::AsofJoinState, cfg::AsofJoinConfig, column::Symbol,
         )
         js.leftchecked = true
     end
-    js.rnt === nothing && !js.rdone && pullright!(js, cfg)
+    js.rnt === nothing && !js.right.done && pullright!(js, cfg)
     if js.passthrough
         c[!, name] = fill(missing, nrow(c))
         return c
@@ -153,17 +147,7 @@ function predictchunk!(js::AsofJoinState, cfg::AsofJoinConfig, column::Symbol,
         js.checked = true
     end
     nt = Tables.columntable(c)
-    resize!(js.matches, nrow(c))
-    resize!(js.found, nrow(c))
-    fill!(js.found, false)
-    i = 1
-    while true
-        i, js.rpos, needpull = joinsegment!(js.matches, js.found, js.index,
-            js.slots, nt, i, js.rnt, js.rpos, js.rdone, cfg.keynames,
-            cfg.before, cfg.tolerance)
-        needpull || break
-        pullright!(js, cfg)
-    end
+    matchchunk!(js, cfg, nt)
     c[!, name] = predictcolumn(js.matches, js.found, Val(column), nt, op)
     return c
 end

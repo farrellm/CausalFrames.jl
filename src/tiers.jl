@@ -185,6 +185,34 @@ function treebuffer(::Type{R}, trees::AbstractDict) where {R}
     return sort!(rows; by = r -> r.time, alg = Base.Sort.DEFAULT_STABLE)
 end
 
+# The shared row buffer of a tiering being built, for addrollingcolumns and
+# summarizewindows alike: `nothing` when neither the running nor the refold tier
+# needs one (the trees own their rows); on a first build, empty; after a
+# widening, the old buffer converted to the new row type, or — when the old
+# tiers kept none — gathered from the old trees (`treebuffer`).
+function rebuildbuffer(tg::Tiering, ::Type{R}, old) where {R}
+    isempty(tg.running) && isempty(tg.refold) && return nothing
+    old === nothing && return R[]
+    old.buffer === nothing && return treebuffer(R, old.trees)
+    return convert(Vector{R}, old.buffer)
+end
+
+# The tree tier of a tiering being built: `nothing` without tree states;
+# otherwise per-key trees replayed from the old trees' own rows when there were
+# any, else from the old buffer's live rows (from `head`, the first row any
+# window still holds), else — a first build — empty.
+function rebuildtrees(tg::Tiering, ::Type{K}, ::Type{R}, ::Type{T}, old,
+    head::Int, keynames::Val) where {K,R,T}
+    isempty(tg.tree) && return nothing
+    trees = Dict{K,SegTree{typeof(tg.tree),R,T}}()
+    if old !== nothing && old.trees !== nothing
+        replayoldtrees!(trees, old.trees, tg.tree, keynames)
+    elseif old !== nothing && old.buffer !== nothing
+        replaytrees!(trees, old.buffer, head, tg.tree, keynames)
+    end
+    return trees
+end
+
 # Replay every live row of the old trees; a tree owns its rows, so this is the
 # rebuild source when no buffer holds them.
 function replayoldtrees!(trees::Dict{K,SegTree{S,R,T}}, old::AbstractDict,

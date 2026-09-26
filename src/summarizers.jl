@@ -232,7 +232,7 @@ dottype(::Type{Ta}, ::Type{Tb}) where {Ta,Tb} =
 # is what lets `downdate!` invert exactly once such a row leaves a rolling
 # window — folded in naively, NaN absorbs and an evicted infinity leaves
 # Inf - Inf = NaN behind. `Missing`-admitting columns count their missing terms
-# the same way (the Optional* states, over the non-missing type), so they too
+# the same way (the sum state's flag M, over the non-missing type), so they too
 # stay invertible. BigFloat is excluded because compensation buys nothing at
 # arbitrary precision and a non-isbits Compensated{BigFloat} would heap-allocate
 # on every row.
@@ -302,8 +302,8 @@ end
     return a.total + a.comp
 end
 
-# The sum family (Sum, SumPower, DotProduct) shares one plain and one
-# compensated accumulator state over a *term functor* — the TrackState
+# The sum family (Sum, SumPower, DotProduct) shares one accumulator state
+# (plain or compensated storage) over a *term functor* — the TrackState
 # combiner-in-type-parameter idiom applied to the folded quantity. The
 # functor's type identifies the family and its input columns; its fields
 # carry runtime config (SumPower's exponent). Terms are formed in the
@@ -326,7 +326,7 @@ struct PairProductTerm{A,B} end
     convert(A, getproperty(row, Ca)) * convert(A, getproperty(row, Cb))
 
 # Whether a term is `missing` for this row — a missing input column, or (for a
-# pair) either operand missing. Only instantiated for the Optional* states,
+# pair) either operand missing. Only reached with the sum state's flag M set,
 # i.e. when a source column admits Missing; over a non-missing column the
 # `ismissing` folds to a compile-time `false`.
 @inline termmissing(::ColumnTerm{C}, row) where {C} = ismissing(getproperty(row, C))
@@ -342,113 +342,106 @@ acctype(t::PowerTerm{C}, intypes::NamedTuple) where {C} =
 acctype(::PairProductTerm{Ca,Cb}, intypes::NamedTuple) where {Ca,Cb} =
     dottype(intypes[Ca], intypes[Cb])
 
-# N names the output column and A is the realized accumulator type, as on
-# every other state; T is the term functor's type, so update! inlines the
-# term computation statically.
-mutable struct AccumState{N,A,T} <: SummarizerState
-    term::T
-    total::A
-end
+# The storage an accumulator of type A folds into: a `Compensated{A}` for a
+# compensable float, A itself otherwise. Each operation dispatches on it, so
+# the one state below compiles to the plain or the compensated fold.
+accstorage(::Type{A}) where {A} = compensable(A) ? Compensated{A} : A
+acczero(::Type{S}) where {S} = convert(S, 0)
+acczero(::Type{Compensated{A}}) where {A} = compzero(A)
+@inline accadd(s, x) = s + x
+@inline accadd(s::Compensated, x) = compadd(s, x)
+@inline accsub(s, x) = s - x
+@inline accsub(s::Compensated, x) = compsub(s, x)
+@inline accmerge(a, b) = a + b
+@inline accmerge(a::Compensated, b::Compensated) = compmerge(a, b)
+@inline accvalue(s) = s
+@inline accvalue(s::Compensated) = compvalue(s)
 
-mutable struct CompensatedAccumState{N,A<:AbstractFloat,T} <: SummarizerState
-    term::T
-    acc::Compensated{A}
-end
+# Carry an accumulator into a wider storage. Integer and plain-float totals are
+# finite as far as the counters know, which is all a plain storage tracked; a
+# compensated one keeps its running pair and counters.
+widenacc(::Type{S2}, acc) where {S2} = convert(S2, accvalue(acc))
+widenacc(::Type{Compensated{A2}}, acc) where {A2} =
+    compadd(compzero(A2), convert(A2, acc))
+widenacc(::Type{Compensated{A2}}, acc::Compensated) where {A2} =
+    widencomp(A2, acc)
 
+@inline maybemissing(::Type{A}, M::Bool) where {A} = M ? Union{Missing,A} : A
+
+# The sum family's one state. N names the output column and A is the realized
+# accumulator type, as on every other state; T is the term functor's type, so
+# update! inlines the term computation statically; S is the storage
+# (`accstorage(A)`).
+#
 # A `missing` input term absorbs a running sum and cannot be subtracted back
 # out, which would force a rolling window off the O(1) running path onto the
-# tree. So, exactly as the compensated state counts nonfinite floats, these two
-# states count the missing terms instead of folding them in: the accumulation
-# lives at the *non-missing* type A (`total`/`acc`, flat — no Union in the hot
-# field), only finite/present terms enter it, `missings` tracks the rest, and
-# `value` reports `missing` whenever that count is positive. The count balances
-# under `downdate!`, so the accumulator stays invertible and a missing row
-# recovers once it leaves the window. Used only when a source column admits
-# Missing; `OptionalCompensatedAccumState` also keeps the compensated state's
-# nonfinite counters.
-mutable struct OptionalAccumState{N,A,T} <: SummarizerState
+# tree. So, exactly as the compensated storage counts nonfinite floats, a
+# Missing-admitting accumulator (the flag M, `AgeSumState`'s idiom) counts its
+# missing terms instead of folding them in: the accumulation lives at the
+# *non-missing* type A (flat — no Union in the hot field), only present terms
+# enter it, `missings` tracks the rest, and `value` reports `missing` whenever
+# that count is positive. The count balances under `downdate!`, so the state
+# stays invertible and a missing row recovers once it leaves the window. With
+# M false, `missings` stays zero and every test of it folds away.
+mutable struct AccumState{N,A,T,M,S} <: SummarizerState
     term::T
-    total::A
+    acc::S
     missings::Int
 end
 
-mutable struct OptionalCompensatedAccumState{N,A<:AbstractFloat,T} <: SummarizerState
-    term::T
-    acc::Compensated{A}
-    missings::Int
-end
-
-# Shared constructor behind the sum family's fresh methods: a Missing-admitting
-# accumulator type folds into the counting Optional* states over the
-# non-missing type; otherwise compensable types get the Neumaier state. (The
-# `Union{}` guard keeps a pathological all-Missing column on the old path.)
+# Shared constructor behind the sum family's fresh methods, from the
+# accumulator type. (The `Union{}` guard keeps a pathological all-Missing
+# column off the counting path.)
 function accumfresh(term, N::Symbol, ::Type{A}) where {A}
-    Missing <: A && nonmissingtype(A) !== Union{} &&
-        return optionalfresh(term, N, nonmissingtype(A))
-    compensable(A) &&
-        return CompensatedAccumState{N,A,typeof(term)}(term, compzero(A))
-    return AccumState{N,A,typeof(term)}(term, convert(A, 0))
+    M = Missing <: A && nonmissingtype(A) !== Union{}
+    An = M ? nonmissingtype(A) : A
+    S = accstorage(An)
+    return AccumState{N,An,typeof(term),M,S}(term, acczero(S), 0)
 end
 
-# Fresh Optional* state over the non-missing accumulator type A.
-function optionalfresh(term, N::Symbol, ::Type{A}) where {A}
-    compensable(A) && return OptionalCompensatedAccumState{N,A,typeof(term)}(
-        term, compzero(A), 0)
-    return OptionalAccumState{N,A,typeof(term)}(term, convert(A, 0), 0)
+fresh(st::AccumState{N,A,T,M,S}) where {N,A,T,M,S} =
+    AccumState{N,A,T,M,S}(st.term, acczero(S), 0)
+@inline function fresh!(st::AccumState{N,A,T,M,S}) where {N,A,T,M,S}
+    st.acc = acczero(S)
+    st.missings = 0
+    return st
 end
-
-fresh(st::AccumState{N,A,T}) where {N,A,T} =
-    AccumState{N,A,T}(st.term, convert(A, 0))
-@inline fresh!(st::AccumState{N,A}) where {N,A} = (st.total = convert(A, 0); st)
-@inline update!(st::AccumState{N,A}, row) where {N,A} =
-    (st.total += termvalue(st.term, A, row); nothing)
-@inline downdate!(st::AccumState{N,A}, row) where {N,A} =
-    (st.total -= termvalue(st.term, A, row); nothing)
-combine!(dest::AccumState{N,A,T}, a::AccumState{N,A,T},
-    b::AccumState{N,A,T}) where {N,A,T} =
-    (dest.total = a.total + b.total; nothing)
-value(st::AccumState{N,A}) where {N,A} = NamedTuple{(N,),Tuple{A}}((st.total,))
-# A later chunk can widen a non-missing accumulator into a Missing-admitting
-# type; that promotes it to the counting Optional* state (no missing folded in
-# yet, so missings = 0) rather than a poisoned plain state.
-function widenstate(st::AccumState{N,A,T}, intypes::NamedTuple) where {N,A,T}
-    A2 = acctype(st.term, intypes)
-    A2 === A && return st
-    Missing <: A2 && nonmissingtype(A2) !== Union{} &&
-        return optionalfrom(st.term, Val(N), nonmissingtype(A2), st.total, 0)
-    compensable(A2) && return CompensatedAccumState{N,A2,T}(
-        st.term, compadd(compzero(A2), convert(A2, st.total)))
-    return AccumState{N,A2,T}(st.term, convert(A2, st.total))
-end
-
-fresh(st::CompensatedAccumState{N,A,T}) where {N,A,T} =
-    CompensatedAccumState{N,A,T}(st.term, compzero(A))
-@inline fresh!(st::CompensatedAccumState{N,A}) where {N,A} =
-    (st.acc = compzero(A); st)
-@inline update!(st::CompensatedAccumState{N,A}, row) where {N,A} =
-    (st.acc = compadd(st.acc, termvalue(st.term, A, row)); nothing)
-@inline downdate!(st::CompensatedAccumState{N,A}, row) where {N,A} =
-    (st.acc = compsub(st.acc, termvalue(st.term, A, row)); nothing)
-combine!(dest::CompensatedAccumState{N,A,T}, a::CompensatedAccumState{N,A,T},
-    b::CompensatedAccumState{N,A,T}) where {N,A,T} =
-    (dest.acc = compmerge(a.acc, b.acc); nothing)
-value(st::CompensatedAccumState{N,A}) where {N,A} =
-    NamedTuple{(N,),Tuple{A}}((compvalue(st.acc),))
-function widenstate(st::CompensatedAccumState{N,A,T},
-    intypes::NamedTuple) where {N,A,T}
-    A2 = acctype(st.term, intypes)
-    A2 === A && return st
-    a = st.acc
-    if Missing <: A2 && nonmissingtype(A2) !== Union{}
-        Ann = nonmissingtype(A2)
-        return compensable(Ann) ?
-               OptionalCompensatedAccumState{N,Ann,T}(st.term,
-            widencomp(Ann, a), 0) :
-               OptionalAccumState{N,Ann,T}(st.term, convert(Ann, compvalue(a)), 0)
+@inline function update!(st::AccumState{N,A,T,M}, row) where {N,A,T,M}
+    if M && termmissing(st.term, row)
+        st.missings += 1
+    else
+        st.acc = accadd(st.acc, termvalue(st.term, A, row))
     end
-    compensable(A2) && return CompensatedAccumState{N,A2,T}(
-        st.term, widencomp(A2, a))
-    return AccumState{N,A2,T}(st.term, convert(A2, compvalue(a)))
+    return nothing
+end
+@inline function downdate!(st::AccumState{N,A,T,M}, row) where {N,A,T,M}
+    if M && termmissing(st.term, row)
+        st.missings -= 1
+    else
+        st.acc = accsub(st.acc, termvalue(st.term, A, row))
+    end
+    return nothing
+end
+function combine!(dest::AccumState{N,A,T,M,S}, a::AccumState{N,A,T,M,S},
+    b::AccumState{N,A,T,M,S}) where {N,A,T,M,S}
+    dest.acc = accmerge(a.acc, b.acc)
+    M && (dest.missings = a.missings + b.missings)
+    return nothing
+end
+# The value's field type is the static `maybemissing(A, M)` — a runtime `typeof`
+# would let a missing window collapse a dependent summarizer's output type.
+value(st::AccumState{N,A,T,M}) where {N,A,T,M} =
+    NamedTuple{(N,),Tuple{maybemissing(A, M)}}((
+        M && st.missings > 0 ? missing : accvalue(st.acc),))
+# A later chunk can widen the accumulator — into a compensable float, or into a
+# Missing-admitting type, which moves it onto the counting path with no missing
+# folded in yet.
+function widenstate(st::AccumState{N}, intypes::NamedTuple) where {N}
+    w = accumfresh(st.term, N, acctype(st.term, intypes))
+    typeof(w) === typeof(st) && return st
+    w.acc = widenacc(typeof(w.acc), st.acc)
+    w.missings = st.missings
+    return w
 end
 
 # Reinterpret a Compensated at a wider float type, carrying its running pair
@@ -456,80 +449,6 @@ end
 widencomp(::Type{A2}, a::Compensated) where {A2} =
     Compensated{A2}(convert(A2, a.total), convert(A2, a.comp),
         a.nans, a.posinf, a.neginf)
-
-# Build an Optional* state from a scalar total (used when promoting a plain,
-# uncompensated accumulator that carries no compensation/nonfinite state).
-function optionalfrom(term, ::Val{N}, ::Type{A2}, total, missings::Int) where {N,A2}
-    T = typeof(term)
-    compensable(A2) && return OptionalCompensatedAccumState{N,A2,T}(
-        term, compadd(compzero(A2), convert(A2, total)), missings)
-    return OptionalAccumState{N,A2,T}(term, convert(A2, total), missings)
-end
-
-# The Optional* interface: fold only present terms into the accumulation and
-# count the missing ones; `value` is `missing` while any missing term is live.
-# The value's field type is the static Union{Missing,A} — a runtime `typeof`
-# would let a missing window collapse a dependent summarizer's output type.
-fresh(st::OptionalAccumState{N,A,T}) where {N,A,T} =
-    OptionalAccumState{N,A,T}(st.term, convert(A, 0), 0)
-@inline fresh!(st::OptionalAccumState{N,A}) where {N,A} =
-    (st.total = convert(A, 0); st.missings = 0; st)
-@inline update!(st::OptionalAccumState{N,A}, row) where {N,A} =
-    (
-        termmissing(st.term, row) ? (st.missings += 1) :
-        (st.total += termvalue(st.term, A, row)); nothing)
-@inline downdate!(st::OptionalAccumState{N,A}, row) where {N,A} =
-    (
-        termmissing(st.term, row) ? (st.missings -= 1) :
-        (st.total -= termvalue(st.term, A, row)); nothing)
-function combine!(dest::OptionalAccumState{N,A,T}, a::OptionalAccumState{N,A,T},
-    b::OptionalAccumState{N,A,T}) where {N,A,T}
-    dest.total = a.total + b.total
-    dest.missings = a.missings + b.missings
-    return nothing
-end
-value(st::OptionalAccumState{N,A}) where {N,A} =
-    NamedTuple{(N,),Tuple{Union{Missing,A}}}((st.missings > 0 ? missing : st.total,))
-function widenstate(st::OptionalAccumState{N,A,T}, intypes::NamedTuple) where {N,A,T}
-    A2 = nonmissingtype(acctype(st.term, intypes))
-    A2 === A && return st
-    return optionalfrom(st.term, Val(N), A2, st.total, st.missings)
-end
-
-fresh(st::OptionalCompensatedAccumState{N,A,T}) where {N,A,T} =
-    OptionalCompensatedAccumState{N,A,T}(st.term, compzero(A), 0)
-@inline fresh!(st::OptionalCompensatedAccumState{N,A}) where {N,A} =
-    (st.acc = compzero(A); st.missings = 0; st)
-@inline update!(st::OptionalCompensatedAccumState{N,A}, row) where {N,A} =
-    (
-        termmissing(st.term, row) ? (st.missings += 1) :
-        (st.acc = compadd(st.acc, termvalue(st.term, A, row))); nothing)
-@inline downdate!(st::OptionalCompensatedAccumState{N,A}, row) where {N,A} =
-    (
-        termmissing(st.term, row) ? (st.missings -= 1) :
-        (st.acc = compsub(st.acc, termvalue(st.term, A, row))); nothing)
-function combine!(dest::OptionalCompensatedAccumState{N,A,T},
-    a::OptionalCompensatedAccumState{N,A,T},
-    b::OptionalCompensatedAccumState{N,A,T}) where {N,A,T}
-    dest.acc = compmerge(a.acc, b.acc)
-    dest.missings = a.missings + b.missings
-    return nothing
-end
-value(st::OptionalCompensatedAccumState{N,A}) where {N,A} =
-    NamedTuple{(N,),Tuple{Union{Missing,A}}}((
-        st.missings > 0 ? missing :
-        compvalue(st.acc),
-    ))
-function widenstate(st::OptionalCompensatedAccumState{N,A,T},
-    intypes::NamedTuple) where {N,A,T}
-    A2 = nonmissingtype(acctype(st.term, intypes))
-    A2 === A && return st
-    return compensable(A2) ?
-           OptionalCompensatedAccumState{N,A2,T}(st.term, widencomp(A2, st.acc),
-        st.missings) :
-           OptionalAccumState{N,A2,T}(st.term, convert(A2, compvalue(st.acc)),
-        st.missings)
-end
 
 """
     Count() -> Summarizer
@@ -748,15 +667,14 @@ end
 # already computed under the name D. It folds nothing: the summarizer that
 # claims it declares that other one as a dependency, and the topological
 # expansion guarantees D is in `vals` by the time this runs. Fieldless, so it
-# joins DerivedState below and inherits the no-op combine!/downdate!/fresh!.
+# joins DerivedState below and inherits its no-op fresh/update!/combine!/
+# downdate!.
 #
 # This is what lets a summarizer whose value is symmetric in two columns fold
 # under one canonical argument order while still answering to the name the
 # caller asked for — see DESIGN.md's "Symmetric summarizers".
 struct AliasState{N,D} <: SummarizerState end
 
-fresh(st::AliasState) = st
-@inline update!(::AliasState, row) = nothing
 # The value type comes from the dependency's declared field type, never from
 # `typeof` of the value, so a missing-poisoned accumulator keeps the output
 # column's Union{Missing,...} eltype instead of collapsing it to Missing.
@@ -881,8 +799,6 @@ function agesumfresh(::Val{N}, ::Val{C}, ::Type{A}) where {N,C,A}
     return AgeSumState{N,C,An,M}(0, convert(An, 0), convert(An, 0), 0)
 end
 
-@inline agesumtype(::Type{A}, M::Bool) where {A} = M ? Union{Missing,A} : A
-
 fresh(::AgeSumState{N,C,A,M}) where {N,C,A,M} =
     AgeSumState{N,C,A,M}(0, convert(A, 0), convert(A, 0), 0)
 @inline function fresh!(st::AgeSumState{N,C,A}) where {N,C,A}
@@ -921,7 +837,7 @@ function combine!(dest::AgeSumState{N,C,A,M}, a::AgeSumState{N,C,A,M},
     return nothing
 end
 value(st::AgeSumState{N,C,A,M}) where {N,C,A,M} =
-    NamedTuple{(N,),Tuple{agesumtype(A, M)}}((
+    NamedTuple{(N,),Tuple{maybemissing(A, M)}}((
         M && st.missings > 0 ? missing : st.s2,))
 function widenstate(st::AgeSumState{N,C,A,M}, intypes::NamedTuple) where {N,C,A,M}
     w = agesumfresh(Val(N), Val(C), sumtype(intypes[C]))
@@ -1012,7 +928,7 @@ end
     )
 end
 value(st::CompensatedAgeSumState{N,C,A,M}) where {N,C,A,M} =
-    NamedTuple{(N,),Tuple{agesumtype(A, M)}}((
+    NamedTuple{(N,),Tuple{maybemissing(A, M)}}((
         M && st.missings > 0 ? missing : agesumvalue(st),))
 function widenstate(st::CompensatedAgeSumState{N,C,A,M},
     intypes::NamedTuple) where {N,C,A,M}
@@ -1042,28 +958,28 @@ struct Moment{C} <: GroupSummarizer
 end
 Moment(column::Symbol, order::Integer) = Moment{column}(Int(order))
 
-# The state is fieldless: the moment is derived entirely from its
-# dependencies' values at emission time, so its own name N and the power
-# sum's name D are all it needs, baked as type parameters so the two-argument
-# `value` infers.
-struct MomentState{C,N,D} <: SummarizerState end
+# A sum over the row count, emitted as N: Moment's power sum and Mean's plain
+# sum. The state is fieldless — the value is derived entirely from the
+# dependencies' values at emission time — so its own name N and the sum's name
+# D are all it needs, baked as type parameters so the two-argument `value`
+# infers.
+struct CountRatioState{N,D} <: SummarizerState end
+
+# The value type comes from the dependencies' declared field types, not from
+# `typeof` of the runtime quotient — a missing-poisoned sum would otherwise
+# collapse the output column's Union{Missing,...} eltype to Missing.
+@inline function value(::CountRatioState{N,D}, vals::NamedTuple) where {N,D}
+    V = Base.promote_op(/, fieldtype(typeof(vals), D),
+        fieldtype(typeof(vals), :count))
+    return NamedTuple{(N,),Tuple{V}}((vals[D] / vals.count,))
+end
 
 dependencies(m::Moment{C}) where {C} = (Count(), SumPower(C, m.order))
 emptyvalue(m::Moment{C}) where {C} =
     NamedTuple{(Symbol(C, :_moment_, m.order),)}((missing,))
 fresh(m::Moment{C}, ::NamedTuple) where {C} =
-    MomentState{C,Symbol(C, :_moment_, m.order),
+    CountRatioState{Symbol(C, :_moment_, m.order),
         Symbol(C, :_sumpower_, m.order)}()
-fresh(st::MomentState) = st
-@inline update!(::MomentState, row) = nothing
-# The value type comes from the dependencies' declared field types, not from
-# `typeof` of the runtime quotient — a missing-poisoned power sum would
-# otherwise collapse the output column's Union{Missing,...} eltype to Missing.
-@inline function value(::MomentState{C,N,D}, vals::NamedTuple) where {C,N,D}
-    V = Base.promote_op(/, fieldtype(typeof(vals), D),
-        fieldtype(typeof(vals), :count))
-    return NamedTuple{(N,),Tuple{V}}((vals[D] / vals.count,))
-end
 
 """
     Mean(column::Symbol) -> Summarizer
@@ -1075,18 +991,10 @@ The mean of `column`, in `:{column}_mean` (`missing` for no rows). Computed from
 struct Mean{C} <: GroupSummarizer end
 Mean(column::Symbol) = Mean{column}()
 
-struct MeanState{C,N,S} <: SummarizerState end
-
 dependencies(::Mean{C}) where {C} = (Count(), Sum(C))
 emptyvalue(::Mean{C}) where {C} = NamedTuple{(Symbol(C, :_mean),)}((missing,))
 fresh(::Mean{C}, ::NamedTuple) where {C} =
-    MeanState{C,Symbol(C, :_mean),Symbol(C, :_sum)}()
-fresh(st::MeanState) = st
-@inline update!(::MeanState, row) = nothing
-@inline function value(::MeanState{C,N,S}, vals::NamedTuple) where {C,N,S}
-    V = Base.promote_op(/, fieldtype(typeof(vals), S), fieldtype(typeof(vals), :count))
-    return NamedTuple{(N,),Tuple{V}}((vals[S] / vals.count,))
-end
+    CountRatioState{Symbol(C, :_mean),Symbol(C, :_sum)}()
 
 """
     Variance(column::Symbol; corrected = true) -> Summarizer
@@ -1105,10 +1013,6 @@ struct Variance{C} <: GroupSummarizer
 end
 Variance(column::Symbol; corrected::Bool = true) = Variance{column}(corrected)
 
-# R (the corrected flag) is baked into the state type so the derived value
-# stays fieldless and inferrable; the divisor is `n - Int(R)`.
-struct VarianceState{C,N,S,Q,R} <: SummarizerState end
-
 # The compile-time value type of the shared (co)variance identity
 # `(q - sa * sb / n) / (n - corrected)`, from the dependencies' declared
 # field types (a runtime `typeof` would let one missing collapse the type).
@@ -1120,20 +1024,12 @@ _covtype(::Type{Q}, ::Type{Sa}, ::Type{Sb}) where {Q,Sa,Sb} =
 dependencies(::Variance{C}) where {C} = (Count(), Sum(C), SumPower(C, 2))
 emptyvalue(::Variance{C}) where {C} =
     NamedTuple{(Symbol(C, :_variance),)}((missing,))
+# A variance is the covariance of a column with itself, the power sum standing
+# in for the dot product, so it takes Covariance's state (defined below; the
+# arithmetic is the same identity, operation for operation).
 fresh(v::Variance{C}, ::NamedTuple) where {C} =
-    VarianceState{C,Symbol(C, :_variance),Symbol(C, :_sum),
-        Symbol(C, :_sumpower_, 2),v.corrected}()
-fresh(st::VarianceState) = st
-@inline update!(::VarianceState, row) = nothing
-@inline function value(::VarianceState{C,N,S,Q,R}, vals::NamedTuple) where {C,N,S,Q,R}
-    Sf = fieldtype(typeof(vals), S)
-    Qf = fieldtype(typeof(vals), Q)
-    V = _covtype(Qf, Sf, Sf)
-    s = vals[S]
-    q = vals[Q]
-    n = vals.count
-    return NamedTuple{(N,),Tuple{V}}(((q - s * s / n) / (n - Int(R)),))
-end
+    CovarianceState{C,C,Symbol(C, :_variance),Symbol(C, :_sumpower_, 2),
+        Symbol(C, :_sum),Symbol(C, :_sum),v.corrected}()
 
 """
     Std(column::Symbol; corrected = true) -> Summarizer
@@ -1159,8 +1055,6 @@ dependencies(s::Std{C}) where {C} = (Variance(C; corrected = s.corrected),)
 emptyvalue(::Std{C}) where {C} = NamedTuple{(Symbol(C, :_std),)}((missing,))
 fresh(::Std{C}, ::NamedTuple) where {C} =
     StdState{C,Symbol(C, :_std),Symbol(C, :_variance)}()
-fresh(st::StdState) = st
-@inline update!(::StdState, row) = nothing
 @inline function value(::StdState{C,N,V}, vals::NamedTuple) where {C,N,V}
     T = Base.promote_op(sqrt, fieldtype(typeof(vals), V))
     return NamedTuple{(N,),Tuple{T}}((_stdsqrt(vals[V]),))
@@ -1183,6 +1077,9 @@ end
 Covariance(a::Symbol, b::Symbol; corrected::Bool = true) =
     Covariance{a,b}(corrected)
 
+# R (the corrected flag) is baked into the state type so the derived value
+# stays fieldless and inferrable; the divisor is `n - Int(R)`. Variance uses it
+# too, with A = B.
 struct CovarianceState{A,B,N,D,SA,SB,R} <: SummarizerState end
 
 covname(a, b) = Symbol(a, :_, b, :_covariance)
@@ -1196,8 +1093,6 @@ emptyvalue(::Covariance{A,B}) where {A,B} =
 fresh(c::Covariance{A,B}, ::NamedTuple) where {A,B} =
     CovarianceState{A,B,covname(A, B),canonicaldotname(A, B),Symbol(A, :_sum),
         Symbol(B, :_sum),c.corrected}()
-fresh(st::CovarianceState) = st
-@inline update!(::CovarianceState, row) = nothing
 @inline function value(::CovarianceState{A,B,N,D,SA,SB,R},
     vals::NamedTuple) where {A,B,N,D,SA,SB,R}
     Df = fieldtype(typeof(vals), D)
@@ -1235,8 +1130,6 @@ emptyvalue(::Correlation{A,B}) where {A,B} =
 fresh(::Correlation{A,B}, ::NamedTuple) where {A,B} =
     CorrelationState{A,B,corname(A, B),covname(A, B),Symbol(A, :_std),
         Symbol(B, :_std)}()
-fresh(st::CorrelationState) = st
-@inline update!(::CorrelationState, row) = nothing
 @inline function value(::CorrelationState{A,B,N,CV,SA,SB},
     vals::NamedTuple) where {A,B,N,CV,SA,SB}
     Cvf = fieldtype(typeof(vals), CV)
@@ -1410,8 +1303,6 @@ function fresh(r::LinearRegression{P,Y}, ::NamedTuple) where {P,Y}
     return LinearRegressionState{first(ns),Base.tail(ns),an,sp,sy,qy,gn,dn,
         r.intercept}()
 end
-fresh(st::LinearRegressionState) = st
-@inline update!(::LinearRegressionState, row) = nothing
 
 # The dependency values this regression reads, and — separately — the tuple
 # type they are *declared* to have. The two must not be confused: `typeof` of
@@ -1842,8 +1733,6 @@ emptyvalue(::Median{C}) where {C} = NamedTuple{(Symbol(C, :_median),)}((missing,
 fresh(::Median{C}, ::NamedTuple) where {C} =
     QuantileState{(Symbol(C, :_median),),sortedname(C),(0.5,),:linear}()
 
-fresh(st::QuantileState) = st
-@inline update!(::QuantileState, row) = nothing
 @inline value(::QuantileState{NS,D,PS,I}, vals::NamedTuple) where {NS,D,PS,I} =
     quantilevalue(Val(NS), vals[D], Val(PS), Val(I))
 
@@ -1958,8 +1847,6 @@ emptyvalue(::PercentRank{C}) where {C} =
     NamedTuple{(Symbol(C, :_percentrank),)}((missing,))
 fresh(::PercentRank{C}, ::NamedTuple) where {C} =
     PercentRankState{Symbol(C, :_percentrank),sortedname(C),Symbol(C, :_last)}()
-fresh(st::PercentRankState) = st
-@inline update!(::PercentRankState, row) = nothing
 @inline value(::PercentRankState{N,D,L}, vals::NamedTuple) where {N,D,L} =
     percentrank(Val(N), vals[D], vals[L])
 
@@ -1980,9 +1867,10 @@ end
 # a no-op. The window transforms give such a state no tier at all (tiers.jl);
 # these methods serve the one case where it keeps one, a set of nothing but
 # fieldless states.
-const DerivedState = Union{AliasState,MomentState,MeanState,VarianceState,
-    StdState,CovarianceState,CorrelationState,LinearRegressionState,
-    QuantileState,PercentRankState}
+const DerivedState = Union{AliasState,CountRatioState,StdState,CovarianceState,
+    CorrelationState,LinearRegressionState,QuantileState,PercentRankState}
+fresh(st::DerivedState) = st
+@inline update!(::DerivedState, row) = nothing
 combine!(::DerivedState, ::DerivedState, ::DerivedState) = nothing
 @inline downdate!(::DerivedState, row) = nothing
 # Fieldless, so already zero — and immutable, so returning `st` is the whole

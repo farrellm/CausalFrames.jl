@@ -16,9 +16,10 @@ fallbacks in `src/parquet.jl` throw the `READHINT`/`WRITEHINT` message:
   discovers the extension. It runs eagerly at operator construction *and*
   again per run, so a missing backend is reported where the user typed the
   operator, while one loaded afterwards still counts
-- `parquetproducer(::Val{:name}, ctx, path, time, rename, sort, closed,
-  skipmissing)` → a
-  zero-argument callable returning the next chunk, or `nothing` at the end
+- `parquetproducer(::Val{:name}, clip::SourceClip, sort)` → a zero-argument
+  callable returning the next chunk, or `nothing` at the end. The clip carries
+  the path, the context window and every clip option (`time`, `rename`,
+  `closed`, `skipmissing`), plus the running `prevtime` and `done`
 - `parquetsink(::Val{:name}, path, queue, rowgroupsize, opts)` → a `ChunkSink`
   wrapping a `chan -> writeloop(chan, ...)`. Translate options *here*, on the
   pipeline's own task, so an unsupported one is reported when the run starts
@@ -29,15 +30,17 @@ fallbacks in `src/parquet.jl` throw the `READHINT`/`WRITEHINT` message:
 - It must return only **non-empty** chunks — loop until a clip leaves rows or
   the source is done, since downstream code may assume a chunk has rows
 - Per-pull state lives in mutable struct fields, never in reassigned closure
-  captures (those get boxed). The dynamically typed fields (`time`, `rename`,
-  the reader handle, `prevtime`) are per-chunk *setup* state; per-row work goes
-  through `clipchunk!`, which puts it behind a function barrier
-- `clipchunk!(df, time, rename, path, "parquet file", prevtime, closed,
-  skipmissing, start, stop)` returns `(clipped, sawstop, prevtime)`: carry
-  `prevtime` to the next pull (that is what catches a cross-chunk sortedness
-  violation) and stop the stream on `sawstop`, a time past the window having
-  been seen. It also drops (or, without `skipmissing`, refuses) missing
-  times, so a producer never handles them itself
+  captures (those get boxed). The dynamically typed fields (the reader handle,
+  the clip's `time`, `rename` and `prevtime`) are per-chunk *setup* state;
+  per-row work goes through `clipchunk!`, which puts it behind a function
+  barrier
+- `clipchunk!(clip, df)` returns the clipped chunk, or `nothing` when no row
+  is in the window. It carries `prevtime` across pulls itself (that is what
+  catches a cross-chunk sortedness violation) and sets `clip.done` on seeing a
+  time past the window, so the loop is `while !clip.done … end`, setting
+  `clip.done` too when the reader runs dry. It also drops (or, without
+  `skipmissing`, refuses) missing times, so a producer never handles them
+  itself
 - DuckDB's pushed-down `WHERE` drops null times silently, which is accepted:
   an `OR col IS NULL` to surface them costs the row-group skip (see
   `notes/duckdb-null-pushdown.md`). Any other pre-filter should leave them for
@@ -49,8 +52,8 @@ fallbacks in `src/parquet.jl` throw the `READHINT`/`WRITEHINT` message:
   needs a row group's minimum strictly past `stop`, since one starting exactly
   there still holds window rows
 - Under `sort = true` the file's order promises nothing, so a producer that
-  cannot sort at the source uses `gatherchunk!` (same arguments, minus
-  `prevtime`, pushing in-window rows onto a `Vector{DataFrame}`) over *every*
+  cannot sort at the source uses `gatherchunk!(kept, clip, df)` (pushing
+  in-window rows onto a `Vector{DataFrame}`) over *every*
   chunk and returns `sortgathered(kept, T)` as its one chunk. Nothing may end
   the scan early: Parquet2's `:after` row groups are skipped, not terminal.
   DuckDB instead sorts in SQL, tie-broken by the virtual `file_row_number`,

@@ -63,15 +63,13 @@ end
 
 # One input's read head: the buffered chunk, the row reached in it, and the
 # lazily refilled iterator behind it. The dynamically typed fields are per-chunk
-# setup state, in the shape of AsofJoinState's right stream; `times` is the
+# setup state, in the shape of JoinState's right stream; `times` is the
 # chunk's time column as the context's time type, which is what every ordering
 # comparison touches, so it is the one field that must stay concrete.
 mutable struct MergeCursor{T}
     const index::Int                  # position in the argument list: the tie-break
-    chunks::Any                       # the input's chunk iterator
-    state::Any                        # its iteration state
-    started::Bool
-    done::Bool
+    const input::PullCursor           # the input's chunks
+    done::Bool                        # `input.done`, concrete: read per claim
     chunk::Union{Nothing,DataFrame}   # the buffered chunk; nothing when consumed
     times::Vector{T}                  # its time column, for ordering only
     pos::Int                          # the next unemitted row
@@ -80,8 +78,8 @@ mutable struct MergeCursor{T}
     passthrough::Bool                 # names == the union names, in order
 end
 
-MergeCursor{T}(index::Int, chunks) where {T} = MergeCursor{T}(index, chunks, nothing,
-    false, false, nothing, T[], 1, Symbol[], Int[], false)
+MergeCursor{T}(index::Int, chunks) where {T} = MergeCursor{T}(index,
+    PullCursor(chunks), false, nothing, T[], 1, Symbol[], Int[], false)
 
 # A run of rows claimed from one cursor's chunk, held until the batch is
 # materialized. Nothing is copied to make a piece: the chunk it points into is
@@ -166,15 +164,12 @@ end
 # the chunk's time column already has the context's time type.
 function refill!(cur::MergeCursor{T}) where {T}
     while true
-        cur.done && return false
-        next = cur.started ? iterate(cur.chunks, cur.state) : iterate(cur.chunks)
-        cur.started = true
-        if next === nothing
+        chunk = pull!(cur.input)
+        if chunk === nothing
             cur.done = true
             cur.chunk = nothing
             return false
         end
-        chunk, cur.state = next
         nrow(chunk) == 0 && continue
         cur.chunk = chunk
         cur.times = convert(Vector{T}, chunk.time)

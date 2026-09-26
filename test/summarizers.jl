@@ -1061,16 +1061,16 @@ end
     # float accumulators get the compensated state; a missing-permitting float
     # gets the compensated *counting* state over the non-missing type; BigFloat
     # keeps the plain one
+    xterm = CausalFrames.ColumnTerm{:x}
+    Comp64 = CausalFrames.Compensated{Float64}
     @test CausalFrames.fresh(Sum(:x), ftypes) isa
-          CausalFrames.CompensatedAccumState{:x_sum,Float64,
-        CausalFrames.ColumnTerm{:x}}
+          CausalFrames.AccumState{:x_sum,Float64,xterm,false,Comp64}
     @test CausalFrames.fresh(Sum(:x), (time = Int64, x = Union{Missing,Float64})) isa
-          CausalFrames.OptionalCompensatedAccumState{:x_sum,Float64,
-        CausalFrames.ColumnTerm{:x}}
+          CausalFrames.AccumState{:x_sum,Float64,xterm,true,Comp64}
     @test CausalFrames.fresh(Sum(:x), (time = Int64, x = Union{Missing,Int})) isa
-          CausalFrames.OptionalAccumState{:x_sum,Int,CausalFrames.ColumnTerm{:x}}
+          CausalFrames.AccumState{:x_sum,Int,xterm,true,Int}
     @test CausalFrames.fresh(Sum(:x), (time = Int64, x = BigFloat)) isa
-          CausalFrames.AccumState
+          CausalFrames.AccumState{:x_sum,BigFloat,xterm,false,BigFloat}
 
     # value is concretely typed and declared at the same element type as the
     # plain state, so nothing downstream can tell the states apart
@@ -1149,16 +1149,14 @@ end
     ist = CausalFrames.fresh(Sum(:x), (time = Int64, x = Int64))
     CausalFrames.update!(ist, (; x = 5))
     wst = CausalFrames.widenstate(ist, (time = Int64, x = Float64))
-    @test wst isa CausalFrames.CompensatedAccumState{:x_sum,Float64,
-        CausalFrames.ColumnTerm{:x}}
+    @test wst isa CausalFrames.AccumState{:x_sum,Float64,xterm,false,Comp64}
     @test CausalFrames.value(wst) === (x_sum = 5.0,)
 
     f32 = CausalFrames.fresh(Sum(:x), (time = Int64, x = Float32))
     foreach(x -> CausalFrames.update!(f32, (; x)),
         Float32[1.0f10, 1.0f0, NaN32, Inf32])
     f64 = CausalFrames.widenstate(f32, (time = Int64, x = Float64))
-    @test f64 isa CausalFrames.CompensatedAccumState{:x_sum,Float64,
-        CausalFrames.ColumnTerm{:x}}
+    @test f64 isa CausalFrames.AccumState{:x_sum,Float64,xterm,false,Comp64}
     @test f64.acc.comp == Float64(f32.acc.comp) && f64.acc.comp != 0.0
     @test f64.acc.nans == 1 && f64.acc.posinf == 1
     CausalFrames.downdate!(f64, (; x = NaN))
@@ -1167,8 +1165,7 @@ end
 
     nst = fold(Sum(:x), [1.0, NaN])
     mst = CausalFrames.widenstate(nst, (time = Int64, x = Union{Missing,Float64}))
-    @test mst isa CausalFrames.OptionalCompensatedAccumState{:x_sum,Float64,
-        CausalFrames.ColumnTerm{:x}}
+    @test mst isa CausalFrames.AccumState{:x_sum,Float64,xterm,true,Comp64}
     @test mst.acc.nans == 1 && mst.missings == 0
     @test isnan(CausalFrames.value(mst).x_sum)
     @test CausalFrames.value(mst) isa NamedTuple{(:x_sum,),Tuple{Union{Missing,Float64}}}
@@ -1201,7 +1198,7 @@ end
 
     # the count balances across several missing terms
     st = foldm(Sum(:x), mint, [1, missing, missing, 4])
-    @test st.missings == 2 && st.total == 5
+    @test st.missings == 2 && st.acc == 5
     @test isequal(CausalFrames.value(st), (x_sum = missing,))
     CausalFrames.downdate!(st, (; x = missing))
     @test isequal(CausalFrames.value(st), (x_sum = missing,))   # one still live
@@ -1224,10 +1221,10 @@ end
     b = foldm(Sum(:x), mint, [missing, 4])
     dest = CausalFrames.fresh(a)
     CausalFrames.combine!(dest, a, b)
-    @test dest.missings == 2 && dest.total == 5
+    @test dest.missings == 2 && dest.acc == 5
     @test isequal(CausalFrames.value(dest), (x_sum = missing,))
     CausalFrames.combine!(a, a, foldm(Sum(:x), mint, [10]))     # dest aliases a
-    @test a.missings == 1 && a.total == 11
+    @test a.missings == 1 && a.acc == 11
 
     # DotProduct counts a term missing when either operand is
     st = CausalFrames.fresh(DotProduct(:x, :y), mint)

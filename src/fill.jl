@@ -57,33 +57,21 @@ DataFrame(load(Context(t0, t0 + Hour(1)), p))
 """
 function forwardfill(selectors...; key = nothing, tolerance = nothing)
     checkselectors(selectors, "forwardfill", false)
-    keycols = tokeycolumns(key)
-    allunique(keycols) || throw(ArgumentError("forwardfill key columns must be unique"))
-    :time in keycols && throw(
-        ArgumentError(":time is the ordering dimension and may not be a forwardfill key"),
-    )
+    keycols = keycolumns(key, "forwardfill")
     keynames = Val(Tuple(keycols))
     return function (p::CausalPipeline)
         return CausalPipeline() do ctx::Context
             st = ForwardFillState(keycols, selectors)
             step = c -> fillchunk!(st, keynames, tolerance, ctx.start, c)
-            return chunkmap(step, p.run(fillcontext(ctx, tolerance)))
+            return chunkmap(
+                step,
+                p.run(widenstart(ctx, tolerance, "forwardfill tolerance")),
+            )
         end
     end
 end
 forwardfill(p::CausalPipeline, selectors...; kwargs...) =
     forwardfill(selectors...; kwargs...)(p)
-
-# The mirror of asofjoin's `rightcontext`: non-negativity is probed by
-# subtracting rather than by comparing against zero, so a time type with no
-# zero of its own (a `Period`, say) still works.
-fillcontext(ctx::Context, ::Nothing) = ctx
-function fillcontext(ctx::Context, tolerance)
-    start = ctx.start - tolerance
-    start <= ctx.start || throw(ArgumentError(
-        "forwardfill tolerance must be non-negative, got $tolerance"))
-    return Context(start, ctx.stop)
-end
 
 # One carried value per (key, filled column): the last non-missing value, the
 # time of the row it came from, and whether there has been one. Mutable, so a
@@ -137,10 +125,7 @@ end
 function resolvefill!(st::ForwardFillState, c::DataFrame)
     cols = names(c)
     st.lastnames == cols && return nothing
-    for k in st.keycols
-        String(k) in cols ||
-            throw(ArgumentError("forwardfill key column $(repr(k)) not found in the input"))
-    end
+    checkkeycolumns(st.keycols, c, "forwardfill")
     foreachliteral(st.selectors) do n
         n in cols ||
             throw(ArgumentError("forwardfill: no column named $(repr(Symbol(n)))"))

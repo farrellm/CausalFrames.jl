@@ -41,8 +41,7 @@ end
 
 # Backend hooks. The extensions' methods are more specific than these, so the
 # fallbacks only ever run when the backend is not loaded.
-parquetproducer(::Val, ::Any, ::Any, ::Any, ::Any, ::Any, ::Any, ::Any) =
-    throw(ArgumentError(READHINT))
+parquetproducer(::Val, ::Any, ::Any) = throw(ArgumentError(READHINT))
 parquetsink(::Val, ::Any, ::Any, ::Any, ::Any) = throw(ArgumentError(WRITEHINT))
 
 """
@@ -88,10 +87,11 @@ function readparquet(path::AbstractString; time = nothing, rename = nothing,
     checksourcetimespec(time, "readparquet")
     resolvebackend(backend, :duckdb, READHINT)   # eager: fail at the call site
     return CausalPipeline() do ctx::Context
+        clip = SourceClip(ctx, path, "parquet file", time, rename, closed,
+            skipmissing)
         return ChunkSource(
-            parquetproducer(resolvebackend(backend, :duckdb,
-                READHINT), ctx, String(path), time, rename, sort, closed,
-                skipmissing),
+            parquetproducer(resolvebackend(backend, :duckdb, READHINT), clip,
+                sort),
         )
     end
 end
@@ -153,8 +153,7 @@ DataFrame(load(Context(0, 10), readparquet(joinpath(dir, "mids.parquet"))))
 """
 function writeparquet(path::AbstractString; queue::Integer = 1,
     rowgroupsize::Integer = 1_000_000, backend::Symbol = :auto, kwargs...)
-    queue >= 0 ||
-        throw(ArgumentError("writeparquet queue must be non-negative, got $queue"))
+    checkqueue(queue, "writeparquet")
     rowgroupsize >= 1 || throw(
         ArgumentError(
             "writeparquet rowgroupsize must be positive, got $rowgroupsize"),
@@ -163,14 +162,11 @@ function writeparquet(path::AbstractString; queue::Integer = 1,
     # Materialized once, so the per-row-group splat into the writer is over a
     # concretely typed NamedTuple rather than the keyword iterator.
     opts = values(kwargs)
-    return function (p::CausalPipeline)
-        return CausalPipeline() do ctx::Context
-            sink = parquetsink(resolvebackend(backend, :parquet2, WRITEHINT),
-                String(path), Int(queue), Int(rowgroupsize), opts)
-            return chunkmap(c -> sinkchunk(sink, c), p.run(ctx);
-                flush = () -> finishwrite(sink))
-        end
-    end
+    return sinktransform(
+        () -> parquetsink(
+            resolvebackend(backend, :parquet2, WRITEHINT), String(path), Int(queue),
+            Int(rowgroupsize), opts),
+    )
 end
 writeparquet(p::CausalPipeline, path::AbstractString; kwargs...) =
     writeparquet(path; kwargs...)(p)

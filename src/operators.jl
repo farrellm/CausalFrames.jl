@@ -60,38 +60,32 @@ concatenate(ps::CausalPipeline...) =
 # readcsv's CSVProducer: the pull-to-pull state lives in fields rather than
 # captured locals (captured variables that are reassigned get boxed). The
 # dynamically typed fields are per-pipeline setup state — one dynamic index
-# into the (heterogeneous) pipeline tuple and one iterator hand-off per
-# pipeline; nothing here runs per row.
+# into the (heterogeneous) pipeline tuple and one cursor per pipeline; nothing
+# here runs per row.
 mutable struct ConcatProducer{P<:Tuple,C<:Context}
     const pipelines::P
     const ctx::C
     index::Int          # the pipeline currently being drained
-    chunks::Any         # its chunk iterator; nothing until it is reached
-    state::Any          # its iteration state
-    started::Bool
+    cursor::Any         # a PullCursor over its chunks; nothing until reached
     names::Union{Nothing,Vector{String}}  # column names of the first chunk
     prevtime::Any       # last time emitted, for cross-pipeline ordering
     previndex::Int      # which pipeline emitted it, for the error message
     ConcatProducer(ps::P, ctx::C) where {P<:Tuple,C<:Context} =
-        new{P,C}(ps, ctx, 1, nothing, nothing, false, nothing, nothing, 0)
+        new{P,C}(ps, ctx, 1, nothing, nothing, nothing, 0)
 end
 
 function (p::ConcatProducer)()
     while p.index <= length(p.pipelines)
-        if p.chunks === nothing
-            p.chunks = p.pipelines[p.index].run(p.ctx)
-            p.started = false
-        end
-        next = p.started ? iterate(p.chunks, p.state) : iterate(p.chunks)
-        if next === nothing
+        p.cursor === nothing &&
+            (p.cursor = PullCursor(p.pipelines[p.index].run(p.ctx)))
+        chunk = pull!(p.cursor)
+        if chunk === nothing
             p.index += 1
-            p.chunks = nothing
+            p.cursor = nothing
             continue
         end
-        chunk, p.state = next
-        p.started = true
         nrow(chunk) == 0 && continue
-        checkconcat!(p, chunk)
+        checkconcat!(p, chunk::DataFrame)
         return chunk
     end
     return nothing
@@ -235,13 +229,37 @@ function readcsv(path::AbstractString; types = nothing, time = nothing,
                 concrete type via `types`, or a `time` function to produce it"))
     end
     return CausalPipeline() do ctx::Context
-        return ChunkSource(
-            CSVProducer{timetype(ctx)}(String(path), Int(chunkbytes),
-                ctx.start, ctx.stop, types, time, rename, delim, sort, closed,
-                skipmissing),
-        )
+        clip = SourceClip(ctx, path, "CSV file", time, rename, closed,
+            skipmissing)
+        return ChunkSource(CSVProducer(clip, Int(chunkbytes), types, delim, sort))
     end
 end
+
+# The configuration and running state every file source shares, and the one
+# argument `clipchunk!` and `gatherchunk!` take: where the rows come from
+# (`path`, and `what` it is, for messages), how `:time` is resolved (`time`,
+# `rename`), which rows are kept (`closed`, `skipmissing`, the window), and —
+# carried across chunks — the last raw time seen, for the cross-chunk order
+# check, and whether the stream is done. A new file-source keyword that bears
+# on the clip is a field here. The dynamically typed fields are per-chunk setup
+# state; the per-row work sits behind `clipchunk!`'s function barriers.
+mutable struct SourceClip{T}
+    const path::String
+    const what::String  # the format, for messages: "CSV file", "parquet file", …
+    const time::Any     # Nothing | Symbol (column name) | Function (row -> time)
+    const rename::Any   # Nothing | AbstractDict/map | Function (name -> name)
+    const closed::Bool
+    const skipmissing::Bool
+    const start::T
+    const stop::T
+    prevtime::Any       # last raw time seen, for cross-chunk sortedness
+    done::Bool          # a time past the window was seen, or the input ended
+end
+
+SourceClip(ctx::Context{T}, path::AbstractString, what::String, time, rename,
+    closed::Bool, skipmissing::Bool) where {T} =
+    SourceClip{T}(String(path), what, time, rename, closed, skipmissing,
+        ctx.start, ctx.stop, nothing, false)
 
 # The stateful producer behind readcsv's ChunkSource. The pull-to-pull state
 # lives in fields rather than captured locals (captured variables that are
@@ -249,27 +267,16 @@ end
 # state, not per-row state — the per-row `time` function runs behind a
 # function barrier (`maptime`).
 mutable struct CSVProducer{T}
-    const path::String
+    const clip::SourceClip{T}
     const chunkbytes::Int
-    const start::T
-    const stop::T
     const types::Any    # CSV.Chunks `types` argument, or nothing
-    const time::Any     # Nothing | Symbol (column name) | Function (row -> time)
-    const rename::Any   # Nothing | AbstractDict/map | Function (name -> name)
     const delim::Any    # CSV.Chunks `delim` argument, or nothing
     const sort::Bool
-    const closed::Bool
-    const skipmissing::Bool
-    chunks::Any         # file-chunk iterator, created on first pull
-    state::Any          # its iteration state
-    started::Bool
-    prevtime::Any       # last raw time seen, for cross-chunk sortedness
-    done::Bool
-    CSVProducer{T}(path, chunkbytes, start, stop, types, time, rename,
-        delim, sort, closed, skipmissing) where {T} =
-        new{T}(path, chunkbytes, start, stop, types, time, rename, delim, sort,
-            closed, skipmissing, nothing, nothing, false, nothing, false)
+    chunks::Any         # PullCursor over the file chunks, created on first pull
 end
+CSVProducer(clip::SourceClip{T}, chunkbytes::Int, types, delim,
+    sort::Bool) where {T} =
+    CSVProducer{T}(clip, chunkbytes, types, delim, sort, nothing)
 
 # The user's `types` (or nothing) as a CSV.jl per-column `types` function that
 # defaults every unspecified column to `String` — so nothing is ever inferred.
@@ -312,67 +319,61 @@ end
 # typed rows of the column table, so `f` specializes and the eltype is inferred.
 maptime(f, nt::NamedTuple) = map(f, Tables.rows(nt))
 
+tochunk(filechunk) = filechunk isa DataFrame ? filechunk : DataFrame(filechunk)
+
 function (p::CSVProducer{T})() where {T}
-    p.done && return nothing
-    p.chunks === nothing &&
-        (p.chunks = csvchunks(p.path, p.chunkbytes, p.types, p.delim))
+    clip = p.clip
+    clip.done && return nothing
     if p.sort
-        p.done = true
+        clip.done = true
         kept = DataFrame[]
-        for filechunk in p.chunks
-            df = filechunk isa DataFrame ? filechunk : DataFrame(filechunk)
-            gatherchunk!(kept, df, p.time, p.rename, p.path, "CSV file",
-                p.closed, p.skipmissing, p.start, p.stop)
+        for filechunk in csvchunks(clip.path, p.chunkbytes, p.types, p.delim)
+            gatherchunk!(kept, clip, tochunk(filechunk))
         end
         return sortgathered(kept, T)
     end
-    while true
-        next = p.started ? iterate(p.chunks, p.state) : iterate(p.chunks)
-        if next === nothing
-            p.done = true
-            return nothing
-        end
-        filechunk, p.state = next
-        p.started = true
-        df = filechunk isa DataFrame ? filechunk : DataFrame(filechunk)
-        clipped, sawstop, p.prevtime = clipchunk!(df, p.time, p.rename, p.path,
-            "CSV file", p.prevtime, p.closed, p.skipmissing, p.start, p.stop)
-        sawstop && (p.done = true)
-        nrow(clipped) > 0 && return clipped
-        p.done && return nothing
+    p.chunks === nothing &&
+        (p.chunks = PullCursor(csvchunks(clip.path, p.chunkbytes, p.types, p.delim)))
+    while !clip.done
+        filechunk = pull!(p.chunks)
+        filechunk === nothing && break
+        out = clipchunk!(clip, tochunk(filechunk))
+        out === nothing || return out
     end
+    clip.done = true
+    return nothing
 end
 
 # Shared by the file sources: rename the columns, materialize `:time`, drop (or
 # refuse) the rows whose time is missing, check sortedness within the chunk and
 # against the last time of the previous one, clip to [start, stop) (or
 # [start, stop] when closed), and convert `:time` to the context's time type.
-# `what` names the format in error messages. Returns the clipped chunk (which
-# may have no rows), whether a time past the window was seen (the source is then
-# done), and the last raw time of this chunk, to be carried to the next call.
-function clipchunk!(df::DataFrame, time, rename, path::String, what::String,
-    prevtime, closed::Bool, skipmissing::Bool, start::T, stop::T) where {T}
-    renamecolumns!(df, rename)
-    resolvetime!(df, time, path, what)
+# Returns the clipped chunk, or nothing when no row is in the window; a time
+# past the window marks the clip done, which ends the source.
+function clipchunk!(clip::SourceClip{T}, df::DataFrame) where {T}
+    what, path = clip.what, clip.path
+    renamecolumns!(df, clip.rename)
+    resolvetime!(df, clip.time, path, what)
     # Missing rows are folded into the clip's row index rather than deleted
     # first, so a chunk holding some costs one copy of its in-window rows.
-    present = presentrows(df.time, skipmissing, what, path)
+    present = presentrows(df.time, clip.skipmissing, what, path)
     times = present === nothing ? df.time : view(df.time, present)
     issorted(times) || throw(ArgumentError(unordered(what, path)))
     if !isempty(times)
-        prevtime !== nothing && first(times) < prevtime &&
+        clip.prevtime !== nothing && first(times) < clip.prevtime &&
             throw(ArgumentError(unordered(what, path)))
-        prevtime = last(times)
+        clip.prevtime = last(times)
     end
-    lo, hi = windowbounds(times, closed, start, stop)
-    sawstop = hi < length(times)   # saw a time past the window
+    lo, hi = windowbounds(times, clip.closed, clip.start, clip.stop)
+    hi < length(times) && (clip.done = true)   # saw a time past the window
+    hi < lo && return nothing
     # The chunk is freshly materialized and owned, so a clip that keeps every
     # row needs no copy.
     clipped =
         present !== nothing ? df[present[lo:hi], :] :
         lo == 1 && hi == nrow(df) ? df : df[lo:hi, :]
     clipped[!, :time] = convert(Vector{T}, clipped.time)
-    return (clipped, sawstop, prevtime)
+    return clipped
 end
 
 # `clipchunk!`'s counterpart for a source asked to `sort`, shared by readcsv and
@@ -380,11 +381,12 @@ end
 # not the file's promise, so there is no order check, no binary search and no
 # early stop — the in-window rows are found by a scan and pushed onto `kept`
 # (when there are any), to be sorted once the file is exhausted.
-function gatherchunk!(kept::Vector{DataFrame}, df::DataFrame, time, rename,
-    path::String, what::String, closed::Bool, skipmissing::Bool, start, stop)
-    renamecolumns!(df, rename)
-    resolvetime!(df, time, path, what)
-    present = presentrows(df.time, skipmissing, what, path)
+function gatherchunk!(kept::Vector{DataFrame}, clip::SourceClip, df::DataFrame)
+    what, path = clip.what, clip.path
+    renamecolumns!(df, clip.rename)
+    resolvetime!(df, clip.time, path, what)
+    present = presentrows(df.time, clip.skipmissing, what, path)
+    closed, start, stop = clip.closed, clip.start, clip.stop
     rows =
         present === nothing ? windowrows(df.time, closed, start, stop) :
         present[windowrows(view(df.time, present), closed, start, stop)]
@@ -534,8 +536,7 @@ time,bid,ask,mid
 ```
 """
 function writecsv(path::AbstractString; queue::Integer = 1, kwargs...)
-    queue >= 0 ||
-        throw(ArgumentError("writecsv queue must be non-negative, got $queue"))
+    checkqueue(queue, "writecsv")
     for k in (:append, :header, :writeheader, :partition, :compress)
         haskey(kwargs, k) && throw(ArgumentError("writecsv controls the \
             $(repr(k)) option of CSV.write itself; it may not be passed"))
@@ -543,17 +544,31 @@ function writecsv(path::AbstractString; queue::Integer = 1, kwargs...)
     # Materialized once, so the per-chunk splat into CSV.write is over a
     # concretely typed NamedTuple rather than the keyword iterator.
     opts = values(kwargs)
+    return sinktransform(
+        () -> ChunkSink(
+            chan -> csvwriteloop(chan, String(path), opts), Int(queue), "writecsv"),
+    )
+end
+writecsv(p::CausalPipeline, path::AbstractString; kwargs...) =
+    writecsv(path; kwargs...)(p)
+
+checkqueue(queue::Integer, op::String) =
+    queue >= 0 ||
+    throw(ArgumentError("$op queue must be non-negative, got $queue"))
+
+# Every file sink's transform: a pass-through chunkmap handing each chunk to a
+# per-run `ChunkSink`, built by `makesink()` when the run starts (so that is
+# when the file is truncated), and joining its writer once upstream is
+# exhausted.
+function sinktransform(makesink)
     return function (p::CausalPipeline)
         return CausalPipeline() do ctx::Context
-            sink = ChunkSink(chan -> csvwriteloop(chan, String(path), opts),
-                Int(queue), "writecsv")
+            sink = makesink()
             return chunkmap(c -> sinkchunk(sink, c), p.run(ctx);
                 flush = () -> finishwrite(sink))
         end
     end
 end
-writecsv(p::CausalPipeline, path::AbstractString; kwargs...) =
-    writecsv(path; kwargs...)(p)
 
 # Per-run writer state, shared by every file sink: the queue feeding the
 # background task, plus the column names of the first chunk, which pin the
@@ -732,9 +747,9 @@ end
 lag(p::CausalPipeline, offset) = lag(offset)(p)
 
 # A negative offset would shift rows earlier, making lag acausal; reject it at
-# run time the way rightcontext validates tolerance (probe start - offset <=
-# start). This is the mirror of asofjoin's rightcontext: the whole window slides
-# back by the offset so the +offset shift lands the output in [start, stop).
+# run time the way `widenstart` validates a tolerance (probe start - offset <=
+# start). Unlike `widenstart`, the whole window slides back by the offset, so
+# the +offset shift lands the output in [start, stop).
 function lagcontext(ctx::Context, offset)
     start = ctx.start - offset
     start <= ctx.start ||
@@ -785,27 +800,24 @@ head(p::CausalPipeline, n::Integer) = head(n)(p)
 # `advance` loops until upstream returns nothing — so it drives the upstream
 # iterator itself, in the shape of readcsv's CSVProducer: the pull-to-pull state
 # lives in fields rather than captured locals (captured variables that are
-# reassigned get boxed). The dynamically typed `state` field is touched once per
-# chunk, never per row, exactly as ConcatProducer's is.
+# reassigned get boxed). The cursor's dynamically typed state is touched once
+# per chunk, never per row, exactly as ConcatProducer's is.
 mutable struct HeadProducer{U}
-    const upstream::U
+    const upstream::PullCursor{U}
     remaining::Int
-    state::Any          # the upstream iteration state
-    started::Bool
 end
-HeadProducer(upstream::U, n::Int) where {U} = HeadProducer{U}(upstream, n, nothing, false)
+HeadProducer(upstream, n::Int) = HeadProducer(PullCursor(upstream), n)
 
 function (p::HeadProducer)()
     p.remaining > 0 || return nothing
-    next = p.started ? iterate(p.upstream, p.state) : iterate(p.upstream)
-    p.started = true
-    if next === nothing
+    chunk = pull!(p.upstream)
+    if chunk === nothing
         p.remaining = 0     # ChunkSource requires nothing to be sticky
         return nothing
     end
-    chunk, p.state = next
     # The chunk protocol guarantees the annotation, which is what lets produce()
-    # infer Union{Nothing, DataFrame} through the dynamically typed state.
+    # infer Union{Nothing, DataFrame} through the cursor's dynamically typed
+    # state.
     return takerows!(p, chunk::DataFrame)
 end
 
@@ -1003,7 +1015,8 @@ names(load(Context(0, 10), p))
 """
 function selectcolumns(selectors...)
     checkselectors(selectors, "selectcolumns", false)
-    return columnprojection(selectors, true, "selectcolumns")
+    return columntransform(cols -> keptcolumns(selectors, cols, true,
+        "selectcolumns"))
 end
 selectcolumns(p::CausalPipeline, selectors...) = selectcolumns(selectors...)(p)
 
@@ -1022,7 +1035,8 @@ order.
 """
 function dropcolumns(selectors...)
     checkselectors(selectors, "dropcolumns", true)
-    return columnprojection(selectors, false, "dropcolumns")
+    return columntransform(cols -> keptcolumns(selectors, cols, false,
+        "dropcolumns"))
 end
 dropcolumns(p::CausalPipeline, selectors...) = dropcolumns(selectors...)(p)
 
@@ -1062,53 +1076,45 @@ function reordercolumns(selectors...)
         n == "time" && throw(
             ArgumentError("reordercolumns: the time column is always first"))
     end
-    return columnreorder(selectors)
+    return columntransform(cols -> orderedcolumns(selectors, cols))
 end
 reordercolumns(p::CausalPipeline, selectors...) = reordercolumns(selectors...)(p)
 
-# Both transforms are the same chunkmap over a per-run resolution cache; they
-# differ only in which side of the match survives.
-function columnprojection(selectors::Tuple, selecting::Bool, opname::String)
+# The three column transforms' shared shape: a chunkmap indexing each chunk by a
+# resolution of its column names — `resolve(names)` gives the columns to keep,
+# in order, or `nothing` to pass the chunk through untouched. The chunk is
+# owned, so the index can share its columns.
+function columntransform(resolve)
     return function (p::CausalPipeline)
         return CausalPipeline() do ctx::Context
-            selection = ColumnSelection()
-            return chunkmap(
-                c -> projectchunk(selection, selectors, c, selecting, opname),
-                p.run(ctx),
-            )
+            memo = SchemaMemo()
+            return chunkmap(p.run(ctx)) do c
+                keep = memoized!(resolve, memo, c)
+                return keep === nothing ? c : c[!, keep]
+            end
         end
     end
 end
 
-# The resolved column list, cached against the schema it was resolved from:
-# `keep === nothing` means every column survives and the chunk passes through
-# untouched. Per-run mutable state lives here rather than in reassigned
-# closure captures (which get boxed).
-mutable struct ColumnSelection
+# The resolution, cached against the names it was derived from. Running the
+# selectors over every column of every chunk is wasted work when the schema
+# never moves — which is the norm — and re-resolving when the names differ
+# keeps the validation per-chunk-strict rather than first-chunk-only, since the
+# trusted load/stream path does not itself re-check schema equality. Per-run
+# mutable state lives here rather than in reassigned closure captures (which
+# get boxed).
+mutable struct SchemaMemo
     lastnames::Union{Nothing,Vector{String}}
-    keep::Union{Nothing,Vector{Symbol}}
+    resolved::Union{Nothing,Vector{Symbol}}
 end
-ColumnSelection() = ColumnSelection(nothing, nothing)
+SchemaMemo() = SchemaMemo(nothing, nothing)
 
-function projectchunk(selection::ColumnSelection, selectors::Tuple,
-    c::DataFrame, selecting::Bool, opname::String)
-    keep = resolvecolumns!(selection, selectors, c, selecting, opname)
-    # The chunk is owned, so the projection can share its columns.
-    return keep === nothing ? c : c[!, keep]
-end
-
-# Running the selectors over every column of every chunk is wasted work when
-# the schema never moves — which is the norm — so the resolution is memoized
-# against the names it was derived from. Re-resolving when they differ keeps
-# the validation per-chunk-strict rather than first-chunk-only, since the
-# trusted load/stream path does not itself re-check schema equality.
-function resolvecolumns!(selection::ColumnSelection, selectors::Tuple,
-    c::DataFrame, selecting::Bool, opname::String)
+function memoized!(resolve, memo::SchemaMemo, c::DataFrame)
     cols = names(c)
-    selection.lastnames == cols && return selection.keep
-    selection.keep = keptcolumns(selectors, cols, selecting, opname)
-    selection.lastnames = cols
-    return selection.keep
+    memo.lastnames == cols && return memo.resolved
+    memo.resolved = resolve(cols)
+    memo.lastnames = cols
+    return memo.resolved
 end
 
 # The names to keep, in the chunk's own column order, or `nothing` when every
@@ -1125,44 +1131,6 @@ function keptcolumns(selectors::Tuple, cols::Vector{String}, selecting::Bool,
             push!(keep, Symbol(n))
     end
     return length(keep) == length(cols) ? nothing : keep
-end
-
-# The projections' chunkmap-over-a-resolution-cache shape, differing only in
-# what the resolution computes: a permutation of every column rather than a
-# subset of them.
-function columnreorder(selectors::Tuple)
-    return function (p::CausalPipeline)
-        return CausalPipeline() do ctx::Context
-            ordering = ColumnOrder()
-            return chunkmap(c -> reorderchunk(ordering, selectors, c), p.run(ctx))
-        end
-    end
-end
-
-# The resolved column order, cached against the schema it was resolved from;
-# `order === nothing` means the chunk is already in it and passes through
-# untouched. Per-run mutable state, as in `ColumnSelection`.
-mutable struct ColumnOrder
-    lastnames::Union{Nothing,Vector{String}}
-    order::Union{Nothing,Vector{Symbol}}
-end
-ColumnOrder() = ColumnOrder(nothing, nothing)
-
-function reorderchunk(ordering::ColumnOrder, selectors::Tuple, c::DataFrame)
-    order = resolveorder!(ordering, selectors, c)
-    # The chunk is owned, so the reindex can share its columns.
-    return order === nothing ? c : c[!, order]
-end
-
-# Memoized exactly as `resolvecolumns!` is, and for the same two reasons: the
-# selectors are wasted work on a schema that never moves, and re-resolving when
-# it does keeps the validation per-chunk-strict.
-function resolveorder!(ordering::ColumnOrder, selectors::Tuple, c::DataFrame)
-    cols = names(c)
-    ordering.lastnames == cols && return ordering.order
-    ordering.order = orderedcolumns(selectors, cols)
-    ordering.lastnames = cols
-    return ordering.order
 end
 
 # The column order to impose, or `nothing` when the chunk already has it.

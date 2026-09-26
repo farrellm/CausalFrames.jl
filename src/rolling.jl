@@ -48,13 +48,7 @@ function addrollingcolumns(windows, summarizers; key = nothing,
         throw(ArgumentError("addrollingcolumns requires at least one window"))
     allunique(windownames) ||
         throw(ArgumentError("addrollingcolumns window names must be unique"))
-    keycols = tokeycolumns(key)
-    allunique(keycols) ||
-        throw(ArgumentError("addrollingcolumns key columns must be unique"))
-    :time in keycols && throw(
-        ArgumentError(
-            ":time is the window dimension and may not be an addrollingcolumns key"),
-    )
+    keycols = keycolumns(key, "addrollingcolumns")
     protos, requested =
         prototypes(tosummarizers(summarizers), Symbol[], "addrollingcolumns")
     prefixednames = Symbol[]
@@ -96,13 +90,10 @@ end
 
 # Look-backs are never compared to each other (they may be of incomparable
 # types); the widened starts all live in the time type, so the earliest one
-# is found there, and non-negativity falls out of `start - lb <= start`.
+# is found there.
 function rollingcontext(ctx::Context, lookbacks::Tuple)
-    starts = map(lb -> ctx.start - lb, lookbacks)
-    for (lb, s) in zip(lookbacks, starts)
-        s <= ctx.start || throw(ArgumentError(
-            "addrollingcolumns lookback must be non-negative, got $lb"))
-    end
+    starts = map(lb -> widenstart(ctx, lb, "addrollingcolumns lookback").start,
+        lookbacks)
     return Context(minimum(starts), ctx.stop)
 end
 
@@ -120,10 +111,7 @@ end
 # (those get boxed). The dynamically typed fields are per-chunk setup state;
 # everything per-row sits behind the rollsegment! function barrier.
 mutable struct RollingState
-    schunks::Any       # summarized chunk iterator
-    sstate::Any        # its iteration state
-    sstarted::Bool
-    sdone::Bool        # summarized stream exhausted
+    const summarized::PullCursor  # the summarized chunks; `done` once exhausted
     snt::Any           # current summarized column table (nothing until pulled)
     spos::Int          # index of the next unadmitted summarized row in snt
     stypes::Union{Nothing,NamedTuple}  # promotion of summarized schemas seen
@@ -133,7 +121,7 @@ mutable struct RollingState
     vals::Any          # per-window value vectors for the chunk in progress
     passthrough::Bool  # the summarized stream produced no chunks at all
     checked::Bool      # augmented-side name/key validation done
-    RollingState(schunks) = new(schunks, nothing, false, false, nothing, 1,
+    RollingState(schunks) = new(PullCursor(schunks), nothing, 1,
         nothing, nothing, nothing, nothing, nothing, false, false)
 end
 
@@ -167,28 +155,18 @@ function rolltiers(tg::Tiering, types::NamedTuple, keynames::Val, nwindows::Int,
     old)
     K = storekeytype(types, keynames)
     R = storerowtype(types)
-    T = types.time
-    oldbuffer = old === nothing ? nothing : old.buffer
-    buffer, winheads =
-        isempty(tg.running) && isempty(tg.refold) ? (nothing, Int[]) :
-        oldbuffer !== nothing ?
-        (convert(Vector{R}, oldbuffer), copy(old.winheads)) :
-        (old === nothing ? R[] : treebuffer(R, old.trees), ones(Int, nwindows))
+    oldbuffered = old !== nothing && old.buffer !== nothing
+    buffer = rebuildbuffer(tg, R, old)
+    winheads =
+        buffer === nothing ? Int[] :
+        oldbuffered ? copy(old.winheads) : ones(Int, nwindows)
     running =
         isempty(tg.running) ? nothing :
         ntuple(
             w -> replayrunning!(RunningTable{K,typeof(tg.running)}(),
                 buffer, winheads[w], tg.running, keynames), nwindows)
-    trees = nothing
-    if !isempty(tg.tree)
-        trees = Dict{K,SegTree{typeof(tg.tree),R,T}}()
-        if old !== nothing && old.trees !== nothing
-            replayoldtrees!(trees, old.trees, tg.tree, keynames)
-        elseif oldbuffer !== nothing
-            replaytrees!(trees, oldbuffer, minimum(old.winheads), tg.tree,
-                keynames)
-        end
-    end
+    trees = rebuildtrees(tg, K, R, types.time, old,
+        oldbuffered ? minimum(old.winheads) : 1, keynames)
     return RollTiers{R}(buffer, winheads, running, trees, tg.running, tg.tree,
         tg.refold, tg.derived, tg.perm)
 end
@@ -203,23 +181,13 @@ RollTiers{R}(buffer::B, winheads::Vector{Int}, running::G, trees::TR,
 # build the tiers on the first one and rebuild them when the promoted schema
 # moves, re-typing any half-filled value vectors along the way.
 function pullsummarized!(rs::RollingState, cfg::RollingConfig)
-    next = rs.sstarted ? iterate(rs.schunks, rs.sstate) : iterate(rs.schunks)
-    rs.sstarted = true
-    if next === nothing
-        rs.sdone = true
+    chunk = pull!(rs.summarized)
+    if chunk === nothing
         rs.snt === nothing && (rs.passthrough = true)
         return nothing
     end
-    chunk, rs.sstate = next
-    if rs.stypes === nothing
-        for k in cfg.keycols
-            String(k) in names(chunk) || throw(
-                ArgumentError(
-                    "addrollingcolumns key column $(repr(k)) not found in the summarized input",
-                ),
-            )
-        end
-    end
+    rs.stypes === nothing && checkkeycolumns(cfg.keycols, chunk,
+        "addrollingcolumns", "the summarized input")
     types = promotetypes(rs.stypes, chunktypes(chunk))
     moved = rs.stypes === nothing || types != rs.stypes
     rs.stypes = types
@@ -248,13 +216,7 @@ end
 
 function rollchunk!(rs::RollingState, cfg::RollingConfig, c::DataFrame)
     if !rs.checked
-        for k in cfg.keycols
-            String(k) in names(c) || throw(
-                ArgumentError(
-                    "addrollingcolumns key column $(repr(k)) not found in the augmented input",
-                ),
-            )
-        end
+        checkkeycolumns(cfg.keycols, c, "addrollingcolumns", "the augmented input")
         for pn in cfg.prefixednames
             String(pn) in names(c) && throw(
                 ArgumentError(
@@ -264,7 +226,7 @@ function rollchunk!(rs::RollingState, cfg::RollingConfig, c::DataFrame)
         end
         rs.checked = true
     end
-    rs.snt === nothing && !rs.sdone && pullsummarized!(rs, cfg)
+    rs.snt === nothing && !rs.summarized.done && pullsummarized!(rs, cfg)
     rs.passthrough && return assembleempty(cfg, c)
     lnt = Tables.columntable(c)
     # Pre-filled with the empty row so a mid-chunk widen never converts an
@@ -276,7 +238,7 @@ function rollchunk!(rs::RollingState, cfg::RollingConfig, c::DataFrame)
     # rebuilds them, possibly with a different partition, mid-chunk.
     while true
         i, rs.spos, needpull = rollsegment!(rs.vals, rs.tiers, lnt, i, rs.snt,
-            rs.spos, rs.sdone, cfg.lookbacks, cfg.keynames, cfg.outs,
+            rs.spos, rs.summarized.done, cfg.lookbacks, cfg.keynames, cfg.outs,
             rs.emptyrow)
         needpull || break
         pullsummarized!(rs, cfg)

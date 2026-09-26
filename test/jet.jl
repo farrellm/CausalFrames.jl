@@ -1,7 +1,7 @@
 # Targeted JET checks: the folding kernels sit behind function barriers and
 # must stay free of runtime dispatch end to end. Whole-package analysis is
 # deliberately not used — the dynamically typed per-run setup fields
-# (SummaryFold, RollingState, AsofJoinState) are intended dynamism and would
+# (SummaryFold, RollingState, JoinState) are intended dynamism and would
 # flood a package-level report.
 
 using JET

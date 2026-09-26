@@ -61,12 +61,15 @@ one), `docs/src/api/summarizers.md` (again its own header),
 `docs/src/api/index.md`, `DESIGN.md`'s "Summarizers" section and export list,
 `test/summarizers.jl`, and `README.md`'s summarizer table.
 
-A new keyword on the file sources (as `closed` and `skipmissing` were) threads
-through the shared clip: `clipchunk!`/`gatherchunk!` in `src/operators.jl`, the
-`parquetproducer` hook's positional signature (the fallback in `src/parquet.jl`
-and both `ext/` producers, with `ext/CLAUDE.md`'s hook contract), plus
-`readjls`/`readtable` wherever the option applies. Then update DESIGN.md and
-the README's source descriptions, and test every parquet backend.
+A new keyword on the file sources (as `closed` and `skipmissing` were) is a
+field of the shared `SourceClip` in `src/operators.jl`, used by
+`clipchunk!`/`gatherchunk!`: add it there and to the `SourceClip(ctx, …)` call
+in each `read*` source that takes it (`readcsv`, `readparquet`, `readjls`),
+plus `readtable` wherever the option applies. The `parquetproducer` hook takes
+the clip whole, so the `ext/` producers change only if they must act on the
+option themselves (as `closed` bounds the pushed-down window). Then update
+DESIGN.md and the README's source descriptions, and test every parquet
+backend.
 
 The `## `name`` header, the overview link and the README link are checked by
 `checkapilinks` in `docs/make.jl`: a missing one, or a README link naming the
