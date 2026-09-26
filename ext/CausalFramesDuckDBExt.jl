@@ -1,10 +1,8 @@
-# The DuckDB backend: the only code in the package that names DuckDB. Reading
-# (the preferred backend) is one streaming query per pipeline run, pulled one
-# result chunk at a time, with the context window riding along as a WHERE clause
-# so DuckDB skips the row groups and pages outside it. Writing (the fallback,
-# used when Parquet2 is not loaded) stages the stream in a temporary table and
-# writes the file with a single COPY, since DuckDB cannot append row groups to
-# a parquet file.
+# The DuckDB backend, the only code that names DuckDB. Reading (preferred) is
+# one streaming query per run, pulled a result chunk at a time, with the window
+# pushed down as a WHERE clause so DuckDB skips row groups and pages outside it.
+# Writing (the fallback) stages the stream in a temporary table and writes the
+# file with one COPY, since DuckDB can't append row groups to a parquet file.
 module CausalFramesDuckDBExt
 
 using CausalFrames
@@ -18,11 +16,10 @@ using CausalFrames:
 
 CausalFrames.backendloaded(::Val{:duckdb}) = true
 
-# One in-memory database for the process, created on first use (never at
-# precompile time), plus a connection per pipeline run — a connection is
-# single-consumer, and a pipeline may be run more than once (a self-join reads
-# its file twice). Opening the database costs milliseconds, a connection
-# microseconds.
+# One in-memory database per process, created on first use (never at
+# precompile time), and a connection per pipeline run, since a connection is
+# single-consumer and a pipeline may run more than once (a self-join reads its
+# file twice). A connection costs microseconds, the database milliseconds.
 const DBLOCK = ReentrantLock()
 const DB = Ref{Any}(nothing)
 
@@ -33,11 +30,8 @@ function connection()
     end
 end
 
-# The stateful producer behind readparquet's ChunkSource, mirroring
-# CSVProducer. The pull-to-pull state lives in fields rather than captured
-# locals (captured variables that are reassigned get boxed). The dynamically
-# typed fields are per-chunk setup state, not per-row state — the per-row
-# `time` function runs behind a function barrier (`maptime`, via `clipchunk!`).
+# The stateful producer behind readparquet's ChunkSource. The untyped fields
+# are per-chunk setup; per-row work is `clipchunk!`'s.
 mutable struct ParquetProducer{T}
     const clip::SourceClip{T}
     const sort::Bool
@@ -66,14 +60,14 @@ function (p::ParquetProducer)()
 end
 
 # Open the connection and start the streaming scan. The window is pushed down
-# whenever the time column can be named in SQL; everything else is clipped on
-# arrival regardless, so a failure to push down costs only a longer read.
+# whenever the time column can be named in SQL; chunks are clipped on arrival
+# regardless, so a failed pushdown only costs a longer read.
 #
-# A `sort` is pushed down the same way, as an ORDER BY on the time column. That
-# sort is not stable in DuckDB, so ties are broken by `file_row_number`, the
-# reader's virtual column (left out of `*`) — unless the file has a column of
-# that name, which shadows it (names are case-insensitive in SQL). Without a
-# nameable time column or a usable tiebreak, the rows are sorted in Julia.
+# A `sort` is pushed down too, as an ORDER BY on the time column. DuckDB's sort
+# is unstable, so ties are broken by `file_row_number`, the reader's virtual
+# column (not in `*`), unless a file column of that name (case-insensitively)
+# shadows it. Without a nameable time column or a usable tiebreak, the rows are
+# sorted in Julia.
 function startquery!(p::ParquetProducer)
     clip = p.clip
     p.con = connection()
@@ -88,18 +82,17 @@ function startquery!(p::ParquetProducer)
         col = "\"" * replace(src, "\"" => "\"\"") * "\""
         order = p.sort && !p.gather ? " ORDER BY $col, file_row_number" : ""
         upper = clip.closed ? "<=" : "<"
-        # The WHERE drops null times along with the rest of the outside, so
-        # without `skipmissing` they go unreported here. An `OR $col IS NULL`
-        # to surface them costs the row-group skip (see
-        # notes/duckdb-null-pushdown.md).
+        # The WHERE also drops null times, so without `skipmissing` they go
+        # unreported here; `OR $col IS NULL` would cost the row-group skip
+        # (see notes/duckdb-null-pushdown.md).
         try
             execstream(p.con,
                 "SELECT * FROM read_parquet(?) WHERE $col >= ? AND $col $upper ?$order",
                 Any[clip.path, clip.start, clip.stop])
         catch
-            # A time type DuckDB cannot bind, or cannot compare against this
-            # column: read the whole file and let the clip do the work. A
-            # genuinely unreadable file fails again below, with its own error.
+            # A time type DuckDB can't bind or compare with this column: read
+            # the whole file and let the clip do the work. An unreadable file
+            # fails again here with its own error.
             execstream(p.con, "SELECT * FROM read_parquet(?)$order", Any[clip.path])
         end
     end
@@ -107,8 +100,8 @@ function startquery!(p::ParquetProducer)
     return nothing
 end
 
-# The `sort = true` read the query could not sort: every result chunk is
-# scanned for its in-window rows, which are sorted once, into a single chunk.
+# A `sort = true` read the query couldn't sort: every result chunk is scanned
+# for in-window rows, which are sorted once into a single chunk.
 function gatherread!(p::ParquetProducer{T}) where {T}
     p.clip.done = true
     kept = DataFrame[]
@@ -128,21 +121,20 @@ function columnnames(con, path::String)
     return String[String(n) for n in Tables.schema(res).names]
 end
 
-# The write fallback. DuckDB cannot append row groups to a parquet file, so the
-# stream is staged in a temporary table — DuckDB spills it to disk under memory
-# pressure — and written by one COPY when the stream ends.
+# The write fallback: the stream is staged in a temporary table (which DuckDB
+# spills to disk under memory pressure) and written by one COPY at the end.
 function CausalFrames.parquetsink(::Val{:duckdb}, path::AbstractString,
     queue::Int, rowgroupsize::Int, opts::NamedTuple)
-    # Translated here, on the pipeline's own task, so an unsupported option is
-    # reported when the run starts rather than inside the writer task.
+    # Translated on the pipeline's task, so an unsupported option is reported
+    # when the run starts rather than inside the writer task.
     compression = copyoptions(opts)
     return ChunkSink(
         chan -> writeloop(chan, String(path), rowgroupsize, compression),
         queue, "writeparquet")
 end
 
-# The COPY options this backend can express. Everything else is Parquet2's own,
-# and silently dropping it would hide a request the user made deliberately.
+# The COPY options this backend can express. Other options are Parquet2's and
+# are rejected rather than silently dropped.
 function copyoptions(opts::NamedTuple)
     extra = filter(!=(:compression_codec), keys(opts))
     isempty(extra) || throw(ArgumentError("writeparquet: the DuckDB backend \
@@ -156,8 +148,8 @@ end
 
 function writeloop(chan::Channel{DataFrame}, path::String, rowgroupsize::Int,
     compression::String)
-    # Truncated when the run starts, as every other sink's file is: a run that
-    # fails or is abandoned must not leave the previous run's file looking current.
+    # Truncated when the run starts, as every sink's file is, so a failed or
+    # abandoned run doesn't leave the previous run's file looking current.
     close(open(path, "w"))
     con = connection()
     staged = false

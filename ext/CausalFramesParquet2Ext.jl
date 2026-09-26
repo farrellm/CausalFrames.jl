@@ -1,9 +1,7 @@
-# The Parquet2 backend: the only code in the package that names Parquet2.
-# Writing (the preferred backend) sends row groups off incrementally as the
-# stream flows by, so the sink never holds more than `rowgroupsize` rows.
-# Reading (the fallback, used when DuckDB is not loaded) walks the file's own
-# row groups, skipping those whose recorded time statistics put them outside
-# the context window.
+# The Parquet2 backend, the only code that names Parquet2. Writing (preferred)
+# writes row groups as the stream flows by, buffering about `rowgroupsize`
+# rows. Reading (the fallback) walks the file's row groups, skipping those
+# whose time statistics put them outside the window.
 module CausalFramesParquet2Ext
 
 using CausalFrames
@@ -18,8 +16,8 @@ CausalFrames.backendloaded(::Val{:parquet2}) = true
 
 function CausalFrames.parquetsink(::Val{:parquet2}, path::AbstractString,
     queue::Int, rowgroupsize::Int, opts::NamedTuple)
-    # Statistics on the time column are what readparquet's window pushdown
-    # reads, so record them unless the caller says otherwise.
+    # readparquet's pushdown reads the time column's statistics, so record
+    # them unless the caller says otherwise.
     o =
         haskey(opts, :compute_statistics) ? opts :
         merge(opts, (; compute_statistics = ["time"]))
@@ -27,17 +25,16 @@ function CausalFrames.parquetsink(::Val{:parquet2}, path::AbstractString,
         queue, "writeparquet")
 end
 
-# The background writer. One handle for the whole run; the footer is written by
-# `finalize!` when the channel closes, which is the moment the file becomes
-# readable at all.
+# The background writer: one handle for the run. `finalize!` writes the footer
+# when the channel closes; only then is the file readable.
 function writeloop(chan::Channel{DataFrame}, path::String, rowgroupsize::Int,
     opts::NamedTuple)
     open(path, "w") do io
         next = iterate(chan)
         if next === nothing
-            # A stream with no rows gets the DuckDB sink's empty `time` column,
-            # since DuckDB cannot read a parquet file with no columns at all.
-            # Statistics are off: Parquet2 cannot compute them over zero rows.
+            # An empty stream gets an empty `time` column, as from the DuckDB
+            # sink, since DuckDB can't read a parquet file with no columns.
+            # Parquet2 can't compute statistics over zero rows.
             fw = Parquet2.FileWriter(io, path; opts..., compute_statistics = false)
             Parquet2.writetable!(fw, DataFrame(time = Int64[]))
             Parquet2.finalize!(fw)
@@ -60,8 +57,7 @@ function writeloop(chan::Channel{DataFrame}, path::String, rowgroupsize::Int,
     return nothing
 end
 
-# One row group from the pending chunks: they are only ever merged, never
-# split, so a single pending chunk is written as it stands.
+# One row group from the pending chunks, which are merged, never split.
 function emitgroup!(fw, buffered::Vector{DataFrame})
     Parquet2.writetable!(fw,
         length(buffered) == 1 ? only(buffered) : reduce(vcat, buffered))
@@ -69,10 +65,8 @@ function emitgroup!(fw, buffered::Vector{DataFrame})
     return nothing
 end
 
-# The read fallback. One row group per chunk, in file order; the pull-to-pull
-# state lives in fields rather than captured locals (captured variables that are
-# reassigned get boxed), and the dynamically typed fields are per-chunk setup
-# state, not per-row state.
+# The read fallback: one row group per chunk, in file order. The untyped fields
+# are per-chunk setup.
 mutable struct RowGroupProducer{T}
     const clip::SourceClip{T}
     const sort::Bool
@@ -104,10 +98,9 @@ function (p::RowGroupProducer)()
     return nothing
 end
 
-# The `sort = true` read: a file out of time order has no row group after which
-# nothing more can be in the window, so every group is visited — statistics
-# still skip the ones wholly outside it, on either side — and the in-window rows
-# are sorted once, into the stream's single chunk.
+# The `sort = true` read: in an unordered file any row group may hold window
+# rows, so every group overlapping the window by its statistics is read, and
+# the in-window rows are sorted once into a single chunk.
 function sortedread!(p::RowGroupProducer{T}) where {T}
     p.clip.done = true
     kept = DataFrame[]
@@ -125,11 +118,10 @@ function open!(p::RowGroupProducer)
     return nothing
 end
 
-# Where a row group sits relative to the window, from its recorded statistics
-# alone: `:before` (skippable), `:after` (so are all later ones, the file being
-# non-decreasing), or `:overlaps` — which is also the answer whenever the
-# statistics are missing or unusable, since skipping is only ever an
-# optimization. A closed window keeps a group starting exactly at `stop`.
+# Where a row group sits relative to the window, by its statistics: `:before`,
+# `:after` (so are all later ones, in a time-ordered file) or `:overlaps`, the
+# answer too when statistics are missing or unusable. A closed window keeps a
+# group starting exactly at `stop`.
 function rowgroupwindow(p::RowGroupProducer, rg::Int)
     (p.usestats && p.timecol !== nothing) || return :overlaps
     stats = Parquet2.ColumnStatistics(Parquet2.Column(p.dataset, rg, p.timecol))
@@ -140,8 +132,8 @@ function rowgroupwindow(p::RowGroupProducer, rg::Int)
         hi < clip.start && return :before
         (clip.closed ? lo > clip.stop : lo >= clip.stop) && return :after
     catch
-        # Times this context cannot compare against: stop consulting statistics
-        # for the rest of the run rather than failing over an optimization.
+        # Statistics incomparable with this context's times: stop consulting
+        # them for the rest of the run.
         p.usestats = false
     end
     return :overlaps
