@@ -225,8 +225,9 @@ rest of a call. See
 ## Causality
 
 Every exported operator is **causal**: its output at time `t` depends only on
-input rows with time `≤ t`. So loading `[a, c)` equals concatenating loads of
-`[a, b)` and `[b, c)`, which makes streaming sound.
+input rows with time `≤ t`. So streaming a pipeline chunk by chunk gives the
+same rows as loading it, and for sources and row-wise transforms, loading
+`[a, c)` equals concatenating loads of `[a, b)` and `[b, c)`.
 
 The forward-looking exceptions live in the `Acausal` submodule, which is never
 re-exported:
