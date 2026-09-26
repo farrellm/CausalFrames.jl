@@ -1,10 +1,8 @@
 # The lookup join: a key-only join against an in-memory table with no time
-# column. A table without time is constant over the window, so there is nothing
-# to stream or merge — the table is resolved once, at construction, into a
-# `Dict{K,Int}` row index over copied columns, and the transform is a stateless
-# chunkmap. Per chunk the type-unstable work (the column table, the schema
-# checks) happens once; the per-row lookup and the per-column gathers are
-# function barriers over concretely typed arguments.
+# column, and so constant over the window. The table is resolved once, at
+# construction, into a `Dict{K,Int}` row index over copied columns, and the
+# transform is a stateless chunkmap. Type-unstable work runs once per chunk;
+# the per-row lookup and per-column gathers are function barriers.
 
 """
     lookupjoin(table; key, unmatched = :missing, leftprefix = nothing,
@@ -56,8 +54,8 @@ function lookupjoin(table; key = nothing, unmatched::Symbol = :missing,
     Tables.istable(table) || throw(
         ArgumentError("lookupjoin table must be a Tables.jl table, got $(typeof(table))"),
     )
-    # Owned 1-based vectors: the index is built now, so a caller mutating the
-    # table later must not be able to desynchronize it.
+    # Owned 1-based copies, so a caller mutating the table later can't
+    # desynchronize the index.
     cols = map(collect, Tables.columntable(table))
     colnames = keys(cols)
     :time in colnames && throw(
@@ -92,8 +90,7 @@ function lookupjoin(table; key = nothing, unmatched::Symbol = :missing,
 end
 lookupjoin(p::CausalPipeline, table; kwargs...) = lookupjoin(table; kwargs...)(p)
 
-# What an unmatched row does, as a type, so the assembly dispatches on it
-# statically rather than branching on a Symbol per chunk.
+# What an unmatched row does, as a type for static dispatch.
 struct MissingOnUnmatched end
 struct ErrorOnUnmatched end
 struct DropUnmatched end
@@ -109,8 +106,8 @@ function unmatchedmode(s::Symbol)
     )
 end
 
-# Everything a run needs, concretely typed: the closures capture this, so each
-# chunk's call into `lookupchunk` is statically dispatched on the table's types.
+# Everything a run needs, concretely typed, so `lookupchunk` dispatches
+# statically on the table's types.
 struct LookupJoin{K<:NamedTuple,C<:NamedTuple,KN,M}
     index::Dict{K,Int}           # key => row of the table
     values::C                    # the table's non-key columns, owned
@@ -121,9 +118,8 @@ struct LookupJoin{K<:NamedTuple,C<:NamedTuple,KN,M}
     rightnames::Vector{Symbol}   # the value columns' output names, prefixed
 end
 
-# Function barrier over the table's typed columns. The key type is the table's,
-# as a store key is the right side's in asofjoin; `get!` stores the first row of
-# each key, so a returned row other than `i` is a duplicate.
+# Function barrier over the table's typed columns. `get!` stores each key's
+# first row, so a returned row other than `i` is a duplicate.
 function buildlookup(cols::NamedTuple, keynames::Val{KN}, ::Val{VN},
     keycols::Vector{Symbol}, mode, leftprefix, rightnames) where {KN,VN}
     K = NamedTuple{KN,Tuple{map(k -> eltype(getproperty(cols, k)), KN)...}}
@@ -151,9 +147,9 @@ function lookupchunk(cfg::LookupJoin, c::DataFrame)
     return assemblelookup(cfg.mode, cfg, c, nt, rows, nmatched)
 end
 
-# The input's columns after the leftprefix rename, against the time column, the
-# keys and the table's output names. O(ncols) per chunk, which keeps the
-# transform free of per-run state.
+# Check the input's prefixed column names against `:time`, the keys and the
+# table's output names. O(ncols) per chunk, so the transform needs no per-run
+# state.
 function checklookupnames(cfg::LookupJoin, c::DataFrame)
     for n in propertynames(c)
         (n === :time || n in cfg.keycols) && continue
@@ -171,9 +167,8 @@ end
 # --- lookup kernel ---------------------------------------------------------
 #
 # Each input row's table row, or 0 where its key is absent; returns the number
-# matched. Only Ints are stored, so a String key costs nothing per row. The
-# input's key may be a different but `isequal` type from the table's: a Dict
-# lookup hashes and compares without converting (the KeySet rule).
+# matched. The input's key type may differ from the table's: Dict lookup uses
+# `isequal` and hashing, without converting.
 function lookuprows!(rows::Vector{Int}, index::Dict{K,Int}, nt::NamedTuple,
     keynames::Val{KN}) where {K,KN}
     nmatched = 0
@@ -216,8 +211,8 @@ end
     ),
 )
 
-# Function barrier: the output column is typed from the table's column, and
-# every slot is written, so the undef vector is never read uninitialized.
+# Function barrier: the output is typed from the table's column, and every slot
+# is written.
 function gathermissing(col::Vector{T}, rows::Vector{Int}) where {T}
     out = Vector{Union{Missing,T}}(undef, length(rows))
     @inbounds for i in eachindex(rows)
@@ -227,8 +222,8 @@ function gathermissing(col::Vector{T}, rows::Vector{Int}) where {T}
     return out
 end
 
-# The chunk is owned, so its columns are adopted and its index renamed in place.
-# A table of keys alone appends nothing (and under :drop is a semi-join).
+# The chunk is owned, so its columns are adopted and renamed in place. A table
+# of keys alone appends nothing (under :drop, a semi-join).
 function appendlookup(cfg::LookupJoin, c::DataFrame, gathered::NamedTuple)
     out = prefixleft!(cfg.leftprefix, cfg.keycols, c)
     isempty(cfg.rightnames) && return out

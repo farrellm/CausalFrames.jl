@@ -1,10 +1,9 @@
-# Model fitting and prediction through MLJ. Like parquet.jl, this file names no
-# MLJ type: fitting, prediction and fitresult persistence go through five hooks
-# whose generic fallbacks live here and whose methods for MLJModelInterface
-# models live in ext/CausalFramesMLJModelInterfaceExt.jl, so a user who never
-# loads an MLJ package pays nothing. The summarizer (`FitModel`) and the value
-# type it emits (`FittedModel`) are in summarizers.jl; the operators over
-# tables of fitted models are here.
+# Model fitting and prediction through MLJ. This file names no MLJ type:
+# fitting, prediction and fitresult persistence go through five hooks, with
+# fallbacks here and MLJModelInterface methods in
+# ext/CausalFramesMLJModelInterfaceExt.jl, so a user who never loads MLJ pays
+# nothing. `FitModel` and `FittedModel` are in summarizers.jl; the operators
+# over fitted models are here.
 
 const MLJHINT = "model fitting needs MLJModelInterface: `using MLJ`, or any \
     MLJ model package"
@@ -14,8 +13,8 @@ mljloaded() =
 
 # --- the extension hooks ---------------------------------------------------
 
-# Whether `m` is a model the extension can fit. Consulted eagerly by FitModel's
-# constructor, so a missing extension is reported where the user typed it.
+# Whether `m` is a model the extension can fit. FitModel's constructor checks
+# it, so a missing extension is reported at the call site.
 ismodel(::Any) = false
 
 # Fit `model` to the column table `X` and response vector `y`, returning
@@ -26,14 +25,13 @@ fitmodel(model, verbosity::Int, X, y) = throw(ArgumentError(MLJHINT))
 # :predict_median) of a fitted model to the column table `X`.
 predictmodel(model, fitresult, op::Symbol, X) = throw(ArgumentError(MLJHINT))
 
-# A persistent form of a fitresult and its inverse (MLJ's `save`/`restore`),
-# the identity unless a model wraps a resource that cannot be serialized as is.
+# A persistent form of a fitresult and its inverse (MLJ's `save`/`restore`);
+# the identity unless a model wraps a resource that can't be serialized as is.
 savefitresult(model, fitresult) = fitresult
 restorefitresult(model, stored) = stored
 
-# Serializing a FittedModel — directly, or as a column cell under writejls —
-# routes its fitresult through the save/restore hooks. The type is our own, so
-# this extends Serialization for it rather than pirating anything.
+# Serializing a FittedModel, directly or as a cell under writejls, routes its
+# fitresult through the save/restore hooks.
 function Serialization.serialize(s::Serialization.AbstractSerializer,
     fm::FittedModel)
     Serialization.serialize_type(s, typeof(fm))
@@ -103,9 +101,9 @@ function applymodels(models::CausalPipeline; column::Symbol = :model,
         ArgumentError(
             "applymodels operation must be one of $PREDICTOPS, got $(repr(operation))"),
     )
-    # Only the model and key columns are carried into the as-of store. A
-    # predicate selector, unlike a name, does not fail on an absent column, so
-    # a missing model column is reported below under this operator's name.
+    # Only the model and key columns go into the as-of store. A predicate
+    # selector doesn't fail on an absent column, so a missing model column is
+    # reported by predictchunk! under this operator's name.
     right = models |> selectcolumns(n -> Symbol(n) === column || Symbol(n) in keycols)
     return function (p::CausalPipeline)
         return CausalPipeline() do ctx::Context
@@ -122,7 +120,7 @@ applymodels(p::CausalPipeline, models::CausalPipeline; kwargs...) =
     applymodels(models; kwargs...)(p)
 
 # joinchunk!'s driver, with the prediction column in place of the right
-# table's columns. The as-of match itself is join.jl's, unchanged.
+# table's columns.
 function predictchunk!(js::JoinState, cfg::JoinConfig, column::Symbol,
     name::Symbol, op::Symbol, c::DataFrame)
     if !js.leftchecked
@@ -152,11 +150,10 @@ function predictchunk!(js::JoinState, cfg::JoinConfig, column::Symbol,
     return c
 end
 
-# Function barrier: with the match buffer's row type known, the model cells are
-# concretely typed and grouping them costs one IdDict insert per row. Each
-# distinct model is then applied once to a view of its rows — the only dynamic
-# calls, one per model per chunk — and the results are scattered into a single
-# column whose element type is the promotion of every group's.
+# Function barrier: with the match row type known, the model cells are
+# concretely typed. Rows are grouped by model identity, each distinct model is
+# applied once to its rows (one dynamic call per model per chunk), and the
+# results are scattered into one column of the promoted element type.
 function predictcolumn(matches::Vector{V}, found::Vector{Bool}, ::Val{C},
     nt::NamedTuple, op::Symbol) where {V,C}
     FM = nonmissingtype(fieldtype(V, C))
@@ -281,8 +278,8 @@ function modelreports(; column::Symbol = :model, name::Symbol = :report)
 end
 modelreports(p::CausalPipeline; kwargs...) = modelreports(; kwargs...)(p)
 
-# The chunk is owned, so the model column is replaced in its own position and
-# renamed; the column vector itself is new, never mutated in place.
+# The chunk is owned, so the model column is replaced by a new vector in its
+# own position and renamed.
 function reportchunk!(c::DataFrame, column::Symbol, name::Symbol)
     hasproperty(c, column) ||
         throw(ArgumentError("modelreports: no column named $(repr(column))"))
@@ -292,8 +289,8 @@ function reportchunk!(c::DataFrame, column::Symbol, name::Symbol)
                 "modelreports output column $(repr(name)) collides with an existing column",
             ),
         )
-    # `map` narrows the element type from the reports themselves, the field
-    # being untyped: Union{Missing, R} for a stream of R-typed reports.
+    # `map` narrows the element type from the reports themselves (the field is
+    # untyped): Union{Missing, R} for R-typed reports.
     c[!, column] = map(fitreport, c[!, column])
     name === column || rename!(c, column => name)
     return c

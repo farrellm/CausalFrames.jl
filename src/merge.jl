@@ -1,11 +1,9 @@
-# The n-ary time-interleaving source. One cursor per input pipeline, each
-# holding one buffered chunk; a step picks the cursor whose head row comes
-# first and claims the whole run of its rows that stays ahead of the runner-up.
-# A claim moves no data — it is a chunk and a row range — and the claims of a
-# batch are copied out together, one allocation per output column. So the
-# comparisons are per run and the copies are per batch, never per row, and the
-# only dynamically typed work (indexing the pipeline tuple, handing off a chunk
-# iterator, a DataFrame column access) is O(inputs + ncols) per step.
+# The n-ary time-interleaving source. Each input pipeline has a cursor holding
+# one buffered chunk. A step picks the cursor whose head row comes first and
+# claims its whole run of rows that stays ahead of the runner-up. A claim is
+# just a chunk and a row range; a batch's claims are copied out together, one
+# allocation per output column. Comparisons are per run, copies per batch, and
+# dynamically typed work is O(inputs + ncols) per step.
 
 """
     merge(p::CausalPipeline, ps::CausalPipeline...; batchsize = 1024)
@@ -61,11 +59,9 @@ function Base.merge(p::CausalPipeline, ps::CausalPipeline...;
     return CausalPipeline(ctx::Context -> ChunkSource(MergeProducer(pipelines, ctx, n)))
 end
 
-# One input's read head: the buffered chunk, the row reached in it, and the
-# lazily refilled iterator behind it. The dynamically typed fields are per-chunk
-# setup state, in the shape of JoinState's right stream; `times` is the
-# chunk's time column as the context's time type, which is what every ordering
-# comparison touches, so it is the one field that must stay concrete.
+# One input's read head: the buffered chunk, the next row in it, and the
+# iterator behind it. `times`, the chunk's time column in the context's time
+# type, is what every comparison reads, so it must stay concrete.
 mutable struct MergeCursor{T}
     const index::Int                  # position in the argument list: the tie-break
     const input::PullCursor           # the input's chunks
@@ -81,10 +77,8 @@ end
 MergeCursor{T}(index::Int, chunks) where {T} = MergeCursor{T}(index,
     PullCursor(chunks), false, nothing, T[], 1, Symbol[], Int[], false)
 
-# A run of rows claimed from one cursor's chunk, held until the batch is
-# materialized. Nothing is copied to make a piece: the chunk it points into is
-# kept alive by this reference, and its rows move exactly once, when the
-# batch's columns are filled.
+# A run of rows claimed from one cursor's chunk, held by reference until the
+# batch is materialized, when its rows are copied once.
 struct MergePiece
     chunk::DataFrame
     colmap::Vector{Int}   # union position -> local column, 0 = absent
@@ -96,9 +90,7 @@ end
 
 Base.length(pc::MergePiece) = pc.hi - pc.lo + 1
 
-# The stateful producer behind merge's ChunkSource, in the shape of
-# concatenate's ConcatProducer: the pull-to-pull state lives in fields rather
-# than captured locals (captured variables that are reassigned get boxed).
+# The stateful producer behind merge's ChunkSource.
 mutable struct MergeProducer{P<:Tuple,T}
     const pipelines::P
     const ctx::Context{T}
@@ -117,8 +109,8 @@ MergeProducer(ps::P, ctx::Context{T}, batchsize::Int) where {P<:Tuple,T} =
 function (p::MergeProducer)()
     p.initialized || initcursors!(p)
     while true
-        # claim! pushes rather than returns its piece: a Union{Nothing, _} of a
-        # struct holding references would be boxed, once per piece
+        # claim! pushes its piece rather than returning a Union{Nothing, _},
+        # which would box it
         if !claim!(p)
             p.pendingrows == 0 && return nothing
             return materialize!(p)
@@ -127,11 +119,9 @@ function (p::MergeProducer)()
     end
 end
 
-# Run every pipeline and buffer its first chunk. The union schema has to be
-# known before the first chunk goes out — a CausalFrame's chunks must all carry
-# the same column names — and the merge needs every head row anyway to decide
-# which one comes first, so nothing is pulled here that the first claim would
-# not have pulled.
+# Run every pipeline and buffer its first chunk, fixing the union schema before
+# any output (every output chunk must carry the same names). The first claim
+# needs every head row anyway, so this pulls nothing extra.
 function initcursors!(p::MergeProducer{P,T}) where {P,T}
     for i in 1:length(p.pipelines)
         cur = MergeCursor{T}(i, p.pipelines[i].run(p.ctx))
@@ -159,9 +149,8 @@ function initcursors!(p::MergeProducer{P,T}) where {P,T}
     return nothing
 end
 
-# Advance to the next non-empty chunk, in the shape of asofjoin's pullright!.
-# Returns whether one was found. `convert` is an identity, not a copy, whenever
-# the chunk's time column already has the context's time type.
+# Advance to the next non-empty chunk, returning whether one was found.
+# `convert` doesn't copy a time column already in the context's time type.
 function refill!(cur::MergeCursor{T}) where {T}
     while true
         chunk = pull!(cur.input)
@@ -178,7 +167,7 @@ function refill!(cur::MergeCursor{T}) where {T}
     end
 end
 
-# O(ncols) per chunk, the rule concatenate's checkconcat! and the sinks apply.
+# O(ncols) per chunk, as in concatenate and the sinks.
 function checkmergeschema!(cur::MergeCursor)
     cols = propertynames(cur.chunk::DataFrame)
     cols == cur.names || throw(ArgumentError("merge: pipeline $(cur.index) changed \
@@ -189,9 +178,8 @@ end
 live(cur::MergeCursor) = cur.chunk !== nothing && cur.pos <= length(cur.times)
 headtime(cur::MergeCursor) = @inbounds cur.times[cur.pos]
 
-# A spent chunk belongs to the piece that claimed it — and, once that piece is
-# materialized, possibly to a consumer downstream. Drop the cursor's own
-# references so nothing is read through them again.
+# A spent chunk belongs to the piece that claimed it, and then possibly to a
+# consumer downstream, so the cursor drops its references.
 function release!(cur::MergeCursor{T}) where {T}
     cur.chunk = nothing
     cur.times = T[]
@@ -199,11 +187,10 @@ function release!(cur::MergeCursor{T}) where {T}
     return nothing
 end
 
-# The winner is the live cursor with the smallest (time, index) key, the
-# runner-up the next smallest — both by index order, so a strict `<` leaves the
-# earlier argument ahead at equal times. 0 means there is none. The only
-# per-claim O(inputs) loop, and the reason the cursors sit in a concretely
-# typed vector: every comparison here is on T.
+# The live cursors with the smallest and next-smallest (time, index) keys, or 0
+# for none. Scanning in index order with a strict `<` keeps the earlier input
+# ahead at equal times. This per-claim O(inputs) loop is why the cursors sit in
+# a concretely typed vector.
 function pickwinner(cursors::Vector{MergeCursor{T}}) where {T}
     w = 0
     b = 0
@@ -224,10 +211,8 @@ function pickwinner(cursors::Vector{MergeCursor{T}}) where {T}
 end
 
 # Claim one piece: the longest run of the winner's rows whose (time, index) key
-# stays below the runner-up's head key. The winner and the runner-up are
-# distinct cursors, and equal head times imply the winner has the smaller index
-# (else it would not have won), so the two branches below are the only ones.
-# The run is never empty, so every call that returns true makes progress.
+# stays below the runner-up's head key. The run is never empty, so every call
+# returning true makes progress.
 function claim!(p::MergeProducer)
     for cur in p.cursors
         if !cur.done && !live(cur)
@@ -242,8 +227,8 @@ function claim!(p::MergeProducer)
         length(cur.times)   # the last live input: the rest of its chunk
     else
         t = headtime(p.cursors[b])
-        # every row before `pos` is <= t already, so the unrestricted searches
-        # land in the same place as searches over pos:end would
+        # rows before `pos` are all <= t, so searching the whole vector lands
+        # where searching pos:end would
         w < b ? searchsortedlast(cur.times, t) : searchsortedfirst(cur.times, t) - 1
     end
     cur.pos = hi + 1
@@ -257,12 +242,9 @@ function claim!(p::MergeProducer)
     return true
 end
 
-# The batch's rows are copied exactly once, into freshly allocated columns of
-# the promoted element type — one allocation per column, not per piece, and no
-# intermediate per-piece frame to concatenate afterwards. A batch that is a
-# single whole chunk skips even that: the chunk is owned and its column vectors
-# are never mutated in place, so they can be adopted as they are, and a chunk
-# that already carries the union schema goes downstream untouched.
+# The batch's rows are copied once, into new columns of the promoted element
+# type. A batch of one whole chunk adopts its column vectors instead, and goes
+# downstream untouched if it already carries the union schema.
 function materialize!(p::MergeProducer)
     pieces = p.pending
     out =
@@ -278,8 +260,8 @@ function adoptwhole(p::MergeProducer, pc::MergePiece)
     n = length(pc)
     cols = Vector{AbstractVector}(undef, length(p.names))
     for (k, j) in enumerate(pc.colmap)
-        # absent columns are zero-byte Vector{Missing} (Missing is a
-        # singleton); concatenation promotes them where the frame is assembled
+        # an absent column is a zero-byte Vector{Missing}; `DataFrame(frame)`
+        # promotes it on concatenation
         cols[k] = j == 0 ? Vector{Missing}(undef, n) : pc.chunk[!, j]
     end
     return DataFrame(cols, p.names; copycols = false)
@@ -294,10 +276,9 @@ function concatpieces(p::MergeProducer, pieces::Vector{MergePiece})
     return DataFrame(cols, p.names; copycols = false)
 end
 
-# The stretch of one piece's column to copy. A source column's type is only
-# known at run time, so the copy is a dynamic call — and a dynamic call boxes
-# every non-pointer argument, which as three loose `Int`s would be three
-# allocations per piece per column. Reused across the whole batch.
+# The stretch of one piece's column to copy, reused across the batch. The copy
+# is a dynamic call, which would box three loose `Int` arguments per piece per
+# column.
 mutable struct CopySpan
     off::Int
     lo::Int
@@ -307,12 +288,9 @@ end
 copyspan!(out::AbstractVector, src::AbstractVector, span::CopySpan) =
     copyto!(out, span.off + 1, src, span.lo, span.len)
 
-# One output column over the batch's pieces: the element type is the promotion
-# of the pieces' own — Missing among them wherever a piece's input lacks the
-# column, which is what widens the column to Union{Missing, T}. The type is a
-# runtime value here, so the filling happens behind a function barrier, where
-# the output is concrete and the copies run one dispatch per piece rather than
-# one per row.
+# One output column over the batch's pieces, typed as the promotion of theirs
+# (Missing where a piece lacks the column). The fill runs behind a function
+# barrier: one dispatch per piece, not per row.
 function buildcolumn(pieces::Vector{MergePiece}, k::Int, n::Int)
     T = Union{}
     for pc in pieces

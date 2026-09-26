@@ -1,13 +1,10 @@
-# The interval-summarization transform. A clock pipeline supplies the interval
-# boundaries; the data stream `p` drives a chunkmap, and the clock is pulled on
-# demand from inside the driver (like asofjoin's right stream and
-# addrollingcolumns' summarized stream). It is the summarizecycles fold with
-# the close trigger changed from "the timestamp changed" to "a clock boundary
-# was crossed", plus — on the keyless path — an emitted row for every interval,
-# empty ones included, to make the output a regular grid. Per the summarize.jl
-# conventions, the type-unstable setup (pulling clock chunks, building/widening
-# states) happens once per chunk and the folding kernels take a concretely
-# typed boundary vector, so the per-row work stays dispatch-free.
+# The interval-summarization transform. The data stream `p` drives a chunkmap
+# and pulls the clock's boundaries on demand, as asofjoin pulls its right
+# stream. It is the summarizecycles fold, closing when a clock boundary is
+# crossed rather than when the timestamp changes. The keyless and declared-key
+# paths also emit a row for every empty interval, making a regular grid.
+# Type-unstable setup (pulling clock chunks, building or widening states) runs
+# once per chunk; the folding kernels take a concretely typed boundary vector.
 
 """
     intervalize(clock, summarizers; key = nothing, keyset = nothing,
@@ -78,12 +75,10 @@ end
 intervalize(p::CausalPipeline, clk::CausalPipeline, summarizers; kwargs...) =
     intervalize(clk, summarizers; kwargs...)(p)
 
-# The clock cursor: one boundary time at a time over clk.run(ctx), refilling
-# from clock chunks lazily. The type-unstable pull (the chunks iterator's
-# element type is opaque, and a DataFrame column access is dynamic, as in
-# asofjoin's right stream) is confined here and to the driver; the per-boundary
-# indexing of the concrete Vector{T} is typed. Clock order is trusted to the
-# chunk protocol, exactly as asofjoin trusts its right stream.
+# The clock cursor: one boundary time at a time over clk.run(ctx), pulling
+# clock chunks lazily. The type-unstable pull is confined here; reading
+# boundaries from the concrete `times` is typed. Clock order is trusted to the
+# chunk protocol.
 mutable struct IntervalCursor{T}
     const chunks::PullCursor
     times::Vector{T}
@@ -106,10 +101,10 @@ end
 # Every boundary has been handed out and the clock is exhausted.
 exhausted(cur::IntervalCursor) = cur.chunks.done && cur.pos > length(cur.times)
 
-# Pull boundaries onto `buf` until its last one is strictly past `tmax`, so
-# every boundary a row at or before `tmax` needs is known, or the clock is
-# exhausted; `tmax = nothing` drains the clock. Shared by intervalize's bounds
-# and summarizewindows' ticks. Type-unstable (the clock pull), once per chunk.
+# Pull boundaries onto `buf` until its last one is strictly past `tmax` (so
+# every boundary a row up to `tmax` needs is known) or the clock is exhausted;
+# `tmax = nothing` drains the clock. Shared with summarizewindows' ticks.
+# Type-unstable, once per chunk.
 function pullpast!(buf::Vector{T}, cur::IntervalCursor{T}, tmax) where {T}
     while tmax === nothing || isempty(buf) || @inbounds(buf[end]) <= tmax
         b = nextboundary!(cur)
@@ -119,12 +114,10 @@ function pullpast!(buf::Vector{T}, cur::IntervalCursor{T}, tmax) where {T}
     return nothing
 end
 
-# Per-run mutable state, in fields rather than reassigned closure captures
-# (those get boxed). `bounds` holds the pulled boundaries not yet fully behind
-# the current interval, whose end is `bounds[bi]` (its begin `bounds[bi-1]`);
-# they carry across chunk boundaries. The SummaryFold's dynamically typed
-# fields are per-chunk setup state, and everything per-row sits behind the fold
-# kernels' concretely typed boundary vector.
+# Per-run state. `bounds` holds the pulled boundaries not yet behind the
+# current interval, which ends at `bounds[bi]` and begins at `bounds[bi-1]`.
+# The SummaryFold's untyped fields are per-chunk setup; per-row work sits in
+# the fold kernels.
 mutable struct IntervalizeState{T}
     cur::IntervalCursor{T}
     bounds::Vector{T}
@@ -134,9 +127,8 @@ mutable struct IntervalizeState{T}
     checked::Bool    # keyed: key columns validated against the input schema
 end
 
-# Drop boundaries fully behind the current interval's begin (`bounds[bi-1]`),
-# keeping the buffer bounded across chunks. After it, the begin is at index 1
-# and the end at index 2.
+# Drop boundaries before the current interval's begin, keeping the buffer
+# bounded. Afterwards the begin is at index 1 and the end at index 2.
 function trimbounds!(st::IntervalizeState)
     st.bi > 2 || return nothing
     deleteat!(st.bounds, 1:(st.bi-2))
@@ -144,14 +136,14 @@ function trimbounds!(st::IntervalizeState)
     return nothing
 end
 
-# The output row type of the keyless grid: `:time` prepended to the value type
-# (which already promotes summary and empty values via promotedvaluetype).
+# The keyless grid's row type: `:time` prepended to the value type, which
+# `promotedvaluetype` has already promoted over summary and empty values.
 _intervalrow(t, v) = merge((; time = t), v)
 intervalrowtype(::Type{T}, ::Type{V}) where {T,V} =
     Base.promote_op(_intervalrow, T, V)
 
-# One keyless grid row: the summary of the interval if it folded a row,
-# otherwise the empty values, both landing in the promoted row type RT.
+# One keyless grid row, as RT: the interval's summary if it folded a row, else
+# the empty values.
 @inline function closeintervalrow(::Type{RT}, t, states::Tuple, folded::Bool,
     emptyrow, r::Val) where {RT}
     folded && return convert(RT, merge((; time = t), summaryvalues(states, r)))
@@ -171,12 +163,10 @@ function intervalstep!(st::IntervalizeState, protos::Tuple, keynames::Val,
     return isempty(rows) ? nothing : DataFrame(rows)
 end
 
-# Close every interval a row crosses (emitting an empty row for each interval
-# with no data, so the grid stays regular), then fold the row into the current
-# interval. `bounds[bi]` is the current interval's end; `bi > length(bounds)`
-# is the trailing region (the clock is drained past `tmax`), whose rows are
-# folded only when closelast will emit them. Returns the closed rows and the
-# carried state.
+# Close every interval a row crosses (an empty row for each interval with no
+# data), then fold the row into the current interval. `bi > length(bounds)` is
+# the trailing region after the last boundary, whose rows are folded only
+# under closelast. Returns the closed rows and the carried state.
 function foldintervals!(states::S, protos::P, nt::NamedTuple,
     bounds::Vector{T}, bi::Int, folded::Bool, closelast::Bool,
     r::Val) where {S<:Tuple,P<:Tuple,T}
@@ -195,8 +185,8 @@ function foldintervals!(states::S, protos::P, nt::NamedTuple,
                 closeintervalrow(RT, @inbounds(bounds[bi]), states,
                     folded, emptyrow, r),
             )
-            # closeintervalrow copied the values out, so the closed interval's
-            # states are zeroed and reused rather than replaced.
+            # closeintervalrow copied the values out, so the states are zeroed
+            # and reused.
             states = freshall!(states)
             folded = false
             bi += 1
@@ -212,8 +202,8 @@ function intervalflush!(st::IntervalizeState{T}, protos::Tuple, stop::T,
     closelast::Bool, outs::Val) where {T}
     pullpast!(st.bounds, st.cur, nothing)
     isempty(st.bounds) && return nothing           # empty clock
-    # No data ever arrived, so no states were built: the grid is all empty
-    # values, typed from the summarizer configs alone.
+    # No data ever arrived, so no states exist: the grid is all empty values,
+    # typed from the summarizers alone.
     st.fold.stateprotos === nothing &&
         return flushemptygrid!(st, protos, stop, closelast, outs)
     rows = flushintervals!(st.fold.states, protos,
@@ -221,9 +211,8 @@ function intervalflush!(st::IntervalizeState{T}, protos::Tuple, stop::T,
     return isempty(rows) ? nothing : DataFrame(rows)
 end
 
-# Drain the remaining grid: the current interval (with data if folded) and
-# every remaining complete interval up to b_K (each empty), then the trailing
-# partial at stop when closelast.
+# Drain the remaining grid: the current interval, every later complete one
+# (empty), then the trailing partial at stop when closelast.
 function flushintervals!(states::S, protos::P, bounds::Vector{T},
     bi::Int, folded::Bool, stop::T, closelast::Bool,
     r::Val) where {S<:Tuple,P<:Tuple,T}
@@ -247,8 +236,7 @@ function flushintervals!(states::S, protos::P, bounds::Vector{T},
 end
 
 # The no-data grid: an empty row per complete interval `[bounds[k-1], bounds[k])`
-# (and the trailing partial when closelast), with the value type from the
-# configs alone.
+# and, when closelast, the trailing partial, typed from the summarizers alone.
 function flushemptygrid!(st::IntervalizeState{T}, protos::Tuple, stop::T,
     closelast::Bool, r::Val) where {T}
     e = emptyvalues(protos, r)
@@ -279,9 +267,8 @@ function intervalstepgrouped!(st::IntervalizeState, protos::Tuple,
     return isempty(rows) ? nothing : DataFrame(rows)
 end
 
-# The keyed analogue: closing an interval emits one row per present key
-# (sorted) and empties the groups (closecycle!), so empty intervals emit
-# nothing — the grid is sparse per key, as unseen keys cannot be emitted.
+# The keyed analogue: closing an interval emits a row per present key, sorted,
+# and empties the groups (closecycle!), so an empty interval emits nothing.
 function foldintervalsgrouped!(groups::GroupTable{K,S}, stateprotos::S,
     nt::NamedTuple, bounds::Vector{T}, bi::Int, keynames::Val{KN},
     closelast::Bool, r::Val) where {K,S,T,KN}
@@ -314,9 +301,8 @@ function intervalflushgrouped!(st::IntervalizeState{T}, stop::T, closelast::Bool
 end
 
 # The current interval closes at its end, emitting its present keys; if data
-# reached the trailing region instead (bi past the last boundary), closelast
-# closes it at stop. Intervening complete intervals are empty, so they emit
-# nothing (the groups are emptied by the first close).
+# reached the trailing region instead, closelast closes it at stop. Later
+# intervals are empty and emit nothing.
 function flushintervalsgrouped!(groups::GroupTable{K,S}, bounds::Vector{T},
     bi::Int, ::Type{RT}, stop, closelast::Bool, r::Val) where {K,S,T,RT}
     rows = RT[]
@@ -347,10 +333,9 @@ function intervalstepdense!(st::IntervalizeState{T}, protos::Tuple, ks::KeySet,
     return isempty(rows) ? nothing : DataFrame(rows)
 end
 
-# The keyless grid's fold over declared-key slots: every crossed boundary
-# closes all of them (closedense!), so an empty interval still emits a row per
-# key. Rows before the first boundary, and trailing rows closelast will not
-# emit, are skipped before their key is looked up. Returns the interval index.
+# The grid fold over declared-key slots: every crossed boundary closes all of
+# them (closedense!), so an empty interval still emits a row per key. Rows that
+# won't be emitted are skipped before their key is looked up. Returns `bi`.
 function foldintervalsdense!(rows::Vector{RT}, dg::DenseGroups, ks::KeySet,
     nt::NamedTuple, bounds::Vector{T}, bi::Int, keynames::Val,
     closelast::Bool, r::Val, emptyrow) where {RT,T}
@@ -381,8 +366,7 @@ function intervalflushdense!(st::IntervalizeState{T}, protos::Tuple,
     return isempty(rows) ? nothing : DataFrame(rows)
 end
 
-# `flushintervals!` over the slots: the current interval, every remaining
-# complete one (each empty), then the trailing partial at stop when closelast.
+# `flushintervals!` over the slots.
 function flushintervalsdense!(rows::Vector{RT}, dg::DenseGroups, ks::KeySet,
     bounds::Vector{T}, bi::Int, stop::T, closelast::Bool, r::Val,
     emptyrow) where {RT,T}
@@ -396,7 +380,7 @@ function flushintervalsdense!(rows::Vector{RT}, dg::DenseGroups, ks::KeySet,
 end
 
 # The no-data dense grid: an empty row per complete interval per declared key
-# (and the trailing partial when closelast), typed from the configs alone.
+# and, when closelast, the trailing partial.
 function flushemptygrid!(st::IntervalizeState{T}, protos::Tuple,
     ks::KeySet{K}, stop::T, closelast::Bool, r::Val) where {T,K}
     e = emptyvalues(protos, r)

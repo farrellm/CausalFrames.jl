@@ -1,7 +1,6 @@
 # sortcycles: a stable reordering of the rows within each cycle (a maximal run of
-# rows sharing one timestamp). The time order is untouched, so the output obeys
-# the chunk protocol by construction; the only state is the latest cycle, held
-# back because the rest of it may arrive in the next chunk.
+# rows sharing one timestamp). Time order is untouched. The only state is the
+# latest cycle, held back because it may continue in the next chunk.
 
 """
     sortcycles(by; rev = false) -> (CausalPipeline -> CausalPipeline)
@@ -44,8 +43,7 @@ DataFrame(load(Context(2020, 2030), p))
 """
 function sortcycles(by; rev::Bool = false)
     spec = sortspec(by)
-    # A concrete ordering rather than a runtime Bool, so the sort inside the
-    # barrier specializes instead of splitting on the direction per comparison.
+    # A concrete ordering, not a runtime Bool, so the sort specializes.
     order = rev ? Base.Order.Reverse : Base.Order.Forward
     return function (p::CausalPipeline)
         return CausalPipeline() do ctx::Context
@@ -58,8 +56,7 @@ end
 sortcycles(p::CausalPipeline, by; kwargs...) = sortcycles(by; kwargs...)(p)
 
 # Eager validation: a function, a name, or a non-empty collection of names,
-# normalized to a tuple of Symbols. A CausalPipeline lands in the error too,
-# which turns a mistyped `sortcycles(p)` into a message.
+# normalized to a tuple of Symbols. A mistyped `sortcycles(p)` gets a message.
 sortspec(f::Function) = f
 sortspec(name::Union{Symbol,AbstractString}) = (Symbol(name),)
 function sortspec(names)
@@ -78,19 +75,16 @@ sortspecerror(x) = throw(
     ArgumentError("invalid sortcycles spec of type $(typeof(x)): expected a \
         column name, a collection of column names, or a per-row function"))
 
-# Per-run state: the pieces of the open cycle, all sharing its time. Pieces are
-# concatenated once, when the cycle closes, so a cycle spread over many chunks
-# costs O(rows) rather than a re-concatenation per chunk.
+# Per-run state: the pieces of the open cycle, concatenated once when the cycle
+# closes, so a cycle spanning many chunks costs O(rows).
 struct CycleSortState
     pending::Vector{DataFrame}
 end
 CycleSortState() = CycleSortState(DataFrame[])
 
-# Emit every cycle known to be complete, sorted, and hold back the trailing one.
-# The emitted rows — the open cycle this chunk closes, then the chunk's own
-# complete cycles — are gathered as views and materialized in one copy: nearly
-# every chunk closes the previous chunk's tail, so concatenating the tail onto
-# the whole chunk first would copy each chunk twice.
+# Emit every complete cycle, sorted, and hold back the trailing one. The emitted
+# rows (the open cycle this chunk closes, then the chunk's own complete cycles)
+# are gathered as views and materialized in one copy.
 function sortcyclechunk!(st::CycleSortState, spec, order, c::DataFrame)
     pending = st.pending
     times = c.time
@@ -102,8 +96,8 @@ function sortcyclechunk!(st::CycleSortState, spec, order, c::DataFrame)
             throw(ArgumentError("sortcycles: chunk columns changed mid-cycle, \
                 from $(names(first(pending))) to $(names(c))"))
         opentime = last(first(pending).time)
-        # Times are non-decreasing, so a chunk ending at the open time is
-        # entirely that cycle; the chunk is owned, so it is held uncopied.
+        # A chunk ending at the open time is entirely that cycle; it is owned,
+        # so it is held uncopied.
         if last(times) == opentime
             push!(pending, c)
             return nothing
@@ -126,8 +120,8 @@ materialize(v::SubDataFrame, ::Nothing) = DataFrame(v)
 materialize(::Nothing, v::SubDataFrame) = DataFrame(v)
 materialize(a::SubDataFrame, b::SubDataFrame) = vcat(a, b)
 
-# Called once, when upstream is exhausted: the open cycle is complete, and a
-# cycle already in order goes out as the pieces' concatenation, uncopied again.
+# Called once upstream is exhausted: the open cycle is complete. One already in
+# order goes out without a further copy.
 function flushcycle!(st::CycleSortState, spec, order)
     isempty(st.pending) && return nothing
     cycle = length(st.pending) == 1 ? only(st.pending) : reduce(vcat, st.pending)
@@ -142,9 +136,9 @@ function sortedview(df::DataFrame, rows::UnitRange{Int}, spec, order)
     return isempty(perm) ? view(df, rows, :) : view(df, perm, :)
 end
 
-# The type-unstable setup, once per emission: resolve the keys over `rows` and
-# hand them to the typed barrier. Returns the rows' permutation as indices into
-# `df`, or an empty vector when every cycle was already in order.
+# Type-unstable setup, once per emission: resolve the keys over `rows` and call
+# the typed barrier. Returns the permutation as indices into `df`, or an empty
+# vector when every cycle was already in order.
 function sortedperm(df::DataFrame, rows::UnitRange{Int}, spec, order)
     perm = cycleperm!(Int[], sortkeys(spec, df, rows), view(df.time, rows), order)
     perm .+= first(rows) - 1
@@ -159,16 +153,15 @@ function sortkeys(names::Tuple{Vararg{Symbol}}, df::DataFrame,
     end
     return map(n -> view(df[!, n], rows), names)
 end
-# Only over `rows`, so the held-back cycle is not keyed twice.
+# Only over `rows`, so held-back rows are not keyed twice.
 sortkeys(f::Function, df::DataFrame, rows::UnitRange{Int}) =
     (maptime(f, map(v -> view(v, rows), Tables.columntable(df))),)
 
-# Function barrier, specialized on the concrete key columns and ordering: walk
-# the cycles of `times`, check each for order in one pass, and stably sort the
-# stretch of the permutation covering any that is not, comparing the key tuples
-# read straight from the columns. `perm` arrives empty and is filled with the
-# identity only once a cycle is found out of order, so an in-order stream
-# allocates nothing here. Returns `perm`, empty or of length `length(times)`.
+# Function barrier over the concrete key columns and ordering: walk the cycles
+# of `times` and stably sort the stretch of the permutation covering each cycle
+# out of order. `perm` arrives empty and becomes the identity only when a cycle
+# needs sorting, so an in-order stream allocates nothing. Returns `perm`, empty
+# or of length `length(times)`.
 function cycleperm!(perm::Vector{Int}, keys::Tuple, times::AbstractVector,
     order::Base.Order.Ordering)
     key = i -> map(k -> @inbounds(k[i]), keys)
@@ -180,8 +173,8 @@ function cycleperm!(perm::Vector{Int}, keys::Tuple, times::AbstractVector,
         while b < n && times[b+1] == t
             b += 1
         end
-        # Stretches before the first sort are still the identity, so the order
-        # check reads the range itself rather than the permutation.
+        # A cycle's stretch of `perm` is the identity until sorted, so the
+        # check reads the range itself.
         if b > a && !issorted(a:b; by = key, order = order)
             isempty(perm) && append!(perm, 1:n)
             sort!(view(perm, a:b); by = key, order = order,
