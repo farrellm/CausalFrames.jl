@@ -536,8 +536,7 @@ time,bid,ask,mid
 ```
 """
 function writecsv(path::AbstractString; queue::Integer = 1, kwargs...)
-    queue >= 0 ||
-        throw(ArgumentError("writecsv queue must be non-negative, got $queue"))
+    checkqueue(queue, "writecsv")
     for k in (:append, :header, :writeheader, :partition, :compress)
         haskey(kwargs, k) && throw(ArgumentError("writecsv controls the \
             $(repr(k)) option of CSV.write itself; it may not be passed"))
@@ -545,17 +544,31 @@ function writecsv(path::AbstractString; queue::Integer = 1, kwargs...)
     # Materialized once, so the per-chunk splat into CSV.write is over a
     # concretely typed NamedTuple rather than the keyword iterator.
     opts = values(kwargs)
+    return sinktransform(
+        () -> ChunkSink(
+            chan -> csvwriteloop(chan, String(path), opts), Int(queue), "writecsv"),
+    )
+end
+writecsv(p::CausalPipeline, path::AbstractString; kwargs...) =
+    writecsv(path; kwargs...)(p)
+
+checkqueue(queue::Integer, op::String) =
+    queue >= 0 ||
+    throw(ArgumentError("$op queue must be non-negative, got $queue"))
+
+# Every file sink's transform: a pass-through chunkmap handing each chunk to a
+# per-run `ChunkSink`, built by `makesink()` when the run starts (so that is
+# when the file is truncated), and joining its writer once upstream is
+# exhausted.
+function sinktransform(makesink)
     return function (p::CausalPipeline)
         return CausalPipeline() do ctx::Context
-            sink = ChunkSink(chan -> csvwriteloop(chan, String(path), opts),
-                Int(queue), "writecsv")
+            sink = makesink()
             return chunkmap(c -> sinkchunk(sink, c), p.run(ctx);
                 flush = () -> finishwrite(sink))
         end
     end
 end
-writecsv(p::CausalPipeline, path::AbstractString; kwargs...) =
-    writecsv(path; kwargs...)(p)
 
 # Per-run writer state, shared by every file sink: the queue feeding the
 # background task, plus the column names of the first chunk, which pin the
@@ -1002,7 +1015,8 @@ names(load(Context(0, 10), p))
 """
 function selectcolumns(selectors...)
     checkselectors(selectors, "selectcolumns", false)
-    return columnprojection(selectors, true, "selectcolumns")
+    return columntransform(cols -> keptcolumns(selectors, cols, true,
+        "selectcolumns"))
 end
 selectcolumns(p::CausalPipeline, selectors...) = selectcolumns(selectors...)(p)
 
@@ -1021,7 +1035,8 @@ order.
 """
 function dropcolumns(selectors...)
     checkselectors(selectors, "dropcolumns", true)
-    return columnprojection(selectors, false, "dropcolumns")
+    return columntransform(cols -> keptcolumns(selectors, cols, false,
+        "dropcolumns"))
 end
 dropcolumns(p::CausalPipeline, selectors...) = dropcolumns(selectors...)(p)
 
@@ -1061,53 +1076,45 @@ function reordercolumns(selectors...)
         n == "time" && throw(
             ArgumentError("reordercolumns: the time column is always first"))
     end
-    return columnreorder(selectors)
+    return columntransform(cols -> orderedcolumns(selectors, cols))
 end
 reordercolumns(p::CausalPipeline, selectors...) = reordercolumns(selectors...)(p)
 
-# Both transforms are the same chunkmap over a per-run resolution cache; they
-# differ only in which side of the match survives.
-function columnprojection(selectors::Tuple, selecting::Bool, opname::String)
+# The three column transforms' shared shape: a chunkmap indexing each chunk by a
+# resolution of its column names — `resolve(names)` gives the columns to keep,
+# in order, or `nothing` to pass the chunk through untouched. The chunk is
+# owned, so the index can share its columns.
+function columntransform(resolve)
     return function (p::CausalPipeline)
         return CausalPipeline() do ctx::Context
-            selection = ColumnSelection()
-            return chunkmap(
-                c -> projectchunk(selection, selectors, c, selecting, opname),
-                p.run(ctx),
-            )
+            memo = SchemaMemo()
+            return chunkmap(p.run(ctx)) do c
+                keep = memoized!(resolve, memo, c)
+                return keep === nothing ? c : c[!, keep]
+            end
         end
     end
 end
 
-# The resolved column list, cached against the schema it was resolved from:
-# `keep === nothing` means every column survives and the chunk passes through
-# untouched. Per-run mutable state lives here rather than in reassigned
-# closure captures (which get boxed).
-mutable struct ColumnSelection
+# The resolution, cached against the names it was derived from. Running the
+# selectors over every column of every chunk is wasted work when the schema
+# never moves — which is the norm — and re-resolving when the names differ
+# keeps the validation per-chunk-strict rather than first-chunk-only, since the
+# trusted load/stream path does not itself re-check schema equality. Per-run
+# mutable state lives here rather than in reassigned closure captures (which
+# get boxed).
+mutable struct SchemaMemo
     lastnames::Union{Nothing,Vector{String}}
-    keep::Union{Nothing,Vector{Symbol}}
+    resolved::Union{Nothing,Vector{Symbol}}
 end
-ColumnSelection() = ColumnSelection(nothing, nothing)
+SchemaMemo() = SchemaMemo(nothing, nothing)
 
-function projectchunk(selection::ColumnSelection, selectors::Tuple,
-    c::DataFrame, selecting::Bool, opname::String)
-    keep = resolvecolumns!(selection, selectors, c, selecting, opname)
-    # The chunk is owned, so the projection can share its columns.
-    return keep === nothing ? c : c[!, keep]
-end
-
-# Running the selectors over every column of every chunk is wasted work when
-# the schema never moves — which is the norm — so the resolution is memoized
-# against the names it was derived from. Re-resolving when they differ keeps
-# the validation per-chunk-strict rather than first-chunk-only, since the
-# trusted load/stream path does not itself re-check schema equality.
-function resolvecolumns!(selection::ColumnSelection, selectors::Tuple,
-    c::DataFrame, selecting::Bool, opname::String)
+function memoized!(resolve, memo::SchemaMemo, c::DataFrame)
     cols = names(c)
-    selection.lastnames == cols && return selection.keep
-    selection.keep = keptcolumns(selectors, cols, selecting, opname)
-    selection.lastnames = cols
-    return selection.keep
+    memo.lastnames == cols && return memo.resolved
+    memo.resolved = resolve(cols)
+    memo.lastnames = cols
+    return memo.resolved
 end
 
 # The names to keep, in the chunk's own column order, or `nothing` when every
@@ -1124,44 +1131,6 @@ function keptcolumns(selectors::Tuple, cols::Vector{String}, selecting::Bool,
             push!(keep, Symbol(n))
     end
     return length(keep) == length(cols) ? nothing : keep
-end
-
-# The projections' chunkmap-over-a-resolution-cache shape, differing only in
-# what the resolution computes: a permutation of every column rather than a
-# subset of them.
-function columnreorder(selectors::Tuple)
-    return function (p::CausalPipeline)
-        return CausalPipeline() do ctx::Context
-            ordering = ColumnOrder()
-            return chunkmap(c -> reorderchunk(ordering, selectors, c), p.run(ctx))
-        end
-    end
-end
-
-# The resolved column order, cached against the schema it was resolved from;
-# `order === nothing` means the chunk is already in it and passes through
-# untouched. Per-run mutable state, as in `ColumnSelection`.
-mutable struct ColumnOrder
-    lastnames::Union{Nothing,Vector{String}}
-    order::Union{Nothing,Vector{Symbol}}
-end
-ColumnOrder() = ColumnOrder(nothing, nothing)
-
-function reorderchunk(ordering::ColumnOrder, selectors::Tuple, c::DataFrame)
-    order = resolveorder!(ordering, selectors, c)
-    # The chunk is owned, so the reindex can share its columns.
-    return order === nothing ? c : c[!, order]
-end
-
-# Memoized exactly as `resolvecolumns!` is, and for the same two reasons: the
-# selectors are wasted work on a schema that never moves, and re-resolving when
-# it does keeps the validation per-chunk-strict.
-function resolveorder!(ordering::ColumnOrder, selectors::Tuple, c::DataFrame)
-    cols = names(c)
-    ordering.lastnames == cols && return ordering.order
-    ordering.order = orderedcolumns(selectors, cols)
-    ordering.lastnames = cols
-    return ordering.order
 end
 
 # The column order to impose, or `nothing` when the chunk already has it.

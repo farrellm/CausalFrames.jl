@@ -32,16 +32,11 @@ interruption stays readable. A JLS file can be read only with a compatible
 Julia and compatible versions of the packages whose types it holds.
 """
 function writejls(path::AbstractString; queue::Integer = 1)
-    queue >= 0 ||
-        throw(ArgumentError("writejls queue must be non-negative, got $queue"))
-    return function (p::CausalPipeline)
-        return CausalPipeline() do ctx::Context
-            sink = ChunkSink(chan -> jlswriteloop(chan, String(path)),
-                Int(queue), "writejls")
-            return chunkmap(c -> sinkchunk(sink, c), p.run(ctx);
-                flush = () -> finishwrite(sink))
-        end
-    end
+    checkqueue(queue, "writejls")
+    return sinktransform(
+        () -> ChunkSink(
+            chan -> jlswriteloop(chan, String(path)), Int(queue), "writejls"),
+    )
 end
 writejls(p::CausalPipeline, path::AbstractString; kwargs...) =
     writejls(path; kwargs...)(p)

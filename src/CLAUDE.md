@@ -33,7 +33,8 @@ design rationale and performance constraints behind each module.
     source's clip options, window, carried `prevtime` and `done` flag — the one
     argument besides the chunk), `clipchunk!` (rename, resolve `:time`, missing
     times via `table.jl`'s `presentrows` barrier, sortedness, clip, convert) and
-    the `ChunkSink` background writer. `sinkchunk` queues
+    the `ChunkSink` background writer, which `sinktransform` wires into a
+    pass-through transform for all three writers. `sinkchunk` queues
     the chunk for the writer and passes downstream `DataFrame(c; copycols =
     false)`, a private index over the same vectors: consumers may mutate a
     chunk's column index, but no operator mutates a column vector in place, so
