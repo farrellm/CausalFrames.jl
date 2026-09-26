@@ -1,8 +1,6 @@
-# Parquet I/O. Both backends are optional and either one suffices in either
-# direction: the operators below hold the API, the docstrings and the
-# backend-independent logic, while the machinery that names DuckDB or Parquet2
-# lives in the package extensions and gives the hooks `parquetproducer` /
-# `parquetsink` their real methods, one per backend.
+# Parquet I/O. Either optional backend serves both directions. This file holds
+# the API and backend-independent logic; the package extensions give the hooks
+# `parquetproducer` and `parquetsink` their per-backend methods.
 
 const BACKENDS = (:duckdb, :parquet2)
 
@@ -13,17 +11,15 @@ const WRITEHINT = "writeparquet needs a parquet backend: run `using Parquet2` \
     (preferred — it writes row groups as the stream flows by) or \
     `using DuckDB`, adding it to the project if necessary"
 
-# Given a `Val{:duckdb}` / `Val{:parquet2}` method by the extensions, so a
-# missing backend can be reported where the user typed the operator.
+# The extensions add `Val{:duckdb}` / `Val{:parquet2}` methods returning true.
 backendloaded(::Val) = false
 
 backendpackage(b::Symbol) = b === :duckdb ? "DuckDB" : "Parquet2"
 
 # The backend an operator will use: the one asked for, else the preferred one if
-# loaded, else the other. Called once per run — dispatching on a runtime symbol
-# here costs one dynamic call per pipeline run, not per chunk — and once
-# eagerly at construction, so a missing backend is reported where the operator
-# was typed while one loaded afterwards still counts.
+# loaded, else the other. Called eagerly at construction, to report a missing
+# backend where the operator was typed, and again per run (one dynamic call),
+# so a backend loaded in between still counts.
 function resolvebackend(request::Symbol, preferred::Symbol, hint::String)
     if request === :auto
         backendloaded(Val(preferred)) && return Val(preferred)
@@ -39,8 +35,7 @@ function resolvebackend(request::Symbol, preferred::Symbol, hint::String)
     return Val(request)
 end
 
-# Backend hooks. The extensions' methods are more specific than these, so the
-# fallbacks only ever run when the backend is not loaded.
+# Backend hooks. These fallbacks run only when the backend is not loaded.
 parquetproducer(::Val, ::Any, ::Any) = throw(ArgumentError(READHINT))
 parquetsink(::Val, ::Any, ::Any, ::Any, ::Any) = throw(ArgumentError(WRITEHINT))
 
@@ -159,8 +154,7 @@ function writeparquet(path::AbstractString; queue::Integer = 1,
             "writeparquet rowgroupsize must be positive, got $rowgroupsize"),
     )
     resolvebackend(backend, :parquet2, WRITEHINT)   # eager: fail at the call site
-    # Materialized once, so the per-row-group splat into the writer is over a
-    # concretely typed NamedTuple rather than the keyword iterator.
+    # A concretely typed NamedTuple, for the per-row-group splat.
     opts = values(kwargs)
     return sinktransform(
         () -> parquetsink(
@@ -171,10 +165,10 @@ end
 writeparquet(p::CausalPipeline, path::AbstractString; kwargs...) =
     writeparquet(path; kwargs...)(p)
 
-# The file's own name for the column that becomes `:time`, or nothing when it
-# cannot be pinned down (a `time` function, a name that no column maps to, or
-# an ambiguous `rename`). Only the window pushdown depends on this, so nothing
-# is the safe answer: it costs a fuller scan, never a wrong one.
+# The file's name for the column that becomes `:time`, or nothing when it can't
+# be pinned down (a `time` function, no matching column, or an ambiguous
+# `rename`). Only the window pushdown uses it, so nothing just costs a fuller
+# scan.
 function timesourcename(filenames::Vector{String}, time, rename)
     time isa Function && return nothing
     target = time isa Symbol ? String(time) : "time"
@@ -182,7 +176,7 @@ function timesourcename(filenames::Vector{String}, time, rename)
     return length(matches) == 1 ? only(matches) : nothing
 end
 
-# Column name after `rename`, mirroring what renamecolumns! does to the frame.
+# A column's name after `rename`, as renamecolumns! renames it.
 renamedto(n::String, ::Nothing) = n
 renamedto(n::String, f) = String(f(n))
 function renamedto(n::String, m::AbstractDict)

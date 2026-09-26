@@ -1,15 +1,14 @@
-# The missing-value fills. `fillmissing` is row-wise and stateless — a constant
-# per column, so a chunk is all the context it needs. `forwardfill` carries the
-# last non-missing value of every filled column across rows, chunks and keys,
-# which makes it stateful in the sense DESIGN.md's streaming section means: the
-# carried state is what keeps `stream` equal to `load`.
+# The missing-value fills. `fillmissing` is row-wise and stateless: a constant
+# per column. `forwardfill` carries the last non-missing value of every filled
+# column across rows, chunks and keys; that carried state keeps `stream` equal
+# to `load`.
 #
-# That state is a cell per (key, column), not a row per key, because a forward
-# fill is column-independent — `:a` may carry from row 3 while `:b` carries from
-# row 7 — so `lastrow`'s whole-row store cannot serve it. The cells are mutable,
-# so the store is a plain `Dict{K,NamedTuple}` rather than join.jl's
-# `Dict{K,Int}` over a slot vector: a lookup already answers with a pointer, so
-# there is no `Union{Nothing,V}` to box (`KeyBuffer`'s reason, src/acausal.jl).
+# The state is a cell per (key, column), not a row per key, because columns
+# carry independently (`:a` from row 3, `:b` from row 7), so `lastrow`'s
+# whole-row store cannot serve. The cells are mutable, so the store is a plain
+# `Dict{K,NamedTuple}` rather than join.jl's `SlotStore`: a lookup already
+# answers with a pointer, with no `Union{Nothing,V}` to box (as with
+# `KeyBuffer` in src/acausal.jl).
 
 """
     forwardfill(selectors...; key = nothing, tolerance = nothing)
@@ -74,12 +73,9 @@ forwardfill(p::CausalPipeline, selectors...; kwargs...) =
     forwardfill(selectors...; kwargs...)(p)
 
 # One carried value per (key, filled column): the last non-missing value, the
-# time of the row it came from, and whether there has been one. Mutable, so a
-# store lookup answers with a pointer and updates in place. `seen` leads so the
-# inner constructor can leave `value` and `time` undefined — TrackState's idiom
-# (src/summarizers.jl) — and it guards every read of them. Both parameters are
-# bound by the constructor's own signature, so Aqua's unbound-parameter check
-# needs nothing further.
+# time of its row, and whether there has been one. `seen` comes first so the
+# inner constructor can leave `value` and `time` undefined (as `TrackState`
+# does); it guards every read of them.
 mutable struct FillCell{T,S}
     seen::Bool
     value::T
@@ -87,11 +83,9 @@ mutable struct FillCell{T,S}
     FillCell{T,S}() where {T,S} = new{T,S}(false)
 end
 
-# Per-run mutable state, in fields rather than reassigned closure captures
-# (those get boxed). The dynamically typed fields are per-chunk setup state:
-# which columns are filled comes from the first chunk's names and the cell
-# types from the promoted schema, so neither is known until a chunk arrives,
-# and everything per-row sits behind the `fillkeyless!`/`fillkeyed!` barriers.
+# Per-run state. The filled columns and cell types are known only once a chunk
+# arrives, so these fields are untyped per-chunk setup; the per-row work sits
+# behind the `fillkeyless!`/`fillkeyed!` barriers.
 mutable struct ForwardFillState
     const keycols::Vector{Symbol}
     const selectors::Tuple
@@ -116,12 +110,9 @@ function fillchunk!(st::ForwardFillState, keynames::Val, tolerance, start,
     return clipstart!(st, c, start)
 end
 
-# The columns to fill, in the chunk's own order. Running the selectors over
-# every column of every chunk is wasted work when the schema never moves, so
-# the resolution is memoized against the names it came from, as
-# `selectcolumns` memoizes its own projection. Element types may move from
-# chunk to chunk, but the set of filled columns may not: it fixes the cell
-# NamedTuple's names, and hence the store's type.
+# The columns to fill, in the chunk's order, memoized against the names they
+# came from. Element types may change between chunks, but the set of filled
+# columns may not: it fixes the cells' names, and so the store's type.
 function resolvefill!(st::ForwardFillState, c::DataFrame)
     cols = names(c)
     st.lastnames == cols && return nothing
@@ -146,9 +137,8 @@ function resolvefill!(st::ForwardFillState, c::DataFrame)
     return nothing
 end
 
-# A cell holds only non-missing values, so it is typed at the non-missing type.
-# The `Union{}` guard keeps a pathological all-Missing column working: there is
-# then no non-missing type to hold, and `seen` simply never becomes true.
+# A cell holds only non-missing values. For an all-Missing column (no
+# non-missing type) it keeps the column's type, and `seen` stays false.
 function cellvaluetype(T::Type)
     V = nonmissingtype(T)
     return V === Union{} ? T : V
@@ -160,8 +150,8 @@ cellstype(types::NamedTuple, ::Val{FN}) where {FN} = NamedTuple{FN,
 @inline freshcells(::Type{NamedTuple{FN,TT}}) where {FN,TT} =
     NamedTuple{FN,TT}(ntuple(i -> fieldtype(TT, i)(), Val(length(FN))))
 
-# Widening copies through the field assignments, which convert, and skips
-# unseen cells — their value and time are deliberately undefined.
+# The field assignments convert. Unseen cells have undefined fields, so they
+# are skipped.
 @inline function widencell(::Type{C}, old::FillCell) where {C<:FillCell}
     cell = C()
     if old.seen
@@ -185,10 +175,9 @@ function widenstore(::Type{Dict{K,NT}}, old::AbstractDict) where {K,NT}
 end
 
 # Per-chunk setup: build or widen the cells, allocate the replacement columns,
-# then hand concretely typed arguments to the per-row kernel. A column whose
-# promoted type admits no `Missing` has nothing to fill, so it gets no
-# replacement column at all and is left untouched — `nothing` in the group
-# tuple, which folds the write away in the kernel.
+# then call the per-row kernel with concretely typed arguments. A column whose
+# promoted type admits no `Missing` gets no replacement column (`nothing`, which
+# folds the write away) and passes through untouched.
 function fillprepared!(st::ForwardFillState, ::Val{KN}, ::Val{FN}, tolerance,
     types::NamedTuple, widened::Bool, c::DataFrame) where {KN,FN}
     isempty(FN) && return nothing
@@ -213,9 +202,8 @@ function fillprepared!(st::ForwardFillState, ::Val{KN}, ::Val{FN}, tolerance,
     return nothing
 end
 
-# The replacement column takes the promoted input type, so a column that has
-# admitted `Missing` in any chunk keeps admitting it — the leading rows before
-# the first value, and the rows past `tolerance`, really are missing.
+# The replacement column takes the promoted input type, keeping `Missing` for
+# rows before the first value or past `tolerance`.
 filloutputs(types::NamedTuple, ::Val{FN}, n::Int) where {FN} =
     NamedTuple{FN}(map(k -> Missing <: types[k] ? Vector{types[k]}(undef, n) :
                             nothing, FN))
@@ -223,8 +211,7 @@ filloutputs(types::NamedTuple, ::Val{FN}, n::Int) where {FN} =
 function attach!(c::DataFrame, outs::NamedTuple{FN}, ::Val{FN}) where {FN}
     for n in FN
         col = outs[n]
-        # Columns are replaced wholesale, never mutated in place; assigning an
-        # existing name keeps its position, so the output schema is the input's.
+        # Replaced wholesale, never mutated; the column keeps its position.
         col === nothing || (c[!, n] = col)
     end
     return nothing
@@ -232,11 +219,9 @@ end
 
 # --- fill kernels ----------------------------------------------------------
 #
-# Called with concretely typed arguments, so the per-row work compiles to
-# direct column access with nothing boxed. `groups` is a tuple of (input
-# column, replacement column) pairs and `cells` the matching cells, both in the
-# filled columns' own order, so the walk over the columns unrolls and no name
-# is a runtime value.
+# Called with concretely typed arguments, so nothing is boxed. `groups` is a
+# tuple of (input column, replacement column) pairs and `cells` the matching
+# cells, so the walk over the columns unrolls.
 
 function fillkeyless!(times::AbstractVector, groups::Tuple, cells::Tuple, tolerance)
     for i in eachindex(times)
@@ -260,9 +245,8 @@ end
     cell = cells[1]
     x = @inbounds incol[i]
     if ismissing(x)
-        # A carried value keeps the time of the row it came from, so staleness
-        # is decided here, against each row — never by evicting eagerly, which
-        # is asofjoin's rule too.
+        # Staleness is judged per row against the carried value's time, never
+        # by eager eviction, as in asofjoin.
         outcol === nothing || (@inbounds outcol[i] =
             cell.seen && (tolerance === nothing || t - cell.time <= tolerance) ?
             cell.value : missing)
@@ -275,10 +259,9 @@ end
     return fillrow!(i, t, tolerance, Base.tail(groups), Base.tail(cells))
 end
 
-# With `tolerance` the input ran over the widened context, so the leading rows
-# fill the cells and are then dropped: `load` rejects a chunk starting before
-# `ctx.start`. Times are non-decreasing across chunks, so the first chunk with
-# an in-window row settles it for every later one.
+# With `tolerance` the input ran over a widened context: rows before
+# `ctx.start` fill the cells and are then dropped. Once a chunk reaches the
+# window, every later chunk is inside it.
 function clipstart!(st::ForwardFillState, c::DataFrame, start)
     st.passedstart && return c
     lo = searchsortedfirst(c.time, start)
@@ -335,11 +318,9 @@ function fillmissing(specs...)
 end
 fillmissing(p::CausalPipeline, specs...) = fillmissing(specs...)(p)
 
-# Parallel tuples — names as a Symbol tuple, values as a possibly
-# heterogeneous one — so the fill values keep their concrete types into the
-# per-column kernel. `towindows` (src/rolling.jl) has the same shape and the
-# same reason. The two leading methods are the inferrable spellings; the
-# fallback flattens whatever collection of pairs was passed.
+# Parallel tuples of names and (possibly heterogeneous) values, so the fill
+# values keep their concrete types, as in `towindows` (src/rolling.jl). The
+# first two methods infer; the fallback flattens any collection of pairs.
 tofillvalues(specs::Tuple{NamedTuple}) = (keys(specs[1]), values(specs[1]))
 tofillvalues(specs::Tuple{Vararg{Pair}}) =
     (map(p -> Symbol(first(p)), specs), map(last, specs))
@@ -369,16 +350,14 @@ function fillmissingchunk!(c::DataFrame, fillnames::Tuple, vals::Tuple)
         hasproperty(c, n) ||
             throw(ArgumentError("fillmissing: no column named $(repr(n))"))
         col = c[!, n]
-        # Nothing to replace, so the column passes through untouched.
+        # Nothing to replace.
         Missing <: eltype(col) || continue
         c[!, n] = fillcolumn(col, v)
     end
     return c
 end
 
-# Function barrier: with the column dispatched concretely the output element
-# type is a compile-time constant, so the comprehension builds a typed column
-# directly. `nonmissingtype(T) === Union{}` (an all-Missing column) falls out
-# on its own — `promote_type(Union{}, V)` is `V`.
+# Function barrier: the output eltype is a compile-time constant. An all-Missing
+# column works too, since `promote_type(Union{}, V)` is `V`.
 fillcolumn(col::AbstractVector{T}, v::V) where {T,V} =
     promote_type(nonmissingtype(T), V)[ismissing(x) ? v : x for x in col]

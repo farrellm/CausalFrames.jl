@@ -1,13 +1,12 @@
-# The JLS sink and source: a stream persisted through the Serialization stdlib,
-# as a header record followed by one serialized DataFrame per chunk. Unlike CSV
-# and parquet, which are typed formats, this round-trips whatever a column
-# holds — at the price of a file tied to the Julia and package versions that
-# wrote it. The sink reuses the file sinks' ChunkSink machinery whole; the
-# source is a CSVProducer-shaped producer over the shared clipchunk!.
+# The JLS sink and source: a stream persisted with the Serialization stdlib as
+# a header record followed by one serialized DataFrame per chunk. Unlike CSV
+# and parquet it round-trips any column value, but the file is tied to the
+# Julia and package versions that wrote it. The sink uses ChunkSink; the source
+# clips with the shared clipchunk!.
 
-# The first record of every file. A NamedTuple of isbits values serializes
-# identically across Julia versions, so a foreign or future file is reported
-# as such rather than as an opaque deserialization failure.
+# The first record of every file. A NamedTuple of a Symbol and an Int
+# serializes stably across Julia versions, so a foreign or future file is
+# reported as such rather than failing opaquely.
 const JLSHEADER = (format = :CausalFramesJLS, version = 1)
 
 """
@@ -42,8 +41,8 @@ writejls(p::CausalPipeline, path::AbstractString; kwargs...) =
     writejls(path; kwargs...)(p)
 
 # The background writer. Each record is its own `serialize` call, so records
-# carry no back-references to each other and the reader can take them one at a
-# time; flushing after each keeps a complete prefix on disk.
+# share no back-references and can be read one at a time; flushing each keeps a
+# complete prefix on disk.
 function jlswriteloop(chan::Channel{DataFrame}, path::String)
     open(path, "w") do io
         serialize(io, JLSHEADER)
@@ -74,16 +73,13 @@ first time past the window; there is no index, so a read costs the file up to
 """
 function readjls(path::AbstractString; closed::Bool = false)
     return CausalPipeline() do ctx::Context
-        # a written stream's times are resolved and never missing: no `time`,
-        # `rename` or `skipmissing` to take
+        # a written stream's times are resolved and never missing
         clip = SourceClip(ctx, path, "jls file", nothing, nothing, closed, false)
         return ChunkSource(JLSProducer(clip))
     end
 end
 
-# The stateful producer behind readjls's ChunkSource, in CSVProducer's shape:
-# the pull-to-pull state lives in fields rather than reassigned closure
-# captures (which would be boxed); the per-row work is clipchunk!'s.
+# The stateful producer behind readjls's ChunkSource.
 mutable struct JLSProducer{T}
     const clip::SourceClip{T}
     io::Union{Nothing,IOStream}   # opened on the first pull
@@ -119,8 +115,8 @@ function finishjls!(p::JLSProducer)
     return nothing
 end
 
-# Open the file and consume its header, turning every way that can fail into an
-# ArgumentError naming the file.
+# Open the file and consume its header; any failure is an ArgumentError naming
+# the file.
 function openjls(path::String)
     io = open(path, "r")
     header = try
@@ -140,8 +136,8 @@ function openjls(path::String)
     return io
 end
 
-# One record. A torn last record (an interrupted writejls) surfaces as an
-# EOFError from inside Serialization; report it as what it is.
+# One record. A truncated last record (an interrupted writejls) surfaces as an
+# EOFError, reported as such.
 function readrecord(io::IOStream, path::String)
     try
         return deserialize(io)

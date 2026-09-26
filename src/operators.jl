@@ -56,12 +56,9 @@ concatenate() = emptyframe()
 concatenate(ps::CausalPipeline...) =
     CausalPipeline(ctx::Context -> ChunkSource(ConcatProducer(ps, ctx)))
 
-# The stateful producer behind concatenate's ChunkSource, in the shape of
-# readcsv's CSVProducer: the pull-to-pull state lives in fields rather than
-# captured locals (captured variables that are reassigned get boxed). The
-# dynamically typed fields are per-pipeline setup state — one dynamic index
-# into the (heterogeneous) pipeline tuple and one cursor per pipeline; nothing
-# here runs per row.
+# The stateful producer behind concatenate's ChunkSource. State lives in fields
+# rather than captured locals, which would be boxed when reassigned. The untyped
+# fields are touched once per chunk or per pipeline, never per row.
 mutable struct ConcatProducer{P<:Tuple,C<:Context}
     const pipelines::P
     const ctx::C
@@ -91,9 +88,9 @@ function (p::ConcatProducer)()
     return nothing
 end
 
-# O(ncols) per chunk. Within one pipeline the chunk protocol already
-# guarantees the ordering; checking every chunk costs nothing extra and lets
-# the message name the pipelines when a boundary is the one out of order.
+# O(ncols) per chunk. The chunk protocol already orders chunks within a
+# pipeline, but checking every chunk is as cheap and lets the message name the
+# pipelines at an out-of-order boundary.
 function checkconcat!(p::ConcatProducer, c::DataFrame)
     cols = names(c)
     if p.names === nothing
@@ -211,12 +208,10 @@ function readcsv(path::AbstractString; types = nothing, time = nothing,
     checksourcetimespec(time, "readcsv")
     chunkbytes > 0 ||
         throw(ArgumentError("readcsv chunkbytes must be positive, got $chunkbytes"))
-    # Eager error where the time column is provably untyped: no `types` at all,
-    # or a name-keyed `types` dict that has no entry for the time column. Other
-    # `types` forms (positional vectors, index-keyed dicts, functions) can only
-    # be judged once the columns are realized, so they defer to the first-chunk
-    # check in `resolvetime!`. `types` names the *original* CSV columns, so a
-    # `rename` breaks the name correspondence too — defer that case as well.
+    # Fail eagerly when the time column is provably untyped: no `types`, or a
+    # name-keyed dict with no entry for it. Other `types` forms, and any
+    # `rename` (`types` names the file's original columns), can only be judged
+    # on the first chunk, in `resolvetime!`.
     if !(time isa Function) && rename === nothing
         timename = time isa Symbol ? time : :time
         namekeyed = types isa AbstractDict && keytype(types) <: Union{Symbol,
@@ -235,14 +230,12 @@ function readcsv(path::AbstractString; types = nothing, time = nothing,
     end
 end
 
-# The configuration and running state every file source shares, and the one
-# argument `clipchunk!` and `gatherchunk!` take: where the rows come from
-# (`path`, and `what` it is, for messages), how `:time` is resolved (`time`,
-# `rename`), which rows are kept (`closed`, `skipmissing`, the window), and —
-# carried across chunks — the last raw time seen, for the cross-chunk order
-# check, and whether the stream is done. A new file-source keyword that bears
-# on the clip is a field here. The dynamically typed fields are per-chunk setup
-# state; the per-row work sits behind `clipchunk!`'s function barriers.
+# The configuration and running state shared by every file source, and the
+# argument `clipchunk!` and `gatherchunk!` take: where rows come from, how
+# `:time` is resolved, which rows are kept, and, across chunks, the last raw
+# time seen and whether the stream is done. A file-source keyword that bears on
+# the clip is a field here. The untyped fields are read once per chunk; per-row
+# work sits behind `clipchunk!`'s function barriers.
 mutable struct SourceClip{T}
     const path::String
     const what::String  # the format, for messages: "CSV file", "parquet file", …
@@ -261,11 +254,9 @@ SourceClip(ctx::Context{T}, path::AbstractString, what::String, time, rename,
     SourceClip{T}(String(path), what, time, rename, closed, skipmissing,
         ctx.start, ctx.stop, nothing, false)
 
-# The stateful producer behind readcsv's ChunkSource. The pull-to-pull state
-# lives in fields rather than captured locals (captured variables that are
-# reassigned get boxed). The dynamically typed fields are per-chunk setup
-# state, not per-row state — the per-row `time` function runs behind a
-# function barrier (`maptime`).
+# The stateful producer behind readcsv's ChunkSource, with fields rather than
+# boxed captured locals. The untyped fields are per-chunk setup; the per-row
+# `time` function runs behind a function barrier (`maptime`).
 mutable struct CSVProducer{T}
     const clip::SourceClip{T}
     const chunkbytes::Int
@@ -278,9 +269,8 @@ CSVProducer(clip::SourceClip{T}, chunkbytes::Int, types, delim,
     sort::Bool) where {T} =
     CSVProducer{T}(clip, chunkbytes, types, delim, sort, nothing)
 
-# The user's `types` (or nothing) as a CSV.jl per-column `types` function that
-# defaults every unspecified column to `String` — so nothing is ever inferred.
-# CSV calls it with a 1-based column index and a `Symbol` name.
+# The user's `types` as a CSV.jl `types` function `(index, name::Symbol)` that
+# defaults every unspecified column to `String`, so nothing is inferred.
 typesfunction(::Nothing) = (i, name) -> String
 typesfunction(t::Type) = (i, name) -> t
 typesfunction(v::AbstractVector) =
@@ -295,14 +285,10 @@ function typesfunction(d::AbstractDict)
     end
 end
 
-# CSV.Chunks refuses files it cannot split (ntasks == 1, or too few rows to
-# justify it); such a file fits in one chunk, so read it whole. Columns are
-# read as plain `String` (`stringtype`) unless `types` overrides them.
+# The file's chunks. A file that fits in one chunk, or that CSV.Chunks refuses
+# to split, is read whole. `delim = nothing` is CSV.jl's own default.
 function csvchunks(path::String, chunkbytes::Int, types, delim)
-    # CSV.jl's own default for `delim` is `nothing`, so passing it through
-    # unchanged is a no-op.
-    # A zero-byte file is what writecsv leaves for a stream with no rows (with
-    # no chunk, there is no header to write), so it reads back as one.
+    # writecsv leaves a zero-byte file (no header) for an empty stream.
     bytes = filesize(path)
     bytes == 0 && return DataFrame[]
     opts = (; types = typesfunction(types), stringtype = String, delim = delim)
@@ -344,18 +330,17 @@ function (p::CSVProducer{T})() where {T}
     return nothing
 end
 
-# Shared by the file sources: rename the columns, materialize `:time`, drop (or
-# refuse) the rows whose time is missing, check sortedness within the chunk and
-# against the last time of the previous one, clip to [start, stop) (or
-# [start, stop] when closed), and convert `:time` to the context's time type.
-# Returns the clipped chunk, or nothing when no row is in the window; a time
-# past the window marks the clip done, which ends the source.
+# Shared by the file sources: rename columns, materialize `:time`, drop (or
+# refuse) missing-time rows, check order within the chunk and against the
+# previous one, clip to the window, and convert `:time` to the context's time
+# type. Returns nothing when no row is in the window. A time past the window
+# marks the clip done, which ends the source.
 function clipchunk!(clip::SourceClip{T}, df::DataFrame) where {T}
     what, path = clip.what, clip.path
     renamecolumns!(df, clip.rename)
     resolvetime!(df, clip.time, path, what)
-    # Missing rows are folded into the clip's row index rather than deleted
-    # first, so a chunk holding some costs one copy of its in-window rows.
+    # Missing rows are excluded through the row index rather than deleted
+    # first, so the chunk is copied once.
     present = presentrows(df.time, clip.skipmissing, what, path)
     times = present === nothing ? df.time : view(df.time, present)
     issorted(times) || throw(ArgumentError(unordered(what, path)))
@@ -367,8 +352,7 @@ function clipchunk!(clip::SourceClip{T}, df::DataFrame) where {T}
     lo, hi = windowbounds(times, clip.closed, clip.start, clip.stop)
     hi < length(times) && (clip.done = true)   # saw a time past the window
     hi < lo && return nothing
-    # The chunk is freshly materialized and owned, so a clip that keeps every
-    # row needs no copy.
+    # The chunk is freshly read and owned, so keeping every row needs no copy.
     clipped =
         present !== nothing ? df[present[lo:hi], :] :
         lo == 1 && hi == nrow(df) ? df : df[lo:hi, :]
@@ -376,11 +360,10 @@ function clipchunk!(clip::SourceClip{T}, df::DataFrame) where {T}
     return clipped
 end
 
-# `clipchunk!`'s counterpart for a source asked to `sort`, shared by readcsv and
-# readparquet: the same rename and time resolution, but the chunk's order is
-# not the file's promise, so there is no order check, no binary search and no
-# early stop — the in-window rows are found by a scan and pushed onto `kept`
-# (when there are any), to be sorted once the file is exhausted.
+# `clipchunk!`'s counterpart for a source asked to `sort`: the same rename and
+# time resolution, but with no order check, binary search or early stop. The
+# in-window rows, found by a scan, are pushed onto `kept` to be sorted once the
+# file is exhausted.
 function gatherchunk!(kept::Vector{DataFrame}, clip::SourceClip, df::DataFrame)
     what, path = clip.what, clip.path
     renamecolumns!(df, clip.rename)
@@ -391,7 +374,7 @@ function gatherchunk!(kept::Vector{DataFrame}, clip::SourceClip, df::DataFrame)
         present === nothing ? windowrows(df.time, closed, start, stop) :
         present[windowrows(view(df.time, present), closed, start, stop)]
     if length(rows) == nrow(df)
-        push!(kept, df)    # freshly materialized and owned, as in clipchunk!
+        push!(kept, df)    # owned, as in clipchunk!
     elseif !isempty(rows)
         push!(kept, df[rows, :])
     end
@@ -404,9 +387,8 @@ windowrows(times::AbstractVector, closed::Bool, start, stop) =
     closed ? findall(t -> start <= t && t <= stop, times) :
     findall(t -> start <= t && t < stop, times)
 
-# The gathered rows as one stably time-sorted chunk (nothing when none were in
-# the window), `:time` converted to the context's time type. Chunks are gathered
-# in file order, so stability across them is file order too.
+# The gathered rows as one chunk stably sorted by time, so ties keep file
+# order, with `:time` converted to the context's time type; nothing if empty.
 function sortgathered(kept::Vector{DataFrame}, ::Type{T}) where {T}
     isempty(kept) && return nothing
     df = length(kept) == 1 ? only(kept) : reduce(vcat, kept)
@@ -424,10 +406,9 @@ unordered(
     path::String,
 ) = "time column in $(sourcename(what, path)) is not non-decreasing"
 
-# A time column that arrived as text cannot be ordered against the window. A
-# `time` function that produced it has to be fixed itself; otherwise only CSV
-# has a `types` knob to point the user at, and parquet or a table carries its
-# own types, so there the way out is a `time` function.
+# The error for a textual time column, which can't be ordered against the
+# window. The hint depends on the cause: a `time` function to fix, CSV's
+# `types`, or, for sources carrying their own types, a `time` function.
 function textualtime(what::String, path::String, fromfunction::Bool)
     src = sourcename(what, path)
     fromfunction &&
@@ -440,9 +421,8 @@ function textualtime(what::String, path::String, fromfunction::Bool)
         a usable time"
 end
 
-# Text times, blank cells aside (a CSV text column with blanks is
-# `Union{Missing,String}`); an all-missing column is not text, whose
-# `nonmissingtype` is `Union{}`.
+# Whether the non-missing eltype is text. An all-missing column (nonmissingtype
+# `Union{}`) is not.
 function istextual(v::AbstractVector)
     S = nonmissingtype(eltype(v))
     return S !== Union{} && S <: AbstractString
@@ -452,9 +432,7 @@ end
 # columns it names; a function is applied to every column name.
 renamecolumns!(::DataFrame, ::Nothing) = nothing
 renamecolumns!(df::DataFrame, f) = (rename!(f, df); nothing)
-# A map may be keyed by either the column name as a String or as a Symbol, so
-# both are looked up; normalizing the pairs to one type up front keeps the two
-# cases from having to be collected separately and spliced together.
+# A map may be keyed by String or Symbol names, so both are looked up.
 function renamecolumns!(df::DataFrame, m::AbstractDict)
     pairs = Pair{String,Symbol}[]
     for n in names(df)
@@ -466,10 +444,8 @@ function renamecolumns!(df::DataFrame, m::AbstractDict)
     return nothing
 end
 
-# Materialize the `:time` column and check it is usable (not text), whether it
-# was a column or produced by a function. `what` names the file format for error
-# messages. Columns are looked up by `columnindex`, which unlike `names(df)`
-# allocates nothing.
+# Materialize `:time`, from a column or a function, and reject it if textual.
+# `columnindex`, unlike `names(df)`, allocates nothing.
 function resolvetime!(df::DataFrame, time, path::String, what::String)
     if time isa Function
         df[!, :time] = maptime(time, Tables.columntable(df))
@@ -541,8 +517,7 @@ function writecsv(path::AbstractString; queue::Integer = 1, kwargs...)
         haskey(kwargs, k) && throw(ArgumentError("writecsv controls the \
             $(repr(k)) option of CSV.write itself; it may not be passed"))
     end
-    # Materialized once, so the per-chunk splat into CSV.write is over a
-    # concretely typed NamedTuple rather than the keyword iterator.
+    # A concretely typed NamedTuple, for the per-chunk splat into CSV.write.
     opts = values(kwargs)
     return sinktransform(
         () -> ChunkSink(
@@ -557,9 +532,8 @@ checkqueue(queue::Integer, op::String) =
     throw(ArgumentError("$op queue must be non-negative, got $queue"))
 
 # Every file sink's transform: a pass-through chunkmap handing each chunk to a
-# per-run `ChunkSink`, built by `makesink()` when the run starts (so that is
-# when the file is truncated), and joining its writer once upstream is
-# exhausted.
+# `ChunkSink` built by `makesink()` when the run starts (truncating the file
+# then), and joining its writer once upstream is exhausted.
 function sinktransform(makesink)
     return function (p::CausalPipeline)
         return CausalPipeline() do ctx::Context
@@ -570,10 +544,9 @@ function sinktransform(makesink)
     end
 end
 
-# Per-run writer state, shared by every file sink: the queue feeding the
-# background task, plus the column names of the first chunk, which pin the
-# file's columns. Per-run mutable state lives here rather than in reassigned
-# closure captures (which get boxed). `label` names the operator in errors.
+# Per-run writer state for every file sink: the queue feeding the background
+# task, and the first chunk's column names, which fix the file's columns.
+# `label` names the operator in errors.
 mutable struct ChunkSink
     const chan::Channel{DataFrame}
     const task::Task
@@ -590,11 +563,9 @@ function ChunkSink(writeloop, queue::Int, label::String)
     return ChunkSink(chan, task, label, nothing)
 end
 
-# The background CSV writer. One handle for the whole run, closed
-# deterministically when the channel closes; each chunk is flushed as it lands,
-# so an interrupted run still leaves a complete prefix on disk. `append` is
-# false only for the first chunk, which is what makes CSV.write emit the header
-# exactly once.
+# The background CSV writer: one handle for the run, closed when the channel
+# closes. Each chunk is flushed as it lands, so an interrupted run leaves a
+# complete prefix. `append = false` on the first chunk writes the header once.
 function csvwriteloop(chan::Channel{DataFrame}, path::String, opts::NamedTuple)
     open(path, "w") do io
         first = true
@@ -616,10 +587,9 @@ function sinkchunk(sink::ChunkSink, c::DataFrame)
             from $(sink.names) to $(cols)"))
     end
     put!(sink.chan, c)
-    # The writer reads `c` concurrently, while downstream transforms may mutate
-    # their chunk's column index in place (they own what they are handed), so
-    # give them a private index over the same column vectors — those are never
-    # mutated in place, only replaced wholesale. O(ncols), nothing per row.
+    # The writer reads `c` concurrently while downstream may mutate its chunk's
+    # column index, so hand downstream a private index over the same vectors,
+    # which are never mutated in place. O(ncols).
     return DataFrame(c; copycols = false)
 end
 
@@ -656,9 +626,8 @@ function filterchunk(pred, c::DataFrame)
     return kept == length(mask) ? c : c[mask, :]
 end
 
-# Function barrier: iterates concretely typed rows of the column table. The
-# kept count falls out of the same pass, so the caller's "everything survived"
-# test costs no second walk over the mask.
+# Function barrier over concretely typed rows. Counting kept rows in the same
+# pass saves a second walk for the "everything survived" test.
 function rowmask(pred, nt::NamedTuple)
     mask = Vector{Bool}(undef, length(nt.time))
     kept = 0
@@ -717,9 +686,8 @@ function addchunk(f, c::DataFrame)
     return hcat(c, DataFrame(vals); copycols = false)
 end
 
-# Function barrier: with concretely typed rows the comprehension infers, so
-# the collected values have a concrete NamedTuple eltype and DataFrame builds
-# typed columns from them directly.
+# Function barrier: over concretely typed rows the comprehension infers a
+# concrete NamedTuple eltype, so DataFrame builds typed columns directly.
 rowvalues(f, nt::NamedTuple) = [f(row) for row in Tables.rows(nt)]
 
 """
@@ -746,10 +714,9 @@ function lag(offset)
 end
 lag(p::CausalPipeline, offset) = lag(offset)(p)
 
-# A negative offset would shift rows earlier, making lag acausal; reject it at
-# run time the way `widenstart` validates a tolerance (probe start - offset <=
-# start). Unlike `widenstart`, the whole window slides back by the offset, so
-# the +offset shift lands the output in [start, stop).
+# The input window: the whole window slid back by `offset`, so the shift lands
+# the output in [start, stop). A negative offset (acausal) is rejected by the
+# same subtraction probe as `widenstart`.
 function lagcontext(ctx::Context, offset)
     start = ctx.start - offset
     start <= ctx.start ||
@@ -757,9 +724,8 @@ function lagcontext(ctx::Context, offset)
     return Context(start, ctx.stop - offset)
 end
 
-# Shift the owned chunk's time column by a constant, preserving order (so no
-# re-sort) and column position. Shared with the acausal `lead`. `delta` may be
-# negative (lead subtracts). One allocation per chunk for the new column.
+# Shift the owned chunk's time column by a constant, keeping its order and
+# position. Shared with `Acausal.lead`, which passes a negative `delta`.
 shiftchunk!(c::DataFrame, delta) = (c[!, :time] = shifttime(c.time, delta); c)
 
 # Function barrier: the broadcast specializes on the concretely typed column.
@@ -795,13 +761,9 @@ function head(n::Integer)
 end
 head(p::CausalPipeline, n::Integer) = head(n)(p)
 
-# The stateful producer behind head's ChunkSource. head must genuinely stop
-# pulling upstream once the budget is spent, which a chunkmap cannot do — its
-# `advance` loops until upstream returns nothing — so it drives the upstream
-# iterator itself, in the shape of readcsv's CSVProducer: the pull-to-pull state
-# lives in fields rather than captured locals (captured variables that are
-# reassigned get boxed). The cursor's dynamically typed state is touched once
-# per chunk, never per row, exactly as ConcatProducer's is.
+# The stateful producer behind head's ChunkSource. head must stop pulling
+# upstream once the budget is spent, which chunkmap (it drains its upstream)
+# cannot do, so it drives the upstream cursor itself.
 mutable struct HeadProducer{U}
     const upstream::PullCursor{U}
     remaining::Int
@@ -815,16 +777,13 @@ function (p::HeadProducer)()
         p.remaining = 0     # ChunkSource requires nothing to be sticky
         return nothing
     end
-    # The chunk protocol guarantees the annotation, which is what lets produce()
-    # infer Union{Nothing, DataFrame} through the cursor's dynamically typed
-    # state.
+    # The chunk protocol guarantees the annotation, which lets produce() infer
+    # Union{Nothing, DataFrame} through the cursor's untyped state.
     return takerows!(p, chunk::DataFrame)
 end
 
-# The chunk is owned and its column vectors are never mutated in place, so one
-# that fits entirely under the budget is passed on as it is — filterchunk's and
-# clipchunk!'s "keeps everything, so no copy" rule. Only the chunk that spends
-# the budget is sliced.
+# A chunk that fits under the budget is owned and passed on uncopied; only the
+# chunk that spends the budget is sliced.
 function takerows!(p::HeadProducer, c::DataFrame)
     k = nrow(c)
     if k <= p.remaining
@@ -872,10 +831,9 @@ function settime(spec)
 end
 settime(p::CausalPipeline, spec) = settime(spec)(p)
 
-# Eager validation, shared by the two settime variants and (through
-# checksourcetimespec) the sources: a column name or a per-row function, nothing
-# else. A CausalPipeline lands here too, which is what turns a
-# mistyped `settime(p)` into a message rather than a MethodError deep in a chunk.
+# Eager validation, shared by both settime variants and (through
+# checksourcetimespec) the sources: a column name or a per-row function. It
+# also turns a mistyped `settime(p)` into a clear message.
 checktimespec(::Symbol, ::String) = nothing
 checktimespec(::Function, ::String) = nothing
 checktimespec(x, opname::String) = throw(
@@ -885,28 +843,23 @@ checktimespec(x, opname::String) = throw(
 )
 
 # A source's `time`: the same spec, or `nothing` for the column named `:time`.
-# Checked eagerly, since the chunk path only acts on a Symbol or a Function and
-# would read the `:time` column in place of anything else it was given.
+# Checked eagerly, since the chunk path would silently read `:time` for any
+# other value.
 checksourcetimespec(::Nothing, ::String) = nothing
 checksourcetimespec(time, opname::String) = checktimespec(time, "$opname time")
 
-# Per-run mutable state, in a field rather than a reassigned closure capture
-# (those get boxed). Unlike CSVProducer's `prevtime::Any` the type is known
-# here — it is the context's — so the cross-chunk comparison stays concrete.
-# The constructor is inner, as ConcatProducer's is, which suppresses the default
-# outer one: `SetTimeState(prevtime::Union{Nothing,T}) where {T}` cannot bind T
-# when called with `nothing`, and Aqua's unbound-type-parameter check fails on it.
+# Per-run state. `prevtime` has the context's time type, so the cross-chunk
+# comparison stays concrete. The inner constructor suppresses the default outer
+# one, whose unbound T (called with `nothing`) fails Aqua's check.
 mutable struct SetTimeState{T}
     prevtime::Union{Nothing,T}
     SetTimeState{T}() where {T} = new{T}(nothing)
 end
 
-# Shared by the causal `settime` and `Acausal.settime`, the way `shiftchunk!` is
-# shared with `lead`: recompute the owned chunk's :time from `spec`, validate the
-# result, and clip to [start, stop). `causal` adds the per-row "no row moves
-# earlier" rule; `opname` names the operator in the messages, which is the only
-# other thing the two variants disagree about. Returns the clipped chunk, which
-# may have no rows — chunkmap drops those.
+# Shared by `settime` and `Acausal.settime`: recompute the owned chunk's :time
+# from `spec`, validate it, and clip to [start, stop). `causal` adds the "no row
+# moves earlier" check; `opname` names the operator in messages. The result may
+# be empty, which chunkmap drops.
 function settimechunk!(st::SetTimeState{T}, spec, c::DataFrame, start::T, stop::T,
     causal::Bool, opname::String) where {T}
     old = c.time
@@ -923,13 +876,11 @@ function settimechunk!(st::SetTimeState{T}, spec, c::DataFrame, start::T, stop::
     lo = searchsortedfirst(new, start)
     hi = searchsortedfirst(new, stop) - 1
     settimecolumn!(c, spec, new)
-    # The chunk is owned, so a clip that keeps every row needs no copy — the
-    # rule filterchunk and clipchunk! follow.
+    # The chunk is owned, so keeping every row needs no copy.
     return lo == 1 && hi == nrow(c) ? c : c[lo:hi, :]
 end
 
-# The raw new time values. Both forms reject a textual column outright, as
-# `resolvetime!` does: a String cannot be ordered against the window.
+# The raw new time values. A textual result is rejected, as in `resolvetime!`.
 function newtimes(spec::Symbol, c::DataFrame, opname::String)
     String(spec) in names(c) ||
         throw(ArgumentError("$opname: no column named $(repr(spec))"))
@@ -945,17 +896,15 @@ checktimevalues(v::AbstractVector, opname::String) =
             $(eltype(v))); parse it to an ordered type first"),
     ) : v
 
-# The new column must live in the context's time type, as every source's does.
+# The new column takes the context's time type, as every source's does.
 function converttimes(::Type{T}, times::AbstractVector, opname::String) where {T}
     eltype(times) <: T && return times
     return convert(Vector{T}, times)
 end
 
-# Function barrier: both vectors are concretely typed, so this compiles to a
-# straight comparison loop. An explicit loop rather than `all(new .>= old)`,
-# which would allocate a BitVector per chunk and lose the row index the message
-# wants; `eachindex(old, new)` also asserts equal axes, which is what catches a
-# `spec` function returning the wrong number of values.
+# Function barrier over concretely typed vectors. An explicit loop, rather than
+# `all(new .>= old)`, allocates nothing and knows the offending row.
+# `eachindex(old, new)` asserts equal lengths.
 function checkforward(old::AbstractVector, new::AbstractVector, opname::String)
     @inbounds for i in eachindex(old, new)
         new[i] >= old[i] || throw(
@@ -967,13 +916,9 @@ function checkforward(old::AbstractVector, new::AbstractVector, opname::String)
     return nothing
 end
 
-# The Symbol form makes the named column the new :time — resolvetime!'s rename,
-# with the twist that a :time column already exists and must go first, since
-# `rename!` onto an existing name is an error. The renamed column keeps its own
-# position, so the output schema is a fixed function of the input's. The Function
-# form overwrites :time, which keeps its position for free. Both mutate the
-# chunk's column index in place, which the owner may do (see DESIGN.md, "CSV
-# output").
+# The Symbol form drops the old :time and renames the named column to :time,
+# in its own position. The Function form overwrites :time in place. Both mutate
+# the owned chunk's column index (see DESIGN.md, "CSV output").
 function settimecolumn!(c::DataFrame, spec::Symbol, new::AbstractVector)
     if spec !== :time
         select!(c, Not(:time))
@@ -1080,10 +1025,9 @@ function reordercolumns(selectors...)
 end
 reordercolumns(p::CausalPipeline, selectors...) = reordercolumns(selectors...)(p)
 
-# The three column transforms' shared shape: a chunkmap indexing each chunk by a
-# resolution of its column names — `resolve(names)` gives the columns to keep,
-# in order, or `nothing` to pass the chunk through untouched. The chunk is
-# owned, so the index can share its columns.
+# The column transforms' shared shape: a chunkmap indexing each owned chunk by
+# `resolve(names)`, the columns to keep in order, or `nothing` to pass it
+# through.
 function columntransform(resolve)
     return function (p::CausalPipeline)
         return CausalPipeline() do ctx::Context
@@ -1096,13 +1040,9 @@ function columntransform(resolve)
     end
 end
 
-# The resolution, cached against the names it was derived from. Running the
-# selectors over every column of every chunk is wasted work when the schema
-# never moves — which is the norm — and re-resolving when the names differ
-# keeps the validation per-chunk-strict rather than first-chunk-only, since the
-# trusted load/stream path does not itself re-check schema equality. Per-run
-# mutable state lives here rather than in reassigned closure captures (which
-# get boxed).
+# The resolution, cached against the names it came from. The schema rarely
+# changes, so this skips re-running the selectors, while re-resolving when names
+# differ keeps validation per-chunk (load and stream don't recheck schemas).
 mutable struct SchemaMemo
     lastnames::Union{Nothing,Vector{String}}
     resolved::Union{Nothing,Vector{Symbol}}
@@ -1134,8 +1074,7 @@ function keptcolumns(selectors::Tuple, cols::Vector{String}, selecting::Bool,
 end
 
 # The column order to impose, or `nothing` when the chunk already has it.
-# `placed` tracks by column position rather than by name: no hashing, and no
-# second pass to subtract the columns the selectors claimed.
+# `placed` tracks columns by position, avoiding hashing.
 function orderedcolumns(selectors::Tuple, cols::Vector{String})
     foreachliteral(selectors) do n
         n in cols || throw(
@@ -1161,8 +1100,8 @@ function orderedcolumns(selectors::Tuple, cols::Vector{String})
            order
 end
 
-# Numbers and Chars iterate as scalars in Base, so they would recurse forever
-# through the collection fallback below rather than being rejected by it.
+# Numbers and Chars iterate as themselves, so the collection fallbacks below
+# would recurse forever on them.
 const ScalarSelector = Union{Number,Char}
 
 selectorerror(x) = throw(
@@ -1172,9 +1111,9 @@ selectorerror(x) = throw(
 checkselector(selectors) =
     applicable(iterate, selectors) || selectorerror(selectors)
 
-# Does a selector spec match this column name? The leaf methods come first so
-# a predicate (callable) and a collection (iterable) can never be confused;
-# anything else must be iterable, and is matched recursively.
+# Whether a selector spec matches a column name. Leaves dispatch first, so a
+# predicate is never taken for a collection; anything else must be iterable
+# and is matched recursively.
 matchescolumn(s::Symbol, name::AbstractString) = String(s) == name
 matchescolumn(s::AbstractString, name::AbstractString) = String(s) == name
 matchescolumn(r::Regex, name::AbstractString) = occursin(r, name)
@@ -1199,9 +1138,8 @@ function foreachliteral(f, selectors)
     return nothing
 end
 
-# Walk every leaf of a selector spec, in order — unlike `foreachliteral`, which
-# visits only the name leaves. `reordercolumns` orders by the selectors, so it
-# needs the regex and predicate ones too, and needs them in the order written.
+# Walk every leaf of a selector spec in order, including the regex and
+# predicate leaves `foreachliteral` skips.
 foreachselector(f, s::Symbol) = (f(s); nothing)
 foreachselector(f, s::AbstractString) = (f(s); nothing)
 foreachselector(f, r::Regex) = (f(r); nothing)
@@ -1215,8 +1153,8 @@ function foreachselector(f, selectors)
     return nothing
 end
 
-# Eager validation: at least one selector, every leaf usable, and — for
-# dropcolumns — no attempt to drop the time column every frame must have.
+# Eager validation: at least one selector, every leaf usable, and, for
+# dropcolumns, no literal `:time`.
 function checkselectors(selectors::Tuple, opname::String, dropping::Bool)
     isempty(selectors) &&
         throw(ArgumentError("$opname requires at least one column selector"))
