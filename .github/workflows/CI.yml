@@ -25,7 +25,7 @@ jobs:
       matrix:
         version:
           - '1.10'
-          - '1.12'
+          - '1'
           - 'pre'
         os:
           - ubuntu-latest
@@ -44,7 +44,7 @@ jobs:
           # JET 0.10+ drops Julia 1.10, so the floor job lets the resolver pick
           # the newest 1.10-compatible JET rather than forcing the latest, which
           # (as Dependabot/CompatHelper PRs request) fails to resolve on 1.10.
-          # 1.12/pre keep 'auto', exercising the newest JET.
+          # '1'/pre keep 'auto', exercising the newest JET.
           force_latest_compatible_version: ${{ matrix.version == '1.10' && 'false' || 'auto' }}
       - uses: julia-actions/julia-processcoverage@v1
       - uses: codecov/codecov-action@v7
