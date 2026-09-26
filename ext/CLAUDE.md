@@ -2,10 +2,10 @@
 
 Three weak-dep extensions: the two parquet backends, then the MLJ model hooks
 (last section). `CausalFramesDuckDBExt.jl` and `CausalFramesParquet2Ext.jl` are
-the only code in the package that names DuckDB or Parquet2; `src/parquet.jl` holds the API, the docstrings and the
-backend-independent logic and names neither. Which backend is preferred in
-which direction, and why, is in `src/CLAUDE.md`'s `parquet.jl` entry — this
-file is the contract an extension implements and the traps in implementing it.
+the only code that names DuckDB or Parquet2; `src/parquet.jl` holds the API,
+the docstrings and the backend-independent logic. Which backend is preferred in
+which direction, and why, is in `src/CLAUDE.md`'s `parquet.jl` entry; this file
+is the contract an extension implements and the traps in implementing it.
 
 ## The hook contract
 
@@ -30,10 +30,9 @@ fallbacks in `src/parquet.jl` throw the `READHINT`/`WRITEHINT` message:
 - It must return only **non-empty** chunks — loop until a clip leaves rows or
   the source is done, since downstream code may assume a chunk has rows
 - Per-pull state lives in mutable struct fields, never in reassigned closure
-  captures (those get boxed). The dynamically typed fields (the reader handle,
-  the clip's `time`, `rename` and `prevtime`) are per-chunk *setup* state;
-  per-row work goes through `clipchunk!`, which puts it behind a function
-  barrier
+  captures (those get boxed). The untyped fields (the reader handle, the clip's
+  `time`, `rename` and `prevtime`) are per-chunk *setup* state; per-row work
+  goes through `clipchunk!`, behind a function barrier
 - `clipchunk!(clip, df)` returns the clipped chunk, or `nothing` when no row
   is in the window. It carries `prevtime` across pulls itself (that is what
   catches a cross-chunk sortedness violation) and sets `clip.done` on seeing a
@@ -92,8 +91,8 @@ error — a wrong answer is unacceptable, a slower one is fine:
 ## Parquet2 specifics
 
 - The sink defaults `compute_statistics = ["time"]` unless the caller set it:
-  those statistics are exactly what the *other* backend-independent read path
-  consults, so the two directions are coupled through the file
+  the row-group skip on read consults those statistics, so the two directions
+  are coupled through the file
 - Chunks are only ever merged into a row group, never split, so
   `rowgroupsize = 1` gives one row group per incoming chunk
 - The file becomes readable only when `finalize!` writes the footer as the

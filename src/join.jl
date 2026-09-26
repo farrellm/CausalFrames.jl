@@ -1,9 +1,8 @@
-# The as-of join transform. The left stream drives a chunkmap; the right
-# stream is pulled on demand from inside the step — a two-pointer merge where
-# the right pointer advances per left row, not per chunk. Per the summarize.jl
-# conventions, the type-unstable setup (schemas, building or widening the
-# store) happens once per right chunk, and the merge kernel takes concretely
-# typed arguments behind a function barrier.
+# The as-of join transform. The left stream drives a chunkmap and the right
+# stream is pulled on demand from inside the step: a two-pointer merge whose
+# right pointer advances per left row. Type-unstable setup (schemas, building
+# or widening the store) runs once per right chunk; the merge kernel takes
+# concretely typed arguments behind a function barrier.
 
 """
     asofjoin(right::CausalPipeline; key = nothing, tolerance = nothing,
@@ -73,12 +72,11 @@ normprefix(p::Union{Symbol,AbstractString}) = String(p)
 prefixed(::Nothing, n::Symbol) = n
 prefixed(p::String, n::Symbol) = Symbol(p, '_', n)
 
-# The join engine shared by `asofjoin`, `applymodels` and the acausal
-# `futurejoin`. The direction `D` is a singleton type picking the store and its
-# kernel by dispatch: `Backward` here (the latest right row at or before each
-# left row), `Acausal.Forward` in the submodule. strict and tolerance ride in
-# type parameters (`cmp` is `<`/`<=` backward, `>`/`>=` forward), so the kernel
-# specializes and neither costs a per-row branch. `op` names the operator in
+# The join engine shared by `asofjoin`, `applymodels` and `Acausal.futurejoin`.
+# The direction `D` picks the store and kernel by dispatch: `Backward` (the
+# latest right row at or before each left row) or `Acausal.Forward`. Strictness
+# (`cmp`: `<`/`<=` backward, `>`/`>=` forward) and tolerance are type
+# parameters, so neither costs a per-row branch. `op` names the operator in
 # error messages.
 struct Backward end
 
@@ -94,9 +92,8 @@ struct JoinConfig{KN,Tol,C,D}
     op::String
 end
 
-# Per-run mutable state, in fields rather than reassigned closure captures
-# (those get boxed). The dynamically typed fields are per-chunk setup state;
-# everything per-row sits behind the `segment!` function barrier.
+# Per-run state. The untyped fields are per-chunk setup; the per-row work sits
+# behind the `segment!` function barrier.
 mutable struct JoinState
     const right::PullCursor  # the right chunks; `done` once exhausted
     rnt::Any           # current right column table (nothing until first pull)
@@ -114,11 +111,9 @@ mutable struct JoinState
 end
 
 # The backward store, shared with `lastrow`: a `Dict{K,Int}` of slot numbers
-# over a `Vector{V}` of rows rather than a Dict of rows, because a Dict of rows
-# can only answer a lookup as `Union{Nothing,V}` — and building that Union out
-# of an inline-stored V heap-allocates it whenever V is not an isbits type (any
-# String or Missing-admitting column is enough). An Int slot number is isbits,
-# so the lookup is free and the row is read back inline.
+# over a `Vector{V}` of rows. A Dict of rows answers a lookup as
+# `Union{Nothing,V}`, which heap-allocates when V is not isbits (any String or
+# Missing-admitting column); an Int slot lookup allocates nothing.
 struct SlotStore{K,V}
     index::Dict{K,Int}
     slots::Vector{V}
@@ -127,14 +122,14 @@ SlotStore{K,V}() where {K,V} = SlotStore{K,V}(Dict{K,Int}(), V[])
 
 newstore(::Backward, ::Type{K}, ::Type{V}) where {K,V} = SlotStore{K,V}()
 
-# Slot numbers do not move, so only the keys are rebuilt; every slot is
-# occupied, so that vector converts wholesale.
+# Slot numbers don't move, so only the keys are rebuilt; every slot is
+# occupied, so the vector converts wholesale.
 widenstore(st::SlotStore, ::Type{K}, ::Type{V}) where {K,V} =
     SlotStore{K,V}(Dict{K,Int}(convert(K, k) => j for (k, j) in st.index),
         convert(Vector{V}, st.slots))
 
-# Store `row` as key `k`'s latest. `get!` claims the next slot number on a
-# miss, so this costs one hash whether or not the key is new.
+# Store `row` as key `k`'s latest, in one hash: `get!` claims the next slot
+# number on a miss.
 @inline function admitslot!(index::Dict{K,Int}, slots::Vector{V}, k,
     row::V) where {K,V}
     j = get!(index, k, length(slots) + 1)
@@ -143,16 +138,14 @@ widenstore(st::SlotStore, ::Type{K}, ::Type{V}) where {K,V} =
 end
 
 # The concrete row and key NamedTuple types for the store, from the promoted
-# right schema. The key type comes from the right side; left-side lookups may
-# carry different (say, narrower numeric) value types — Dict lookup hashes
-# with isequal, which matches across numeric types, so no conversion needed.
+# right schema. Left-side keys need no conversion: Dict lookup uses `isequal`
+# and hashing, which agree across numeric types.
 storerowtype(types::NamedTuple) = NamedTuple{keys(types),Tuple{values(types)...}}
 storekeytype(types::NamedTuple, ::Val{KN}) where {KN} =
     storerowtype(NamedTuple{KN}(types))
 
-# Widen a half-filled matches buffer, copying only the slots `found` marks.
-# The rest are deliberately undefined — a plain `convert` over the vector would
-# read them. Shared with futurejoin, whose buffer has the same shape.
+# Widen a half-filled matches buffer, copying only the slots `found` marks; a
+# plain `convert` would read the undefined rest. Shared with futurejoin.
 function convertmatches(::Type{V2}, matches::Vector,
     found::Vector{Bool}) where {V2}
     out = Vector{V2}(undef, length(matches))
@@ -162,12 +155,9 @@ function convertmatches(::Type{V2}, matches::Vector,
     return out
 end
 
-# Pull the next right chunk (type-unstable, once per right chunk): create or
-# widen the store when the promoted right schema moves — a source may hand a
-# column a different element type from one chunk to the next. The matches
-# buffer may be half-filled mid-left-chunk when this runs, so it is converted
-# along with the store — through `convertmatches`, since its unmatched slots
-# are undefined.
+# Pull the next right chunk (type-unstable, once per chunk), creating the store
+# or widening it when the promoted right schema changes. The matches buffer may
+# be half-filled mid-left-chunk, so it is widened too, with `convertmatches`.
 function pullright!(js::JoinState, cfg::JoinConfig)
     chunk = pull!(js.right)
     if chunk === nothing
@@ -212,8 +202,8 @@ function joinchunk!(js::JoinState, cfg::JoinConfig, c::DataFrame)
 end
 
 # Match every row of the left column table `nt` into `js.matches`/`js.found`,
-# pulling right chunks as the kernel asks for them. The fields are re-read on
-# each pass: a widening inside `pullright!` replaces the store and the buffer.
+# pulling right chunks as the kernel asks. The fields are re-read on each pass,
+# since `pullright!` may replace the store and the buffer.
 function matchchunk!(js::JoinState, cfg::JoinConfig, nt::NamedTuple)
     n = length(nt.time)
     resize!(js.matches, n)
@@ -232,12 +222,11 @@ end
 
 # --- merge kernel ----------------------------------------------------------
 #
-# Called with concretely typed arguments; the per-row work compiles down to
-# direct column access. Processes left rows from index i, admitting right
-# rows from rnt starting at rpos into the store. Returns (i, rpos, needpull):
-# needpull means the current right chunk is consumed but the stream may still
-# hold rows admissible for left row i — the driver must pull the next right
-# chunk before row i can be matched.
+# Called with concretely typed arguments. Processes left rows from index i,
+# admitting right rows from rnt, starting at rpos, into the store. Returns
+# (i, rpos, needpull): needpull means the right chunk is used up but the stream
+# may hold more rows admissible for left row i, so the driver must pull the
+# next right chunk before matching row i.
 segment!(st::SlotStore{K,V}, matches::Vector{V}, found::Vector{Bool},
     lnt::NamedTuple, i::Int, rnt::NamedTuple, rpos::Int, rdone::Bool,
     keynames::Val, before, tolerance) where {K,V} =
@@ -252,17 +241,16 @@ function joinsegment!(matches::Vector{V}, found::Vector{Bool},
     rlen = length(rnt.time)
     while i <= n
         t = @inbounds lnt.time[i]
-        # Admit right rows not after (strict: strictly before) t; equal right
-        # times overwrite the key's slot, so the later row in stream order
-        # wins.
+        # Admit right rows at or before t (strictly before, if strict). Among
+        # equal times the later row overwrites the key's slot.
         while rpos <= rlen && before(@inbounds(rnt.time[rpos]), t)
             admitslot!(index, slots, keyat(rnt, rpos, keynames),
                 rowat(V, rnt, rpos))
             rpos += 1
         end
         rpos > rlen && !rdone && return (i, rpos, true)
-        # A stored row keeps its time, so tolerance staleness is decided here,
-        # against each left row — never by evicting eagerly.
+        # Staleness is judged per left row against the stored row's time,
+        # never by eager eviction.
         j = get(index, keyat(lnt, i, keynames), 0)
         if j > 0
             m = @inbounds slots[j]
@@ -276,9 +264,9 @@ function joinsegment!(matches::Vector{V}, found::Vector{Bool},
     return (i, rpos, false)
 end
 
-# The V(...) conversion is what keeps the store insert type-stable when a
-# column's eltype is abstract (e.g. Union{Missing,Int}): a bare map would
-# yield the values' narrower concrete types.
+# `convert(V, …)` keeps the insert type-stable when a column's eltype is
+# abstract (e.g. Union{Missing,Int}); a bare map would give the values'
+# narrower types.
 @inline rowat(::Type{V}, nt::NamedTuple, i::Int) where {V} =
     convert(V, map(col -> @inbounds(col[i]), nt))
 @inline keyat(nt::NamedTuple, i::Int, ::Val{KN}) where {KN} =
@@ -286,9 +274,8 @@ end
 
 # --- output assembly -------------------------------------------------------
 
-# One rename! over every pair, not one call per column: each call rebuilds the
-# chunk's column index, which made this O(ncols^2) per chunk. The field form is
-# shared with lookupjoin.
+# One rename! over every pair, since each call rebuilds the column index. The
+# field form is shared with lookupjoin.
 prefixleft!(cfg::JoinConfig, c::DataFrame) =
     prefixleft!(cfg.leftprefix, cfg.keycols, c)
 function prefixleft!(leftprefix::Union{Nothing,String}, keycols::Vector{Symbol},
@@ -302,8 +289,8 @@ function prefixleft!(leftprefix::Union{Nothing,String}, keycols::Vector{Symbol},
     return c
 end
 
-# Needs both schemas, so it runs once the first right chunk has been seen and
-# before the first chunk is emitted.
+# Needs both schemas, so it runs after the first right chunk and before the
+# first output chunk.
 function checknames(cfg::JoinConfig, c::DataFrame, rvaluenames)
     seen = Set{Symbol}()
     function check(n)
@@ -340,10 +327,9 @@ function assemble(cfg::JoinConfig, js::JoinState, c::DataFrame)
     return hcat(c, rdf; copycols = false)
 end
 
-# Function barrier: fieldtype fixes the column's element type so the
-# comprehension builds a typed column directly. `found` is what makes the
-# unmatched slots safe — they are undefined, never `missing`, because a
-# Vector{Union{Missing,V}} boxes every stored row when V is not isbits.
+# Function barrier: `fieldtype` fixes the column's element type. Unmatched
+# slots are undefined rather than `missing` (a Vector{Union{Missing,V}} boxes
+# every row when V is not isbits), so `found` guards every read.
 matchcolumn(matches::Vector{V}, found::Vector{Bool}, ::Val{N}) where {V,N} =
     Union{Missing,fieldtype(V, N)}[
         @inbounds(found[i]) ? getproperty(@inbounds(matches[i]), N) : missing

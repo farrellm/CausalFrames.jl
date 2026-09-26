@@ -1,10 +1,9 @@
-# Acausal operations. Everything here looks *forward* in time, violating the
-# causal invariant the rest of the package upholds, so it lives in its own
-# submodule and is reached only through `using CausalFrames.Acausal` — never
-# re-exported from the top level. The forward join runs on `asofjoin`'s join
-# engine (`JoinConfig`, `JoinState`, `joinchunk!` in join.jl) and supplies only
-# its direction: a store and a kernel picked by dispatch on `Forward`, with the
-# match direction, the tie-break, and the context widening all inverted.
+# Acausal operations. Everything here looks *forward* in time, breaking the
+# causal invariant, so it lives in a submodule reached only through
+# `using CausalFrames.Acausal` and is never re-exported. The forward join runs
+# on asofjoin's engine (join.jl) and supplies only its direction: a store and
+# kernel picked by dispatch on `Forward`, with the match direction, tie-break
+# and context widening inverted.
 module Acausal
 
 using ..CausalFrames: CausalPipeline, Context, chunkmap, shiftchunk!,
@@ -79,10 +78,9 @@ end
 futurejoin(left::CausalPipeline, right::CausalPipeline; kwargs...) =
     futurejoin(right; kwargs...)(left)
 
-# The mirror of `widenstart`: forward tolerance widens the right
-# window forward, so lookahead past the window end is covered — the one place
-# times are added. The explicit guard rejects a negative tolerance, which the
-# Context constructor (only start <= stop) would otherwise accept.
+# The mirror of `widenstart`: a tolerance widens the right window forward, so
+# lookahead past the window's end is covered. The guard rejects a negative
+# tolerance, which the Context constructor would accept.
 futurecontext(ctx::Context, ::Nothing) = ctx
 function futurecontext(ctx::Context, tolerance)
     stop = ctx.stop + tolerance
@@ -91,16 +89,14 @@ function futurecontext(ctx::Context, tolerance)
     return Context(ctx.start, stop)
 end
 
-# The forward direction of `asofjoin`'s join engine (`JoinConfig`, `JoinState`,
-# `joinchunk!`): the same driver, with this store and kernel picked by dispatch
-# on `Forward`, and `cmp` being `>` or `>=`.
+# The forward direction of the join engine: the same driver, with the store and
+# kernel below picked by dispatch, and `cmp` being `>` or `>=`.
 struct Forward end
 
-# A per-key FIFO of buffered future right rows: append on pull, logical
-# pop-front by advancing `head` (the segtree.jl idiom), with an amortized
-# compaction so a buffer that stays small cannot grow its backing vector
-# without bound. `matches` stores copied row values, not buffer indices, so
-# compaction never invalidates an emitted match.
+# A per-key FIFO of buffered future right rows: append on pull, pop by
+# advancing `head`, with amortized compaction so the backing vector stays
+# bounded. `matches` holds copied rows, not indices, so compaction never
+# invalidates a match.
 mutable struct KeyBuffer{V}
     rows::Vector{V}
     head::Int
@@ -122,10 +118,9 @@ function bufpop!(b::KeyBuffer)
     return nothing
 end
 
-# Keyed by K over rows V, as the backward `SlotStore` is; a mutable
-# `KeyBuffer` already answers a lookup with a pointer, so there is no
-# `Union{Nothing,V}` to box. The matches buffer and the per-key buffers may be
-# half-consumed mid-left-chunk when a widening arrives, so both convert.
+# A Dict of mutable `KeyBuffer`s: a lookup answers with a pointer, so there is
+# no `Union{Nothing,V}` to box. A widening may arrive mid-left-chunk, so the
+# per-key buffers convert along with the matches buffer.
 newstore(::Forward, ::Type{K}, ::Type{V}) where {K,V} = Dict{K,KeyBuffer{V}}()
 widenstore(store::Dict{<:Any,<:KeyBuffer}, ::Type{K}, ::Type{V}) where {K,V} =
     Dict{K,KeyBuffer{V}}(
@@ -134,13 +129,11 @@ widenstore(store::Dict{<:Any,<:KeyBuffer}, ::Type{K}, ::Type{V}) where {K,V} =
 
 # --- merge kernel ----------------------------------------------------------
 #
-# Called with concretely typed arguments; the per-row work compiles down to
-# direct column access. On entry it drains the current right chunk fully into
-# the per-key buffers (a forward join needs rows *ahead* of t, so admission is
-# not gated by t), then processes left rows from index i. Returns
-# (i, rpos, needpull): needpull means a left row's key has no buffered future
-# row yet but the right stream is not exhausted — the driver must pull the
-# next right chunk before row i can be resolved.
+# Called with concretely typed arguments. First buffers the whole right chunk
+# by key (a forward join needs rows *ahead* of t), then processes left rows
+# from index i. Returns (i, rpos, needpull): needpull means row i's key has no
+# buffered future row but the right stream isn't exhausted, so the driver must
+# pull the next right chunk before resolving row i.
 segment!(store::Dict{K,KeyBuffer{V}}, matches::Vector{V}, found::Vector{Bool},
     lnt::NamedTuple, i::Int, rnt::NamedTuple, rpos::Int, rdone::Bool,
     keynames::Val, after, tolerance) where {K,V} =
@@ -161,24 +154,21 @@ function futuresegment!(matches::Vector{V}, found::Vector{Bool},
     while i <= n
         t = @inbounds lnt.time[i]
         b = get(store, keyat(lnt, i, keynames), nothing)
-        # Drop buffered rows now before t (strict: at or before t); they can
-        # never match this or any later (larger-t) left row. `after` is `>`
-        # or `>=`, so its negation is the discard test — the reverse of
-        # asofjoin's `before`, never reused.
+        # Drop buffered rows before t (at or before t, if strict); they can't
+        # match this or any later left row.
         if b !== nothing
             while !bufempty(b) && !after(buffront(b).time, t)
                 bufpop!(b)
             end
         end
         if b === nothing || bufempty(b)
-            # No buffered future row for this key. If the right stream may
-            # still hold one, pull and re-enter at i; otherwise it is missing.
+            # No buffered future row for this key: pull and re-enter at i if
+            # the right stream may hold one, else leave it missing.
             rdone || return (i, rpos, true)
         else
-            # The front is the earliest right row with time >= t (strict >).
-            # Tolerance staleness is decided here, against each left row: a
-            # front too far ahead now may match a later, larger t, so never
-            # evict on tolerance — leave the slot missing.
+            # The front is the earliest right row at or after t (after, if
+            # strict). A front beyond tolerance may still match a later left
+            # row, so it is never evicted on tolerance.
             m = buffront(b)
             if tolerance === nothing || m.time - t <= tolerance
                 @inbounds matches[i] = m
@@ -216,10 +206,9 @@ function lead(offset)
 end
 lead(p::CausalPipeline, offset) = lead(offset)(p)
 
-# The mirror of lag's lagcontext: the whole window slides forward by the offset
-# so the -offset shift lands the output back in [start, stop). The guard rejects
-# a negative offset (which the Context constructor, only start <= stop, would
-# otherwise accept and silently turn into a causal lag).
+# The mirror of `lagcontext`: the window slides forward by `offset`, so the
+# shift lands the output in [start, stop). The guard rejects a negative offset,
+# which would silently act as a lag.
 function leadcontext(ctx::Context, offset)
     start = ctx.start + offset
     start >= ctx.start ||

@@ -64,8 +64,8 @@
     end
 
     @testset "element types across chunks" begin
-        # a source may hand a column a different element type per chunk; the
-        # store tracks the promotion and widens a half-filled store in place
+        # a column's element type may differ per chunk; the store tracks the
+        # promotion and is rebuilt at the wider type
         drifting = CausalPipeline() do _
             [DataFrame(time = [1, 2], k = ["a", "b"], v = [1, 2]),
                 DataFrame(time = [3], k = ["b"], v = [3.5])]

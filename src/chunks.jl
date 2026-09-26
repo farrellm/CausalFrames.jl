@@ -1,12 +1,11 @@
 # Internal streaming machinery. The chunk protocol: a pipeline's run(ctx)
 # returns a single-pass lazy iterator of non-empty DataFrame chunks with
-# non-decreasing times within and across chunks; consumers take ownership of
-# yielded chunks. Empty chunks are filtered out here so downstream code may
-# assume every chunk has at least one row.
+# non-decreasing times within and across chunks, and consumers own the chunks
+# they are given. The iterators here drop empty chunks.
 
-# A source iterator driven by a stateful producer closure.
-# produce() -> Union{Nothing, DataFrame}; nothing means exhausted (and must
-# keep returning nothing on subsequent calls).
+# A source iterator over a stateful producer closure
+# produce() -> Union{Nothing, DataFrame}. Once it returns nothing (exhausted),
+# it must keep doing so.
 struct ChunkSource{F}
     produce::F
 end
@@ -22,14 +21,12 @@ function Base.iterate(it::ChunkSource, _ = nothing)
     end
 end
 
-# The pull side of an iterator driven one element at a time from a stateful
-# owner: a producer draining its input, or a binary transform pulling its second
-# stream on demand. Stateful rather than a captured local (captured variables
-# that are reassigned get boxed), and sticky: once the iterator is exhausted,
-# every later `pull!` returns `nothing` without touching it again. `state` is
-# dynamically typed, but it is touched once per element — per chunk, never per
-# row — so callers annotate what they pull (`::DataFrame`) where inference needs
-# it.
+# Pulls an iterator one element at a time for a stateful owner, such as a
+# producer draining its input or a binary transform pulling its second stream.
+# A mutable struct rather than a captured local, which would be boxed when
+# reassigned. Sticky: once the iterator is exhausted, `pull!` returns `nothing`
+# without touching it again. `state` is untyped but touched once per chunk, so
+# callers annotate what they pull (`::DataFrame`) where inference needs it.
 mutable struct PullCursor{I}
     const iter::I
     state::Any
@@ -57,12 +54,11 @@ struct Flushed end
 """
     chunkmap(step, upstream; flush = () -> nothing)
 
-Lazy chunk-to-chunk transformer: applies `step(chunk::DataFrame) ->
-Union{Nothing, DataFrame}` to each upstream chunk, skipping `nothing` and
-empty results; once upstream is exhausted, calls `flush() ->
-Union{Nothing, DataFrame}` exactly once and yields its result if non-empty.
-Single-pass: `step` and `flush` may close over mutable per-run state.
-Internal.
+Internal lazy chunk transformer. Applies `step(chunk::DataFrame) ->
+Union{Nothing, DataFrame}` to each upstream chunk, skipping `nothing` and empty
+results, then calls `flush() -> Union{Nothing, DataFrame}` once after upstream
+ends and yields its result if non-empty. Single-pass, so `step` and `flush` may
+close over mutable per-run state.
 """
 chunkmap(step, upstream; flush = () -> nothing) = ChunkMap(step, flush, upstream)
 
@@ -75,8 +71,8 @@ end
 Base.IteratorSize(::Type{<:ChunkMap}) = Base.SizeUnknown()
 Base.eltype(::Type{<:ChunkMap}) = DataFrame
 
-# The upstream state is wrapped in Some so it can never be confused with this
-# ChunkMap's own Flushed sentinel (the upstream may itself be a ChunkMap).
+# The upstream state is wrapped in Some so it can't be confused with this
+# ChunkMap's Flushed sentinel (the upstream may itself be a ChunkMap).
 Base.iterate(it::ChunkMap) = advance(it, iterate(it.upstream))
 Base.iterate(it::ChunkMap, s::Some) = advance(it, iterate(it.upstream, something(s)))
 Base.iterate(::ChunkMap, ::Flushed) = nothing

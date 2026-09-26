@@ -1,34 +1,26 @@
-# The monoid segment tree behind the rolling and window tree tiers: an
-# implicit array-based tree whose leaves are single admitted rows and whose
-# inner nodes hold the combine! of their children, so any contiguous row
-# range — in particular a trailing window — folds from O(log n) partial
-# combinations instead of every row. Rows only append (times are
-# non-decreasing) and only expire logically from the front (`head`); expired
-# leaves stay in place, excluded from queries, until a capacity-triggered
-# rebuild drops them — which is also what keeps a leaf poisoned by an
-# absorbing value (missing, NaN) harmless once it expires, since a query never
-# touches a node unless its whole range is inside the window.
+# The monoid segment tree behind the rolling and window tree tiers: an implicit
+# array tree whose leaves are rows and whose inner nodes hold the combine! of
+# their children, so a contiguous row range (a trailing window) folds from
+# O(log n) partial states. Rows only append and expire logically from the front
+# (`head`). Expired leaves stay in place until a rebuild drops them; a query
+# only reads nodes wholly inside the window, so an expired leaf holding an
+# absorbing value (missing, NaN) is harmless.
 #
-# Appending and recombining are separate steps. `treeappend!` writes only the
-# leaf; `treesync!` recombines the ancestors of every leaf appended since the
-# last sync, level by level, in O(new leaves + log cap). addrollingcolumns
-# queries after every append, so it syncs one leaf at a time (`treepush!`,
-# O(log cap) per row); summarizewindows queries only at clock ticks, so it
-# appends a tick's rows as bare leaves and syncs them together — about one
-# combine per row.
+# `treeappend!` writes only the leaf; `treesync!` recombines the ancestors of
+# every leaf appended since the last sync, in O(new leaves + log cap).
+# addrollingcolumns queries after every append, so it syncs per row
+# (`treepush!`, O(log cap)); summarizewindows queries only at ticks, so it syncs
+# a tick's rows together, about one combine per row.
 
 # S is the state-tuple type (one state per expanded summarizer prototype), R
 # the stored row type, T the time type. Leaves j = 1..cap sit at node
 # cap + j - 1; node i's children are 2i and 2i + 1; cap is a power of two.
-# Only nodes over appended leaves are maintained. A leaf slot past
-# length(rows) holds whatever a rebuild left there, and the append that claims
-# it zeroes it first; an inner node whose range lies wholly past length(rows)
-# is never read, because the sync combines the right edge with `ident` instead
-# and a query stops at length(rows).
-# accl/accr are the query walk's two order-preserving accumulators, owned by
-# the tree and zeroed per query rather than allocated: a query runs once per
-# output row per window, so allocating them there cost one heap allocation per
-# state per row — the single largest per-row allocation in the package.
+# Only nodes over appended leaves are maintained. A leaf slot past length(rows)
+# holds whatever a rebuild left there and is zeroed by the append that claims
+# it; an inner node wholly past length(rows) is never read, since the sync
+# combines the right edge with `ident` and queries stop at length(rows).
+# accl/accr are the query's two order-preserving accumulators, owned by the tree
+# and zeroed per query so queries don't allocate.
 mutable struct SegTree{S<:Tuple,R,T}
     rows::Vector{R}    # this key's admitted rows, in time order
     times::Vector{T}   # rows[j].time, aligned; for the window-start search
@@ -46,20 +38,18 @@ newsegtree(stateprotos::S, ::Type{R}, ::Type{T}) where {S<:Tuple,R,T} =
         map(fresh, stateprotos), map(fresh, stateprotos),
         map(fresh, stateprotos), 4, 1, 0)
 
-# Peeled explicitly rather than through `foreach`/`map`: the three-argument
-# `foreach` folds over a `zip` and does not unroll for tuples, which costs a
-# runtime dispatch per node on this hot path, and `map` would build a
-# throwaway NTuple{n,Nothing}.
+# Peeled explicitly: the three-argument `foreach` goes through a `zip` and
+# doesn't unroll for tuples (a runtime dispatch per node), and `map` would
+# build a throwaway NTuple{n,Nothing}.
 @inline combinenodes!(::Tuple{}, ::Tuple{}, ::Tuple{}) = nothing
 @inline function combinenodes!(dest::S, a::S, b::S) where {S<:Tuple}
     combine!(first(dest), first(a), first(b))
     return combinenodes!(Base.tail(dest), Base.tail(a), Base.tail(b))
 end
 
-# Append one row as a bare leaf: zero the slot it claims and fold the row in,
-# leaving the ancestors to the next `treesync!`. A full tree rebuilds first,
-# which also drops the expired prefix; between rebuilds at least half the
-# capacity is appended, so the rebuild amortizes to O(1) per row.
+# Append one row as a bare leaf (zeroing its slot), leaving the ancestors to
+# the next `treesync!`. A full tree rebuilds first, dropping the expired
+# prefix; rebuilds amortize to O(1) per row.
 function treeappend!(tr::SegTree{S,R}, stateprotos::S,
     row::R) where {S<:Tuple,R}
     length(tr.rows) == tr.cap && rebuild!(tr, stateprotos)
@@ -72,13 +62,11 @@ function treeappend!(tr::SegTree{S,R}, stateprotos::S,
     return nothing
 end
 
-# Recombine the ancestors of the leaves appended since the last sync, one level
-# at a time over the contiguous run of parents they share: O(new leaves +
-# log cap), no allocation. The run starts at the head rather than at the first
-# unsynced leaf when the head is past it: a node reaching into the expired
-# prefix is never queried, so neither is a stale value it carries. Only the
-# run's last parent can have a right child wholly past length(rows), and that
-# child is unmaintained, so the parent combines with `ident` instead.
+# Recombine the ancestors of the leaves appended since the last sync, level by
+# level over their contiguous run of parents: O(new leaves + log cap), no
+# allocation. The run starts no earlier than the head, since nodes reaching
+# into the expired prefix are never queried. Only the run's last parent can
+# have a right child wholly past length(rows); it combines with `ident`.
 function treesync!(tr::SegTree)
     n = length(tr.rows)
     lo = max(tr.synced + 1, tr.head)
@@ -101,24 +89,23 @@ function treesync!(tr::SegTree)
     return nothing
 end
 
-# Append one row and recombine its ancestors at once — O(log cap), for a caller
-# that queries after every append.
+# Append one row and recombine its ancestors: O(log cap), for a caller that
+# queries after every append.
 function treepush!(tr::SegTree{S,R}, stateprotos::S, row::R) where {S<:Tuple,R}
     treeappend!(tr, stateprotos, row)
     treesync!(tr)
     return nothing
 end
 
-# Fold rows lo:hi (1-based, inclusive; caller has checked lo <= hi and synced
-# the tree) into a state tuple: the standard bottom-up walk, kept
-# order-preserving with two accumulators — accL collects left-edge nodes left
-# to right, accR right-edge nodes right to left — because First/Last combine
-# correctly only over stream-ordered ranges.
+# Fold rows lo:hi (inclusive; the caller has checked lo <= hi and synced the
+# tree) into a state tuple by the bottom-up walk, order-preserving with two
+# accumulators (accl collects left-edge nodes left to right, accr right-edge
+# nodes right to left), since order-sensitive states such as First/Last
+# combine only over stream-ordered ranges.
 #
-# The accumulators are the tree's own scratch, zeroed here rather than
-# allocated, so the returned tuple is **borrowed**: it stays valid only until
-# the next query on this tree. Every caller (`emittree!`, `windowstates`) reads
-# it straight through `summaryvalues`, which copies the values out.
+# The returned tuple is the tree's own scratch, **borrowed**: valid only until
+# the next query on this tree. Callers (`treestates` in rolling.jl,
+# `tierstates` in windows.jl) read it straight through `summaryvalues`.
 function treequery(tr::SegTree{S}, lo::Int, hi::Int) where {S<:Tuple}
     accl = freshall!(tr.accl)
     accr = freshall!(tr.accr)
@@ -142,12 +129,11 @@ function treequery(tr::SegTree{S}, lo::Int, hi::Int) where {S<:Tuple}
     return accl
 end
 
-# The first live index whose row is inside a window ending at t: the least
-# m in head:length(times) with t - times[m] <= lb, or length + 1 when the
-# window is empty. The predicate is the rolling kernel's own membership test
-# verbatim — never rearranged to times[m] >= t - lb, which could disagree at
-# the last ulp for floating-point times — and it is monotone in m because
-# times are non-decreasing, so the search is a plain binary chop.
+# The first live index whose row is inside a window ending at t: the least m in
+# head:length(times) with t - times[m] <= lb, or length + 1 if none. The
+# predicate is the rolling kernel's membership test verbatim (rearranging it to
+# times[m] >= t - lb could disagree in the last ulp for float times), and it
+# is monotone in m, so this is a binary search.
 function windowstart(times::Vector{T}, head::Int, t, lb) where {T}
     lo, hi = head, length(times) + 1
     while lo < hi
@@ -162,20 +148,14 @@ function windowstart(times::Vector{T}, head::Int, t, lb) where {T}
 end
 
 # Drop the expired prefix and re-lay the live rows at a capacity leaving at
-# least live + 1 free slots, so rebuilds stay amortized-O(1) per append even
-# when nothing has expired.
+# least live + 1 free slots, so rebuilds stay amortized O(1) per append.
 #
-# At an unchanged capacity the live leaves' state tuples move to the front by
-# reference, and nothing is folded, zeroed or recombined here: the expired
-# tuples they swap with land past the new length(rows), where each is zeroed by
-# the append that claims its slot, and `synced = 0` has the next sync recombine
-# the ancestors. That is the steady state under a window short enough to
-# expire rows as fast as they arrive: `live` stays small, `cap` settles, and a
-# rebuild fires every few appends. Rebuilding by allocation there once cost
-# O(cap) fresh states each time — about six allocations per admitted row on a
-# 25-unit window — and re-zeroing and recombining the whole node vector still
-# cost several state operations per append. Only a capacity change allocates,
-# re-folding the live rows into fresh leaves.
+# At an unchanged capacity, the steady state under a short window, the live
+# leaves' state tuples swap to the front by reference and nothing is folded,
+# zeroed or recombined: the expired tuples land past length(rows), to be zeroed
+# by the appends that claim them, and `synced = 0` has the next sync recombine
+# the ancestors. Only a capacity change allocates, re-folding the live rows
+# into fresh leaves.
 function rebuild!(tr::SegTree{S}, stateprotos::S) where {S<:Tuple}
     dead = tr.head - 1
     deleteat!(tr.rows, 1:dead)

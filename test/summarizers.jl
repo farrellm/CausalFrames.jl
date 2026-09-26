@@ -51,8 +51,8 @@
     @test ismissing(only(df.x_moment_2))    # via its poisoned power sum
     @test only(df.x_first) == 1         # first does not
 
-    # a source may infer a column's type per chunk, so the state widens
-    # across the boundary rather than forcing the first chunk's type
+    # a column's type may differ per chunk, so the state widens across the
+    # boundary rather than keeping the first chunk's type
     df = DataFrame(
         load(Context(0, 9),
             chunks(DataFrame(time = [1, 2], qty = Int[1, 2]),
@@ -152,9 +152,8 @@ end
     @test ismissing(only(df.x_sum))            # the contrast: sum poisons
     @test eltype(df.x_sum) == Union{Missing,Int64}
 
-    # a source may hand a column a different element type per chunk, so the
-    # state widens rather than forcing the first chunk's type — and values
-    # equal across the promotion still count once (1 and 1.0 are one value)
+    # a column's type may differ per chunk, so the state widens, and values
+    # equal across the promotion count once (1 and 1.0 are one value)
     df = summarized(
         chunks(DataFrame(time = [1, 2], x = Int[1, 2]),
             DataFrame(time = [3, 4], x = Float64[1.0, 2.5])),
@@ -372,8 +371,8 @@ end
             summarize(ss)),
     )
     intypes = (time = Int64, x = Int32, y = Int32)
-    # a prototype that folds real per-row state, as against a fieldless
-    # derived one — which is what "shares the accumulator" actually means
+    # a prototype that folds per-row state, as opposed to a fieldless derived
+    # one: what "shares the accumulator" means
     accumulators(protos) = [
         only(keys(CausalFrames.emptyvalue(s))) for s in protos
         if length(keys(CausalFrames.emptyvalue(s))) == 1 &&
@@ -398,8 +397,8 @@ end
     @test eltype(df.y_x_dotproduct) == Float32
     @test eltype(df.y_x_covariance) == Float32
 
-    # the point of the change: both orders fold one accumulator, and the
-    # reversed one is a fieldless rename over it
+    # both orders fold one accumulator, the reversed one a fieldless rename
+    # over it
     protos, requested =
         CausalFrames.prototypes(Summarizer[DotProduct(:x, :y),
             DotProduct(:y, :x)], Symbol[])
@@ -633,8 +632,8 @@ end
     ) isa
           NamedTuple
 
-    # the sharing claim, tested rather than assumed: two regressions over the
-    # same predictors fold one accumulator per cross product between them
+    # two regressions over the same predictors share one accumulator per cross
+    # product
     protos, requested = CausalFrames.prototypes(
         Summarizer[LinearRegression([:x, :z], :y; name = :m1),
             LinearRegression([:x, :z], :w; name = :m2)], Symbol[])
@@ -743,11 +742,10 @@ end
         AgeWeightedSum(:x), Product(:x), Min(:x), Max(:x), First(:x), Last(:x),
         MinMax(:x), CountDistinct(:x)]
 
-    # fresh! must be indistinguishable from fresh: the transforms zero and
-    # reuse state tuples per cycle, per interval and per window query, so a
-    # state that does not fully reset leaks one emission's values into the
-    # next. MinMax is in the list without implementing fresh!, which is what
-    # exercises the `fresh(st)` default a custom summarizer inherits.
+    # fresh! must be indistinguishable from fresh: the transforms reuse state
+    # tuples per cycle, interval and window query, so an incomplete reset leaks
+    # values into the next emission. MinMax doesn't implement fresh!, which
+    # exercises the `fresh(st)` default.
     selfcontained = [Count(), Sum(:x), SumPower(:x, 2), DotProduct(:x, :y),
         AgeWeightedSum(:x), Product(:x), Min(:x), Max(:x), First(:x), Last(:x),
         MinMax(:x), CountDistinct(:x), Opaque(Sum(:x))]
@@ -779,8 +777,8 @@ end
         @test typeof(CausalFrames.fresh!(st)) === typeof(st)
     end
 
-    # Zeroing a built-in state is pure field writes, so it allocates nothing —
-    # the property every reuse path depends on.
+    # Zeroing a built-in state allocates nothing, which every reuse path relies
+    # on.
     for s in [Count(), Sum(:x), SumPower(:x, 2), DotProduct(:x, :y),
         AgeWeightedSum(:x), Product(:x), Min(:x), Max(:x), First(:x), Last(:x),
         CountDistinct(:x)]
@@ -791,12 +789,11 @@ end
         @test (@allocated CausalFrames.fresh!(st)) == 0
     end
 
-    # And over a whole tuple the cost does not grow with the number of resets.
-    # Asserted as a slope rather than as `@allocated(one call) == 0` because a
-    # lone `@allocated` puts a function boundary around the call, and the
-    # returned tuple has to be materialized to cross it — which Julia 1.10
-    # does even though it elides the tuple once `freshall!` is inlined into a
-    # folding loop, which is the only way the package calls it.
+    # And over a whole tuple the cost doesn't grow with the number of resets.
+    # Asserted as a slope rather than `@allocated(one call) == 0`: a lone
+    # `@allocated` puts a function boundary around the call, where Julia 1.10
+    # materializes the returned tuple that it elides once `freshall!` is
+    # inlined into a folding loop, as the package always calls it.
     function resettotal(states, row, n)
         acc = 0
         for _ in 1:n
@@ -898,10 +895,10 @@ end
 end
 
 @testset "SumPower term specialization" begin
-    # SumPower(c, 1) and SumPower(c, 2) fold the terms whose exponent is in the
-    # type — a move and a multiply — rather than PowerTerm's runtime `^`. That
-    # is an implementation detail, so it has to leave the output name, the
-    # accumulator type and the term's *bits* alone. See notes/sumpower-terms.md.
+    # SumPower(c, 1) and SumPower(c, 2) fold terms whose exponent is in the type
+    # (a move and a multiply) rather than PowerTerm's runtime `^`. That must not
+    # change the output name, the accumulator type or the term's *bits*. See
+    # notes/sumpower-terms.md.
     chunks(cs...) = CausalPipeline(ctx -> collect(cs))
     intypes = (time = Int64, x = Float64)
 
@@ -951,13 +948,12 @@ end
     end
     rnd = bitpatterns(50_000)
 
-    # n = 1 is exactly the runtime power, with one exception — and it is
-    # Julia's, not ours: on 1.10 `^(::Float64, ::Integer)` drops the sign of
-    # zero, returning 0.0 for (-0.0)^1. That was fixed in 1.11. ColumnTerm
-    # hands the column value back untouched, so on 1.10 the specialization is
-    # the more correct of the two; and it is unobservable in output either way,
-    # since the compensated accumulator starts at +0.0 and 0.0 + -0.0 is 0.0
-    # (asserted end to end below). Float32 is unaffected on every version.
+    # n = 1 is exactly the runtime power, except that on Julia 1.10
+    # `^(::Float64, ::Integer)` drops the sign of zero ((-0.0)^1 is 0.0; fixed
+    # in 1.11). ColumnTerm returns the value untouched, so it is the more
+    # correct there, and the difference is unobservable in output, since the
+    # accumulator starts at +0.0 (asserted end to end below). Float32 is
+    # unaffected.
     dropssignedzero(x) = VERSION < v"1.11" && x === -0.0
     @test all(x -> dropssignedzero(x) || same(runtimepow(x, 1), x), edge)
     @test all(x -> same(runtimepow(x, 1), x), rnd)
@@ -973,15 +969,11 @@ end
     @test all(x -> runtimepow(x, 2) === x * x, ints)   # incl. the wrap-around
     @test all(x -> runtimepow(x, 2) === x * x, (true, false))
 
-    # n = 2 is *not* bit-identical to the runtime power over floats, and the
-    # honest claim is stronger than equality: x * x is the correctly rounded
-    # square. Assert that, and bound the disagreement — a real regression (a
-    # wrong exponent, a dropped convert) would miss by far more than one ULP.
-    # How often, and on which inputs, the runtime ^ misses is Base's business
-    # and not asserted: on 1.10 its error terms go through `muladd` and a
-    # `have_fma` branch, so near underflow the last bit depends on the CPU (a CI
-    # runner in another region once disagreed on 169 of these 50,000 patterns
-    # where the local machine, on 1.12, disagreed on 5).
+    # n = 2 is *not* bit-identical to the runtime power over floats: x * x is
+    # the correctly rounded square. Assert that, and bound the disagreement to
+    # one ULP; a real bug (a wrong exponent, a dropped convert) would miss by
+    # far more. Where the runtime ^ misses is Base's business and not asserted:
+    # near underflow its last bit depends on the CPU's FMA support.
     setprecision(BigFloat, 512) do
         @test all(x -> same(x * x, Float64(BigFloat(x)^2)), rnd)
         # concrete inputs whose square lands just above floatmin, where the two
@@ -997,11 +989,9 @@ end
     @test all(x -> abs(runtimepow(x, 2) - x * x) <= eps(x * x), differing)
     @test all(x -> abs(x * x) < 1e-300, differing)
 
-    # The property the compensated accumulators actually rest on: they classify
-    # NaN and ±Inf *terms* and carry the sign of zero, so those bits must not
-    # move. None do, apart from Julia 1.10's own (-0.0)^1 above — and the
-    # accumulator absorbs that one, since its running total starts at +0.0.
-    # (The power-1 half is asserted above, alongside the version note.)
+    # The compensated accumulators classify NaN and ±Inf *terms* and carry the
+    # sign of zero, so those bits must not move. None do, apart from Julia
+    # 1.10's (-0.0)^1 above, which the +0.0 starting total absorbs.
     @test all(x -> same(runtimepow(x, 2), x * x), edge)
     @test only(
         DataFrame(

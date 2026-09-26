@@ -75,10 +75,10 @@ end
 scan(ctx::Context) = (p::CausalPipeline) -> scan(ctx, p)
 
 # O(1)-per-chunk guards against a misbehaving hand-rolled source: cross-chunk
-# order and window bounds. Within-chunk order and schema equality are the
-# chunk protocol's responsibility (sources validate their own input;
-# transforms preserve order), so the public constructor's O(n) scans are
-# skipped. Returns the chunk's last time, to be passed back as `prev`.
+# order and window bounds. Within-chunk order and schema equality are left to
+# the chunk protocol (sources validate their input, transforms preserve order),
+# so the public constructor's O(n) scans are skipped. Returns the chunk's last
+# time, to be passed back as `prev`.
 function checkchunk(ctx::Context, c::DataFrame, prev)
     prev === nothing || prev <= first(c.time) ||
         throw(
@@ -130,9 +130,9 @@ Base.iterate(fs::FrameStream, st::Tuple) = emitframe(fs, st...)
 # next chunk (checking cross-chunk order), or over [substart, ctx.stop] when
 # `chunk` is the last one.
 function emitframe(fs::FrameStream{T}, chunk, substart, ustate) where {T}
-    # The same O(1) guards as load: window bounds here, cross-chunk order at
-    # the lookahead below (substart is the chunk's own first time except for
-    # the very first chunk, where it is ctx.start).
+    # The O(1) guards of `checkchunk`: window bounds here, cross-chunk order at
+    # the lookahead below. substart is the chunk's first time, except for the
+    # first chunk, where it is ctx.start.
     first(chunk.time) >= substart || throw(ArgumentError(
         "chunk times must lie in [$(fs.ctx.start), $(fs.ctx.stop)]"))
     next = iterate(fs.chunks, ustate)
@@ -150,8 +150,6 @@ function emitframe(fs::FrameStream{T}, chunk, substart, ustate) where {T}
     return (trustedframe(Context{T}(substart, b), chunk), (nextchunk, b, nustate))
 end
 
-# Within-chunk order and schema equality are trusted to the chunk protocol
-# (the O(n) part of the public constructor's validation); the cheap boundary
-# and bounds guards above still run per chunk.
+# Skips the public constructor's O(n) validation, as `checkchunk` explains.
 trustedframe(ctx::Context{T}, chunk::DataFrame) where {T} =
     CausalFrame{T}(Trusted(), ctx, [chunk])

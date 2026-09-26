@@ -1,9 +1,8 @@
 @testset "writejls and readjls" begin
     dir = mktempdir()
     ctx = Context(0, 100)
-    # Columns neither CSV nor parquet can carry — vectors and NamedTuples —
-    # over two chunks, built fresh per run since chunks are consumed by
-    # ownership.
+    # Columns neither CSV nor parquet can carry (vectors and NamedTuples), over
+    # two chunks, built fresh per run since consumers own their chunks.
     p = CausalPipeline(
         ctx -> [
             DataFrame(time = [1, 3], x = [1.5, 2.5], v = [[1, 2], [3]],
@@ -130,8 +129,8 @@
         end
         @test_throws ArgumentError load(ctx, readjls(unsorted))
 
-        # a torn last record is reported as such, while the complete records
-        # before it stay readable
+        # a truncated last record is reported as such, while the complete
+        # records before it stay readable
         full = joinpath(dir, "full.jls")
         scan(ctx, p |> writejls(full))
         torn = joinpath(dir, "torn.jls")

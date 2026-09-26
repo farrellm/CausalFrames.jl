@@ -12,15 +12,12 @@ using DataFrames
 
 # A deterministic keyed trades table, built **once** and served in chunks like
 # a real source. Duplicate times (4 rows per timestamp) exercise
-# summarizecycles, and the symbols stay `String`s — the keyed paths hash
-# String-carrying NamedTuple keys, which is what a real source looks like.
+# summarizecycles, and the symbols stay `String`s, as from a real source, so
+# the keyed paths hash String-carrying keys.
 #
-# Building the columns inside the benchmarked expression is the trap this
-# avoids: constructing a million `"s" * string(i)` symbols costs ~3 allocations
-# per row, which put a ~140 ms / 145 MiB / 3.0M-allocation floor under every
-# entry in the suite and buried the operators entirely (`selectcolumns` really
-# costs ~280 allocations; the suite used to report 3,001,037). Generation is
-# therefore hoisted to load time, and only the pipeline is timed.
+# Generation is hoisted to load time so only the pipeline is timed: building a
+# million `"s" * string(i)` symbols costs ~3 allocations per row, which would
+# bury the operators' own cost.
 function tradechunks(n; chunkrows = 100_000, nkeys = 100)
     syms = ["s" * string(k) for k in 0:(nkeys-1)]   # interned once
     return [
@@ -31,11 +28,10 @@ function tradechunks(n; chunkrows = 100_000, nkeys = 100)
     ]
 end
 
-# Chunks are consumed by ownership and some operators mutate the chunk's column
-# *index* in place, so each run is handed a private index over the same column
-# vectors — O(ncols) per chunk rather than O(nrows). Column vectors themselves
-# are never mutated in place anywhere (see DESIGN.md, "CSV output"), which is
-# what makes the sharing sound.
+# Consumers own their chunks and may mutate a chunk's column *index*, so each
+# run gets a private index over the same column vectors, O(ncols) per chunk.
+# Column vectors are never mutated in place (see DESIGN.md, "CSV output"), so
+# sharing them is sound.
 tradesource(chunks) =
     CausalPipeline(ctx -> (DataFrame(c; copycols = false) for c in chunks))
 
@@ -58,9 +54,9 @@ open(CSVPATH, "w") do io
     end
 end
 
-# A structure-hiding wrapper: delegates the interface to the wrapped
-# summarizer but subtypes plain Summarizer, so the window transforms re-fold it
-# — the baseline the running and tree tiers are measured against.
+# A structure-hiding wrapper: delegates to the wrapped summarizer but subtypes
+# plain Summarizer, so the window transforms re-fold it, the baseline for the
+# running and tree tiers.
 struct RefoldWrap{S<:CausalFrames.Summarizer} <: CausalFrames.Summarizer
     inner::S
 end
@@ -129,15 +125,12 @@ SUITE["rowwise"]["pipeline"] = @benchmarkable load(
     clock(1) |>
     filterrows(r -> r.time % 3 != 0) |> addcolumns(r -> (; x = 0.5 * r.time)),
 )
-# Two entries, because they measure different things. Over SRC the cost is just
-# the one partial-chunk slice: SRC hands out pre-built chunks, so `drain-load`
-# is nearly free and a head that failed to stop early would look the same.
-# Over readcsv it is the early exit itself. `chunkbytes` has to be set: the
-# 4 MiB default swallows this 200k-row file whole, so head would read all of it
-# whatever it did. At 64 KiB the file is ~45 chunks and head(1000) should read
-# one, landing far under `head-drain` — which is that same read without the
-# truncation, and exactly what head would cost if it were ever rebuilt on a
-# chunkmap, since chunkmap's `advance` cannot stop pulling.
+# Two entries, because they measure different things. Over SRC the cost is the
+# one partial-chunk slice: SRC hands out pre-built chunks, so a head that
+# failed to stop early would look the same. Over readcsv it is the early exit
+# itself. `chunkbytes` is set because the 4 MiB default swallows this 200k-row
+# file whole; at 64 KiB the file is ~45 chunks and head(1000) should read one,
+# far under `head-drain`, the same read without the early stop.
 SUITE["rowwise"]["head"] = @benchmarkable load(CTX, SRC |> head(1000))
 SUITE["rowwise"]["head-early-exit"] = @benchmarkable load(Context(0, 300_000),
     readcsv(CSVPATH; types = CSVTYPES, chunkbytes = 65_536) |> head(1000))
@@ -174,9 +167,8 @@ SUITE["summarize"]["keyless"] = @benchmarkable load(CTX,
 SUITE["summarize"]["keyed"] = @benchmarkable load(CTX,
     SRC |> summarize([Count(), Sum(:qty)]; key = :sym))
 # The squared power sum, which nothing else in this suite reaches: every
-# Variance, Std, Covariance, Correlation and LinearRegression folds one, so it
-# is the busiest term in the package and the one whose per-row cost is worth
-# watching (see notes/sumpower-terms.md).
+# Variance, Std, Covariance, Correlation and LinearRegression folds one, so its
+# per-row cost is worth watching (see notes/sumpower-terms.md).
 SUITE["summarize"]["powersum"] = @benchmarkable load(CTX,
     SRC |> summarize([SumPower(:qty, 2), Variance(:qty)]))
 SUITE["summarize"]["cycles"] = @benchmarkable load(CTX,
@@ -212,14 +204,14 @@ SUITE["intervalize"]["dense"] = @benchmarkable load(CTX,
     SRC |> intervalize(clock(1000), [Count(), Sum(:qty)]; key = :sym,
         keyset = SYMS))
 
-# The same ~1000 ticks, each now summarizing a trailing 5000 time units (about
+# The same ~1000 ticks, each summarizing a trailing 5000 time units (about
 # 20,000 rows, five tick spacings, so windows overlap five-fold). Entries per
 # window tier: the running tier slides per-key states once per row (Min/Max
-# through their windowed deques in "tracking"); the tree tier (Product is a
-# monoid only) appends each row to a segment tree and recombines a tick's rows
-# together at the tick; the re-fold baseline folds every window at its tick,
-# paying the overlap. "mixed" is an OHLC-style set spanning the running tier
-# and dependents, at a look-back shorter than the tick spacing and at 5000.
+# through their windowed deques in "tracking"); the tree tier (Product is only
+# a monoid) appends rows to a segment tree and recombines them at the tick; the
+# re-fold baseline folds every window at its tick, paying the overlap. "mixed"
+# is an OHLC-style set spanning the running tier and dependents, at a look-back
+# shorter than the tick spacing and at 5000.
 SUITE["windows"] = BenchmarkGroup()
 SUITE["windows"]["running"] = @benchmarkable load(CTX,
     SRC |> summarizewindows(clock(1000), 5000, [Count(), Sum(:qty), Mean(:qty)]))
@@ -251,8 +243,8 @@ SUITE["windows"]["refold"] = @benchmarkable load(CTX,
         [RefoldWrap(Min(:qty)), RefoldWrap(Max(:qty))]))
 
 # Entries per window tier, as for the windows group (see src/tiers.jl), plus
-# the mixed set at windows of about 4, 24 and 1000 rows (keyless) — the small
-# ones are where a running+tree split could have lost to a tree alone.
+# the mixed set at windows of about 4, 24 and 1000 rows (keyless); the small
+# ones are where a running+tree split could lose to a tree alone.
 SUITE["rolling"] = BenchmarkGroup()
 SUITE["rolling"]["running"] = @benchmarkable load(RCTX,
     RSRC |> addrollingcolumns((; w25 = 25), [Sum(:qty), Mean(:qty)]))
@@ -302,11 +294,11 @@ SUITE["join"]["lookup-keyed"] =
 SUITE["join"]["lookup-drop"] = @benchmarkable load(CTX,
     SRC |> lookupjoin(HALFDIM; key = :sym, unmatched = :drop))
 
-# The n-ary merge over the same two sources. "interleaved" is the worst case
-# — the two streams share every timestamp, so blocks are cycle-sized and the
-# rows are copied; "shifted" moves one source a half-window later so long runs
-# of whole chunks pass through untouched; "union" merges sources with
-# different columns, the missing-filling path.
+# The n-ary merge over the same two sources. "interleaved" is the worst case:
+# the streams share every timestamp, so blocks are cycle-sized and rows are
+# copied. "shifted" moves one source a half-window later so long runs of whole
+# chunks pass through untouched. "union" merges sources with different
+# columns, the missing-filling path.
 SUITE["merge"] = BenchmarkGroup()
 SUITE["merge"]["interleaved"] = @benchmarkable load(CTX, merge(SRC, SRC2))
 SUITE["merge"]["shifted"] = @benchmarkable load(CTX,

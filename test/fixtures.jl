@@ -1,8 +1,7 @@
-# A test-local multi-valued summarizer exercising the NamedTuple interface:
-# tracks the minimum and maximum of a column. Also the worked example of the
-# config/state split — the column rides in a type parameter, and the state's
-# value type comes from the input schema. A monoid (combine! below) but not a
-# group, exercising the custom-monoid path of addrollingcolumns.
+# A test-local multi-valued summarizer: the minimum and maximum of a column.
+# The column is a type parameter and the state's value type comes from the
+# input schema. A monoid but not a group, for addrollingcolumns' custom-monoid
+# path.
 struct MinMax{C} <: MonoidSummarizer end
 MinMax(column::Symbol) = MinMax{column}()
 
@@ -50,10 +49,9 @@ function CausalFrames.combine!(dest::MinMaxState{C,L,H,T},
     return nothing
 end
 
-# A structure-hiding wrapper: delegates the interface to the wrapped
-# summarizer (reusing its state unchanged) but subtypes plain Summarizer, so
-# any tuple containing it takes addrollingcolumns's re-fold fallback — the
-# oracle the fast paths are differentially tested against.
+# A structure-hiding wrapper: delegates to the wrapped summarizer (reusing its
+# state) but subtypes plain Summarizer, so it takes the window transforms'
+# refold tier, the oracle the fast paths are tested against.
 struct Opaque{S<:Summarizer} <: Summarizer
     inner::S
 end
@@ -64,9 +62,9 @@ CausalFrames.fresh(o::Opaque, intypes::NamedTuple) =
 CausalFrames.dependencies(o::Opaque) =
     map(Opaque, CausalFrames.dependencies(o.inner))
 
-# Opaque's monoid counterpart: a group hidden down to a monoid, so its
-# accumulators take the window transforms' segment tree rather than the running
-# tier. It is the only way to put a built-in group's `combine!` under a window.
+# Opaque's monoid counterpart: a group hidden down to a monoid, so it takes the
+# tree tier rather than the running tier, putting a built-in group's `combine!`
+# under a window.
 struct AsMonoid{S<:Summarizer} <: MonoidSummarizer
     inner::S
 end
@@ -81,10 +79,9 @@ CausalFrames.dependencies(o::AsMonoid) =
 struct BadTime <: Summarizer end
 CausalFrames.emptyvalue(::BadTime) = (; time = 0)
 
-# A test-local dependent summarizer whose dependencies are themselves
-# dependent: the population variance from the first two raw moments
-# (TestVar -> Moment -> Count/SumPower), so expansion is transitive and the
-# Count underneath both moments is shared.
+# A dependent summarizer whose dependencies are dependent: the population
+# variance from the first two raw moments (TestVar -> Moment ->
+# Count/SumPower), so expansion is transitive and both moments share a Count.
 struct TestVar{C} <: Summarizer end
 TestVar(column::Symbol) = TestVar{column}()
 
@@ -105,11 +102,10 @@ function CausalFrames.value(::TestVarState{C,N,M1,M2},
     return NamedTuple{(N,),Tuple{V}}((vals[M2] - vals[M1]^2,))
 end
 
-# A group summarizer whose state reports itself non-invertible once its column
-# widens to Float64. Every built-in accumulator stays invertible under
-# widening, so this is the only way to drive the window transforms' demotion
-# of an accumulator from the running tier to the tree. The output name rides in a type parameter, as the
-# interface requires for `value` to infer.
+# A group summarizer whose state is non-invertible once its column widens to
+# Float64, driving the window transforms' demotion of an accumulator from the
+# running tier to the tree (no built-in does this). The output name is a type
+# parameter so `value` infers.
 struct FragileSum{C} <: GroupSummarizer end
 FragileSum(column::Symbol) = FragileSum{column}()
 mutable struct FragileSumState{C,N,T} <: SummarizerState
@@ -135,8 +131,8 @@ CausalFrames.isinvertible(::FragileSumState{C,N,Float64}) where {C,N} = false
 
 # FragileSum's mirror: non-invertible while its column is Int, invertible once
 # it widens to Float64, so a widening *promotes* it from the tree to the running
-# tier — which no built-in does — and the running tier needs a buffer the
-# tree-only call never kept.
+# tier (no built-in does this), which needs a buffer the tree-only call didn't
+# keep.
 struct LateSum{C} <: GroupSummarizer end
 LateSum(column::Symbol) = LateSum{column}()
 mutable struct LateSumState{C,N,T} <: SummarizerState
@@ -161,14 +157,13 @@ CausalFrames.isinvertible(::LateSumState{C,N,Int}) where {C,N} = false
 
 # A dependent spanning every window tier: its dependencies are a group (Sum,
 # running), a monoid (Product, tree) and a plain summarizer (Opaque(Sum) under
-# its own name, re-fold), and its own state is fieldless, so it sits in no tier
-# and reads all three at emission.
+# its own name, refold), and its fieldless state reads all three at emission.
 struct TierSpan{C} <: Summarizer end
 TierSpan(column::Symbol) = TierSpan{column}()
 
 struct TierSpanState{C,N,S,P,Q} <: SummarizerState end
 
-# The re-fold dependency: Sum under another name, hidden from the structure.
+# The refold dependency: Sum under another name, hidden from the structure.
 struct PlainSum{C} <: Summarizer end
 PlainSum(column::Symbol) = PlainSum{column}()
 CausalFrames.emptyvalue(::PlainSum{C}) where {C} =
@@ -198,9 +193,8 @@ struct Loopy <: Summarizer end
 CausalFrames.dependencies(::Loopy) = (Loopy(),)
 CausalFrames.emptyvalue(::Loopy) = (; loopy = missing)
 
-# A tiny deterministic linear-congruential sequence for property tests, so
-# the suite needs no RNG dependency and failures reproduce exactly: n values
-# drawn from 0:(m - 1).
+# A deterministic linear-congruential sequence of n values in 0:(m - 1), so
+# property tests need no RNG dependency and failures reproduce exactly.
 function lcgsequence(seed::Integer, n::Int, m::Int)
     vals = Vector{Int}(undef, n)
     s = UInt64(seed)

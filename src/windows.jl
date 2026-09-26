@@ -1,23 +1,17 @@
-# The window-summarization transform. A clock pipeline supplies the tick times;
-# at each tick τ the rows with time in [τ - lookback, τ) are summarized and
-# emitted at τ. The data stream drives a chunkmap and the clock is pulled on
-# demand, exactly as in intervalize; the window bookkeeping is addrollingcolumns'
-# — a buffer of admitted rows with an eviction head — sampled at the ticks
-# rather than at every row. Keyless output is a grid (one row per tick); keyed
-# output is sparse, with one empty row marking a key whose window has emptied.
+# The window-summarization transform. A clock supplies the ticks; at each tick
+# τ the rows with time in [τ - lookback, τ) are summarized and emitted at τ.
+# The data stream drives a chunkmap and pulls the clock on demand, as in
+# intervalize; the window bookkeeping is addrollingcolumns' (a buffer of
+# admitted rows with an eviction head), sampled at ticks rather than rows.
+# Keyless output is a grid (one row per tick); keyed output is sparse, with one
+# empty row marking a key whose window has emptied.
 #
-# Each summarizer's window algorithm follows its own structure, as in
-# rolling.jl (tiers.jl): groups slide per-key running states (update! on
-# admission, downdate! on eviction, O(1) amortized per row), other monoids
-# append rows to per-key segment trees and fold each window from O(log window)
-# partial combinations at its tick, and anything else re-folds each window at
-# its tick, O(window) per tick. The tree differs from rolling's in when it
-# recombines: rolling queries after every row, so each append updates its
-# ancestors, while here nothing reads a tree between ticks, so a tick's rows are
-# appended as bare leaves and their ancestors recombined together at the tick
-# (`treesync!`) — about one combine per row instead of log(window). Per the
-# summarize.jl conventions, the type-unstable setup happens once per chunk and
-# the kernels take concretely typed arguments behind function barriers.
+# The tiers are rolling.jl's (tiers.jl): running groups (O(1) amortized per
+# row), segment trees queried at each tick (O(log window)), and refolds
+# (O(window) per tick). Nothing reads a tree between ticks, so a tick's rows
+# are appended as bare leaves and recombined together at the tick
+# (`treesync!`), about one combine per row. Type-unstable setup runs once per
+# chunk; the kernels take concretely typed arguments.
 
 """
     summarizewindows(clock, lookback, summarizers; key = nothing,
@@ -74,9 +68,8 @@ end
 summarizewindows(p::CausalPipeline, clk::CausalPipeline, lookback, summarizers;
     kwargs...) = summarizewindows(clk, lookback, summarizers; kwargs...)(p)
 
-# `grid` (keyless) and the declared key set (`Nothing` unless dense) ride in
-# type parameters, so the kernels specialize on them and neither costs a per-row
-# branch.
+# `grid` (keyless) and the declared key set (`Nothing` unless dense) are type
+# parameters, so neither costs a per-row branch.
 struct WindowConfig{KN,LB,P<:Tuple,O,G,KS<:Union{Nothing,KeySet}}
     keycols::Vector{Symbol}
     keynames::Val{KN}
@@ -87,9 +80,8 @@ struct WindowConfig{KN,LB,P<:Tuple,O,G,KS<:Union{Nothing,KeySet}}
     ks::KS
 end
 
-# Per-run mutable state, in fields rather than reassigned closure captures
-# (those get boxed). The dynamically typed fields are per-chunk setup state;
-# everything per-row sits behind the kernels' function barrier.
+# Per-run state. The untyped fields are per-chunk setup; per-row work sits
+# behind the kernels' function barrier.
 mutable struct WindowState{T}
     cur::IntervalCursor{T}
     ticks::Vector{T}    # pulled ticks not yet closed
@@ -105,12 +97,11 @@ end
 
 # The window structures for one tiering (tiers.jl), R being the stored row type.
 # The buffer holds the admitted rows not yet evicted, in time order, for the
-# running tier's eviction and the refold tier's folds; the trees own their rows,
-# so a tree-only call keeps no buffer. In each tier present, presence of a key
-# means rows in its window: the running table deletes a group with its last row,
-# a tree whose window empties is dropped, and the refold table is filled at the
-# tick from the live rows. So the first tier present — the primary — gives the
-# keys to emit, and the others are looked up by key.
+# running tier's eviction and the refold tier's folds; trees own their rows, so
+# a tree-only call keeps no buffer. In every tier a key is present exactly when
+# its window has rows (the running table deletes a group with its last row, an
+# emptied tree is dropped, the refold table is filled at the tick from the live
+# rows), so the first tier present, the primary, gives the keys to emit.
 struct WindowTiers{R,B,G,TR,GT,SR<:Tuple,ST<:Tuple,SF<:Tuple,SD<:Tuple,P,SC}
     buffer::B        # Vector{R}, or nothing
     running::G       # RunningTable{K,SR}, or nothing
@@ -135,12 +126,11 @@ WindowTiers{R}(buffer::B, running::G, trees::TR, refold::GT, runprotos::SR,
 @inline primarygroups(::Nothing, trees::AbstractDict, refold) = trees
 @inline primarygroups(::Nothing, ::Nothing, gt::GroupTable) = gt.table
 
-# Build the tiers for the first realized schema, or rebuild them for a widened
-# one, always from the live rows — correct for every transition, including an
-# accumulator the widening demotes from the running tier to the tree. New trees
-# replay the buffer, surviving ones the old trees' own rows; a buffer the old
-# tiers did not keep is gathered from the old trees (`treebuffer`). The refold
-# table is filled only at ticks, so it starts empty.
+# Build the tiers for the first realized schema, or rebuild them from the live
+# rows for a widened one (`rebuildbuffer`, `rebuildtrees`), which is correct
+# for every transition, including one that demotes an accumulator from the
+# running tier to the tree. The refold table is filled only at ticks, so it
+# starts empty.
 function preparewindows!(st::WindowState, cfg::WindowConfig, types::NamedTuple)
     tg = tiering(cfg.protos, types)
     K = storekeytype(types, cfg.keynames)
@@ -165,10 +155,8 @@ function preparewindows!(st::WindowState, cfg::WindowConfig, types::NamedTuple)
     return nothing
 end
 
-# The emitted row type and the empty row, from the realized states: the summary
-# values promoted field-wise with the empty values (both are emitted), behind
-# `:time` and the key — the data's key type when sparse, the declared one when
-# dense.
+# The emitted row type and the empty row. The key type is the data's when
+# sparse, the declared one when dense.
 windowkeytype(::Nothing, st::WindowState) = eltype(st.prevkeys)
 windowkeytype(::KeySet{K}, st::WindowState) where {K} = K
 
@@ -184,8 +172,7 @@ function windowstep!(st::WindowState{T}, cfg::WindowConfig,
         checkkeycolumns(cfg.keycols, c, "summarizewindows")
         st.checked = true
     end
-    # The clock is exhausted and every tick closed, so no row from here on can
-    # fall in any window: drop the chunk rather than admit rows nothing evicts.
+    # Every tick is closed, so no later row falls in any window.
     exhausted(st.cur) && isempty(st.ticks) && return nothing
     types = promotetypes(st.types, chunktypes(c))
     moved = st.types === nothing || types != st.types
@@ -203,10 +190,9 @@ function windowstep!(st::WindowState{T}, cfg::WindowConfig,
     return isempty(rows) ? nothing : DataFrame(rows)
 end
 
-# Dead rows accumulate at the front of the buffer as the head advances;
-# dropping them only when they dominate keeps the cost amortized O(1) per
-# admitted row. Called at each tick's eviction, so the buffer stays near the
-# window's size rather than growing through a chunk.
+# Dead rows before the head are dropped once they dominate the buffer:
+# amortized O(1) per row. Called at each tick, so the buffer stays near the
+# window's size.
 compacthead!(::Nothing, head::Int) = head
 function compacthead!(buffer::Vector, head::Int)
     dead = head - 1
@@ -217,9 +203,8 @@ function compacthead!(buffer::Vector, head::Int)
     return head
 end
 
-# Past the clock's last tick nothing is emitted again, so the live rows — the
-# buffer, and the trees, which own theirs — are released rather than held to the
-# end of the stream, as intervalize drops its trailing rows.
+# After the last tick nothing more is emitted, so the live rows (the buffer,
+# groups and trees) are released rather than held to the end of the stream.
 function releasewindows!(st::WindowState)
     t = st.tiers
     t.buffer === nothing || empty!(t.buffer)
@@ -229,8 +214,8 @@ function releasewindows!(st::WindowState)
     return nothing
 end
 
-# The no-data grid, typed from the configs alone: one empty row per tick
-# keyless, one per tick per declared key when dense.
+# The no-data grid: one empty row per tick when keyless, one per tick per
+# declared key when dense.
 function emptywindowgrid(ticks::Vector{T}, ::Nothing, e) where {T}
     RT = gridrowtype(T, typeof((;)), typeof(e))
     return DataFrame(RT[convert(RT, gridrow(t, (;), e)) for t in ticks])
@@ -245,8 +230,8 @@ function windowflush!(st::WindowState{T}, cfg::WindowConfig) where {T}
     pullpast!(st.ticks, st.cur, nothing)
     isempty(st.ticks) && return nothing
     if st.tiers === nothing
-        # No data ever arrived, so no states were built: the grid of empty rows
-        # when keyless or dense; nothing at all when sparse.
+        # No data ever arrived: empty rows when keyless or dense, nothing when
+        # sparse.
         (cfg.grid isa Val{true} || cfg.ks !== nothing) || return nothing
         return emptywindowgrid(st.ticks, cfg.ks,
             emptyvalues(cfg.protos, cfg.outs))
@@ -261,11 +246,10 @@ end
 
 # --- kernels ---------------------------------------------------------------
 #
-# Called with concretely typed arguments; an absent tier compiles to nothing.
-# For each row at time s, every pending tick τ <= s is closed first — the
-# window is half-open, so the row is in no window of a tick at or before it —
-# and then the row is admitted. Returns (head, closed): the eviction head and
-# how many ticks were closed.
+# Called with concretely typed arguments; an absent tier compiles away. For
+# each row at time s, every pending tick τ <= s is closed first (windows are
+# half-open, so the row is in none of them), then the row is admitted. Returns
+# the eviction head and the number of ticks closed.
 function windowrows!(rows::Vector{RT}, tiers::WindowTiers{R}, head::Int,
     nt::NamedTuple, ticks::Vector{T}, prevkeys::Vector, lookback,
     keynames::Val, outs::Val, emptyrow, grid::Val,
@@ -295,11 +279,11 @@ function flushwindows!(rows::Vector, tiers::WindowTiers, head::Int,
 end
 
 # Admit one row into every tier. A row may already be outside the next tick's
-# window (a look-back shorter than the tick spacing); the eviction at that tick
-# downdates it right back out. A declared keyset is checked where the primary
-# tier makes a key's group or tree — a row whose key already has one was
-# declared — and on admission when the primary is the refold table, which is
-# filled only at ticks. The tree appends a bare leaf, synced at the tick.
+# window (a look-back shorter than the tick spacing); that tick's eviction
+# downdates it right back out. A declared keyset is checked when the primary
+# tier makes a key's group or tree, or on every admission when the primary is
+# the refold table, which is filled only at ticks. Trees get a bare leaf,
+# synced at the tick.
 @inline function admitwindow!(tiers::WindowTiers, row, keynames::Val,
     ks::Union{Nothing,KeySet})
     pushrow!(tiers.buffer, row)
@@ -332,8 +316,7 @@ end
 # Close tick τ: evict the rows that have left its window, downdating them out of
 # the running tier; move each tree's head to the window start, dropping emptied
 # trees and syncing the rest; fold the live rows into the refold table; emit;
-# then retire the refold states to the table's pool — `summaryvalues` has
-# copied their values out by then, which is the `closecycle!` protocol.
+# then retire the refold states to the pool.
 @noinline function closewindow!(rows::Vector, τ, tiers::WindowTiers, head::Int,
     prevkeys::Vector, lookback, keynames::Val, outs::Val, emptyrow, grid::Val,
     ks::Union{Nothing,KeySet})
@@ -362,10 +345,9 @@ end
 @inline evictwinrunning!(rt::RunningTable, row, keynames::Val) =
     evictgroup!(rt, keyvalues(row, keynames), row)
 
-# Every admitted row is before τ, so a tree's window is head:length(rows). A
-# tree whose window has emptied is dropped: ticks only advance, so its rows are
-# expired for good. The survivors sync the leaves appended since the last tick,
-# once, before their one query.
+# Every admitted row is before τ, so a tree's window is head:length(rows). An
+# emptied tree is dropped, since ticks only advance. The survivors sync once,
+# before their one query.
 @inline closetrees!(::Nothing, τ, lookback) = nothing
 @inline function closetrees!(trees::AbstractDict, τ, lookback)
     filter!(trees) do (_, tr)
@@ -398,10 +380,9 @@ end
 end
 
 # One tier's states for key k, whose entry in the primary tier is g: `()` for
-# an absent tier, g itself for the primary (no second lookup), a lookup by key
-# for the others, and for a tree its borrowed query (see `treequery`), read
-# once per tick through summaryvalues. The running tier, when present, is
-# always the primary.
+# an absent tier, g itself for the primary, a lookup by key for the others,
+# and for a tree its borrowed query (`treequery`). The running tier, when
+# present, is always the primary.
 @inline tierstates(::Nothing, k, g) = ()
 @inline tierstates(::RunningTable{K,S}, k, g::RunningGroup{S}) where {K,S<:Tuple} =
     g.states
@@ -417,10 +398,9 @@ end
         (tierstates(tiers.running, k, g), tierstates(tiers.trees, k, g),
             tierstates(tiers.refold, k, g), tiers.derived)), outs)
 
-# Emit one tick from the primary tier's groups. Undeclared keys: the present
-# ones sorted into the reused scratch, then `emitwindow!`'s grid or vanish-row
-# merge. A declared keyset: `emitdense!`, which needs neither the sort nor
-# `prevkeys`.
+# Emit one tick from the primary tier's groups: without a declared keyset, the
+# present keys sorted into the reused scratch, then `emitwindow!`; with one,
+# `emitdense!`.
 @inline function emitgroups!(rows::Vector, τ, groups::AbstractDict,
     scratch::Vector{<:Pair}, prevkeys::Vector, tiers::WindowTiers, outs::Val,
     emptyrow, grid::Val, ::Nothing)
@@ -433,13 +413,12 @@ end
     prevkeys::Vector, tiers::WindowTiers, outs::Val, emptyrow, grid::Val,
     ks::KeySet) = emitdense!(rows, τ, groups, ks, tiers, outs, emptyrow)
 
-# One row per declared key, in declared order: the key's window summary when it
-# has a group, the empty values otherwise. The declared key type may differ from
-# the groups' (it is `isequal`), which the Dict lookups allow without converting.
+# One row per declared key, in declared order: the key's summary when it has a
+# group, else the empty values. Lookups by the declared key need no conversion.
 function emitdense!(rows::Vector{RT}, τ, groups::AbstractDict, ks::KeySet,
     tiers::WindowTiers, outs::Val, emptyrow) where {RT}
-    # `haskey` then indexing, not `get(groups, k, nothing)`: a re-fold primary's
-    # entry is a tuple of states, which a Union with Nothing would box per key.
+    # `haskey` then indexing, not `get(groups, k, nothing)`: a refold primary's
+    # entry is a state tuple, which a Union with Nothing would box.
     for k in ks.keys
         if haskey(groups, k)
             push!(rows,
@@ -451,11 +430,10 @@ function emitdense!(rows::Vector{RT}, τ, groups::AbstractDict, ks::KeySet,
     return rows
 end
 
-# Emit one tick. Keyless (grid): exactly one row, the summary or the empty
-# values. Keyed: the present keys in key order, merged with an empty row for
-# every key present at the previous tick and absent now; the present keys then
-# become the previous tick's. Both lists are sorted by the tuple of key values,
-# the order `groupkey` gives, so one merge walk suffices.
+# Emit one tick. Keyless (grid): one row, the summary or the empty values.
+# Keyed: the present keys in key order, merged with an empty row for each key
+# present at the previous tick and absent now; the present keys then become
+# `prevkeys`. Both lists are sorted by `groupkey`, so one merge walk suffices.
 function emitwindow!(rows::Vector{RT}, τ, present::Vector{<:Pair},
     prevkeys::Vector{K}, tiers::WindowTiers, outs::Val, emptyrow,
     ::Val{G}) where {RT,K,G}

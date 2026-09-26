@@ -1,7 +1,7 @@
-# Precompile the main pipeline paths so first use is fast. User-supplied row
-# functions and summarizer combinations still specialize at first call — this
-# covers the shared machinery (chunk iteration, CSV reading, frame assembly,
-# the folding kernels for the stock summarizers over Int and Float64 columns).
+# Precompile the main pipeline paths so first use is fast: the shared machinery
+# (chunk iteration, sources, frame assembly) and the stock summarizers' kernels
+# over Int and Float64 columns. User row functions and summarizer combinations
+# still specialize at first call.
 @setup_workload begin
     dir = mktempdir()
     csv = joinpath(dir, "precompile.csv")
@@ -25,12 +25,11 @@
             ),
         )
         DataFrame(load(ctx, readcsv(csv; types = csvtypes, sort = true)))
-        # The regressions get a workload of their own rather than joining the
-        # list above: they expand to a dependency apiece per cross product, and
-        # a prototype tuple much past 32 falls off Julia's inference cliff. Both
-        # solve paths are covered — the K = 1 closed form and the general
-        # factorization — over predictors that are not collinear, so the
-        # Cholesky succeeds and the coefficient and standard-error code runs.
+        # The regressions get their own workload: each expands to a dependency
+        # per cross product, and a prototype tuple much past 32 falls off
+        # inference. Both solve paths run (the K = 1 closed form and the
+        # factorization), over non-collinear predictors so the Cholesky
+        # succeeds and the coefficient and standard-error code runs.
         DataFrame(
             load(
                 ctx,
@@ -83,9 +82,9 @@
         )
         DataFrame(load(ctx, p |> intervalize(clock(2), [Count(), Sum(:v)];
             key = :sym)))
-        # the running window tier keyless; keyed, which also takes the
-        # vanish-row path, the running tier's windowed trackers beside the tree
-        # tier (Product is a monoid only) and a fieldless dependent
+        # the running window tier keyless; then keyed, which also takes the
+        # vanish-row path, with windowed trackers in the running tier beside
+        # the tree tier (Product is only a monoid) and a fieldless dependent
         DataFrame(
             load(ctx, p |> summarizewindows(clock(2), 3,
                 [Count(), Sum(:v), Mean(:v)])),
@@ -114,10 +113,9 @@
                     key = :sym, keyset = ["a", "b"])),
         )
         DataFrame(load(ctx, p |> addsummarycolumns([First(:v), Last(:v)])))
-        # group summarizers take the running window tier, other monoids the
-        # tree tier, each per accumulator; the re-fold tier is reachable only
-        # through user summarizers without the structure, so it specializes
-        # at first call like any custom summarizer
+        # group summarizers take the running tier and other monoids the tree
+        # tier; only user summarizers without that structure reach the refold
+        # tier, which specializes at first call
         DataFrame(
             load(
                 ctx,

@@ -52,8 +52,7 @@ construction site must use the validating path.
 Public access:
 
 - the Tables.jl interface, as a **column-access** table. `Tables.columns`
-  materializes once, as a copy; rows are served by Tables.jl's row-view
-  fallback over those columns, so touching both costs one materialization.
+  materializes a copy, and Tables.jl's row fallback iterates those columns.
   `Tables.schema(cf)` needs no row scan (names from the first chunk, eltypes
   promoted across chunks) and matches `DataFrame(cf)`. `Tables.partitions(cf)`
   yields one copied partition per chunk; an empty frame yields the zero-row
@@ -153,26 +152,24 @@ closes it with the exception and the pipeline task sees it at the next
 `put!` rather than deadlocking on a full queue.
 
 This is the one place chunk ownership is shared, and it needs care. A
-consumer owns the chunk it is handed, and four operators use that licence to
-mutate the chunk's *column index* in place (`asofjoin`'s `prefixleft!`, which
-`lookupjoin` shares,
-`addrollingcolumns`' `assembleempty`, `settime`'s symbol form, which drops the
-old `:time` and renames another column onto it) — which would race the writer reading
-the same DataFrame on another task. Column *vectors*, by contrast, are never
-mutated in place anywhere: every operator builds new ones. So the writer
-keeps the original chunk and downstream gets `DataFrame(c; copycols = false)`
-— a private index over the same vectors, O(ncols) per chunk and nothing per
-row.
+consumer owns the chunk it is handed, and several operators use that licence
+to mutate the chunk's *column index* in place (`asofjoin`'s `prefixleft!`,
+which `lookupjoin` shares; `addrollingcolumns`' `assembleempty`; `settime`'s
+symbol form, which drops the old `:time` and renames another column onto it),
+which would race the writer reading the same DataFrame on another task. Column
+*vectors*, by contrast, are never mutated in place: every operator builds new
+ones. So the writer keeps the original chunk and downstream gets
+`DataFrame(c; copycols = false)`, a private index over the same vectors,
+O(ncols) per chunk.
 
 The file is truncated when the run starts and finalized when the stream is
 *exhausted*, via `chunkmap`'s once-only `flush`. Abandoning a `stream`
-part-way therefore leaves the last chunks unwritten — `scan` is the entry
-point to use when the file is the only thing wanted. A stream with no rows
-yields an empty file, never a stale one — there is no chunk to take a header
-from — and `readcsv` reads a zero-byte file back as an empty stream, so the
-round trip holds. Keyword arguments pass through to
-`CSV.write`, except `append`/`header`/`writeheader`/`partition`/`compress`,
-which the transform controls itself and rejects eagerly.
+part-way therefore leaves the last chunks unwritten; `scan` is the entry
+point when the file is the only thing wanted. A stream with no rows yields an
+empty file (there is no chunk to take a header from), which `readcsv` reads
+back as an empty stream. Keyword arguments pass through to `CSV.write`, except
+`append`/`header`/`writeheader`/`partition`/`compress`, which the transform
+controls itself and rejects eagerly.
 
 ## Parquet I/O
 
@@ -217,41 +214,37 @@ time with `<=` rather than `<`, and a Parquet2 row group starting exactly at
 `stop` is read rather than ending the scan — skipping it would be a wrong
 answer, not a slower one. DuckDB's `WHERE` also drops null times, so without
 `skipmissing` a null in a named time column goes unreported there while
-Parquet2 raises it — error coverage, like sortedness, differs between the
-readers, and successful results do not. Surfacing them with `OR col IS NULL`
-was measured and rejected: the disjunction defeats the row-group skip, ~7x
-slower on every default read even of a file with no nulls
-(`notes/duckdb-null-pushdown.md`).
+Parquet2 raises it: error coverage, like sortedness, differs between the
+readers, but successful results do not. `OR col IS NULL` would surface them,
+but it defeats the row-group skip, making every default read ~7x slower even
+of a file with no nulls (`notes/duckdb-null-pushdown.md`).
 
 Backend selection resolves twice: eagerly at construction, so a missing backend
 is reported where the operator was typed, and again inside `run(ctx)`, so a
 backend loaded after the pipeline was built still counts. The run-time
-resolution dispatches on a runtime symbol — one dynamic call per pipeline run,
-not per chunk — and hands a `Val` to `parquetproducer` / `parquetsink`, whose
-per-backend methods live in the extensions.
+resolution is one dynamic call per run, handing a `Val` to `parquetproducer` /
+`parquetsink`, whose per-backend methods live in the extensions.
 
 One in-memory DuckDB database is created lazily per process and a connection
 opened per `run(ctx)` — a connection is single-consumer, and a pipeline may be
 run more than once (a self-join reads its file twice).
 
-Both sinks reuse the CSV sink's machinery whole: the shared `ChunkSink` (bounded
-`Channel{DataFrame}`, background task, `bind`ed so a writer failure surfaces at
-the next `put!`, the first-chunk column check, and the
-`DataFrame(c; copycols = false)` hand-off that keeps the writer's chunk private
-from downstream index mutation). Only the write loop differs. Holding chunks —
-to fill a row group, or to stage the whole output — is safe under the same
-contract: column *vectors* are never mutated in place anywhere, only replaced
-wholesale. Chunks are only ever merged, never split, so `rowgroupsize = 1`
-writes one row group per incoming chunk.
+Both sinks reuse the CSV sink's `ChunkSink` (bounded `Channel{DataFrame}`,
+background task, `bind`ed so a writer failure surfaces at the next `put!`, the
+first-chunk column check, and the `DataFrame(c; copycols = false)` hand-off);
+only the write loop differs. Holding chunks, to fill a row group or to stage
+the whole output, is safe under the same contract: column *vectors* are never
+mutated in place. Chunks are only ever merged, never split, so
+`rowgroupsize = 1` writes one row group per incoming chunk.
 
 The one semantic difference from `writecsv`: **a parquet file is only valid
 once finalized**. The footer (or, for DuckDB, the whole file) is written when
 the stream is exhausted, so there is no usable prefix on disk mid-run and
-abandoning a `stream` part-way leaves an unusable file — `scan` is the entry
+abandoning a `stream` part-way leaves an unusable file; `scan` is the entry
 point when the file is the point. Both sinks truncate the file when the run
-starts, as `writecsv` does — the DuckDB sink explicitly, since otherwise it
+starts, as `writecsv` does (the DuckDB sink explicitly, since otherwise it
 touches the file only at the final `COPY`, and a failed run would leave the
-previous one's file looking current. A stream with no rows yields a valid file
+previous one's file looking current). A stream with no rows yields a valid file
 of zero rows and one `time::Int64` column under either sink (DuckDB cannot read
 a parquet file with no columns at all), which both readers return as an empty
 stream. Keyword arguments pass through to `Parquet2.FileWriter`, where
@@ -289,7 +282,7 @@ time column and that tiebreak, so a `time` function, an untraceable `rename`, or
 a file with a column of its own named `file_row_number` (which shadows the
 virtual one) sends DuckDB down the gather-and-sort path instead. Parquet2 always
 gathers; its statistics still skip row groups wholly outside the window, but
-under a sort a group at or past `stop` no longer ends the scan.
+under a sort a group at or past `stop` does not end the scan.
 
 A `sort = true` read raises no order error, and none is checked separately: the
 output is sorted by construction. The within-timestamp half of an `ORDER BY` —
@@ -337,10 +330,11 @@ of its in-window rows, never a delete-then-slice. As with sortedness, a
 missing time is only detected in the chunks actually read: one past the early
 stop, or in a skipped row group, goes unreported.
 
-Without the check a missing time fell through to whatever it broke: `missing`
-sorts last, so mid-chunk it failed the order check with a misleading message,
-at the end it read as a time past the window and was silently dropped by the
-early stop, and in a `DataFrame` it reached a boolean test as a `TypeError`.
+Without the check a missing time would fall through to whatever it broke:
+`missing` sorts last, so mid-chunk it would fail the order check with a
+misleading message, at the end it would read as a time past the window and be
+silently dropped by the early stop, and in a `DataFrame` it would reach a
+boolean test as a `TypeError`.
 
 ## JLS I/O
 
@@ -354,29 +348,28 @@ is a stdlib already in the sysimage, so this costs no dependency weight.
 The format is a header record `(format = :CausalFramesJLS, version = 1)`
 followed by one serialized `DataFrame` per chunk. Each record is its own
 `serialize` call, so records carry no back-references to one another and the
-reader can `deserialize` them one at a time. The header is a `NamedTuple` of
-isbits values, which serializes identically across Julia versions, so a foreign
+reader can `deserialize` them one at a time. The header, a `NamedTuple` of a
+`Symbol` and an `Int`, serializes stably across Julia versions, so a foreign
 file or a future format version is reported as such rather than as an opaque
 deserialization failure.
 
-The sink is the shared `ChunkSink` whole — background task, bounded queue,
-first-chunk column check, the `copycols = false` hand-off — with a write loop
-that serializes and flushes each chunk. Like `writecsv`, and unlike the parquet
-sinks, it therefore has a usable prefix mid-run; a stream with no rows leaves a
-header-only file, which reads back as an empty stream. The source is a
-`CSVProducer`-shaped `JLSProducer` that deserializes one record per pull and
-hands it to the shared `clipchunk!` (no `time` or `rename` — the file was
-written from a stream, so its `:time` is already resolved), stopping at the
-first time past the window. There is no index to seek by, so a read costs the file's
-prefix up to `stop`, as CSV's does.
+The sink is the shared `ChunkSink` with a write loop that serializes and
+flushes each chunk. Like `writecsv`, and unlike the parquet sinks, it has a
+usable prefix mid-run; a stream with no rows leaves a header-only file, which
+reads back as an empty stream. The source is a `CSVProducer`-shaped
+`JLSProducer` that deserializes one record per pull and hands it to the shared
+`clipchunk!` (with no `time` or `rename`: the file was written from a stream,
+so its `:time` is already resolved), stopping at the first time past the
+window. There is no index to seek by, so a read costs the file's prefix up to
+`stop`, as CSV's does.
 
 Three caveats, all of them `Serialization`'s: a file is readable only by a
 compatible Julia and compatible versions of the packages whose types it holds;
 deserialization can construct arbitrary types, so a file must be trusted; and
-an interrupted run leaves every complete record readable while its torn last
-record is reported as an `ArgumentError` rather than a bare `EOFError`. JLS is a
-persistence format for a pipeline's own outputs, not an interchange format —
-`writecsv` and `writeparquet` remain that.
+an interrupted run leaves every complete record readable while its truncated
+last record is reported as an `ArgumentError` rather than a bare `EOFError`.
+JLS is a persistence format for a pipeline's own outputs, not an interchange
+format; `writecsv` and `writeparquet` are that.
 
 ## Tables as sources
 
@@ -509,14 +502,12 @@ is the whole point, and it is why `head` is the one transform not built on
 still read the entire file.
 
 Instead `head` returns a `ChunkSource` over a mutable `HeadProducer`, which
-drives the upstream iterator itself — readcsv's `CSVProducer` shape, with the
+drives the upstream iterator itself through a `PullCursor`, with the
 pull-to-pull state in fields rather than in reassigned closure captures (which
-would be boxed). `ChunkSource.produce()` takes no arguments, so the upstream
-iterator *and* its state must be fields; the dynamically typed `state` field is
-the same trade `ConcatProducer` already makes, and it costs one dynamic
-`iterate` dispatch **per chunk**, never per row. The pulled chunk carries a
-`::DataFrame` annotation — the chunk protocol guarantees it — so `produce()`
-still infers `Union{Nothing, DataFrame}` through that field.
+would be boxed). The cursor's untyped `state` field costs one dynamic `iterate`
+dispatch **per chunk**, never per row, and the pulled chunk carries a
+`::DataFrame` annotation (the chunk protocol guarantees it), so `produce()`
+still infers `Union{Nothing, DataFrame}`.
 
 A chunk that fits entirely under the remaining budget is passed on untouched
 (the chunk is owned and column vectors are never mutated in place, so the
@@ -537,12 +528,11 @@ exactly the sense `summarize` is.
 One known limitation. The sinks finalize in `chunkmap`'s once-only `flush`, and
 `head` abandons its upstream, so a sink placed *upstream* of `head` never
 finalizes: its channel is never closed, its writer task blocks forever holding
-an open file, and the file is left unfinished. This is the documented
-"abandoning a `stream` part-way" hazard, but `head` makes it reachable from a
-fully drained `load`, which is new. Truncate first —
-`p |> head(n) |> writecsv(path)`, never the reverse. Fixing it properly wants a
-`close`-style hook on the chunk protocol so an abandoning consumer can release
-its upstream; that does not exist today and is deliberately out of scope here.
+an open file, and the file is left unfinished. This is the "abandoning a
+`stream` part-way" hazard, reachable here from a fully drained `load`.
+Truncate first: `p |> head(n) |> writecsv(path)`, never the reverse. A proper
+fix needs a `close`-style hook on the chunk protocol so an abandoning consumer
+can release its upstream, which the protocol does not have.
 
 ## Concatenation
 
@@ -558,11 +548,11 @@ flow by (O(ncols) per chunk, nothing per row):
 
 - **Time order.** The pipelines must be passed in time order; a chunk whose
   first time precedes the last time already emitted is an `ArgumentError`
-  naming the two pipelines. Equal times across a boundary are fine — the
+  naming the two pipelines. Equal times across a boundary are fine: the
   output only has to be non-decreasing. Within one pipeline the chunk protocol
-  already guarantees this, but checking every chunk costs nothing extra and
-  turns what `load`'s `checkchunk` would report as a generic cross-chunk
-  violation into a message that names the pipeline that is out of place.
+  already guarantees this, but checking every chunk is as cheap and turns what
+  `load`'s `checkchunk` would report as a generic cross-chunk violation into a
+  message naming the pipeline that is out of place.
 - **Identical columns.** Chunks must carry the same column names in the same
   order as the first chunk seen, the same rule the sinks apply in
   `sinkchunk`. Element *types* may still differ between pipelines, exactly as
@@ -579,11 +569,10 @@ time-order check rather than silently reordered.
 
 The mechanism is the `ChunkSource` producer `ConcatProducer`, in the shape of
 readcsv's `CSVProducer`: per-run state in fields rather than reassigned
-closure captures, and the dynamically typed fields (the current chunk
-iterator and its state) touched once per *pipeline*, not per chunk and never
-per row. A pipeline's `run(ctx)` is called only once the previous one is
-exhausted, which keeps the chain as lazy as its parts — a chain of file
-sources holds one file open at a time.
+closure captures, with the untyped fields (the pipeline index and its
+`PullCursor`) touched per chunk, never per row. A pipeline's `run(ctx)` is
+called only once the previous one is exhausted, which keeps the chain as lazy
+as its parts: a chain of file sources holds one file open at a time.
 
 Causality is trivial: rows pass through unchanged and in time order, so
 output at time `t` still depends only on input rows at time `≤ t`.
@@ -624,13 +613,11 @@ not have pulled. Thereafter each pipeline is one chunk ahead at most. That is
 the cost of interleaving: `merge` holds `n` sources open at once and `n`
 chunks resident, where `concatenate` holds one.
 
-The mechanism is a `ChunkSource` producer over one `MergeCursor` per pipeline
-— the buffered chunk, the row reached in it, and the lazily refilled iterator
-behind it, in the shape of asofjoin's right stream. The cursors sit in a
-`Vector{MergeCursor{T}}` rather than a tuple: selection indexes them by a
-runtime index, and the only field the ordering touches (`times`, the chunk's
-time column as the context's time type) is already concrete in the flat
-struct.
+The mechanism is a `ChunkSource` producer over one `MergeCursor` per pipeline:
+the buffered chunk, the row reached in it, and the lazily refilled iterator
+behind it. The cursors sit in a `Vector{MergeCursor{T}}` rather than a tuple:
+selection indexes them at run time, and the only field the ordering touches
+(`times`, the chunk's time column in the context's time type) is concrete.
 
 Rows are claimed a **piece** at a time, never a row at a time. Each step picks
 the cursor with the smallest key and claims from it the longest run of rows
@@ -645,16 +632,13 @@ every step productive.
 Pieces accumulate until `batchsize` rows are claimed (`clock`'s knob, same
 default) and are then materialized together, one allocation per output column,
 each row copied exactly once. Without the batching, two streams alternating row
-by row would emit one chunk per row and `load` would build a vector of chunks
-as long as the data; without the deferral, those rows would be copied twice,
-once into a per-piece frame and once more to concatenate them. The column's
-element type is the promotion of the pieces' own — `Missing` among them
-wherever a piece's input lacks the column, which is what widens it to
-`Union{Missing, T}`. The type is a runtime value, so the filling sits behind a
-function barrier where the output column is concrete; the offsets ride in a
-reused mutable `CopySpan` rather than as loose `Int` arguments, because the
-source column's type is known only at run time and a dynamic call boxes every
-non-pointer argument it is passed.
+by row would emit one chunk per row; without the deferral, rows would be copied
+twice, once into a per-piece frame and again to concatenate them. The column's
+element type is the promotion of the pieces' own, with `Missing` wherever a
+piece's input lacks the column. The type is a runtime value, so the filling
+sits behind a function barrier where the output column is concrete; the
+offsets ride in a reused mutable `CopySpan` rather than as loose `Int`
+arguments, because the copy is a dynamic call, which would box each of them.
 
 A batch that is a single piece covering a whole buffered chunk skips the copy
 entirely: the chunk is owned and column vectors are never mutated in place, so
@@ -690,13 +674,13 @@ receive the matched row's time.
 - **Tolerance.** With `tolerance` a match additionally requires
   `time - rtime <= tolerance` (inclusive; checked per left row against the
   stored right row, never by eager eviction). The right pipeline then runs
-  over the widened context `[start - tolerance, stop)` so lookback near the
-  window start is fully covered — the only place the time type needs
-  subtraction (`T - tolerance` yielding a time, `T - T` comparable to
-  `tolerance`; numbers and `Dates` types qualify). Without `tolerance` the
-  right pipeline sees only `[start, stop)`, so left rows near `start` may
-  find no earlier right row. Negative tolerance is rejected at run time,
-  generically, via `start - tolerance <= start` (the `clock` precedent).
+  over the widened context `[start - tolerance, stop)` (`widenstart`), so
+  lookback near the window start is fully covered; the time type must support
+  `T - tolerance` yielding a time and `T - T` comparable to `tolerance`
+  (numbers and `Dates` types do). Without `tolerance` the right pipeline sees
+  only `[start, stop)`, so left rows near `start` may find no earlier right
+  row. Negative tolerance is rejected at run time, generically, via
+  `start - tolerance <= start`.
 - **Prefixes.** `leftprefix` / `rightprefix` rename that side's non-time,
   non-key columns to `"{prefix}_{name}"`. Output names must be unique after
   prefixing — checked once, when both schemas are first known — so a
@@ -715,9 +699,9 @@ The implementation is a single-pass two-pointer merge: a `chunkmap` over the
 left stream pulls right chunks on demand — the right pointer advances per
 left *row* — keeping the most recent admitted right row per key. The store's
 key and row types are concrete NamedTuple types derived from the promoted
-right schema (widened when a later chunk moves it, as the summarizer states
-are), and the per-row merge sits behind a function barrier in the
-`summarize.jl` style. `strict` and `tolerance` ride in type parameters
+right schema (widened when a later chunk changes it, as the summarizer states
+are), and the per-row merge sits behind a function barrier. `strict` and
+`tolerance` ride in type parameters
 (`strict` as the comparison function `<` vs `<=`), so neither costs a per-row
 branch.
 
@@ -742,21 +726,20 @@ type-unstable setup once per right chunk, the per-row merge behind a function
 barrier — with three inversions:
 
 - **Match and tie-break.** The comparator `after` (`>` or `>=`) rides in a
-  type parameter, and its negation is the discard test (the reverse of
-  `asofjoin`'s `before`, never reused). Among right rows sharing the earliest
-  qualifying time, the **first** in stream order wins (`asofjoin` keeps the
-  last).
+  type parameter, and its negation is the discard test. Among right rows
+  sharing the earliest qualifying time, the **first** in stream order wins
+  (`asofjoin` keeps the last).
 - **Context widening.** With `tolerance` the match requires
   `rtime - time <= tolerance` and the right pipeline runs over the widened
-  context `[start, stop + tolerance)` — the only place times are *added*
-  (`futurecontext`, mirror of `widenstart`'s subtraction; an explicit guard
-  rejects negative tolerance, which the `Context` constructor would accept).
-  Without `tolerance` the right sees only `[start, stop)`, so left rows near
-  `stop` may find no later right row (mirror of `asofjoin` near `start`).
+  context `[start, stop + tolerance)` (`futurecontext`, the mirror of
+  `widenstart`; an explicit guard rejects negative tolerance, which the
+  `Context` constructor would accept). Without `tolerance` the right sees
+  only `[start, stop)`, so left rows near `stop` may find no later right row
+  (mirror of `asofjoin` near `start`).
 - **Buffering.** Because the match is the *earliest* qualifying right row,
   the store is a `Dict{K, KeyBuffer{V}}` of per-key FIFOs (append on pull,
-  logical pop-front by advancing a `head`, amortized compaction — the
-  `segtree.jl` idiom) rather than one row per key. Rows are held until a left
+  logical pop-front by advancing a `head`, amortized compaction) rather than
+  one row per key. Rows are held until a left
   row consumes or outruns them, and confirming that a key has no future match
   drains the right stream, so worst-case memory is O(number of right rows) —
   the price of looking forward. `matches` stores copied row values, not buffer
@@ -775,14 +758,12 @@ so everything forward-looking stays in `Acausal`.
 ## Representing a match
 
 Both joins accumulate one match per left row and turn them into columns when
-the chunk is assembled. The obvious representation — a
-`Vector{Union{Missing, V}}` over the right row type — costs a **heap
-allocation per left row**, and only for the rows that actually match, which is
-why it went unnoticed: it appears whenever `V` is not an `isbitstype`, and any
-`String` column or any `Missing`-admitting column on the right side is enough.
-Julia stores `V` inline in a `Vector{V}` but not in a `Vector{Union{Missing,
-V}}`, which is a boxed-reference array unless *every* member of the union is
-isbits.
+the chunk is assembled. The obvious representation, a
+`Vector{Union{Missing, V}}` over the right row type, costs a **heap
+allocation per matched left row** whenever `V` is not an `isbitstype`, which
+any `String` or `Missing`-admitting right column causes. Julia stores `V`
+inline in a `Vector{V}` but not in a `Vector{Union{Missing, V}}`, which is a
+boxed-reference array unless *every* member of the union is isbits.
 
 So a match is a `Vector{V}` of rows plus a `Vector{Bool}` mask. Slots for
 unmatched rows are left **undefined** rather than set to a sentinel, so
@@ -790,13 +771,13 @@ unmatched rows are left **undefined** rather than set to a sentinel, so
 copies only those slots when a schema widening rebuilds a half-filled buffer
 mid-chunk.
 
-That alone fixes `futurejoin`, whose store holds *mutable* `KeyBuffer`s and so
-answers a lookup with a pointer that needs no box. `asofjoin`'s store held rows
-by value, so `get` had to materialise `Union{Nothing, V}` — boxing exactly the
-same way, and the match array merely reused that box. Hence the `Dict{K, Int}`
+The store must avoid the same box. `futurejoin`'s holds *mutable*
+`KeyBuffer`s, so a lookup answers with a pointer. A store holding rows by
+value, as `asofjoin`'s `Dict{K, V}` would, has `get` materialize
+`Union{Nothing, V}`, boxing the same way. Hence `SlotStore`, a `Dict{K, Int}`
 of slot numbers over a `Vector{V}`: an `Int` is isbits, so the lookup is free
 and the row is read back inline. Admission claims a slot with `get!`, so it
-still costs one hash whether or not the key is new, and memory stays O(distinct
+costs one hash whether or not the key is new, and memory stays O(distinct
 keys).
 
 The rows must be *copied* into the match buffer rather than referenced by
@@ -814,8 +795,8 @@ is causal at every row whatever the context, and nothing needs widening.
 
 A lookup table is not a stream, so it is never clipped to the window, and a
 table with no rows still has a schema to append. (An `asofjoin` against a
-constant-time stream, its predecessor, lost every row when the constant fell
-outside the window.)
+constant-time stream would lose every row once the constant fell outside the
+window.)
 
 - **Keys.** `key` is required and must be present in both — the table's checked
   at construction, each input chunk's on arrival. Keys match with `isequal`
@@ -843,8 +824,8 @@ statically dispatched: a `Dict{K,Int}` from key to table row (`K` the table's ke
 NamedTuple type), the value columns as a concrete NamedTuple, and `unmatched`
 resolved to a singleton mode type. Per chunk, `lookuprows!` fills a
 `Vector{Int}` of table rows, 0 for no match, behind a function barrier. Only
-`Int`s are stored, so a non-isbits key costs nothing per row, the lesson of
-"Representing a match". Each value column is then gathered in one typed pass
+`Int`s are stored, so a non-isbits key costs nothing per row (see
+"Representing a match"). Each value column is then gathered in one typed pass
 (`gathermissing`, or plain `col[rows]` in the strict modes). `:drop` slices the
 chunk only when some row is unmatched.
 
@@ -924,15 +905,14 @@ within a chunk — and (2) implies neither, since mapping every row to `start` i
 sorted, boundary-safe, and backward. So `settimechunk!` carries a `prevtime`
 across chunks the way `clipchunk!` does.
 
-`settimechunk!` is shared with the acausal variant exactly as `shiftchunk!` is
-shared with `lead`; the two differ only in a `causal::Bool` and the operator name
-used in messages, one branch per chunk and none per row. It could not reuse
-`resolvetime!`: that renames onto `:time` without dropping the existing one,
-which DataFrames rejects, and its error wording is welded to the file sources'
-`path`/`what`. Only `maptime` is shared. The per-row causality check is an
-explicit loop behind a function barrier over two concretely typed vectors —
-`all(new .>= old)` would allocate a `BitVector` per chunk and lose the row index
-the message wants.
+`settimechunk!` is shared with the acausal variant as `shiftchunk!` is shared
+with `lead`; the two differ only in a `causal::Bool` and the operator name used
+in messages, one branch per chunk. It can't reuse `resolvetime!`, which renames
+onto `:time` without dropping the existing one (which DataFrames rejects) and
+words its errors for the file sources' `path`/`what`; only `maptime` is shared.
+The per-row causality check is an explicit loop behind a function barrier over
+two concretely typed vectors, since `all(new .>= old)` would allocate a
+`BitVector` per chunk and lose the row index the message wants.
 
 **The window is not widened.** `lag`/`lead` slide their upstream window because
 their shift is a constant known before any data is read (`lagcontext` /
@@ -949,9 +929,9 @@ is clipped away by the first evaluation and never offered to the second. Only th
 the out-of-window rows, widen the context yourself; nothing can infer how far.
 
 `settime(:time)` is legal and leaves the values alone, but it still re-clips, so
-a row sitting exactly at `stop` — which frames tolerate and `summarize` emits —
-is dropped. Special-casing it into a true no-op was rejected: it would then
-behave differently from `settime(r -> r.time)`, which is worse.
+a row sitting exactly at `stop` (which frames tolerate and `summarize` emits)
+is dropped. It is not special-cased into a true no-op, which would make it
+behave differently from `settime(r -> r.time)`.
 
 ## Rolling windows
 
@@ -1004,7 +984,7 @@ non-decreasing, so windows slide forward monotonically: per window and key,
 rows enter in stream order and expire for good, oldest first. The window
 algorithm is chosen **per accumulator**, not per call (`tiers.jl`). The
 expanded prototype tuple is partitioned into tiers from the realized states,
-so the weakest structure in a call costs only its own summarizers:
+so the weakest structure in a call slows only its own summarizers:
 
 - **Running tier — `GroupSummarizer`s.** Each window keeps per-key running
   states (a `Dict` from key to state tuple plus a live-row count). Admitted
@@ -1050,13 +1030,13 @@ whether the window is empty. A call whose summarizers share one structure
 compiles to the single-algorithm kernel: an absent tier's structure is
 `nothing`, and its code disappears.
 
-Measured over the benchmark's 100,000 rows (four per time unit, 100 keys), the
-per-accumulator choice leaves single-structure calls where they were and
-speeds up everything that used to fall to the weakest summarizer: an
-OHLC-style `[First, Max, Min, Last, Mean, Std]` goes from 52 ms to 15 ms at a
-250-unit look-back (it used to take the tree whole) and from 28 ms to 15 ms at
-5 units; `[Min, Max]` from 14.3 ms (tree) to 7.0 ms (deques); and
-`CountDistinct` from 239 ms (a set copied per combine) to 7.2 ms.
+Measured over the benchmark's 100,000 rows (four per time unit, 100 keys),
+choosing per accumulator rather than giving the whole call its weakest
+summarizer's algorithm matters: an OHLC-style `[First, Max, Min, Last, Mean,
+Std]` takes 15 ms at a 250-unit look-back against 52 ms through the tree alone
+(28 ms at 5 units); `[Min, Max]` takes 7.0 ms on the deques against 14.3 ms on
+the tree; and `CountDistinct` 7.2 ms against 239 ms with a set copied per
+combine.
 
 The partition is re-derived from the realized states whenever they are built
 or widened. A widening that produces an accumulator defeating `downdate!`
@@ -1065,14 +1045,15 @@ mid-stream; the tree recovers a poisoned window once the offending row
 expires, where such a running state never could. The sum family, though,
 counts `NaN`, `±Inf`, and `missing` terms rather than folding them in (see
 Summarizers), so those widenings stay running and recover on expiry there.
-Widening only promotes, so an accumulator can demote but never return. A
-widening rebuilds every tier from the live rows (the buffer, or the old trees
-for a tree that already existed) — rare, O(live), and correct for every
-transition; the new types force a rebuild anyway. In every tier the
-type-unstable setup happens once per chunk and the per-row work sits behind
-one concretely typed kernel; only the (possibly heterogeneous) look-backs
-peel vararg-style, the per-window tables and value vectors being homogeneous
-and indexable type-stably.
+No built-in accumulator becomes invertible by widening, so built-ins only
+demote; a custom state that promotes gets a buffer gathered from the trees
+(`treebuffer`). A widening rebuilds every tier from the live rows (the buffer,
+or the previous trees for a tree that already existed): rare, O(live), and
+correct for every transition, and the new types force a rebuild anyway. In
+every tier the type-unstable setup happens once per chunk and the per-row work
+sits behind one concretely typed kernel; only the (possibly heterogeneous)
+look-backs peel vararg-style, the per-window tables and value vectors being
+homogeneous and indexable type-stably.
 
 ## Interval summarization
 
@@ -1086,10 +1067,9 @@ changed" to "a clock boundary was crossed".
 
 - **Boundaries.** The clock's `:time` column gives `b₀ < b₁ < … < b_K` (only
   `:time` is read; other columns are ignored, and clock order is trusted to
-  the chunk protocol). Each complete interval `[bₖ, bₖ₊₁)` — inclusive of
-  begin, exclusive of end, the frame convention flipped from the sources'
-  `[start, stop)` only in which end is open — is summarized and emitted at its
-  **end** `bₖ₊₁`. This is causal: the summary at `bₖ₊₁` folds only rows with
+  the chunk protocol). Each complete interval `[bₖ, bₖ₊₁)`, half-open like the
+  sources' `[start, stop)`, is summarized and emitted at its **end** `bₖ₊₁`.
+  This is causal: the summary at `bₖ₊₁` folds only rows with
   time `< bₖ₊₁`. Input rows before `b₀` fall in no interval and are dropped.
 - **Keyless is a regular grid.** Every complete interval emits exactly one
   row, an empty one included with the summarizers' identity/missing values
@@ -1132,18 +1112,17 @@ emitted at `τ`, dropping the input columns. It sits between two neighbours.
 a look-back equal to a regular clock's spacing reproduces it at every tick
 after the first. `addrollingcolumns` covers a trailing window but emits a row
 per row of the stream it augments, and its keys must be present on both sides,
-which a bare clock cannot supply. Per-key windows sampled at clock ticks were
-the gap — fitting a model per key at every tick is the motivating case (see
-"Model fitting (MLJ)").
+which a bare clock cannot supply. `summarizewindows` fills that gap, per-key
+windows sampled at clock ticks; fitting a model per key at every tick is the
+motivating case (see "Model fitting (MLJ)").
 
 - **Windows** are half-open: they include `τ - lookback` and exclude `τ`
   itself. That is `intervalize`'s convention, and it is what makes a summary
   emitted at `τ` fold only rows strictly before it. (`addrollingcolumns`'
   windows include their own row's time instead, because there the row *is* the
-  observation being annotated.) The input runs over `[start - lookback, stop)`,
-  so the first tick already sees a full window — the `rollingcontext` widening,
-  with the same generic non-negativity check — and the clock over
-  `[start, stop)`.
+  observation being annotated.) The input runs over `[start - lookback, stop)`
+  (`widenstart`, with its non-negativity check), so the first tick already
+  sees a full window, and the clock over `[start, stop)`.
 - **Keyless is a regular grid.** Every tick emits one row; an empty window
   emits the summarizers' empty values, so element types widen through the
   shared `promotedvaluetype`. No data at all still emits the whole grid, typed
@@ -1210,27 +1189,23 @@ The window algorithm is chosen per accumulator, by `addrollingcolumns`' tiers
   takes, and the differential-test oracle for the others.
 - **No tier** for stateless (dependent) states, as in `addrollingcolumns`.
 
-Measured over the benchmark's million rows with 1,000-unit ticks, the tiers
-keep single-structure calls at parity and speed up mixed ones: the OHLC-style
-set above goes from 127 ms to 100 ms keyless and 267 ms to 159 ms keyed at a
-5,000-unit look-back, and from 238 ms to 96 ms keyless at a 20-unit look-back
-(shorter than the tick spacing, where the old tree was rebuilt at every tick);
-`Last` alone goes from 34 ms to 21 ms. The one loss is keyless `[Min, Max]`
-alone, about 46 ms to 55 ms (minimum of samples; the gap measured 7–20% across
-sessions). Per tracker and row, the deque's `update!` on admission and
-`downdate!` on eviction cost 8.6–10.2 ns — a `pop!` and a `push!` on each of its
-two vectors, and the counters — where the old tree zeroed and folded a leaf and
-recombined its share of ancestors at the tick in 3.1–3.6 ns. The tree's own
-overheads (rebuilds allocating fresh states, a window-start search per tick)
-win back only part of that difference; the key lookups, of the empty key,
-barely register. Keyed, the same set goes from about 106 ms to 99 ms (5–22%
-faster across sessions), since a hundred trees each rebuild and search while
-the deque's cost per row is unchanged, so no heuristic chooses between them.
-Keeping the deque's values and sequence numbers in one vector for isbits
-values, halving its pushes and pops, is the obvious next step. (The buffer is
-compacted at every tick's eviction, and rolling's after every row's, so it
-stays near the window's size rather than growing through a whole chunk — which
-is what keeps the running tier at or ahead of its old single-mode kernel.)
+Measured over the benchmark's million rows with 1,000-unit ticks, splitting a
+mixed call across tiers beats running it all on the tree: the OHLC-style set
+above takes 100 ms keyless and 159 ms keyed at a 5,000-unit look-back, against
+127 ms and 267 ms, and 96 ms against 238 ms keyless at a 20-unit look-back
+(shorter than the tick spacing, where a tree rebuilds at every tick); `Last`
+alone takes 21 ms against 34 ms. The exception is keyless `[Min, Max]` alone,
+about 55 ms on the deques against 46 ms on a tree (7–20% across sessions): the
+deque's `update!` and `downdate!` cost 8.6–10.2 ns per tracker and row (a
+`pop!` and a `push!` on each of two vectors, and the counters), where a tree
+leaf and its share of the tick's recombination cost 3.1–3.6 ns, and the tree's
+rebuilds and window-start searches win back only part of that. Keyed, the
+deque wins (about 99 ms against 106 ms), since a hundred trees each rebuild
+and search, so no heuristic chooses between them. Keeping the deque's values
+and sequence numbers in one vector for isbits values, halving its pushes and
+pops, is the obvious next optimization. The buffer is compacted at every
+tick's eviction (and rolling's after every row), so it stays near the window's
+size rather than growing through a whole chunk.
 
 Presence means rows in the window in every tier, so the first tier present
 (running, then tree, then re-fold) supplies the keys a tick emits, and the
@@ -1240,9 +1215,9 @@ only when the running or re-fold tier is present.
 
 A widening that defeats `isinvertible` moves only that accumulator to the tree
 mid-stream, as in `addrollingcolumns`. Every widening rebuilds the tiers from
-the live rows: running groups replay the buffer, new trees replay the buffer,
-and surviving trees replay their own rows; the re-fold table starts empty,
-since it is filled only at ticks.
+the live rows: running groups replay the buffer, trees replay the previous
+trees' rows (or the buffer, if there were none), and the re-fold table starts
+empty, since it is filled only at ticks.
 
 `summarizewindows` is **causal**: a row emitted at `τ` folds only rows with time
 `< τ`. It is **stateful** in the usual sense, so streaming equals loading,
@@ -1255,7 +1230,7 @@ Keyed output from `summarizecycles`, `intervalize` and `summarizewindows` is
 sparse by necessity — a causal operator cannot emit a key it has not seen yet —
 but the key set is often known up front, and the consumer wants a cell per
 close and key, empty cells included: SQL's `keys LEFT JOIN data`. Without a
-declaration that took one upstream pipeline per key, `merge`d back together.
+declaration that takes one upstream pipeline per key, `merge`d back together.
 `keyset` declares the keys and makes keyed output **dense**.
 
 - **Every close emits every declared key, in declared order** — every cycle,
@@ -1293,8 +1268,8 @@ reads (`emitdense!`, a lookup per declared key per tick in the first tier
 present). When that primary tier is the running or the tree tier, the
 declaration is checked only where a key's group or tree is made, so a key's
 later rows pay nothing for it; re-fold groups only at ticks, so when it is the
-primary it checks each admitted row. The undeclared paths pass `nothing` for the key set,
-and the checks dispatch away.
+primary it checks each admitted row. The undeclared paths pass `nothing` for
+the key set, and the checks dispatch away.
 
 ## Model fitting (MLJ)
 
@@ -1314,17 +1289,17 @@ loading any MLJ model loads the extension, and it is small and pure Julia
 (ScientificTypesBase and StatisticalTraits beyond stdlibs): measured on Julia
 1.12, `using MLJModelInterface` after `using CausalFrames` — the package and
 the extension together — takes about 0.01 s, against about 1 s for
-CausalFrames itself. MLJBase was
-rejected: machines bring Distributions, CategoricalArrays and dozens more
-packages, and the model-level API (`fit`, `predict`, the data front-end
-`reformat`, `save`/`restore`) needs none of them. Model *implementations*
-generally do need MLJBase, for `MLJModelInterface.matrix` and friends, which is
-why users load `using MLJ` — but that weight is theirs to choose. One naming
-consequence: MLJ (like MLJModelInterface) exports the scientific type `Count`,
-so alongside it the summarizer is written `CausalFrames.Count()`; renaming an
-existing export to dodge a downstream package was not worth the breakage. As with
-parquet, `src/models.jl` names no MLJ type: the extension implements five hooks
-whose fallbacks live there (`ismodel`, `fitmodel`, `predictmodel`,
+CausalFrames itself. MLJBase is not a dependency: machines bring
+Distributions, CategoricalArrays and dozens more packages, and the model-level
+API (`fit`, `predict`, the data front-end `reformat`, `save`/`restore`) needs
+none of them. Model *implementations* generally do need MLJBase, for
+`MLJModelInterface.matrix` and friends, which is why users load `using MLJ`,
+but that weight is theirs to choose. One naming consequence: MLJ (like
+MLJModelInterface) exports the scientific type `Count`, so alongside it the
+summarizer is written `CausalFrames.Count()`; renaming an existing export to
+dodge a downstream package is not worth the breakage. As with parquet,
+`src/models.jl` names no MLJ type: the extension implements five hooks whose
+fallbacks live there (`ismodel`, `fitmodel`, `predictmodel`,
 `savefitresult`, `restorefitresult`).
 
 **`FitModel`** buffers the rows it folds — one concretely typed vector per
@@ -1382,11 +1357,11 @@ report alone, which lives in MLJModelInterface itself — so the two agree
 exactly: an empty report becomes `nothing`, and a model overloading `report` is
 honoured. (A machine's report also merges the reports of operations run since,
 which a fit-time table cannot hold.) It is row-wise and stateless, and a
-`missing` cell stays `missing`. The report stays
-one column. Splatting its fields into columns was rejected: a chunk's column
-names must be fixed before its rows go out, and the fields are unknown until a
-model has been fit, so a keyless stream opening on empty windows would have
-nothing to name them from. `addcolumns` extracts fields.
+`missing` cell stays `missing`. The report stays one column rather than being
+splatted into its fields: a chunk's column names must be fixed before its rows
+go out, and the fields are unknown until a model has been fit, so a keyless
+stream opening on empty windows would have nothing to name them from.
+`addcolumns` extracts fields.
 
 **Persistence.** `FittedModel` defines `serialize`/`deserialize` on its own type
 (so not piracy) that route the fitresult through `savefitresult` and
@@ -1417,22 +1392,22 @@ so emitting there is allowed — `summarize` already does it. The consequence is
 that the original timestamp is lost; the composable recovery is
 `addcolumns(r -> (; t0 = r.time))` upstream, rather than a magic extra column.
 
-The per-key store is **join.jl's**, not a `GroupTable`: a `Dict{K,Int}` of slot
-numbers over a `Vector{V}` of concretely typed rows, with `V` and `K` built by
-`storerowtype`/`storekeytype` from the promoted input schema, and rows read with
-`rowat`/`keyat`. The reasoning is "Representing a match" applied unchanged — a
-`Dict{K,V}` can only answer `get` as `Union{Nothing,V}`, which Julia heap-boxes
-whenever `V` is not isbits, and `lastrow` does a dict operation *per row*, so one
-`String` column would cost one box per row. A `Dict{K,DataFrame}` of one-row
-slices dodges the box only because a DataFrame is already a pointer, at the cost
-of a whole DataFrames `Index` plus a one-element vector per column per key.
+The per-key store is join.jl's `SlotStore`, not a `GroupTable`: a `Dict{K,Int}`
+of slot numbers over a `Vector{V}` of concretely typed rows, with `V` and `K`
+built by `storerowtype`/`storekeytype` from the promoted input schema, and rows
+read with `rowat`/`keyat`. The reasoning is "Representing a match" applied
+unchanged: a `Dict{K,V}` can only answer `get` as `Union{Nothing,V}`, which
+Julia heap-boxes whenever `V` is not isbits, and `lastrow` does a dict
+operation *per row*, so one `String` column would cost one box per row. A
+`Dict{K,DataFrame}` of one-row slices would dodge the box only because a
+DataFrame is already a pointer, at the cost of a whole DataFrames `Index` plus
+a one-element vector per column per key.
 
 What `lastrow` does *not* need is the join's `found` mask: every slot a key
 claims is written the same instant, so the store is never half-filled and a
-widening is a plain `convert(Vector{V}, slots)` rather than `convertmatches`.
-Slot numbers do not move under a widening either, so only the dict's keys are
-rebuilt — the store is the join's own `SlotStore`, widened by the same
-`widenstore`. Because the store is one concretely typed
+widening (the join's own `widenstore`) is a plain `convert(Vector{V}, slots)`
+rather than `convertmatches`, rebuilding only the dict's keys since slot
+numbers don't move. Because the store is one concretely typed
 vector, the flush builds the output through a `DataFrame(rows)` over it directly:
 no `vcat` of per-key frames, and so no `cols = :union` question and no promotion
 pass. Element types may drift chunk to chunk, as everywhere else, and the store
@@ -1469,9 +1444,9 @@ a keyed `Count` over `key = :time` a rank.
   on it reorders nothing.
 - **Order.** Stable, so equal keys keep stream order, and by `isless`, so
   `missing` sorts last. `rev` reverses the whole order, `missing` first included;
-  a mixed direction is a function negating a numeric key. Per-key `rev` pairs
-  were left out: the function form already covers the numeric case, and a
-  descending text key is rare enough not to justify a second spelling.
+  a mixed direction is a function negating a numeric key. There are no per-key
+  `rev` pairs: the function form covers the numeric case, and a descending
+  text key is too rare to justify a second spelling.
 
 The mechanism is a `chunkmap` whose one piece of state is the **open cycle**: the
 trailing cycle of the last chunk is held back, because the rest of it may be in
@@ -1480,9 +1455,9 @@ before its own trailing cycle, prefixed by the held-back pieces when the chunk
 closes them. A chunk whose last time equals the open time is entirely that cycle
 and is appended as a piece, uncopied. The pieces are a `Vector{DataFrame}`,
 concatenated once when the cycle closes, so a cycle spread over many chunks costs
-O(rows) — `sortgathered`'s idiom — where re-concatenating per chunk would be
-quadratic. Their column names must match, checked per piece, since a moved schema
-cannot be concatenated into one cycle; element types promote on concatenation.
+O(rows), where re-concatenating per chunk would be quadratic. Their column
+names must match, checked per piece, since a changed schema can't be
+concatenated into one cycle; element types promote on concatenation.
 Flush emits the last cycle.
 
 Nearly every chunk closes the cycle the previous one held back, so the emission
@@ -1536,15 +1511,14 @@ because the rows before a column's first value — and the rows past
 
 The carried state is one cell per **(key, column)**, not one row per key: a
 forward fill is column-independent, so `:a` may carry from row 3 while `:b`
-carries from row 7, and `lastrow`'s whole-row store cannot express that. Since
-a cell must be *updated* in place rather than replaced, it is a mutable struct,
-and that in turn settles the store: a plain `Dict{K, NamedTuple}` of cells,
-not the `Dict{K, Int}` over a slot vector [Representing a
-match](#representing-a-match) argues for. The reason that store exists is that
-a `Dict{K, V}` of immutable rows answers every lookup as `Union{Nothing, V}`
-and boxes it whenever `V` is not isbits; a lookup of a mutable cell already
-answers with a pointer, so there is nothing to box — the same reasoning that
-makes `futurejoin`'s `KeyBuffer` mutable. A cell is typed at the column's
+carries from row 7, and `lastrow`'s whole-row store cannot express that. A
+cell is *updated* in place, so it is a mutable struct, and that settles the
+store: a plain `Dict{K, NamedTuple}` of cells, not the `SlotStore`
+[Representing a match](#representing-a-match) argues for. That store exists
+because a `Dict{K, V}` of immutable rows answers every lookup as
+`Union{Nothing, V}` and boxes it whenever `V` is not isbits; a lookup of a
+mutable cell already answers with a pointer, as with `futurejoin`'s
+`KeyBuffer`. A cell is typed at the column's
 *non-missing* type, so gaining `Missing` mid-stream does not disturb it, and
 the `seen` flag keeps "nothing carried yet" distinct from a column holding
 `missing`, exactly as `TrackState`'s does.
@@ -1722,8 +1696,9 @@ would. `Product` is the same story with `Base.prod`'s widening and a `*` fold.
 
 The whole sum family (`Sum`, `SumPower`, `DotProduct`) is backed by one
 shared state, `AccumState`, whose storage is plain or compensated (below) and
-which is parameterized by a *term functor* — the same idiom as the `Min`/`Max`/`First`/`Last` state, but
-for the folded quantity: the functor's type names the family and its input
+which is parameterized by a *term functor* (the same idiom as the
+`Min`/`Max`/`First`/`Last` state's combiner, applied to the folded quantity):
+the functor's type names the family and its input
 columns (`ColumnTerm{:x}`, `PowerTerm{:x}`, `PairProductTerm{:a,:b}`), its
 fields carry runtime config (`SumPower`'s exponent), and `update!` inlines
 it statically. Every term is formed *in the accumulator's widened type* —
@@ -1740,16 +1715,15 @@ well beyond `SumPower` itself since every `Variance`, `Std`, `Covariance`,
 `Correlation`, and `LinearRegression` depends on the squared power sum. This is
 an implementation detail: the output column keeps its own name and the
 accumulator type is unchanged (`powertype(T, 1) === sumtype(T)` and
-`powertype(T, 2) === dottype(T, T)`), so no schema moves. The term value is
-bit-identical at `n = 1` and for integers; at `n = 2` over floats `x * x` is
-the correctly rounded square, which the runtime `^` can miss by 1 ULP for
-inputs whose square lands near underflow (how often depends on the CPU, since
-`^` rounds its error terms differently with and without FMA, so the tests bound
-the difference rather than asserting where it falls) — more accurate, but a
-change. It does not
-disturb what the compensated storage relies on, since they classify NaN and ±Inf
-*terms* and carry the sign of zero, and no nonfinite or signed-zero case
-differs. `notes/sumpower-terms.md` records the measurements.
+`powertype(T, 2) === dottype(T, T)`), so no schema changes. The term value is
+bit-identical to `x^n` at `n = 1` and for integers; at `n = 2` over floats
+`x * x` is the correctly rounded square, which the runtime `^` can miss by 1
+ULP for inputs whose square lands near underflow (how often depends on the
+CPU's FMA support, so the tests bound the difference rather than asserting
+where it falls). That doesn't disturb what the compensated storage relies on,
+since it classifies NaN and ±Inf *terms* and carries the sign of zero, and no
+nonfinite or signed-zero case differs. `notes/sumpower-terms.md` records the
+measurements.
 
 When the realized accumulator type is a fixed-precision float (a non-BigFloat
 `AbstractFloat`), the sum accumulators (`Sum`, `SumPower`, `DotProduct`) switch
@@ -1775,10 +1749,10 @@ accumulation at the *non-missing* type and counts the `missing` terms in an
 `Int`, folding only present terms in (without the flag the count stays zero
 and every test of it compiles away).
 `value` returns `missing` while that count is positive and the ordinary
-reconstructed total otherwise, at the declared element type `Union{Missing, A}`
-— identical results to the old absorbing behaviour, but the count subtracts
-away under `downdate!`, so the accumulator stays invertible and a rolling window
-recovers on the running path once the missing row expires (no tree demotion).
+reconstructed total otherwise, at the declared element type `Union{Missing, A}`.
+The count subtracts away under `downdate!`, so the accumulator stays invertible
+and a rolling window recovers on the running path once the missing row expires
+(no tree demotion).
 The accumulation field is never itself `Union{Missing, …}`; only the `value`
 return is. `widenstate` carries the whole representation across schema
 promotions — plain→compensated storage (an `Int` column promoted to float),
@@ -1822,8 +1796,8 @@ It is a group through its windowed state. The ordinary state's `Set` combines
 still appears elsewhere in the window is unknowable from the set. The windowed
 state counts the rows per distinct value in a `Dict{T,Int}` instead and drops a
 value when its count reaches zero, so a sliding window costs O(1) per row where
-the segment tree it used to take copied a set on every combine — 239 ms against
-7.2 ms over the benchmark's 100,000 rows at a 25-unit look-back. The two stay separate
+a segment tree would copy a set on every combine (7.2 ms against 239 ms over the
+benchmark's 100,000 rows at a 25-unit look-back). The two stay separate
 because the count costs the folds that never remove a row: incrementing a count
 through the public `Dict` API hashes twice per row, which measured 1.4–1.7×
 slower than `push!` on a Set over a million-row fold (1.62× for 100 distinct
@@ -1850,9 +1824,11 @@ single-threaded:
 | `Sum`, ns per row | 67 | 48 | 48 | 50 | 50 |
 | re-fold, ns per row | 411 | 4,915 | — | — | — |
 
-The memmove only dominates past about ten thousand rows. A tree would pay off
-there, and has not been measured, since indicator windows are far shorter. Its value is the state itself,
-*borrowed* as `treequery`'s scratch is: dependents read it within the emission
+The memmove only dominates past about ten thousand rows, where a tree would pay
+off; that is unmeasured, since indicator windows are far shorter.
+
+Its value is the state itself, *borrowed* as `treequery`'s scratch is:
+dependents read it within the emission
 and the projection drops it, so emitting allocates nothing — and requesting it
 as an output column would alias one state across every row, which its
 docstring forbids. `combine!` merges into a scratch vector and swaps it in, so
@@ -1901,12 +1877,11 @@ two never collapse under the name-keyed deduplication described below.
 
 ### Element types across chunks
 
-A source may hand a column a different element type from one chunk to the
-next, so a column can be `Int` in one chunk and `Float64` in the next. The
-summarization
-transforms therefore track the promotion of every input type seen so far and
-call `widenstate` when that promotion moves, rebuilding a state for the wider
-type and carrying its accumulated value over. Summaries emitted before the
+A column's element type may differ from one chunk to the next (`Int` in one,
+`Float64` in the next). The summarization transforms therefore track the
+promotion of every input type seen so far and call `widenstate` when it
+changes, rebuilding a state for the wider type and carrying its accumulated
+value over. Summaries emitted before the
 widening keep the narrower type, which frames already tolerate (see "Core
 types"), and `DataFrame(cf)` promotes them on concatenation.
 
@@ -1922,7 +1897,7 @@ The transforms exploit this with a **function barrier** per chunk. The
 type-unstable setup — reading the schema, building or widening the states,
 turning the chunk into a column table — happens once per chunk; the folding
 kernels then take concretely typed arguments (a *tuple* of states, never a
-`Vector{Summarizer}`; a `Dict{K,S}` of key groups with both parameters
+`Vector{Summarizer}`; a `GroupTable{K,S}` of key groups with both parameters
 concrete, the key names carried in a `Val`) and specialize, so the per-row
 work compiles to direct field access with no dispatch or boxing. Folding a
 million rows allocates on the order of kilobytes.
@@ -1949,15 +1924,14 @@ and the re-fold window kernel.
 Three structures own reusable scratch rather than allocating it per use:
 
 - a `SegTree` holds the two order-preserving accumulators its range queries
-  fold into, so `treequery`'s result is **borrowed** — valid until that tree's
+  fold into, so `treequery`'s result is **borrowed**: valid until that tree's
   next query, which is all its callers need, since they read it straight
   through `summaryvalues`. It also compacts its row buffers in place across
   rebuilds and, at an unchanged capacity, keeps its node vector by moving the
-  live leaves' state tuples to the front by reference — nothing is re-zeroed
-  or re-folded, a swapped-out tuple being zeroed only by the append that claims
-  its slot — which matters because a window short enough
-  to expire rows as fast as they arrive keeps the capacity at its floor and
-  rebuilds every few appends;
+  live leaves' state tuples to the front by reference (nothing is re-zeroed or
+  re-folded; a swapped-out tuple is zeroed by the append that claims its slot).
+  That matters because a window short enough to expire rows as fast as they
+  arrive keeps the capacity at its floor and rebuilds every few appends;
 - the re-fold window kernel threads one state tuple through its window
   recursion for a whole segment;
 - a `GroupTable` — the per-key state tuples of the keyed transforms — carries a
@@ -2021,8 +1995,8 @@ overlapping columns fold each cross product once, and because a squared term is
 requested as `SumPower(c, 2)` rather than `DotProduct(c, c)`, and every genuine
 cross product under the canonical order described below, a regression also
 shares with a `Variance`, `Std`, `Correlation`, or `Covariance` the user asked
-for separately, whichever way round the latter's arguments are
-written. With an intercept the normal equations are centered on the column
+for separately, whichever way round the latter's arguments are written. With
+an intercept the normal equations are centered on the column
 means — the multivariate form of the `Covariance` identity, better conditioned
 and one dimension smaller than carrying a column of ones — and the intercept is
 recovered as `ȳ − Σᵢ βᵢ x̄ᵢ`. The system is symmetric positive semidefinite, so
@@ -2142,7 +2116,7 @@ this structure (see "Rolling windows" and "Window summarization"). The classific
   it holds one value — but still pays a pop and a push on two vectors per row.
   It keeps the newest value and a count of the window's rows instead: evicting
   the oldest row changes the last value only by emptying the window, and a
-  count, unlike the last row's time, tells tied rows apart. That measured
+  count, unlike the last row's time, tells tied rows apart. Measured, that is
   1.1–2.2 ns per row against the deque's 5.7–8.4, and 23 ms against 38 ms for a
   keyless `summarizewindows` of `Last` over the benchmark's million rows.
   `CountDistinct` counts rows per value (see above).
@@ -2274,17 +2248,18 @@ the second.
 | `src/precompile.jl` | PrecompileTools workload covering the main pipeline paths |
 
 Exports: `Context`, `CausalFrame`, `CausalPipeline`, `load`, `stream`,
-`scan`, `context`, `timetype`, `emptyframe`, `concatenate`, `clock`, `readcsv`, `writecsv`, `readparquet`,
-`writeparquet`, `readjls`, `writejls`, `readtable`, `filterrows`,
-`addcolumns`, `selectcolumns`, `dropcolumns`, `reordercolumns`, `Summarizer`, `MonoidSummarizer`, `GroupSummarizer`,
-`SummarizerState`, `Count`, `CountDistinct`, `Sum`, `SumPower`, `AgeWeightedSum`,
-`Moment`, `Product`, `DotProduct`, `Mean`, `Variance`, `Std`, `Covariance`,
-`Correlation`, `LinearRegression`, `Quantile`, `Median`, `PercentRank`, `Min`,
-`Max`, `First`, `Last`, `FitModel`, `FittedModel`, `applymodels`, `addpredictions`, `modelreports`, `summarize`,
+`scan`, `context`, `timetype`, `emptyframe`, `concatenate`, `clock`,
+`readcsv`, `writecsv`, `readparquet`, `writeparquet`, `readjls`, `writejls`,
+`readtable`, `filterrows`, `addcolumns`, `selectcolumns`, `dropcolumns`,
+`reordercolumns`, `Summarizer`, `MonoidSummarizer`, `GroupSummarizer`,
+`SummarizerState`, `Count`, `CountDistinct`, `Sum`, `SumPower`,
+`AgeWeightedSum`, `Moment`, `Product`, `DotProduct`, `Mean`, `Variance`,
+`Std`, `Covariance`, `Correlation`, `LinearRegression`, `Quantile`, `Median`,
+`PercentRank`, `Min`, `Max`, `First`, `Last`, `FitModel`, `FittedModel`,
+`applymodels`, `addpredictions`, `modelreports`, `summarize`,
 `summarizecycles`, `intervalize`, `summarizewindows`, `addsummarycolumns`,
-`addrollingcolumns`,
-`asofjoin`, `lookupjoin`, `lag`, `settime`, `head`, `lastrow`, `sortcycles`, `forwardfill`,
-`fillmissing`.
+`addrollingcolumns`, `asofjoin`, `lookupjoin`, `lag`, `settime`, `head`,
+`lastrow`, `sortcycles`, `forwardfill`, `fillmissing`.
 
 `merge` is not in that list: it is `Base.merge`, extended for `CausalPipeline`
 arguments rather than exported under a name of our own, so `using CausalFrames`
@@ -2301,6 +2276,7 @@ Dependencies: DataFrames, CSV, Tables, LinearAlgebra, PrecompileTools, and the
 each behind a package extension (see "Parquet I/O"), and MLJModelInterface,
 behind the MLJ extension (see "Model fitting (MLJ)").
 
-Package infrastructure: `test/` runs the unit tests plus an Aqua.jl quality
-testset; `benchmark/benchmarks.jl` is a PkgBenchmark-compatible suite over
-the hot paths; `docs/` is a Documenter.jl site built and deployed by CI.
+Package infrastructure: `test/` runs the unit tests plus Aqua.jl quality and
+targeted JET dispatch checks; `benchmark/benchmarks.jl` is a
+PkgBenchmark-compatible suite over the hot paths; `docs/` is a Documenter.jl
+site built and deployed by CI.

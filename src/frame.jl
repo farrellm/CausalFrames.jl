@@ -1,7 +1,6 @@
 # Internal token: the caller vouches for the chunk-protocol invariants
-# (non-empty chunks, shared schema, ordered in-window times), so the trusted
-# constructor may skip the O(n) validation. Only load and stream qualify —
-# they consume iterators that already guarantee the protocol.
+# (non-empty chunks, shared schema, ordered in-window times), so the constructor
+# skips the O(n) validation. Only load and stream use it.
 struct Trusted end
 
 """
@@ -90,17 +89,14 @@ function DataFrames.DataFrame(frame::CausalFrame{T}) where {T}
     return reduce(vcat, frame.chunks)
 end
 
-# Column access only: rows are served through Tables.jl's row-view fallback
-# over the columns, so consumers touching both pay one materialization, not
-# two. The copy in Tables.columns keeps the backing opaque.
+# Column access only: Tables.jl's row fallback iterates these columns. The
+# copy made by `DataFrame(frame)` keeps the backing opaque.
 Tables.istable(::Type{<:CausalFrame}) = true
 Tables.columnaccess(::Type{<:CausalFrame}) = true
 Tables.columns(frame::CausalFrame) = Tables.columns(DataFrame(frame))
 
-# The names are known without materializing, and the eltypes are the
-# promotion of each column's per-chunk eltypes — what `DataFrame(frame)`
-# produces on concatenation — so the schema costs O(chunks * columns), never
-# a row scan.
+# Each eltype is the promotion of the column's per-chunk eltypes, as
+# `DataFrame(frame)` produces: O(chunks * columns), no row scan.
 function Tables.schema(frame::CausalFrame{T}) where {T}
     isempty(frame.chunks) && return Tables.Schema((:time,), (T,))
     ns = propertynames(first(frame.chunks))
@@ -109,9 +105,8 @@ function Tables.schema(frame::CausalFrame{T}) where {T}
     return Tables.Schema(ns, types)
 end
 
-# One partition per backing chunk; the copies keep the backing opaque. An
-# empty frame yields the single zero-row frame `DataFrame(frame)` would, so
-# partition-aware sinks see the same table as whole-table consumers.
+# One copied partition per chunk. An empty frame yields the zero-row frame
+# `DataFrame(frame)` gives, so partition-aware sinks see the same table.
 Tables.partitions(frame::CausalFrame{T}) where {T} =
     (copy(c) for c in (isempty(frame.chunks) ? (DataFrame(time = T[]),) :
                        frame.chunks))

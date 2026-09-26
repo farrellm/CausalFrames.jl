@@ -1,13 +1,8 @@
-# The last-row-per-key transform. It folds the whole window the way `summarize`
-# does — one pass per chunk, nothing emitted until the stream is exhausted — but
-# keeps rows rather than summaries, so its store is join.jl's rather than a
-# GroupTable: a Dict{K,Int} of slot numbers over a Vector{V} of concretely typed
-# rows. A Dict{K,V} would answer every lookup as Union{Nothing,V} and box it
-# whenever V is not isbits (one String column is enough), and a Dict{K,DataFrame}
-# of one-row slices would allocate a whole DataFrame index per key. See
-# DESIGN.md, "Representing a match". No `found` mask is needed here, unlike the
-# join's matches buffer: every slot a key claims is written the same instant, so
-# the store is never half-filled and widening is a plain `convert`.
+# The last-row-per-key transform. Like `summarize` it folds the whole window and
+# emits once the stream is exhausted, but it keeps rows rather than summaries,
+# so its store is join.jl's `SlotStore` (see there, and DESIGN.md, "Representing
+# a match"), not a GroupTable. A slot is written as soon as its key claims it,
+# so unlike the join's matches no `found` mask is needed.
 
 """
     lastrow(; key = nothing) -> (CausalPipeline -> CausalPipeline)
@@ -58,11 +53,9 @@ function lastrow(; key = nothing)
 end
 lastrow(p::CausalPipeline; kwargs...) = lastrow(; kwargs...)(p)
 
-# Per-run mutable state, in fields rather than reassigned closure captures
-# (those get boxed). The dynamically typed fields are per-chunk setup state: the
-# store's row and key types come from the promoted input schema, so they are not
-# known until the first chunk arrives, and everything per-row sits behind the
-# `lastsegment!` function barrier.
+# Per-run state. The store's row and key types come from the promoted input
+# schema, known only once a chunk arrives, so these fields are untyped per-chunk
+# setup; the per-row work sits behind the `lastsegment!` function barrier.
 mutable struct LastRowState
     const keycols::Vector{Symbol}
     names::Union{Nothing,Vector{String}}  # column names, fixed by the first chunk
@@ -81,8 +74,7 @@ function lastrowchunk!(st::LastRowState, ::Val{KN}, c::DataFrame) where {KN}
     V = storerowtype(types)
     nt = Tables.columntable(c)
     if isempty(KN)
-        # Keyless: the chunk's last row is the last row so far, so there is
-        # nothing to do per row. O(ncols) per chunk.
+        # Keyless: only the chunk's last row matters. O(ncols) per chunk.
         st.row = rowat(V, nt, length(nt.time))
         return nothing
     end
@@ -95,10 +87,9 @@ function lastrowchunk!(st::LastRowState, ::Val{KN}, c::DataFrame) where {KN}
     return nothing
 end
 
-# O(ncols) per chunk. The key check needs the schema, so it runs on the first
-# chunk; the names check runs on every chunk, since the store's row type is fixed
-# by them and a rename would otherwise surface as an opaque `convert` failure.
-# Column order counts: a reordering moves the schema downstream operators see.
+# O(ncols) per chunk. Keys are checked on the first chunk; names, including
+# their order, on every chunk, since they fix the store's row type and a change
+# would otherwise surface as an opaque `convert` failure.
 function checkschema!(st::LastRowState, c::DataFrame)
     cols = names(c)
     if st.names === nothing
@@ -113,10 +104,8 @@ function checkschema!(st::LastRowState, c::DataFrame)
     return nothing
 end
 
-# Function barrier: called with concretely typed arguments, so the per-row work
-# compiles to direct column access with nothing boxed. Last write wins, which is
-# exactly "each key's last row" — joinsegment!'s admission loop without the
-# tolerance and ordering machinery.
+# Function barrier over concretely typed arguments. Last write wins: the
+# join's admission loop without tolerance or ordering.
 function lastsegment!(index::Dict{K,Int}, slots::Vector{V}, nt::NamedTuple,
     ::Val{KN}) where {K,V,KN}
     for i in eachindex(nt.time)
@@ -136,14 +125,11 @@ function flushlastrow(st::LastRowState, ::Val{KN}, stop) where {KN}
     return DataFrame(emitlast(st.store.slots, ordered, stop))
 end
 
-# Function barrier: the emitted rows are concretely typed, so DataFrame builds
-# typed columns from them directly with no promotion pass — and the O(keys) slot
-# reads are not O(keys) dynamic dispatches through `st.slots::Any`.
+# Function barrier: the rows are concretely typed, so DataFrame builds typed
+# columns directly and the slot reads don't dispatch through `st.store::Any`.
 emitlast(slots::Vector{V}, ordered::Vector{<:Pair}, stop) where {V} =
     [retime(@inbounds(slots[j]), stop) for (_, j) in ordered]
 
-# Overwrite the row's time with the emission time. `merge` replaces an existing
-# key's value in place, so `:time` keeps the column position it had in the input
-# and the output schema is the input's exactly. `stop` already carries the
-# context's time type, so nothing is converted.
+# Set the row's time to the emission time. `merge` keeps `:time` in its input
+# position, so the output schema is the input's.
 @inline retime(row::NamedTuple, stop) = merge(row, (; time = stop))
