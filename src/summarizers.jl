@@ -1,11 +1,9 @@
 # The summarizer interface and the concrete summarizers. A summarization is
-# split in two: an immutable Summarizer holding only the configuration, and a
-# SummarizerState holding the running state. The state is built from the input
-# columns' element types, so its value fields — and hence the element types of
-# the columns it produces — are concrete. That split is what makes an output
-# column's type a consequence of the input schema rather than an accident of
-# the values, and it is what lets the folding loops in summarize.jl run
-# type-stable behind a function barrier.
+# split into an immutable Summarizer (the configuration) and a SummarizerState
+# (the running state). The state is built from the input columns' element
+# types, so its value fields, and so its output columns, are concretely typed
+# by the input schema rather than by the values. That is what lets the folding
+# loops in summarize.jl run type-stable behind a function barrier.
 
 """
     Summarizer
@@ -194,48 +192,36 @@ then fold that summarizer through a segment tree instead.
 """
 isinvertible(::SummarizerState) = true
 
-# Fold one row into — or, for group states, back out of — every state in a
-# tuple. Over a concrete state tuple the foreach unrolls and each update!
-# dispatches statically, so the shared spelling costs nothing.
+# Fold one row into (or, for group states, out of) every state in a tuple. Over
+# a concrete tuple the foreach unrolls and dispatches statically.
 @inline updateall!(states::Tuple, row) = foreach(st -> update!(st, row), states)
 @inline downdateall!(states::Tuple, row) =
     foreach(st -> downdate!(st, row), states)
 
-# Zero a whole state tuple in place, returning the tuple to use — the same
-# must-use-the-result contract as `fresh!` itself, since a state that cannot be
-# zeroed in place returns a new object. Over a concrete tuple the map unrolls
-# and each `fresh!` dispatches statically, so for the built-in (mutable) states
-# this is pure field writes and allocates nothing.
+# Zero a state tuple in place, returning the tuple to use (as with `fresh!`, a
+# state that can't be zeroed in place returns a new object). Over a concrete
+# tuple the map unrolls; for the built-in states it allocates nothing.
 @inline freshall!(states::Tuple) = map(fresh!, states)
 
-# The element type Base.sum produces over a column of eltype T: small signed
-# and unsigned integers widen to Int/UInt, everything else keeps its type. The
-# accumulator is built at this width up front, so the folding loop is a plain
-# `+` that is both type-stable and immune to the overflow that accumulating in
-# the input's own type would risk.
+# The element type Base.sum produces over eltype T: small integers widen to
+# Int/UInt, everything else keeps its type. Accumulating at this width is
+# type-stable and avoids overflowing the input's own type.
 sumtype(::Type{T}) where {T} = Base.promote_op(Base.add_sum, T, T)
 
-# The analogous widths for a product and for a dot product. `prodtype` is the
-# element type `Base.prod` produces (small ints widen through `mul_prod` just
-# as they do through `add_sum`); `dottype` is `sumtype` applied to the type of
-# one `a * b` term, since a dot product is a sum of products.
+# The analogous widths for a product (as `Base.prod`) and a dot product
+# (`sumtype` of one `a * b` term).
 prodtype(::Type{T}) where {T} = Base.promote_op(Base.mul_prod, T, T)
 dottype(::Type{Ta}, ::Type{Tb}) where {Ta,Tb} =
     sumtype(Base.promote_op(*, Ta, Tb))
 
 # Floating-point sum accumulators use Kahan-Babuška-Neumaier compensated
-# summation, and nonfinite terms are counted rather than folded in: only
-# finite terms enter the (total, comp) pair, while NaN and signed-infinity
-# terms bump Int counts, and `compvalue` reconstructs the IEEE result
-# `Base.sum` would produce (any NaN, or infinities of both signs, -> NaN; one
-# infinity sign -> that infinity). Keeping nonfinites out of the running pair
-# is what lets `downdate!` invert exactly once such a row leaves a rolling
-# window — folded in naively, NaN absorbs and an evicted infinity leaves
-# Inf - Inf = NaN behind. `Missing`-admitting columns count their missing terms
-# the same way (the sum state's flag M, over the non-missing type), so they too
-# stay invertible. BigFloat is excluded because compensation buys nothing at
-# arbitrary precision and a non-isbits Compensated{BigFloat} would heap-allocate
-# on every row.
+# summation over the finite terms only; NaN and ±Inf terms are counted, and
+# `compvalue` reconstructs the IEEE result `Base.sum` would give. Keeping
+# nonfinites out of the running pair lets `downdate!` remove them exactly
+# (folded in, NaN absorbs and an evicted Inf leaves Inf - Inf = NaN). Missing
+# terms are counted the same way (the sum state's flag M). BigFloat is
+# excluded: compensation buys nothing at arbitrary precision, and a non-isbits
+# Compensated{BigFloat} would allocate per row.
 compensable(::Type{T}) where {T} = T <: AbstractFloat && T !== BigFloat
 
 struct Compensated{A<:AbstractFloat}
@@ -249,9 +235,8 @@ end
 compzero(::Type{A}) where {A<:AbstractFloat} =
     Compensated{A}(zero(A), zero(A), 0, 0, 0)
 
-# One Neumaier step. The isfinite guard keeps comp finite when the total
-# overflows to infinity from all-finite terms, so compvalue reconstructs the
-# Inf that Base.sum would produce rather than Inf + (-Inf) = NaN.
+# One Neumaier step. The isfinite guard keeps comp finite when finite terms
+# overflow the total to Inf, so compvalue gives Inf, as Base.sum does, not NaN.
 @inline function neumaier(s::A, c::A, x::A) where {A<:AbstractFloat}
     t = s + x
     if isfinite(t)
@@ -302,15 +287,11 @@ end
     return a.total + a.comp
 end
 
-# The sum family (Sum, SumPower, DotProduct) shares one accumulator state
-# (plain or compensated storage) over a *term functor* — the TrackState
-# combiner-in-type-parameter idiom applied to the folded quantity. The
-# functor's type identifies the family and its input columns; its fields
-# carry runtime config (SumPower's exponent). Terms are formed in the
-# accumulator's type A, so a per-row power or product cannot overflow the
-# way computing it in the input columns' own types would; for the
-# compensated (float) states the input column already is A, so the
-# conversion is exact either way.
+# The sum family (Sum, SumPower, DotProduct) shares one accumulator state over
+# a *term functor*, whose type names the family member and its input columns
+# and whose fields carry runtime config (SumPower's exponent). Terms are formed
+# in the accumulator type A, so a per-row power or product can't overflow the
+# input's own type.
 
 struct ColumnTerm{C} end
 struct PowerTerm{C}
@@ -325,26 +306,23 @@ struct PairProductTerm{A,B} end
 @inline termvalue(::PairProductTerm{Ca,Cb}, ::Type{A}, row) where {Ca,Cb,A} =
     convert(A, getproperty(row, Ca)) * convert(A, getproperty(row, Cb))
 
-# Whether a term is `missing` for this row — a missing input column, or (for a
-# pair) either operand missing. Only reached with the sum state's flag M set,
-# i.e. when a source column admits Missing; over a non-missing column the
-# `ismissing` folds to a compile-time `false`.
+# Whether this row's term is `missing` (for a pair, either operand). Only
+# reached with the sum state's flag M set.
 @inline termmissing(::ColumnTerm{C}, row) where {C} = ismissing(getproperty(row, C))
 @inline termmissing(::PowerTerm{C}, row) where {C} = ismissing(getproperty(row, C))
 @inline termmissing(::PairProductTerm{Ca,Cb}, row) where {Ca,Cb} =
     ismissing(getproperty(row, Ca)) || ismissing(getproperty(row, Cb))
 
-# The accumulator type a term folds into, from the (promoted) input column
-# types — recomputed by widenstate whenever the schema promotion moves.
+# The accumulator type a term folds into, from the promoted input types;
+# recomputed by widenstate.
 acctype(::ColumnTerm{C}, intypes::NamedTuple) where {C} = sumtype(intypes[C])
 acctype(t::PowerTerm{C}, intypes::NamedTuple) where {C} =
     powertype(intypes[C], t.power)
 acctype(::PairProductTerm{Ca,Cb}, intypes::NamedTuple) where {Ca,Cb} =
     dottype(intypes[Ca], intypes[Cb])
 
-# The storage an accumulator of type A folds into: a `Compensated{A}` for a
-# compensable float, A itself otherwise. Each operation dispatches on it, so
-# the one state below compiles to the plain or the compensated fold.
+# An accumulator's storage: a `Compensated{A}` for a compensable float, else A
+# itself. The operations below dispatch on it.
 accstorage(::Type{A}) where {A} = compensable(A) ? Compensated{A} : A
 acczero(::Type{S}) where {S} = convert(S, 0)
 acczero(::Type{Compensated{A}}) where {A} = compzero(A)
@@ -357,9 +335,8 @@ acczero(::Type{Compensated{A}}) where {A} = compzero(A)
 @inline accvalue(s) = s
 @inline accvalue(s::Compensated) = compvalue(s)
 
-# Carry an accumulator into a wider storage. Integer and plain-float totals are
-# finite as far as the counters know, which is all a plain storage tracked; a
-# compensated one keeps its running pair and counters.
+# Carry an accumulator into a wider storage. A plain total enters a compensated
+# storage as one term; a compensated one keeps its pair and counters.
 widenacc(::Type{S2}, acc) where {S2} = convert(S2, accvalue(acc))
 widenacc(::Type{Compensated{A2}}, acc) where {A2} =
     compadd(compzero(A2), convert(A2, acc))
@@ -368,30 +345,24 @@ widenacc(::Type{Compensated{A2}}, acc::Compensated) where {A2} =
 
 @inline maybemissing(::Type{A}, M::Bool) where {A} = M ? Union{Missing,A} : A
 
-# The sum family's one state. N names the output column and A is the realized
-# accumulator type, as on every other state; T is the term functor's type, so
-# update! inlines the term computation statically; S is the storage
+# The sum family's state. N names the output column, A is the accumulator type,
+# T the term functor's type (so update! inlines the term) and S the storage
 # (`accstorage(A)`).
 #
-# A `missing` input term absorbs a running sum and cannot be subtracted back
-# out, which would force a rolling window off the O(1) running path onto the
-# tree. So, exactly as the compensated storage counts nonfinite floats, a
-# Missing-admitting accumulator (the flag M, `AgeSumState`'s idiom) counts its
-# missing terms instead of folding them in: the accumulation lives at the
-# *non-missing* type A (flat — no Union in the hot field), only present terms
-# enter it, `missings` tracks the rest, and `value` reports `missing` whenever
-# that count is positive. The count balances under `downdate!`, so the state
-# stays invertible and a missing row recovers once it leaves the window. With
-# M false, `missings` stays zero and every test of it folds away.
+# A `missing` term would absorb a running sum and could not be subtracted, so,
+# as with nonfinite floats, a Missing-admitting accumulator (flag M) counts
+# missing terms instead: A is the *non-missing* type, only present terms enter
+# `acc`, and `value` is `missing` while `missings` is positive. The count
+# balances under `downdate!`, so the state stays invertible. With M false every
+# test of `missings` folds away.
 mutable struct AccumState{N,A,T,M,S} <: SummarizerState
     term::T
     acc::S
     missings::Int
 end
 
-# Shared constructor behind the sum family's fresh methods, from the
-# accumulator type. (The `Union{}` guard keeps a pathological all-Missing
-# column off the counting path.)
+# The sum family's constructor, from the accumulator type. An all-Missing
+# column (nonmissingtype `Union{}`) stays off the counting path.
 function accumfresh(term, N::Symbol, ::Type{A}) where {A}
     M = Missing <: A && nonmissingtype(A) !== Union{}
     An = M ? nonmissingtype(A) : A
@@ -428,14 +399,13 @@ function combine!(dest::AccumState{N,A,T,M,S}, a::AccumState{N,A,T,M,S},
     M && (dest.missings = a.missings + b.missings)
     return nothing
 end
-# The value's field type is the static `maybemissing(A, M)` — a runtime `typeof`
-# would let a missing window collapse a dependent summarizer's output type.
+# The value's field type is the static `maybemissing(A, M)`; a runtime `typeof`
+# would let a missing window narrow a dependent summarizer's output type.
 value(st::AccumState{N,A,T,M}) where {N,A,T,M} =
     NamedTuple{(N,),Tuple{maybemissing(A, M)}}((
         M && st.missings > 0 ? missing : accvalue(st.acc),))
-# A later chunk can widen the accumulator — into a compensable float, or into a
-# Missing-admitting type, which moves it onto the counting path with no missing
-# folded in yet.
+# A later chunk can widen the accumulator into a compensable float or onto the
+# missing-counting path.
 function widenstate(st::AccumState{N}, intypes::NamedTuple) where {N}
     w = accumfresh(st.term, N, acctype(st.term, intypes))
     typeof(w) === typeof(st) && return st
@@ -444,8 +414,7 @@ function widenstate(st::AccumState{N}, intypes::NamedTuple) where {N}
     return w
 end
 
-# Reinterpret a Compensated at a wider float type, carrying its running pair
-# and its nonfinite counters unchanged.
+# A Compensated at a wider float type, with its counters unchanged.
 widencomp(::Type{A2}, a::Compensated) where {A2} =
     Compensated{A2}(convert(A2, a.total), convert(A2, a.comp),
         a.nans, a.posinf, a.neginf)
@@ -497,8 +466,7 @@ emptyvalue(::CountDistinct{C}) where {C} =
 fresh(::CountDistinct{C}, intypes::NamedTuple) where {C} =
     CountDistinctState{C,Symbol(C, :_countdistinct),intypes[C]}()
 fresh(::CountDistinctState{C,N,T}) where {C,N,T} = CountDistinctState{C,N,T}()
-# `empty!` keeps the set's slots, so the per-cycle, per-interval and per-window
-# zeroing is allocation-free once the first fold has sized it.
+# `empty!` keeps the set's slots, so repeated zeroing doesn't allocate.
 @inline fresh!(st::CountDistinctState) = (empty!(st.seen); st)
 @inline update!(st::CountDistinctState{C}, row) where {C} =
     (push!(st.seen, getproperty(row, C)); nothing)
@@ -506,8 +474,7 @@ value(st::CountDistinctState{C,N}) where {C,N} =
     NamedTuple{(N,),Tuple{Int}}((length(st.seen),))
 function combine!(dest::CountDistinctState{C,N,T}, a::CountDistinctState{C,N,T},
     b::CountDistinctState{C,N,T}) where {C,N,T}
-    # `dest` may alias either argument, so it can only be cleared once both
-    # have been read — which, for a union, means not clearing it at all.
+    # `dest` may alias either argument, in which case it can't be cleared.
     if dest === a
         union!(dest.seen, b.seen)
     elseif dest === b
@@ -527,11 +494,9 @@ function widenstate(st::CountDistinctState{C,N,T},
     return widened
 end
 
-# The windowed state: a count of rows per distinct value, so removing the
-# oldest row drops its value exactly when no other row in the window holds it.
-# Kept apart from the Set above because incrementing a count through the public
-# Dict API hashes twice per row, which measured 1.4-1.7x slower than `push!` on
-# the folds that never remove a row (see DESIGN.md's CountDistinct paragraph).
+# The windowed state: a row count per distinct value, dropping a value when its
+# last row leaves. The non-window folds keep the Set, since a Dict count
+# increment hashes twice (measured 1.4-1.7x slower; see DESIGN.md).
 struct CountDistinctWindowState{C,N,T} <: SummarizerState
     counts::Dict{T,Int}
 end
@@ -589,46 +554,34 @@ powertype(::Type{T}, ::Int) where {T} = sumtype(Base.promote_op(^, T, Int))
 emptyvalue(s::SumPower{C}) where {C} =
     NamedTuple{(Symbol(C, :_sumpower_, s.power),)}((0,))
 
-# PowerTerm carries its exponent in a *field*, so `^` cannot specialize on it:
-# every row pays a runtime power (`power_by_squaring` for integers, `pow_body`
-# for floats) where a move or a single multiply would do. The two exponents that
-# actually turn up in this package — 1 from `Moment(c, 1)`, 2 from every
-# variance, covariance, correlation and regression — therefore borrow the terms
-# whose exponent is in the *type*: ColumnTerm is `x` and PairProductTerm{C,C} is
-# `x * x`. Worth about 3x on the per-row fold (see notes/sumpower-terms.md).
+# PowerTerm's exponent is a *field*, so `^` can't specialize on it and every
+# row pays a runtime power. The two common exponents (1 from `Moment(c, 1)`, 2
+# from every variance, covariance, correlation and regression) use terms whose
+# exponent is in the *type* instead: ColumnTerm (`x`) and PairProductTerm{C,C}
+# (`x * x`), about 3x faster per row. The output name and accumulator type are
+# unchanged (`powertype(T, 1) === sumtype(T)`, `powertype(T, 2) ===
+# dottype(T, T)`).
 #
-# The output column keeps its own name and the accumulator type is unchanged
-# (`powertype(T, 1) === sumtype(T)` and `powertype(T, 2) === dottype(T, T)` for
-# every T the package admits), so nothing about the schema moves.
-#
-# The *value* is bit-identical for `n = 1`, and for integers and Bool at both
-# exponents. At `n = 2` over floats it is not quite: `x * x` is the correctly
-# rounded square, while the runtime `^` can be 1 ULP off it for inputs whose
-# square lands near underflow (66 of 500k random Float64 bit patterns where it
-# was measured; how many depends on the CPU, since `^` rounds its error terms
-# differently with and without FMA). The specialization is the more accurate of
-# the two there — but it is a change, so it is stated rather than glossed. What the compensated states
-# actually require is unaffected: they classify NaN and ±Inf *terms* and carry
-# the sign of zero, and no nonfinite or subnormal case differs at either
-# exponent. (On Julia 1.10 only, `(-0.0)^1` returns `0.0` — a `^` bug fixed in
-# 1.11 — so there ColumnTerm is the *more* correct of the two; the accumulator
-# starts at +0.0 and absorbs the difference either way.) See
-# notes/sumpower-terms.md; the properties are tested.
+# Values are bit-identical to `x^n` except at `n = 2` over floats whose square
+# lands near underflow, where `x * x` is correctly rounded and `^` can be 1 ULP
+# off (CPU-dependent). No NaN, ±Inf, signed-zero or subnormal classification
+# differs, which is what the compensated states rely on. (On Julia 1.10,
+# `(-0.0)^1` is `0.0`, a `^` bug; the accumulator starts at +0.0 either way.)
+# See notes/sumpower-terms.md; these properties are tested.
 function powerterm(::Type{Val{C}}, power::Int) where {C}
     power == 1 && return ColumnTerm{C}()
     power == 2 && return PairProductTerm{C,C}()
     return PowerTerm{C}(power)
 end
 
-# The term is formed in the accumulator's type before raising to the power
-# (see termvalue), then classified: NaN^0 and Inf^0 are the finite term 1.0,
-# exactly as they contribute to `sum(x .^ 0)`.
+# The term is raised to the power in the accumulator's type, then classified:
+# NaN^0 and Inf^0 are the finite term 1.0, as in `sum(x .^ 0)`.
 fresh(s::SumPower{C}, intypes::NamedTuple) where {C} =
     accumfresh(powerterm(Val{C}, s.power), Symbol(C, :_sumpower_, s.power),
         powertype(intypes[C], s.power))
 
-# A monoid but not a group: dividing a row back out fails outright at zero
-# (the total is 0 no matter what else was folded) and truncates for integers.
+# A monoid but not a group: dividing a row back out fails at zero and
+# truncates for integers.
 """
     Product(column::Symbol) -> Summarizer
 
@@ -663,21 +616,15 @@ function widenstate(st::ProductState{C,N,A}, intypes::NamedTuple) where {C,N,A}
     return ProductState{C,N,A2}(convert(A2, st.total))
 end
 
-# A summarizer that emits, under its own name N, a value another summarizer
-# already computed under the name D. It folds nothing: the summarizer that
-# claims it declares that other one as a dependency, and the topological
-# expansion guarantees D is in `vals` by the time this runs. Fieldless, so it
-# joins DerivedState below and inherits its no-op fresh/update!/combine!/
-# downdate!.
-#
-# This is what lets a summarizer whose value is symmetric in two columns fold
-# under one canonical argument order while still answering to the name the
-# caller asked for — see DESIGN.md's "Symmetric summarizers".
+# Emits, under its own name N, the value a dependency computed under D, which
+# the topological expansion puts in `vals` first. Fieldless, so it joins
+# DerivedState below. It lets a summarizer symmetric in two columns fold under
+# one canonical argument order while answering to the name the caller asked
+# for (see DESIGN.md's "Symmetric summarizers").
 struct AliasState{N,D} <: SummarizerState end
 
-# The value type comes from the dependency's declared field type, never from
-# `typeof` of the value, so a missing-poisoned accumulator keeps the output
-# column's Union{Missing,...} eltype instead of collapsing it to Missing.
+# The value type comes from the dependency's declared field type, not `typeof`
+# of the value, so a missing value keeps the column's Union{Missing,...} eltype.
 @inline function value(::AliasState{N,D}, vals::NamedTuple) where {N,D}
     V = fieldtype(typeof(vals), D)
     return NamedTuple{(N,),Tuple{V}}((vals[D],))
@@ -697,8 +644,8 @@ DotProduct(a::Symbol, b::Symbol) = DotProduct{a,b}()
 dotname(a, b) = Symbol(a, :_, b, :_dotproduct)
 
 # Σab and Σba are the same number, so every summarizer needing one asks for it
-# under the sorted argument order and they all share the accumulator. See
-# DESIGN.md's "Symmetric summarizers" for the rule these two implement.
+# in sorted argument order and they share the accumulator (DESIGN.md,
+# "Symmetric summarizers").
 canonicaldot(a::Symbol, b::Symbol) =
     isless(b, a) ? DotProduct(b, a) : DotProduct(a, b)
 canonicaldotname(a::Symbol, b::Symbol) =
@@ -753,16 +700,12 @@ DataFrame(load(Context(0, 10), p))
 struct AgeWeightedSum{C} <: GroupSummarizer end
 AgeWeightedSum(column::Symbol) = AgeWeightedSum{column}()
 
-# The state folds three numbers: the row count n, S1 = Σy and S2 = Σk·y. A new
-# row ages every row already folded by one, adding S1 to S2 before joining S1
-# itself at weight 0. Removing the oldest row — the only row `downdate!` is ever
-# handed — takes back its weight n - 1. Combining ages a's rows by b's count. n
-# counts every row, missing and nonfinite included, since age is counted in rows.
-#
-# A `missing` input is counted rather than folded, as the sum family's Optional*
-# states do, but through the flag M (the column admits Missing) instead of a
-# second pair of state types: `missings` is always there, and its test folds away
-# when the column cannot hold `missing`.
+# The state folds the row count n, S1 = Σy and S2 = Σk·y. A new row ages every
+# folded row by one, adding S1 to S2, then joins S1 at weight 0. Removing the
+# oldest row (the only one `downdate!` is handed) takes back its weight n - 1.
+# Combining ages a's rows by b's count. n counts every row, missing and
+# nonfinite included, since age is counted in rows. A `missing` input is
+# counted, not folded, under the flag M, as in `AccumState`.
 mutable struct AgeSumState{N,C,A,M} <: SummarizerState
     n::Int
     s1::A
@@ -770,10 +713,10 @@ mutable struct AgeSumState{N,C,A,M} <: SummarizerState
     missings::Int
 end
 
-# The float form keeps S1 as a `Compensated`, so its counters classify each raw
-# NaN and ±Inf input once, on entry. S2 keeps only the finite pair — its counters
-# stay zero — and takes its nonfinite classification from S1's, minus the newest
-# row's (`newest`: 0 finite or missing, 1 NaN, 2 +Inf, 3 -Inf), whose weight is 0.
+# The float form keeps S1 as a `Compensated`, whose counters classify each NaN
+# and ±Inf input. S2 keeps only the finite pair (zero counters) and takes its
+# nonfinite classification from S1's, minus the newest row's, whose weight is 0
+# (`newest`: 0 finite or missing, 1 NaN, 2 +Inf, 3 -Inf).
 mutable struct CompensatedAgeSumState{N,C,A<:AbstractFloat,M} <: SummarizerState
     n::Int
     s1::Compensated{A}
@@ -788,9 +731,8 @@ emptyvalue(::AgeWeightedSum{C}) where {C} = NamedTuple{(agesumname(C),)}((0,))
 fresh(::AgeWeightedSum{C}, intypes::NamedTuple) where {C} =
     agesumfresh(Val(agesumname(C)), Val(C), sumtype(intypes[C]))
 
-# The representation for accumulator type A, as `accumfresh` picks it: the
-# non-missing type carries the fold, compensated when it is a fixed-precision
-# float.
+# The state for accumulator type A, chosen as `accumfresh` chooses: the fold is
+# at the non-missing type, compensated for a fixed-precision float.
 function agesumfresh(::Val{N}, ::Val{C}, ::Type{A}) where {N,C,A}
     M = Missing <: A && nonmissingtype(A) !== Union{}
     An = M ? nonmissingtype(A) : A
@@ -845,9 +787,8 @@ function widenstate(st::AgeSumState{N,C,A,M}, intypes::NamedTuple) where {N,C,A,
     return agesumfrom(w, st.n, st.s1, st.s2, st.missings)
 end
 
-# Carry a plain state's numbers into a freshly built wider one. Integer and
-# plain-float totals are finite as far as the counters know, which is all a
-# plain state ever tracked.
+# Carry a plain state's numbers into a wider fresh one. A plain state tracks no
+# nonfinite counts, so its totals enter a compensated one as finite terms.
 function agesumfrom(w::AgeSumState{N,C,A,M}, n, s1, s2, missings) where {N,C,A,M}
     return AgeSumState{N,C,A,M}(n, convert(A, s1), convert(A, s2), missings)
 end
@@ -860,8 +801,8 @@ end
 @inline agesumclass(x::AbstractFloat) =
     isfinite(x) ? Int8(0) : isnan(x) ? Int8(1) : x > 0 ? Int8(2) : Int8(3)
 
-# S2's finite pair plus another pair (S1's, or a scaled one): the two Neumaier
-# steps `compmerge` takes, leaving S2's unused counters at zero.
+# S2's finite pair plus another pair (S1's, or a scaled one), as `compmerge`
+# adds, leaving S2's counters at zero.
 @inline function pairadd(a::Compensated{A}, total::A, comp::A) where {A}
     t, c = neumaier(a.total, a.comp, total)
     t, c = neumaier(t, c, comp)
@@ -958,16 +899,13 @@ struct Moment{C} <: GroupSummarizer
 end
 Moment(column::Symbol, order::Integer) = Moment{column}(Int(order))
 
-# A sum over the row count, emitted as N: Moment's power sum and Mean's plain
-# sum. The state is fieldless — the value is derived entirely from the
-# dependencies' values at emission time — so its own name N and the sum's name
-# D are all it needs, baked as type parameters so the two-argument `value`
+# A sum D over the row count, emitted as N: Moment's power sum or Mean's plain
+# sum. Fieldless; the names are type parameters so the two-argument `value`
 # infers.
 struct CountRatioState{N,D} <: SummarizerState end
 
-# The value type comes from the dependencies' declared field types, not from
-# `typeof` of the runtime quotient — a missing-poisoned sum would otherwise
-# collapse the output column's Union{Missing,...} eltype to Missing.
+# The value type comes from the dependencies' declared field types, not
+# `typeof` of the quotient, so a missing sum keeps the Union{Missing,...} eltype.
 @inline function value(::CountRatioState{N,D}, vals::NamedTuple) where {N,D}
     V = Base.promote_op(/, fieldtype(typeof(vals), D),
         fieldtype(typeof(vals), :count))
@@ -1013,9 +951,8 @@ struct Variance{C} <: GroupSummarizer
 end
 Variance(column::Symbol; corrected::Bool = true) = Variance{column}(corrected)
 
-# The compile-time value type of the shared (co)variance identity
-# `(q - sa * sb / n) / (n - corrected)`, from the dependencies' declared
-# field types (a runtime `typeof` would let one missing collapse the type).
+# The compile-time value type of the (co)variance identity
+# `(q - sa * sb / n) / (n - corrected)`, from the dependencies' field types.
 _covtype(::Type{Q}, ::Type{Sa}, ::Type{Sb}) where {Q,Sa,Sb} =
     Base.promote_op(/,
         Base.promote_op(-, Q,
@@ -1025,8 +962,7 @@ dependencies(::Variance{C}) where {C} = (Count(), Sum(C), SumPower(C, 2))
 emptyvalue(::Variance{C}) where {C} =
     NamedTuple{(Symbol(C, :_variance),)}((missing,))
 # A variance is the covariance of a column with itself, the power sum standing
-# in for the dot product, so it takes Covariance's state (defined below; the
-# arithmetic is the same identity, operation for operation).
+# in for the dot product, so it uses CovarianceState (below).
 fresh(v::Variance{C}, ::NamedTuple) where {C} =
     CovarianceState{C,C,Symbol(C, :_variance),Symbol(C, :_sumpower_, 2),
         Symbol(C, :_sum),Symbol(C, :_sum),v.corrected}()
@@ -1077,15 +1013,13 @@ end
 Covariance(a::Symbol, b::Symbol; corrected::Bool = true) =
     Covariance{a,b}(corrected)
 
-# R (the corrected flag) is baked into the state type so the derived value
-# stays fieldless and inferrable; the divisor is `n - Int(R)`. Variance uses it
-# too, with A = B.
+# R (the corrected flag) is a type parameter so the state stays fieldless; the
+# divisor is `n - Int(R)`. Variance uses it too, with A = B.
 struct CovarianceState{A,B,N,D,SA,SB,R} <: SummarizerState end
 
 covname(a, b) = Symbol(a, :_, b, :_covariance)
-# The covariance is symmetric, so it reads the canonically ordered dot product
-# rather than its own argument order: Covariance(:y, :x) still produces
-# :y_x_covariance, but shares the one :x_y_dotproduct accumulator.
+# Reads the canonically ordered dot product: Covariance(:y, :x) produces
+# :y_x_covariance from the shared :x_y_dotproduct accumulator.
 dependencies(::Covariance{A,B}) where {A,B} =
     (Count(), Sum(A), Sum(B), canonicaldot(A, B))
 emptyvalue(::Covariance{A,B}) where {A,B} =
@@ -1212,36 +1146,30 @@ function LinearRegression(predictors, response::Symbol;
         throw(ArgumentError("LinearRegression requires at least one predictor"))
     allunique(ps) || throw(ArgumentError(
         "LinearRegression predictors must be unique, got $ps"))
-    # A predictor named `intercept` produces the constant term's own pair of
-    # columns. Caught here rather than left to the NamedTuple constructor,
-    # whose "duplicate field name" says nothing about which summarizer built
-    # it. The check is on the whole name set rather than that one case, so it
-    # stays honest if the naming scheme grows.
+    # Catches, e.g., a predictor named `intercept`, which would otherwise fail
+    # later in the NamedTuple constructor with no mention of this summarizer.
     outs = regnames(ps, name, intercept)
     allunique(outs) || throw(ArgumentError(
         "LinearRegression output columns must be unique, got $outs"))
     return LinearRegression{ps,response}(intercept, name)
 end
-# A lone name. A string is one name too, never iterated as a collection of
-# one-character names.
+# A lone name; a string is one name, not a collection of characters.
 LinearRegression(predictor::Union{Symbol,AbstractString}, response::Symbol;
     kwargs...) = LinearRegression((Symbol(predictor),), response; kwargs...)
 
-# Fieldless like every other derived state, and every name it reads back is a
-# type parameter so the two-argument `value` infers: NN and SN are the output
-# names (the row count, then the statistics), AN every accumulator name read —
-# deduplicated, since a predictor may be the response — and SP/SY/QY/GN/DN the
-# sums, the response's power sum, the packed upper triangle of the cross-product
-# matrix, and the predictor-response cross products. I is the intercept flag,
-# baked in like Variance's `corrected` so the state stays fieldless.
+# Fieldless, with every name a type parameter so the two-argument `value`
+# infers. NN and SN are the output names (the row count, then the statistics);
+# AN every accumulator name read, deduplicated (a predictor may be the
+# response); SP and SY the predictor and response sums, QY the response's power
+# sum, GN the packed upper triangle of the cross-product matrix, DN the
+# predictor-response cross products; I the intercept flag.
 struct LinearRegressionState{NN,SN,AN,SP,SY,QY,GN,DN,I} <: SummarizerState end
 
 _regname(::Nothing, base::Symbol) = base
 _regname(prefix::Symbol, base::Symbol) = Symbol(prefix, :_, base)
 
-# The output names in emission order: the row count, the two model-level
-# statistics, the intercept's pair when there is one, then a (beta, tstat) pair
-# per predictor in the order given.
+# The output names in emission order: the row count, `r2`, `stderr`, the
+# intercept's pair if any, then a (beta, tstat) pair per predictor.
 function regnames(P::Tuple, name, intercept::Bool)
     ns = Symbol[_regname(name, :n), _regname(name, :r2), _regname(name, :stderr)]
     if intercept
@@ -1255,10 +1183,9 @@ function regnames(P::Tuple, name, intercept::Bool)
     return Tuple(ns)
 end
 
-# Cross products go through the canonical (sorted) dot product every symmetric
-# summarizer shares. A squared term instead goes to SumPower(c, 2) rather than
-# DotProduct(c, c): same value, under the name Variance, Std and Correlation
-# already depend on.
+# Cross products use the canonical dot product. A squared term uses
+# SumPower(c, 2) rather than DotProduct(c, c): the same value, under the name
+# Variance, Std and Correlation depend on.
 crossdep(a::Symbol, b::Symbol) =
     a === b ? SumPower(a, 2) : canonicaldot(a, b)
 crossname(a::Symbol, b::Symbol) =
@@ -1304,21 +1231,18 @@ function fresh(r::LinearRegression{P,Y}, ::NamedTuple) where {P,Y}
         r.intercept}()
 end
 
-# The dependency values this regression reads, and — separately — the tuple
-# type they are *declared* to have. The two must not be confused: `typeof` of
-# the values is value-dependent (a poisoned accumulator holding `missing`
-# reports `Missing`, not `Union{Missing,_}`), so it both collapses the output
-# column's element type and, because it is then not a compile-time constant,
-# drops the whole emission into runtime dispatch. `Base.promote_op` asks
-# inference for the declared type instead, which is constant.
+# The dependency values this regression reads, and the tuple type they are
+# *declared* to have. `typeof` of the values depends on them (a `missing`
+# reports `Missing`, not `Union{Missing,_}`), which would narrow the output
+# eltype and push the emission into runtime dispatch; `Base.promote_op` gives
+# the declared type, a compile-time constant.
 @inline depvalues(vals::NamedTuple, ::Val{NS}) where {NS} =
     values(NamedTuple{NS}(vals))
 @inline deptypes(::Type{V}, ::Val{NS}) where {V<:NamedTuple,NS} =
     Base.promote_op(depvalues, V, Val{NS})
 
-# The statistic columns' shared element type: promote those declared types,
-# run the centered identity's arithmetic over the result, then force it
-# floating point, since a rank-deficient fit reports NaN.
+# The statistics' shared element type: the declared types promoted, run through
+# the centered identity's arithmetic, then made floating point for NaN.
 @inline _promotefields(::Type{Tuple{A}}) where {A} = A
 @inline _promotefields(::Type{T}) where {T<:Tuple} =
     promote_type(Base.tuple_type_head(T), _promotefields(Base.tuple_type_tail(T)))
@@ -1335,29 +1259,25 @@ end
 @inline _anymissing(::Tuple{}) = false
 @inline _anymissing(t::Tuple) = ismissing(first(t)) || _anymissing(Base.tail(t))
 
-# Narrow a dependency value to the compute type. By the time this runs the
-# caller has already returned if anything was missing, but the compiler does
-# not know that, so the `ismissing` test is what keeps it dispatch-free: it
-# splits the Union explicitly and lets `convert` resolve statically. Leaving it
-# to `convert` alone only looks fine on a one-element tuple — Julia
-# union-splits that — and goes dynamic as soon as a second Union-typed value
-# joins it, which is what the K >= 2 cross-product tuple is.
+# Narrow a dependency value to the compute type. The caller has already
+# returned if anything was missing, but the explicit `ismissing` split keeps
+# `convert` static; `convert` alone goes dynamic over tuples of two or more
+# Union-typed values (the K >= 2 cross products).
 @inline _conv(::Type{Vc}, x) where {Vc} = ismissing(x) ? zero(Vc) : convert(Vc, x)
 @inline _convall(::Type{Vc}, ::Tuple{}) where {Vc} = ()
 @inline _convall(::Type{Vc}, t::Tuple) where {Vc} =
     (_conv(Vc, first(t)), _convall(Vc, Base.tail(t))...)
 
-# A dependency read back as a scalar; the empty name tuple is the no-intercept
-# case, where there is no such dependency and the value is never used.
+# A dependency read back as a scalar. The empty name tuple is the
+# no-intercept case, whose value is never used.
 @inline _regscalar(::Type{Vc}, ::NamedTuple, ::Val{()}) where {Vc} = zero(Vc)
 @inline _regscalar(::Type{Vc}, vals::NamedTuple, ::Val{NS}) where {Vc,NS} =
     _conv(Vc, only(depvalues(vals, Val(NS))))
 
-# Simple regression in closed form. This is the common case and the one that
-# runs per row under addsummarycolumns and addrollingcolumns, so it stays on
-# scalars and never builds the workspace the general path needs. Every quotient
-# that can go 0/0 does so in floating point, and every sqrt argument is clamped
-# at zero, so a degenerate window yields NaN rather than raising.
+# Simple regression in closed form, on scalars with no workspace: the common
+# case, run per row under addsummarycolumns and addrollingcolumns. Every
+# possible 0/0 is in floating point, and sqrt arguments are clamped at zero, so
+# a degenerate window gives NaN rather than an error.
 @inline function regstats(::Type{Vc}, ::Val{I}, ::Val{M}, n::Vc,
     g::NTuple{G,Vc}, d::NTuple{1,Vc}, s::Tuple{Vararg{Vc}}, sy::Vc,
     qy::Vc) where {Vc,I,M,G}
@@ -1390,10 +1310,10 @@ end
     return (r2, stderr, beta, tbeta)
 end
 
-# Multiple regression. The cross-product matrix is symmetric positive
-# semidefinite, so Cholesky is the factorization; `check = false` turns rank
-# deficiency into a flag rather than a PosDefException, and its inverse gives
-# both the coefficients' standard errors and the intercept's quadratic form.
+# Multiple regression by Cholesky of the positive semidefinite cross-product
+# matrix. `check = false` turns rank deficiency into a flag rather than an
+# exception; the inverse gives the standard errors and the intercept's
+# quadratic form.
 function regstats(::Type{Vc}, ::Val{I}, ::Val{M}, n::Vc, g::NTuple{G,Vc},
     d::NTuple{K,Vc}, s::Tuple{Vararg{Vc}}, sy::Vc, qy::Vc) where {Vc,I,M,G,K}
     nan = Vc(NaN)
@@ -1494,13 +1414,11 @@ sv = CausalFrames.value(st).x_sortedvalues
 struct SortedValues{C} <: GroupSummarizer end
 SortedValues(column::Symbol) = SortedValues{column}()
 
-# A sorted Vector rather than a balanced tree or skip list: the binary search is
-# O(log window) and the insert or delete a memmove of the shorter side, which
-# stays cheap and cache-friendly far past the windows indicators use (DESIGN.md
-# has the measurements). `missing` and NaN are counted rather than stored, as the
-# sum family counts them, so the vector is totally ordered by `isless` and
-# either one recovers once its row leaves. M flags a Missing-admitting column,
-# as on AgeSumState. `scratch` is the merge buffer `combine!` swaps with `vals`.
+# A sorted Vector rather than a tree or skip list: a binary search plus a
+# memmove stays cheap far past typical window sizes (DESIGN.md has the
+# measurements). `missing` and NaN are counted, not stored, so the vector is
+# totally ordered by `isless` and both recover once their row leaves. M flags a
+# Missing-admitting column. `scratch` is the buffer `combine!` swaps with `vals`.
 mutable struct SortedState{C,N,T,M} <: SummarizerState
     vals::Vector{T}
     scratch::Vector{T}
@@ -1512,8 +1430,8 @@ SortedState{C,N,T,M}() where {C,N,T,M} = SortedState{C,N,T,M}(T[], T[], 0, 0)
 
 sortedname(C::Symbol) = Symbol(C, :_sortedvalues)
 
-# A column of only `missing` gets T = Union{}: nothing is ever stored, and the
-# dependents' output type collapses to Missing.
+# An all-`missing` column gets T = Union{}: nothing is stored, and the
+# dependents' output type is Missing.
 function sortedfresh(::Val{C}, ::Type{A}) where {C,A}
     M = Missing <: A
     return SortedState{C,sortedname(C),nonmissingtype(A),M}()
@@ -1532,8 +1450,8 @@ fresh(::SortedState{C,N,T,M}) where {C,N,T,M} = SortedState{C,N,T,M}()
     st.missings = 0
     return st
 end
-# A new value goes after its equals, so equal values keep their fold order; any
-# copy may leave, since equal under `isless` is `isequal`.
+# A new value goes after its equals, keeping fold order; removal may take any
+# equal copy, since equal under `isless` is `isequal`.
 @inline function update!(st::SortedState{C}, row) where {C}
     v = getproperty(row, C)
     if ismissing(v)
@@ -1558,8 +1476,8 @@ end
     end
     return nothing
 end
-# Merged into `dest`'s scratch vector, which is none of the inputs' `vals`, and
-# swapped in once both have been read, so `dest` may alias `a` or `b`.
+# Merged into `dest`'s scratch vector and swapped in after both inputs are
+# read, so `dest` may alias `a` or `b`.
 function combine!(dest::SortedState{C,N,T,M}, a::SortedState{C,N,T,M},
     b::SortedState{C,N,T,M}) where {C,N,T,M}
     out = resize!(dest.scratch, length(a.vals) + length(b.vals))
@@ -1573,8 +1491,7 @@ function combine!(dest::SortedState{C,N,T,M}, a::SortedState{C,N,T,M},
 end
 value(st::SortedState{C,N,T,M}) where {C,N,T,M} =
     NamedTuple{(N,),Tuple{SortedState{C,N,T,M}}}((st,))
-# Widening keeps the order: every promotion the schema makes (Int to Float64,
-# a type to its Missing union) is monotone.
+# Widening keeps the order, since every schema promotion is monotone.
 function widenstate(st::SortedState{C,N,T,M}, intypes::NamedTuple) where {C,N,T,M}
     w = sortedfresh(Val(C), intypes[C])
     typeof(w) === typeof(st) && return st
@@ -1674,7 +1591,7 @@ function Quantile(column::Symbol, ps; interpolation::Symbol = :linear)
     end
     allunique(qs) || throw(ArgumentError(
         "Quantile probabilities must be unique, got $qs"))
-    # Two probabilities closer than the name's twelve digits would share a name
+    # probabilities closer than the name's twelve digits would share a name
     outs = quantilenames(column, qs)
     allunique(outs) || throw(ArgumentError(
         "Quantile output columns must be unique, got $outs"))
@@ -1682,8 +1599,8 @@ function Quantile(column::Symbol, ps; interpolation::Symbol = :linear)
 end
 Quantile(column::Symbol, p::Real; kwargs...) = Quantile(column, (p,); kwargs...)
 
-# The percentage, to twelve significant digits so that 0.07 names `7` although
-# 100 * 0.07 is 7.000000000000001, with `_` for the decimal point.
+# The percentage to twelve significant digits (so 0.07 names `7`, though
+# 100 * 0.07 is 7.000000000000001), with `_` for the decimal point.
 function quantilesuffix(p::Float64)
     r = round(100 * p; sigdigits = 12)
     isinteger(r) && return string(Int(r))
@@ -1716,10 +1633,9 @@ DataFrame(load(Context(0, 10), readtable(df) |> summarize(Median(:x))))
 struct Median{C} <: GroupSummarizer end
 Median(column::Symbol) = Median{column}()
 
-# Fieldless like the other derived states: the output names NS, the
-# accumulator's name D, the probabilities PS and the interpolation I are all
-# type parameters, so the two-argument `value` infers and the map over PS
-# unrolls. Median is a QuantileState of one probability.
+# Fieldless: the output names NS, the accumulator's name D, the probabilities
+# PS and the interpolation I are type parameters, so `value` infers and the map
+# over PS unrolls. Median is a QuantileState of one probability.
 struct QuantileState{NS,D,PS,I} <: SummarizerState end
 
 dependencies(::Quantile{C}) where {C} = (SortedValues(C),)
@@ -1736,8 +1652,7 @@ fresh(::Median{C}, ::NamedTuple) where {C} =
 @inline value(::QuantileState{NS,D,PS,I}, vals::NamedTuple) where {NS,D,PS,I} =
     quantilevalue(Val(NS), vals[D], Val(PS), Val(I))
 
-# The accumulator's type is its declared field type, never a missing-dependent
-# `typeof`, so M and T are what the schema says.
+# `st`'s type is the declared field type, so M and T are the schema's.
 @inline function quantilevalue(::Val{NS}, st::SortedState{C,N,T,M}, ::Val{PS},
     ::Val{I}) where {NS,C,N,T,M,PS,I}
     V0 = I === :linear ? Base.promote_op(linearquantile, Vector{T}, Float64) : T
@@ -1760,12 +1675,10 @@ end
 @inline orderstat(v::Vector, p::Float64, ::Val{:nearestrank}) =
     @inbounds v[nearestrank(length(v), p)]
 
-# `Statistics.quantile`'s type 7 (alpha = beta = 1) over sorted `v`, written
-# out because `quantile(v, p; sorted = true)` still scans all of `v` for NaN and
-# `missing` on every call, which would make each emission O(window). This is the
-# arithmetic of Statistics 1.11.5, whose `fma` lands a position that is an exact
-# integer exactly; earlier versions add `n * p` unfused, and can differ from it
-# in the last bit.
+# `Statistics.quantile`'s type 7 (alpha = beta = 1) over sorted `v`, written out
+# because `quantile(v, p; sorted = true)` scans all of `v` on every call. This
+# is Statistics 1.11.5's arithmetic, whose `fma` places an exactly integral
+# position exactly; earlier versions can differ in the last bit.
 @inline function linearquantile(v::Vector, p::Float64)
     n = length(v)
     aleph = fma(n, p, 1.0 - p)
@@ -1787,11 +1700,10 @@ end
     end
 end
 
-# The smallest k with k/n ≥ p, compared in floating point: `ceil(p * n)` can
-# land one off where p * n rounds across an integer (0.07 * 100), and k/n is
-# the correctly rounded quotient, so it equals p whenever the exact ratio is
-# p's decimal. That is TA-Lib's exact integer `ceil(P * n / 100)` for a
-# percentage P.
+# The smallest k with k/n ≥ p, compared in floating point. `ceil(p * n)` can be
+# one off where p * n rounds across an integer (0.07 * 100); the correctly
+# rounded k/n equals p whenever the exact ratio is p's decimal, matching
+# TA-Lib's integer `ceil(P * n / 100)` for a percentage P.
 @inline function nearestrank(n::Int, p::Float64)
     k = clamp(ceil(Int, p * n), 1, n)
     while k > 1 && (k - 1) / n >= p
@@ -1855,43 +1767,33 @@ fresh(::PercentRank{C}, ::NamedTuple) where {C} =
     V = M ? Union{Missing,Float64} : Float64
     M && st.missings > 0 && return NamedTuple{(N,),Tuple{V}}((missing,))
     st.nans > 0 && return NamedTuple{(N,),Tuple{V}}((NaN,))
-    # newest is present here, but only a missing window proves it; the test
-    # splits the Union for the compiler
+    # newest is present here, but the compiler can't know it; the test splits
+    # the Union
     vs = st.vals
     below = ismissing(newest) ? 0 : searchsortedfirst(vs, newest) - 1
     return NamedTuple{(N,),Tuple{V}}((below / (length(vs) - 1),))
 end
 
-# The derived states are fieldless — the summary is computed from the
-# dependencies' values at emission time — so combining and downdating them is
-# a no-op. The window transforms give such a state no tier at all (tiers.jl);
-# these methods serve the one case where it keeps one, a set of nothing but
-# fieldless states.
+# The derived states are fieldless (their value comes from the dependencies'
+# at emission), so folding, combining and downdating are no-ops. The window
+# transforms give them no tier (tiers.jl) except in a set made only of
+# fieldless states, which these methods serve.
 const DerivedState = Union{AliasState,CountRatioState,StdState,CovarianceState,
     CorrelationState,LinearRegressionState,QuantileState,PercentRankState}
 fresh(st::DerivedState) = st
 @inline update!(::DerivedState, row) = nothing
 combine!(::DerivedState, ::DerivedState, ::DerivedState) = nothing
 @inline downdate!(::DerivedState, row) = nothing
-# Fieldless, so already zero — and immutable, so returning `st` is the whole
-# implementation (the default would allocate nothing either, but this keeps
-# `freshall!` free of a call that inference has to see through).
+# Fieldless, so already zero; defined so `freshall!` needs no call to `fresh`.
 @inline fresh!(st::DerivedState) = st
 
-# Min/Max/First/Last have no identity element, and all four track one value of
-# the input column's type, so they share a state. `F` is the singleton type of
-# the combiner (min, max, keepfirst, keeplast), recovered as `F.instance`, so
-# `update!` specializes per summarizer. The `seen` flag keeps "no rows folded
-# in" distinct from a column holding missing or nothing; the value field is
-# typed exactly like the input column — no Union{Missing,T} in the folding
-# loop — and is left *undefined* until the first row; `seen` guards every read
-# of it.
-#
-# This relies on `value` never being called on a state that has folded no
-# rows, which the transforms guarantee: every key group and every cycle folds
-# a row before emitting, a keyless summarize with at least one chunk has at
-# least one row, and the no-rows case is answered by `emptyvalue` without ever
-# building a state.
+# Min/Max/First/Last each track one value of the input column's type, with no
+# identity element, so they share a state. `F` is the singleton type of the
+# combiner (min, max, keepfirst, keeplast), recovered as `F.instance`, so
+# `update!` specializes per summarizer. `val` is typed exactly as the input
+# column and left *undefined* until the first row; `seen` guards every read.
+# `value` is never called before a row is folded: the transforms answer the
+# no-rows case with `emptyvalue`.
 
 keepfirst(a, b) = a
 keeplast(a, b) = b
@@ -1904,10 +1806,7 @@ mutable struct TrackState{C,N,T,F} <: SummarizerState
 end
 
 fresh(::TrackState{C,N,T,F}) where {C,N,T,F} = TrackState{C,N,T,F}()
-# Only `seen` is cleared: a field cannot be un-defined, so a stale value may
-# survive where `fresh` would leave the field undefined. Both are equally
-# unreadable — `seen` guards every read of `val`, and `value` is only ever
-# called on a state that has folded a row.
+# Only `seen` is cleared; the stale `val` is never read.
 @inline fresh!(st::TrackState) = (st.seen = false; st)
 @inline function update!(st::TrackState{C,N,T,F}, row) where {C,N,T,F}
     v = getproperty(row, C)
@@ -1915,8 +1814,8 @@ fresh(::TrackState{C,N,T,F}) where {C,N,T,F} = TrackState{C,N,T,F}()
     st.seen = true
     return nothing
 end
-# Reads both inputs before writing, so it tolerates dest aliasing a or b; the
-# ordered-ranges law is what makes keepfirst/keeplast correct here.
+# Reads both inputs before writing, so `dest` may alias `a` or `b`. `a`'s rows
+# precede `b`'s, which makes keepfirst/keeplast correct.
 function combine!(dest::TrackState{C,N,T,F}, a::TrackState{C,N,T,F},
     b::TrackState{C,N,T,F}) where {C,N,T,F}
     if a.seen && b.seen
@@ -1943,20 +1842,16 @@ function widenstate(st::TrackState{C,N,T,F}, intypes::NamedTuple) where {C,N,T,F
 end
 
 # The windowed state of Min, Max and First: a monotonic deque of the window's
-# candidate values, oldest at the front. A new value `v` first drops every value `b` at the
-# back that it makes redundant — those with `F(b, v)` equal to `v`, which cannot
-# be the window's answer while `v` is in it — so the front is always the fold of
-# the window. That relies on `F` selecting one of its arguments associatively,
-# which `min` and `max` do under `isequal` (NaN, ±0.0 and `missing` included),
-# as does `keepfirst` (nothing is ever redundant, so the deque is the window).
-# `keeplast` would qualify too — everything is redundant, so the deque holds one
-# value — but Last has a cheaper state of its own below.
+# candidate values, oldest at the front. A new value `v` first pops every value
+# `b` at the back with `F(b, v)` equal to `v`, which can't be the answer while
+# `v` is in the window, so the front is always the window's fold. This needs
+# `F` to select one of its arguments associatively, as `min` and `max` do under
+# `isequal` (NaN, ±0.0 and `missing` included), and `keepfirst` does (nothing
+# is popped, so the deque is the window). Last has a cheaper state below.
 #
-# Rows leave oldest first (the `downdate!` law), so each row's sequence number
-# is all eviction needs: the front goes when its row does, and a row already
-# dropped as redundant is simply not there. Dead front slots are reclaimed once
-# they dominate, the rolling buffer's amortized compaction, so a steady window
-# neither grows the vectors nor allocates.
+# Rows leave oldest first, so eviction needs only sequence numbers: the front
+# goes when its row does, and a popped row is already gone. Dead front slots
+# are reclaimed once they dominate, so a steady window doesn't allocate.
 mutable struct WindowTrackState{C,N,T,F} <: SummarizerState
     vals::Vector{T}
     seqs::Vector{Int}  # each live value's row number, counted from the last zero
@@ -2064,23 +1959,16 @@ emptyvalue(::Last{C}) where {C} = NamedTuple{(Symbol(C, :_last),)}((missing,))
 fresh(::Last{C}, intypes::NamedTuple) where {C} =
     TrackState{C,Symbol(C, :_last),intypes[C],typeof(keeplast)}()
 
-# Min, Max and First slide the deque above: the TrackState they fold everywhere
-# else has no inverse, but a window removes its rows oldest first, which the
-# deque can.
+# Min, Max and First slide the deque above, since TrackState has no inverse.
 freshwindowed(s::Union{Min,Max,First}, intypes::NamedTuple) =
     windowtrack(fresh(s, intypes))
 windowtrack(::TrackState{C,N,T,F}) where {C,N,T,F} = WindowTrackState{C,N,T,F}()
 
-# Last's windowed state: the newest value and a count of the rows in the window.
-# Removing the oldest row can only change the last value by emptying the
-# window, so a count is all eviction needs — a count rather than the last row's
-# time, which could not tell tied rows apart. As TrackState's `seen` does, the
-# count guards the value field, which is left undefined until the first row
-# and stale once the window empties; `value` is only read with rows folded.
-# Measured against the deque (which, under `keeplast`, would hold one value but
-# still pop and push two vectors per row): 1.1-2.2 ns per row against 5.7-8.4,
-# and 23 ms against 38 ms for a keyless summarizewindows of `Last` over the
-# benchmark's million rows.
+# Last's windowed state: the newest value and a row count. Evicting the oldest
+# row changes the last value only by emptying the window, so a count (not a
+# time, which can't tell tied rows apart) is all eviction needs. `val` is
+# undefined until the first row and stale once the window empties; `value` is
+# only read with rows folded. About 3-4x cheaper per row than the deque.
 mutable struct WindowLastState{C,N,T} <: SummarizerState
     n::Int
     val::T
@@ -2114,8 +2002,7 @@ struct FittedModel{P,M}
     report::Any
 end
 
-# Compact, so a frame of models prints as a table rather than as a dump of
-# every fitresult.
+# Compact, so a frame of models prints as a table.
 Base.show(io::IO, fm::FittedModel{P}) where {P} =
     print(io, "FittedModel(", nameof(typeof(fm.model)), ", ", P, ")")
 
@@ -2167,15 +2054,13 @@ function FitModel(model, predictors, response::Symbol; name::Symbol = :model,
         "FitModel response $(repr(response)) is also a predictor"))
     return FitModel{name,ps,response,typeof(model)}(model, Int(verbosity))
 end
-# A lone name. A string is one name too, never iterated as a collection of
-# one-character names.
+# A lone name; a string is one name, not a collection of characters.
 FitModel(model, predictor::Union{Symbol,AbstractString}, response::Symbol;
     kwargs...) = FitModel(model, (Symbol(predictor),), response; kwargs...)
 
-# The folded rows: one concretely typed vector per predictor plus one for the
-# response, typed from the input schema like every other state. `fresh!`
-# empties them in place, keeping their capacity — the re-fold windows zero a
-# state per window — which is safe only because `value` fits on copies.
+# The folded rows: a concretely typed vector per predictor and one for the
+# response. `fresh!` empties them keeping capacity, which is safe only because
+# `value` fits on copies.
 mutable struct FitModelState{N,P,Y,M,C<:NamedTuple,V<:AbstractVector} <:
                SummarizerState
     const model::M
@@ -2199,15 +2084,14 @@ fresh(st::FitModelState{N,P,Y,M,C,V}) where {N,P,Y,M,C,V} =
     empty!(st.y)
     return st
 end
-# `P` is a type parameter, so the map over it unrolls into one statically
-# typed push per predictor column.
+# `P` is a type parameter, so the map unrolls into one typed push per column.
 @inline function update!(st::FitModelState{N,P,Y}, row) where {N,P,Y}
     map(push!, values(st.cols), map(p -> getproperty(row, p), P))
     push!(st.y, getproperty(row, Y))
     return nothing
 end
-# The fit is opaque (an extension hook, returning Any), but the value's type is
-# built from the type parameters, so the output column is concrete regardless.
+# The fit returns Any, but the value's type is built from the type parameters,
+# so the output column is concrete.
 function value(st::FitModelState{N,P,Y,M}) where {N,P,Y,M}
     fitresult, report = fitmodel(st.model, st.verbosity, map(copy, st.cols),
         copy(st.y))

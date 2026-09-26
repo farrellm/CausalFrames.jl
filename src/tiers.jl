@@ -1,6 +1,6 @@
 # The window tiers shared by addrollingcolumns and summarizewindows. The
-# expanded summarizer set is partitioned per accumulator, so the weakest
-# structure in a call no longer sets the cost of the rest:
+# expanded summarizer set is partitioned per accumulator, so each accumulator
+# gets the cheapest algorithm its structure allows:
 #
 # - running: GroupSummarizers whose windowed state (`freshwindowed`) is
 #   invertible. Per-key running states, update!d as rows arrive and downdate!d,
@@ -13,14 +13,14 @@
 #   nothing, so they need no per-key copy and no tier; one instance serves
 #   every key and window, reading its dependencies' values at emission.
 #
-# At emission the tiers' state tuples are spliced back into the topological
-# order by a compile-time permutation (`mergestates`), and the ordinary
+# At emission the tiers' state tuples are spliced back into topological order
+# by a compile-time permutation (`mergestates`) and the ordinary
 # `summaryvalues` runs over the result, so a dependent reads dependencies from
-# any tier. Every tier holds the same rows per key, so any one of them decides
-# whether a window is empty. Partitioning is type-unstable setup, run once per
-# run and on each widening; everything per row sees concretely typed tier
-# tuples, with an absent tier's structure `nothing` and its templates `()`, so
-# a single-tier call compiles to the single-algorithm kernel it used to be.
+# any tier. Every tier holds the same rows per key, so any one decides whether
+# a window is empty. Partitioning is type-unstable setup, run per run and per
+# widening; per-row code sees concretely typed tier tuples, an absent tier
+# being `nothing` with templates `()`, so a single-tier call compiles to a
+# single-algorithm kernel.
 
 const RUNNINGTIER = 1
 const TREETIER = 2
@@ -29,8 +29,8 @@ const DERIVEDTIER = 4
 const TIERNAMES = (:running, :tree, :refold, :derived)
 
 # The partition of one realized state set: each tier's template tuple and, per
-# topological position, the (tier, index) pair it moved to. The running
-# templates are windowed states; the others are ordinary ones.
+# topological position, its (tier, index). The running templates are windowed
+# states; the others are ordinary ones.
 struct Tiering{SR<:Tuple,ST<:Tuple,SF<:Tuple,SD<:Tuple,P}
     running::SR
     tree::ST
@@ -39,10 +39,9 @@ struct Tiering{SR<:Tuple,ST<:Tuple,SF<:Tuple,SD<:Tuple,P}
     perm::Val{P}
 end
 
-# A state with no fields holds nothing to fold. The one exception is a set made
-# only of such states (a custom summarizer that ignores its rows), which then
-# keeps its structural tier so that some tier still tracks which windows are
-# empty.
+# A state with no fields holds nothing to fold and takes the derived tier,
+# unless every state is fieldless (a custom summarizer ignoring its rows): then
+# they keep their structural tiers, so some tier tracks which windows are empty.
 function tiering(protos::Tuple, intypes::NamedTuple)
     states = newstates(protos, intypes)
     windowed = map(s -> freshwindowed(s, intypes), protos)
@@ -60,15 +59,13 @@ function tiering(protos::Tuple, intypes::NamedTuple)
         pick(REFOLDTIER, states), pick(DERIVEDTIER, states), Val(perm))
 end
 
-# Each state's tier, in topological order — for tests and for reasoning about a
-# call, not used on any path.
+# Each state's tier, in topological order; for tests and debugging only.
 tiernames(::Tiering{SR,ST,SF,SD,P}) where {SR,ST,SF,SD,P} =
     map(c -> TIERNAMES[first(c)], P)
 
-# The topologically ordered state tuple, from the four tiers' tuples in tier
-# order. Generated so the permutation is spliced in as constant field accesses:
-# the result is a tuple of references to the tiers' (mutable) states, built
-# without allocating.
+# The topologically ordered state tuple, from the four tiers' tuples. Generated
+# so the permutation becomes constant field accesses, building a tuple of
+# references to the tiers' states without allocating.
 @generated function mergestates(::Val{P}, sources::Tuple) where {P}
     fields = [:(getfield(getfield(sources, $t), $j)) for (t, j) in P]
     return Expr(:block, Expr(:meta, :inline), Expr(:tuple, fields...))
@@ -77,9 +74,9 @@ end
 mergedstates(tg::Tiering) =
     mergestates(tg.perm, (tg.running, tg.tree, tg.refold, tg.derived))
 
-# The emitted value type, from the merged templates. Windowed states report the
-# same value type as ordinary ones (the `freshwindowed` contract), so this is
-# the type every tier combination emits.
+# The emitted value type, from the merged templates. Windowed states have the
+# ordinary states' value type (the `freshwindowed` contract), so every tier
+# combination emits it.
 tieredvaluetype(tg::Tiering, protos::Tuple, outs::Val) =
     promotedvaluetype(typeof(mergedstates(tg)), protos, outs)
 
@@ -91,10 +88,9 @@ tieredvaluetype(tg::Tiering, protos::Tuple, outs::Val) =
 
 # One key's running window state: the states with every in-window row folded
 # in, and how many rows that is. A group is deleted when its last row leaves,
-# so presence in the table implies live >= 1 and an absent key means an empty
-# window. Deleted groups retire to the table's pool and are zeroed on reuse —
-# the `GroupTable` idiom — so a key whose window empties and refills does not
-# rebuild its states (the windowed Min/First states own vectors).
+# so an absent key means an empty window. Deleted groups retire to the pool and
+# are zeroed on reuse, as in `GroupTable`, so a key whose window empties and
+# refills doesn't rebuild its states (windowed Min/First states own vectors).
 mutable struct RunningGroup{S<:Tuple}
     states::S
     live::Int
@@ -108,14 +104,14 @@ end
 RunningTable{K,S}() where {K,S<:Tuple} =
     RunningTable{K,S}(Dict{K,RunningGroup{S}}(), RunningGroup{S}[])
 
-# Fold `row` into key `k`'s group, making the group if needed. A declared
-# keyset (summarizewindows) is checked only there: a key that already has a
-# group was declared.
+# Fold `row` into key `k`'s group, making it if needed. A declared keyset
+# (summarizewindows) is checked only then, since a key with a group was
+# declared.
 @inline function admitgroup!(rt::RunningTable{K,S}, stateprotos::S, k, row,
     ks::Union{Nothing,KeySet} = nothing, keynames::Val = Val(())) where {K,S<:Tuple}
     pool = rt.pool
-    # Without a keyset the closure captures only the pool and templates — one
-    # capturing the row (a String key, say) measurably slows every admission.
+    # Without a keyset the closure doesn't capture the row, which measurably
+    # slows every admission (with a String key, say).
     g =
         ks === nothing ? get!(() -> claimgroup!(pool, stateprotos), rt.groups, k) :
         get!(rt.groups, k) do
@@ -148,8 +144,7 @@ end
     return nothing
 end
 
-# Fold the live rows (from head on) back into a fresh table; a function
-# barrier so the per-row work is concretely typed.
+# Fold the live rows (from head on) into a fresh table; a function barrier.
 function replayrunning!(rt::RunningTable{K,S}, rows::Vector, head::Int,
     stateprotos::S, keynames::Val) where {K,S<:Tuple}
     for j in head:length(rows)
@@ -172,11 +167,10 @@ function replaytrees!(trees::Dict{K,SegTree{S,R,T}}, rows::Vector, head::Int,
     return trees
 end
 
-# The old trees' live rows as one time-ordered buffer, for a rebuild that needs
-# a buffer where the old tiers kept none. The built-in states only ever demote,
-# so this takes a custom state that turns invertible when its column widens.
-# The stable sort keeps each key's rows in stream order, which is all its
-# running group sees.
+# The trees' live rows as one time-ordered buffer, for a rebuild that needs a
+# buffer where the previous tiers kept none. Built-in states only demote, so
+# only a custom state that becomes invertible on widening gets here. The stable
+# sort keeps each key's rows in stream order.
 function treebuffer(::Type{R}, trees::AbstractDict) where {R}
     rows = R[]
     for (_, tr) in trees, j in tr.head:length(tr.rows)
@@ -185,11 +179,10 @@ function treebuffer(::Type{R}, trees::AbstractDict) where {R}
     return sort!(rows; by = r -> r.time, alg = Base.Sort.DEFAULT_STABLE)
 end
 
-# The shared row buffer of a tiering being built, for addrollingcolumns and
-# summarizewindows alike: `nothing` when neither the running nor the refold tier
-# needs one (the trees own their rows); on a first build, empty; after a
-# widening, the old buffer converted to the new row type, or — when the old
-# tiers kept none — gathered from the old trees (`treebuffer`).
+# The shared row buffer of a tiering being built: `nothing` when neither the
+# running nor the refold tier needs one (trees own their rows); empty on a first
+# build; after a widening, the previous buffer converted to the new row type,
+# or gathered from the previous trees (`treebuffer`) if there was none.
 function rebuildbuffer(tg::Tiering, ::Type{R}, old) where {R}
     isempty(tg.running) && isempty(tg.refold) && return nothing
     old === nothing && return R[]
@@ -197,10 +190,9 @@ function rebuildbuffer(tg::Tiering, ::Type{R}, old) where {R}
     return convert(Vector{R}, old.buffer)
 end
 
-# The tree tier of a tiering being built: `nothing` without tree states;
-# otherwise per-key trees replayed from the old trees' own rows when there were
-# any, else from the old buffer's live rows (from `head`, the first row any
-# window still holds), else — a first build — empty.
+# The tree tier of a tiering being built: `nothing` without tree states, else
+# per-key trees replayed from the previous trees' rows if any, else from the
+# previous buffer's live rows (from `head`), else (a first build) empty.
 function rebuildtrees(tg::Tiering, ::Type{K}, ::Type{R}, ::Type{T}, old,
     head::Int, keynames::Val) where {K,R,T}
     isempty(tg.tree) && return nothing
@@ -213,8 +205,7 @@ function rebuildtrees(tg::Tiering, ::Type{K}, ::Type{R}, ::Type{T}, old,
     return trees
 end
 
-# Replay every live row of the old trees; a tree owns its rows, so this is the
-# rebuild source when no buffer holds them.
+# Replay every live row of the previous trees, which own their rows.
 function replayoldtrees!(trees::Dict{K,SegTree{S,R,T}}, old::AbstractDict,
     stateprotos::S, keynames::Val) where {K,S<:Tuple,R,T}
     for (_, tr) in old
