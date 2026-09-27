@@ -193,6 +193,13 @@ design rationale and performance constraints behind each module.
     all of `v` per call; `nearestrank` corrects `ceil(p * n)` to TA-Lib's exact
     rank. `PercentRank` reads the newest value from `Last`, a group via
     `WindowLastState`, so it keeps the running tier too
+  - row terms (`name => f`, a `ColumnSpec`) are virtual input columns, not a
+    summarizer feature: a constructor builds the summarizer over `name` and
+    hands the specs to `withterms`, which wraps it in the inert `Termed`
+    carrier only when a spec is a pair. Every constructor takes one
+    `ColumnSpec` per column argument (never a method per Symbol/Pair
+    combination). `prototypes` strips the carrier, so states, tiers and
+    kernels never see it; don't add behaviour to `Termed` beyond `emptyvalue`
   - `FitModel` (MLJ) is the one summarizer whose value is an object: its state
     buffers the folded rows in concretely typed vectors and fits at `value`
     time through the `fitmodel` hook (src/models.jl), building
@@ -206,8 +213,14 @@ design rationale and performance constraints behind each module.
   `checkkeycolumns` (first chunk: present in the input, naming which input for
   the binary transforms). `prototypes` expands dependencies topologically and
   returns the requested output names, which ride through the kernels in a
-  `Val` to project hidden dependencies out of the output. Per-run state lives
-  in `SummaryFold`, never in reassigned closure captures (those get boxed).
+  `Val` to project hidden dependencies out of the output, plus the row terms
+  it unwrapped. Every summarizing transform (these three, `intervalize`,
+  `addrollingcolumns`, `summarizewindows`) reads its summarizers' input through
+  `terminput`: the chunk's column table plus one vector per term (per chunk,
+  behind `rowvalues`' barrier), with input types taken from that table so term
+  types widen like columns. The term vectors must never reach an output.
+  Per-run state lives in `SummaryFold`, never in reassigned closure captures
+  (those get boxed).
   The per-key states live in a `GroupTable{K,S}` (both parameters concrete),
   which also holds the reused emission buffer and the pool of retired state
   tuples that `closecycle!` retires into and `groupstates!` zeroes back out

@@ -282,7 +282,7 @@ end
             CausalFrames.tosummarizers(ss), kc)
         outs = Val(requested)
         kn = Val(Tuple(kc))
-        cfg = CausalFrames.WindowConfig(kc, kn, 5, protos, outs, grid, ks)
+        cfg = CausalFrames.WindowConfig(kc, kn, 5, protos, outs, grid, ks, (;))
         st = CausalFrames.WindowState{Int}(
             CausalFrames.IntervalCursor{Int}(clock(5).run(Context(0, 10))))
         CausalFrames.preparewindows!(st, cfg, types)
@@ -369,4 +369,16 @@ end
         cur.times = [cur.index]
     end
     JET.@test_opt CausalFrames.pickwinner(cursors)
+end
+
+@testset "row term columns" begin
+    # A term column is computed per chunk behind `rowvalues`' barrier, which
+    # must specialize on the term function and the column table.
+    nt = (time = [1, 2], high = [5.0, 6.0], low = [4.0, 4.5])
+    JET.@test_opt CausalFrames.rowvalues(rangeterm, nt)
+    protos, requested, terms = CausalFrames.prototypes(
+        CausalFrames.tosummarizers([Sum(:range => rangeterm)]), Symbol[])
+    tnt = merge(nt, (; range = CausalFrames.rowvalues(rangeterm, nt)))
+    states = CausalFrames.newstates(protos, CausalFrames.chunktypes(tnt))
+    JET.@test_opt CausalFrames.foldall!(states, tnt)
 end

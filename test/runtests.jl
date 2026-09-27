@@ -39,6 +39,7 @@ include("fixtures.jl")
     include("windows.jl")
     include("summarize.jl")
     include("summarizers.jl")
+    include("rowterms.jl")
     include("models.jl")
 
     # JET can lag pre-release Julia; the checks are the same on every

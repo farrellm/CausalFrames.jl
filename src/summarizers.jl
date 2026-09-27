@@ -158,6 +158,87 @@ if requested. Defaults to `()`.
 dependencies(::Summarizer) = ()
 
 """
+    ColumnSpec
+
+An input column as a summarizer constructor takes it: a column name (a
+`Symbol`), or a *row term* `name => f`. A row term is a virtual input column
+`name`, whose value in each row is `f(row)`. The summarizer reads it as it
+would a column, so its output is named after `name` (`Sum(:range => f)` gives
+`:range_sum`). The summarizing transforms compute each row term once per row,
+alongside the input, and never add it to their output. See
+[Row terms](@ref).
+
+`Union{Symbol, Pair{Symbol, <:Base.Callable}}`.
+"""
+const ColumnSpec = Union{Symbol,Pair{Symbol,<:Base.Callable}}
+
+colname(c::Symbol) = c
+colname(p::Pair) = first(p)
+
+# A summarizer and the row terms it reads, as `withterms` builds it for a
+# constructor given a `name => f`. `prototypes` unwraps it before folding, so
+# no state, tier or kernel ever sees one.
+struct Termed{S<:Summarizer,T<:NamedTuple} <: Summarizer
+    summarizer::S
+    terms::T
+end
+
+emptyvalue(t::Termed) = emptyvalue(t.summarizer)
+
+unterm(s::Summarizer) = s
+unterm(t::Termed) = t.summarizer
+rowterms(::Summarizer) = (;)
+rowterms(t::Termed) = t.terms
+
+# Add a `name => f` row term to `pairs`. The same name must always mean the
+# same function (`===`, so two copies of one lambda literal differ).
+function addterm!(pairs::Vector{Pair{Symbol,Any}}, name::Symbol, f, op::String)
+    i = findfirst(p -> first(p) === name, pairs)
+    if i === nothing
+        push!(pairs, name => f)
+    elseif last(pairs[i]) !== f
+        throw(
+            ArgumentError(
+                "$op row term $(repr(name)) is defined by more than one function; " *
+                "bind the function once and reuse it",
+            ),
+        )
+    end
+    return pairs
+end
+
+termtuple(pairs::Vector{Pair{Symbol,Any}}) =
+    NamedTuple{Tuple(map(first, pairs))}(Tuple(map(last, pairs)))
+
+"""
+    withterms(s::Summarizer, specs::ColumnSpec...) -> Summarizer
+
+`s`, carrying the row terms among `specs`, which are the [`ColumnSpec`](@ref)s
+`s` was built from. A constructor taking a column calls it on the summarizer
+built from the specs' names:
+
+```julia
+MySum(column::ColumnSpec) = withterms(MySum{colname(column)}(), column)
+```
+
+With no row term among `specs` it returns `s` itself. A row term may not be
+named `:time`, and two row terms with the same name must be the same function;
+either is an `ArgumentError` naming `s`'s type.
+"""
+function withterms(s::Summarizer, specs::ColumnSpec...)
+    any(p -> p isa Pair, specs) || return s
+    op = string(nameof(typeof(s)))
+    pairs = Pair{Symbol,Any}[]
+    for p in specs
+        p isa Pair || continue
+        first(p) === :time &&
+            throw(ArgumentError("$op row term may not be named :time"))
+        addterm!(pairs, first(p), last(p), op)
+    end
+    return Termed(s, termtuple(pairs))
+end
+
+"""
     combine!(dest::SummarizerState, a::SummarizerState, b::SummarizerState)
 
 Set `dest` to the state folding `a`'s rows then `b`'s would give. Required for
@@ -522,15 +603,33 @@ value(st::CountDistinctWindowState{C,N}) where {C,N} =
     NamedTuple{(N,),Tuple{Int}}((length(st.counts),))
 
 """
-    Sum(column::Symbol) -> Summarizer
+    Sum(column::ColumnSpec) -> Summarizer
 
 The sum of `column`, in `:{column}_sum` (`0` for no rows). The element type is
 what `Base.sum` gives: small integers widen (`Int32` to `Int64`), other types
 are kept (`Float32` stays `Float32`). Floats use compensated summation, with
 NaN and ±Inf counted separately so a rolling window recovers once they leave.
+
+# Arguments
+- `column`: a column name, or a row term `name => f` summing `f(row)` (see
+  [`ColumnSpec`](@ref)).
+
+```jldoctest
+df = DataFrame(time = 1:3, high = [5.0, 6.0, 8.0], low = [4.0, 4.5, 5.0])
+p = readtable(df) |> summarize(Sum(:range => r -> r.high - r.low))
+DataFrame(load(Context(0, 10), p))
+
+# output
+
+1×2 DataFrame
+ Row │ time   range_sum
+     │ Int64  Float64
+─────┼──────────────────
+   1 │    10        5.5
+```
 """
 struct Sum{C} <: GroupSummarizer end
-Sum(column::Symbol) = Sum{column}()
+Sum(column::ColumnSpec) = withterms(Sum{colname(column)}(), column)
 
 emptyvalue(::Sum{C}) where {C} = NamedTuple{(Symbol(C, :_sum),)}((0,))
 fresh(::Sum{C}, intypes::NamedTuple) where {C} =
@@ -631,15 +730,36 @@ struct AliasState{N,D} <: SummarizerState end
 end
 
 """
-    DotProduct(a::Symbol, b::Symbol) -> Summarizer
+    DotProduct(a::ColumnSpec, b::ColumnSpec) -> Summarizer
 
 The sum of `a * b`, in `:{a}_{b}_dotproduct` (`0` for no rows). The element type
 widens as for [`Sum`](@ref), and terms are formed in that type. `DotProduct(:y,
 :x)` shares the accumulator of `DotProduct(:x, :y)` (and of any
 [`Covariance`](@ref) or [`LinearRegression`](@ref) needing it).
+
+# Arguments
+- `a`, `b`: column names or row terms `name => f` (see [`ColumnSpec`](@ref)).
+  A row term is named, and so ordered, by its `name`.
+
+```jldoctest
+df = DataFrame(time = 1:2, high = [6.0, 9.0], low = [4.0, 6.0],
+    volume = [10, 20])
+tp = r -> (r.high + r.low) / 2
+p = readtable(df) |> summarize(DotProduct(:tp => tp, :volume))
+DataFrame(load(Context(0, 10), p))
+
+# output
+
+1×2 DataFrame
+ Row │ time   tp_volume_dotproduct
+     │ Int64  Float64
+─────┼─────────────────────────────
+   1 │    10                 200.0
+```
 """
 struct DotProduct{A,B} <: GroupSummarizer end
-DotProduct(a::Symbol, b::Symbol) = DotProduct{a,b}()
+DotProduct(a::ColumnSpec, b::ColumnSpec) =
+    withterms(DotProduct{colname(a),colname(b)}(), a, b)
 
 dotname(a, b) = Symbol(a, :_, b, :_dotproduct)
 
