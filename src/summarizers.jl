@@ -158,6 +158,105 @@ if requested. Defaults to `()`.
 dependencies(::Summarizer) = ()
 
 """
+    ColumnSpec
+
+An input column as a summarizer constructor takes it: a column name (a
+`Symbol`), or a *row term* `name => f`. A row term is a virtual input column
+`name`, whose value in each row is `f(row)`. The summarizer reads it as it
+would a column, so its output is named after `name` (`Sum(:range => f)` gives
+`:range_sum`). The summarizing transforms compute each row term once per row,
+alongside the input, and never add it to their output. See
+[Row terms](@ref).
+
+`Union{Symbol, Pair{Symbol, <:Base.Callable}}`.
+
+```jldoctest
+df = DataFrame(time = 1:3, high = [5.0, 6.0, 8.0], low = [4.0, 4.5, 5.0])
+spread = r -> r.high - r.low   # bound once, so both summarizers share it
+p = readtable(df) |>
+    addsummarycolumns([Sum(:spread => spread), Mean(:spread => spread)])
+DataFrame(load(Context(0, 10), p))
+
+# output
+
+3×5 DataFrame
+ Row │ time   high     low      spread_sum  spread_mean
+     │ Int64  Float64  Float64  Float64     Float64
+─────┼──────────────────────────────────────────────────
+   1 │     1      5.0      4.0         1.0      1.0
+   2 │     2      6.0      4.5         2.5      1.25
+   3 │     3      8.0      5.0         5.5      1.83333
+```
+"""
+const ColumnSpec = Union{Symbol,Pair{Symbol,<:Base.Callable}}
+
+colname(c::Symbol) = c
+colname(p::Pair) = first(p)
+
+# A summarizer and the row terms it reads, as `withterms` builds it for a
+# constructor given a `name => f`. `prototypes` unwraps it before folding, so
+# no state, tier or kernel ever sees one.
+struct Termed{S<:Summarizer,T<:NamedTuple} <: Summarizer
+    summarizer::S
+    terms::T
+end
+
+emptyvalue(t::Termed) = emptyvalue(t.summarizer)
+
+unterm(s::Summarizer) = s
+unterm(t::Termed) = t.summarizer
+rowterms(::Summarizer) = (;)
+rowterms(t::Termed) = t.terms
+
+# Add a `name => f` row term to `pairs`. The same name must always mean the
+# same function (`===`, so two copies of one lambda literal differ).
+function addterm!(pairs::Vector{Pair{Symbol,Any}}, name::Symbol, f, op::String)
+    i = findfirst(p -> first(p) === name, pairs)
+    if i === nothing
+        push!(pairs, name => f)
+    elseif last(pairs[i]) !== f
+        throw(
+            ArgumentError(
+                "$op row term $(repr(name)) is defined by more than one function; " *
+                "bind the function once and reuse it",
+            ),
+        )
+    end
+    return pairs
+end
+
+termtuple(pairs::Vector{Pair{Symbol,Any}}) =
+    NamedTuple{Tuple(map(first, pairs))}(Tuple(map(last, pairs)))
+
+"""
+    withterms(s::Summarizer, specs::ColumnSpec...) -> Summarizer
+
+`s`, carrying the row terms among `specs`, which are the [`ColumnSpec`](@ref)s
+`s` was built from. A constructor taking a column calls it on the summarizer
+built from the specs' names:
+
+```julia
+MySum(column::ColumnSpec) = withterms(MySum{colname(column)}(), column)
+```
+
+With no row term among `specs` it returns `s` itself. A row term may not be
+named `:time`, and two row terms with the same name must be the same function;
+either is an `ArgumentError` naming `s`'s type.
+"""
+function withterms(s::Summarizer, specs::ColumnSpec...)
+    any(p -> p isa Pair, specs) || return s
+    op = string(nameof(typeof(s)))
+    pairs = Pair{Symbol,Any}[]
+    for p in specs
+        p isa Pair || continue
+        first(p) === :time &&
+            throw(ArgumentError("$op row term may not be named :time"))
+        addterm!(pairs, first(p), last(p), op)
+    end
+    return Termed(s, termtuple(pairs))
+end
+
+"""
     combine!(dest::SummarizerState, a::SummarizerState, b::SummarizerState)
 
 Set `dest` to the state folding `a`'s rows then `b`'s would give. Required for
@@ -442,7 +541,7 @@ combine!(dest::CountState, a::CountState, b::CountState) =
 value(st::CountState) = (; count = st.n)
 
 """
-    CountDistinct(column::Symbol) -> Summarizer
+    CountDistinct(column::ColumnSpec) -> Summarizer
 
 The number of distinct values of `column`, in `:{column}_countdistinct`
 (`Int`, `0` for no rows).
@@ -452,9 +551,12 @@ out `missing` upstream for SQL's `count(DISTINCT x)`. The state holds every
 distinct value seen, so memory is O(distinct values) per summary; in a sliding
 window it also counts each value's rows, so it can drop a value when its last
 row leaves.
+
+# Arguments
+- `column`: a column name, or a row term `name => f` (see [`ColumnSpec`](@ref)).
 """
 struct CountDistinct{C} <: GroupSummarizer end
-CountDistinct(column::Symbol) = CountDistinct{column}()
+CountDistinct(column::ColumnSpec) = withterms(CountDistinct{colname(column)}(), column)
 
 mutable struct CountDistinctState{C,N,T} <: SummarizerState
     seen::Set{T}
@@ -522,32 +624,55 @@ value(st::CountDistinctWindowState{C,N}) where {C,N} =
     NamedTuple{(N,),Tuple{Int}}((length(st.counts),))
 
 """
-    Sum(column::Symbol) -> Summarizer
+    Sum(column::ColumnSpec) -> Summarizer
 
 The sum of `column`, in `:{column}_sum` (`0` for no rows). The element type is
 what `Base.sum` gives: small integers widen (`Int32` to `Int64`), other types
 are kept (`Float32` stays `Float32`). Floats use compensated summation, with
 NaN and ±Inf counted separately so a rolling window recovers once they leave.
+
+# Arguments
+- `column`: a column name, or a row term `name => f` summing `f(row)` (see
+  [`ColumnSpec`](@ref)).
+
+```jldoctest
+df = DataFrame(time = 1:3, high = [5.0, 6.0, 8.0], low = [4.0, 4.5, 5.0])
+p = readtable(df) |> summarize(Sum(:range => r -> r.high - r.low))
+DataFrame(load(Context(0, 10), p))
+
+# output
+
+1×2 DataFrame
+ Row │ time   range_sum
+     │ Int64  Float64
+─────┼──────────────────
+   1 │    10        5.5
+```
 """
 struct Sum{C} <: GroupSummarizer end
-Sum(column::Symbol) = Sum{column}()
+Sum(column::ColumnSpec) = withterms(Sum{colname(column)}(), column)
 
 emptyvalue(::Sum{C}) where {C} = NamedTuple{(Symbol(C, :_sum),)}((0,))
 fresh(::Sum{C}, intypes::NamedTuple) where {C} =
     accumfresh(ColumnTerm{C}(), Symbol(C, :_sum), sumtype(intypes[C]))
 
 """
-    SumPower(column::Symbol, n::Integer) -> Summarizer
+    SumPower(column::ColumnSpec, n::Integer) -> Summarizer
 
 The sum of `column ^ n`, in `:{column}_sumpower_{n}` (`0` for no rows). The
 element type follows [`Sum`](@ref) applied to `column ^ n`; each term is raised
 in that widened type, so it cannot overflow the input type. `SumPower(:x, 1)`
 is a separate column from `Sum(:x)`.
+
+# Arguments
+- `column`: a column name, or a row term `name => f` (see [`ColumnSpec`](@ref)).
+- `n`: the exponent, part of the output name.
 """
 struct SumPower{C} <: GroupSummarizer
     power::Int
 end
-SumPower(column::Symbol, power::Integer) = SumPower{column}(Int(power))
+SumPower(column::ColumnSpec, power::Integer) =
+    withterms(SumPower{colname(column)}(Int(power)), column)
 
 powertype(::Type{T}, ::Int) where {T} = sumtype(Base.promote_op(^, T, Int))
 
@@ -583,14 +708,17 @@ fresh(s::SumPower{C}, intypes::NamedTuple) where {C} =
 # A monoid but not a group: dividing a row back out fails at zero and
 # truncates for integers.
 """
-    Product(column::Symbol) -> Summarizer
+    Product(column::ColumnSpec) -> Summarizer
 
 The product of `column`, in `:{column}_product` (`1` for no rows). The element
 type is what `Base.prod` gives: small integers widen (`Int32` to `Int64`),
 other types are kept.
+
+# Arguments
+- `column`: a column name, or a row term `name => f` (see [`ColumnSpec`](@ref)).
 """
 struct Product{C} <: MonoidSummarizer end
-Product(column::Symbol) = Product{column}()
+Product(column::ColumnSpec) = withterms(Product{colname(column)}(), column)
 
 mutable struct ProductState{C,N,A} <: SummarizerState
     total::A
@@ -631,15 +759,36 @@ struct AliasState{N,D} <: SummarizerState end
 end
 
 """
-    DotProduct(a::Symbol, b::Symbol) -> Summarizer
+    DotProduct(a::ColumnSpec, b::ColumnSpec) -> Summarizer
 
 The sum of `a * b`, in `:{a}_{b}_dotproduct` (`0` for no rows). The element type
 widens as for [`Sum`](@ref), and terms are formed in that type. `DotProduct(:y,
 :x)` shares the accumulator of `DotProduct(:x, :y)` (and of any
 [`Covariance`](@ref) or [`LinearRegression`](@ref) needing it).
+
+# Arguments
+- `a`, `b`: column names or row terms `name => f` (see [`ColumnSpec`](@ref)).
+  A row term is named, and so ordered, by its `name`.
+
+```jldoctest
+df = DataFrame(time = 1:2, high = [6.0, 9.0], low = [4.0, 6.0],
+    volume = [10, 20])
+tp = r -> (r.high + r.low) / 2
+p = readtable(df) |> summarize(DotProduct(:tp => tp, :volume))
+DataFrame(load(Context(0, 10), p))
+
+# output
+
+1×2 DataFrame
+ Row │ time   tp_volume_dotproduct
+     │ Int64  Float64
+─────┼─────────────────────────────
+   1 │    10                 200.0
+```
 """
 struct DotProduct{A,B} <: GroupSummarizer end
-DotProduct(a::Symbol, b::Symbol) = DotProduct{a,b}()
+DotProduct(a::ColumnSpec, b::ColumnSpec) =
+    withterms(DotProduct{colname(a),colname(b)}(), a, b)
 
 dotname(a, b) = Symbol(a, :_, b, :_dotproduct)
 
@@ -663,7 +812,7 @@ fresh(::DotProduct{A,B}, intypes::NamedTuple) where {A,B} =
         dottype(intypes[A], intypes[B]))
 
 """
-    AgeWeightedSum(column::Symbol) -> Summarizer
+    AgeWeightedSum(column::ColumnSpec) -> Summarizer
 
 The sum of `column` weighted by each row's age, `Σₖ k·yₖ` where `k` counts the
 rows folded after row `k` (`0` for the newest), in `:{column}_ageweightedsum`
@@ -677,7 +826,8 @@ leave. The newest row weighs `0`, so a NaN or ±Inf there contributes nothing
 until a later row arrives; a `missing` anywhere gives `missing`.
 
 # Arguments
-- `column`: the column to weight. Age is counted in rows, in stream order, so
+- `column`: the column to weight, or a row term `name => f` (see [`ColumnSpec`](@ref)).
+  Age is counted in rows, in stream order, so
   rows tied in time have different ages.
 
 ```jldoctest
@@ -698,7 +848,7 @@ DataFrame(load(Context(0, 10), p))
 ```
 """
 struct AgeWeightedSum{C} <: GroupSummarizer end
-AgeWeightedSum(column::Symbol) = AgeWeightedSum{column}()
+AgeWeightedSum(column::ColumnSpec) = withterms(AgeWeightedSum{colname(column)}(), column)
 
 # The state folds the row count n, S1 = Σy and S2 = Σk·y. A new row ages every
 # folded row by one, adding S1 to S2, then joins S1 at weight 0. Removing the
@@ -887,17 +1037,22 @@ agesumwiden(w::AgeSumState, st::CompensatedAgeSumState) =
     agesumfrom(w, st.n, compvalue(st.s1), agesumvalue(st), st.missings)
 
 """
-    Moment(column::Symbol, n::Integer) -> Summarizer
+    Moment(column::ColumnSpec, n::Integer) -> Summarizer
 
 The `n`-th raw moment of `column`, the mean of `column ^ n`, in
 `:{column}_moment_{n}` (`missing` for no rows). Computed from
 [`SumPower`](@ref)`(column, n)` and [`Count`](@ref); integer input gives
 `Float64`.
+
+# Arguments
+- `column`: a column name, or a row term `name => f` (see [`ColumnSpec`](@ref)).
+- `n`: the order, part of the output name.
 """
 struct Moment{C} <: GroupSummarizer
     order::Int
 end
-Moment(column::Symbol, order::Integer) = Moment{column}(Int(order))
+Moment(column::ColumnSpec, order::Integer) =
+    withterms(Moment{colname(column)}(Int(order)), column)
 
 # A sum D over the row count, emitted as N: Moment's power sum or Mean's plain
 # sum. Fieldless; the names are type parameters so the two-argument `value`
@@ -920,14 +1075,17 @@ fresh(m::Moment{C}, ::NamedTuple) where {C} =
         Symbol(C, :_sumpower_, m.order)}()
 
 """
-    Mean(column::Symbol) -> Summarizer
+    Mean(column::ColumnSpec) -> Summarizer
 
 The mean of `column`, in `:{column}_mean` (`missing` for no rows). Computed from
 [`Sum`](@ref)`(column)` and [`Count`](@ref); integer input gives `Float64`,
 `Float32` stays `Float32`.
+
+# Arguments
+- `column`: a column name, or a row term `name => f` (see [`ColumnSpec`](@ref)).
 """
 struct Mean{C} <: GroupSummarizer end
-Mean(column::Symbol) = Mean{column}()
+Mean(column::ColumnSpec) = withterms(Mean{colname(column)}(), column)
 
 dependencies(::Mean{C}) where {C} = (Count(), Sum(C))
 emptyvalue(::Mean{C}) where {C} = NamedTuple{(Symbol(C, :_mean),)}((missing,))
@@ -935,11 +1093,14 @@ fresh(::Mean{C}, ::NamedTuple) where {C} =
     CountRatioState{Symbol(C, :_mean),Symbol(C, :_sum)}()
 
 """
-    Variance(column::Symbol; corrected = true) -> Summarizer
+    Variance(column::ColumnSpec; corrected = true) -> Summarizer
 
 The variance of `column`, as `Statistics.var`, in `:{column}_variance`
 (`missing` for no rows). Computed from [`Count`](@ref), [`Sum`](@ref) and
 [`SumPower`](@ref)`(column, 2)`; integer input gives `Float64`.
+
+# Arguments
+- `column`: a column name, or a row term `name => f` (see [`ColumnSpec`](@ref)).
 
 # Keywords
 - `corrected = true`: divide by `n - 1` (a single row gives `NaN`); `false`
@@ -949,7 +1110,8 @@ The variance of `column`, as `Statistics.var`, in `:{column}_variance`
 struct Variance{C} <: GroupSummarizer
     corrected::Bool
 end
-Variance(column::Symbol; corrected::Bool = true) = Variance{column}(corrected)
+Variance(column::ColumnSpec; corrected::Bool = true) =
+    withterms(Variance{colname(column)}(corrected), column)
 
 # The compile-time value type of the (co)variance identity
 # `(q - sa * sb / n) / (n - corrected)`, from the dependencies' field types.
@@ -968,11 +1130,14 @@ fresh(v::Variance{C}, ::NamedTuple) where {C} =
         Symbol(C, :_sum),Symbol(C, :_sum),v.corrected}()
 
 """
-    Std(column::Symbol; corrected = true) -> Summarizer
+    Std(column::ColumnSpec; corrected = true) -> Summarizer
 
 The standard deviation of `column`, as `Statistics.std`, in `:{column}_std`
 (`missing` for no rows): the square root of [`Variance`](@ref), with round-off
 negatives clamped to zero.
+
+# Arguments
+- `column`: a column name, or a row term `name => f` (see [`ColumnSpec`](@ref)).
 
 # Keywords
 - `corrected = true`: as for [`Variance`](@ref).
@@ -980,7 +1145,8 @@ negatives clamped to zero.
 struct Std{C} <: GroupSummarizer
     corrected::Bool
 end
-Std(column::Symbol; corrected::Bool = true) = Std{column}(corrected)
+Std(column::ColumnSpec; corrected::Bool = true) =
+    withterms(Std{colname(column)}(corrected), column)
 
 struct StdState{C,N,V} <: SummarizerState end
 
@@ -997,11 +1163,14 @@ fresh(::Std{C}, ::NamedTuple) where {C} =
 end
 
 """
-    Covariance(a::Symbol, b::Symbol; corrected = true) -> Summarizer
+    Covariance(a::ColumnSpec, b::ColumnSpec; corrected = true) -> Summarizer
 
 The covariance of `a` and `b`, as `Statistics.cov`, in `:{a}_{b}_covariance`
 (`missing` for no rows). Computed from [`Count`](@ref), [`Sum`](@ref) of each
 column and [`DotProduct`](@ref)`(a, b)`.
+
+# Arguments
+- `a`, `b`: column names or row terms `name => f` (see [`ColumnSpec`](@ref)).
 
 # Keywords
 - `corrected = true`: as for [`Variance`](@ref), including that it is not part
@@ -1010,8 +1179,8 @@ column and [`DotProduct`](@ref)`(a, b)`.
 struct Covariance{A,B} <: GroupSummarizer
     corrected::Bool
 end
-Covariance(a::Symbol, b::Symbol; corrected::Bool = true) =
-    Covariance{a,b}(corrected)
+Covariance(a::ColumnSpec, b::ColumnSpec; corrected::Bool = true) =
+    withterms(Covariance{colname(a),colname(b)}(corrected), a, b)
 
 # R (the corrected flag) is a type parameter so the state stays fieldless; the
 # divisor is `n - Int(R)`. Variance uses it too, with A = B.
@@ -1041,15 +1210,19 @@ fresh(c::Covariance{A,B}, ::NamedTuple) where {A,B} =
 end
 
 """
-    Correlation(a::Symbol, b::Symbol) -> Summarizer
+    Correlation(a::ColumnSpec, b::ColumnSpec) -> Summarizer
 
 The Pearson correlation of `a` and `b`, as `Statistics.cor`, clamped to
 `[-1, 1]`, in `:{a}_{b}_correlation` (`missing` for no rows, `NaN` for one).
 Computed from [`Covariance`](@ref) and the two columns' [`Std`](@ref)s; there is
 no `corrected` keyword, since the correction cancels.
+
+# Arguments
+- `a`, `b`: column names or row terms `name => f` (see [`ColumnSpec`](@ref)).
 """
 struct Correlation{A,B} <: GroupSummarizer end
-Correlation(a::Symbol, b::Symbol) = Correlation{a,b}()
+Correlation(a::ColumnSpec, b::ColumnSpec) =
+    withterms(Correlation{colname(a),colname(b)}(), a, b)
 
 struct CorrelationState{A,B,N,CV,SA,SB} <: SummarizerState end
 
@@ -1074,15 +1247,16 @@ fresh(::Correlation{A,B}, ::NamedTuple) where {A,B} =
 end
 
 """
-    LinearRegression(predictors, response::Symbol; intercept = true,
+    LinearRegression(predictors, response::ColumnSpec; intercept = true,
                      name = nothing) -> Summarizer
 
 An ordinary least squares fit of `response` on `predictors`.
 
 # Arguments
-- `predictors`: a column name, or a collection of distinct names (`K` of them).
-  None may be named `intercept`.
-- `response`: the response column.
+- `predictors`: a column name or row term `name => f` (see [`ColumnSpec`](@ref)),
+  or a collection of distinct ones (`K` of them). None may be named
+  `intercept`.
+- `response`: the response column, or a row term.
 
 # Keywords
 - `intercept = true`: fit a constant term. Without it, `r2` is the uncentered
@@ -1139,9 +1313,10 @@ struct LinearRegression{P,Y} <: GroupSummarizer
     name::Union{Nothing,Symbol}
 end
 
-function LinearRegression(predictors, response::Symbol;
+function LinearRegression(predictors, response::ColumnSpec;
     intercept::Bool = true, name::Union{Nothing,Symbol} = nothing)
-    ps = Tuple(Symbol(p) for p in predictors)
+    specs = Tuple(p isa Pair ? p : Symbol(p) for p in predictors)
+    ps = map(colname, specs)
     isempty(ps) &&
         throw(ArgumentError("LinearRegression requires at least one predictor"))
     allunique(ps) || throw(ArgumentError(
@@ -1151,11 +1326,14 @@ function LinearRegression(predictors, response::Symbol;
     outs = regnames(ps, name, intercept)
     allunique(outs) || throw(ArgumentError(
         "LinearRegression output columns must be unique, got $outs"))
-    return LinearRegression{ps,response}(intercept, name)
+    return withterms(LinearRegression{ps,colname(response)}(intercept, name),
+        specs..., response)
 end
-# A lone name; a string is one name, not a collection of characters.
-LinearRegression(predictor::Union{Symbol,AbstractString}, response::Symbol;
-    kwargs...) = LinearRegression((Symbol(predictor),), response; kwargs...)
+# A lone name or row term; a string is one name, not a collection of
+# characters.
+LinearRegression(predictor::Union{ColumnSpec,AbstractString},
+    response::ColumnSpec; kwargs...) =
+    LinearRegression((predictor,), response; kwargs...)
 
 # Fieldless, with every name a type parameter so the two-argument `value`
 # infers. NN and SN are the output names (the row count, then the statistics);
@@ -1378,7 +1556,7 @@ end
 end
 
 """
-    SortedValues(column::Symbol) -> Summarizer
+    SortedValues(column::ColumnSpec) -> Summarizer
 
 The values of `column` in sorted order: the accumulator [`Quantile`](@ref),
 [`Median`](@ref) and [`PercentRank`](@ref) read, for a summarizer of your own to
@@ -1398,7 +1576,8 @@ and removing a row each cost a binary search and a shift of up to the window's
 values.
 
 # Arguments
-- `column`: the column to collect. Its values must be ordered by `isless`.
+- `column`: the column to collect, or a row term `name => f` (see [`ColumnSpec`](@ref)).
+  Its values must be ordered by `isless`.
 
 ```jldoctest
 st = CausalFrames.fresh(CausalFrames.SortedValues(:x), (; x = Float64))
@@ -1412,7 +1591,7 @@ sv = CausalFrames.value(st).x_sortedvalues
 ```
 """
 struct SortedValues{C} <: GroupSummarizer end
-SortedValues(column::Symbol) = SortedValues{column}()
+SortedValues(column::ColumnSpec) = withterms(SortedValues{colname(column)}(), column)
 
 # A sorted Vector rather than a tree or skip list: a binary search plus a
 # memmove stays cheap far past typical window sizes (DESIGN.md has the
@@ -1528,7 +1707,7 @@ function mergesorted!(out::Vector, a::Vector, b::Vector)
 end
 
 """
-    Quantile(column::Symbol, p; interpolation = :linear) -> Summarizer
+    Quantile(column::ColumnSpec, p; interpolation = :linear) -> Summarizer
 
 The `p` quantiles of `column`, one column per probability, in
 `:{column}_quantile_{100p}` (`:x_quantile_50` for `0.5`, `:x_quantile_2_5` for
@@ -1538,7 +1717,8 @@ Computed from [`CausalFrames.SortedValues`](@ref CausalFrames.SortedValues), so 
 O(window) per key.
 
 # Arguments
-- `column`: the column to summarize. Its values must be ordered by `isless`,
+- `column`: the column to summarize, or a row term `name => f` (see [`ColumnSpec`](@ref)).
+  Its values must be ordered by `isless`,
   and `:linear` must be able to interpolate them.
 - `p`: a probability in `[0, 1]`, or a non-empty collection of distinct ones,
   giving one column each in the order given. Any other value is an
@@ -1577,7 +1757,7 @@ struct Quantile{C,PS,I} <: GroupSummarizer end
 
 const INTERPOLATIONS = (:linear, :nearestrank)
 
-function Quantile(column::Symbol, ps; interpolation::Symbol = :linear)
+function Quantile(column::ColumnSpec, ps; interpolation::Symbol = :linear)
     interpolation in INTERPOLATIONS || throw(
         ArgumentError(
             "Quantile interpolation must be :linear or :nearestrank, got " *
@@ -1592,12 +1772,13 @@ function Quantile(column::Symbol, ps; interpolation::Symbol = :linear)
     allunique(qs) || throw(ArgumentError(
         "Quantile probabilities must be unique, got $qs"))
     # probabilities closer than the name's twelve digits would share a name
-    outs = quantilenames(column, qs)
+    c = colname(column)
+    outs = quantilenames(c, qs)
     allunique(outs) || throw(ArgumentError(
         "Quantile output columns must be unique, got $outs"))
-    return Quantile{column,qs,interpolation}()
+    return withterms(Quantile{c,qs,interpolation}(), column)
 end
-Quantile(column::Symbol, p::Real; kwargs...) = Quantile(column, (p,); kwargs...)
+Quantile(column::ColumnSpec, p::Real; kwargs...) = Quantile(column, (p,); kwargs...)
 
 # The percentage to twelve significant digits (so 0.07 names `7`, though
 # 100 * 0.07 is 7.000000000000001), with `_` for the decimal point.
@@ -1610,12 +1791,15 @@ quantilenames(C::Symbol, PS::Tuple) =
     map(p -> Symbol(C, :_quantile_, quantilesuffix(p)), PS)
 
 """
-    Median(column::Symbol) -> Summarizer
+    Median(column::ColumnSpec) -> Summarizer
 
 The median of `column`, as `Statistics.median` up to rounding, in `:{column}_median`
 (`missing` for no rows): [`Quantile`](@ref)`(column, 0.5)` under its own name,
 sharing its accumulator, so integer input gives `Float64`. A `missing` in the
 rows gives `missing` and a NaN gives NaN.
+
+# Arguments
+- `column`: a column name, or a row term `name => f` (see [`ColumnSpec`](@ref)).
 
 ```jldoctest
 df = DataFrame(time = 1:4, x = [4, 1, 3, 5])
@@ -1631,7 +1815,7 @@ DataFrame(load(Context(0, 10), readtable(df) |> summarize(Median(:x))))
 ```
 """
 struct Median{C} <: GroupSummarizer end
-Median(column::Symbol) = Median{column}()
+Median(column::ColumnSpec) = withterms(Median{colname(column)}(), column)
 
 # Fieldless: the output names NS, the accumulator's name D, the probabilities
 # PS and the interpolation I are type parameters, so `value` infers and the map
@@ -1716,7 +1900,7 @@ end
 end
 
 """
-    PercentRank(column::Symbol) -> Summarizer
+    PercentRank(column::ColumnSpec) -> Summarizer
 
 The fraction of the other rows whose `column` is strictly below the newest
 row's, in `:{column}_percentrank` (`Float64`, `missing` for no rows): for `n`
@@ -1729,7 +1913,8 @@ it recovers once that row leaves. Computed from
 is O(window) per key.
 
 # Arguments
-- `column`: the column to rank. Its values must be ordered by `isless`.
+- `column`: the column to rank, or a row term `name => f` (see [`ColumnSpec`](@ref)).
+  Its values must be ordered by `isless`.
 
 ```jldoctest
 df = DataFrame(time = 1:5, x = [4, 1, 3, 5, 3])
@@ -1750,7 +1935,7 @@ DataFrame(load(Context(0, 10), p))
 ```
 """
 struct PercentRank{C} <: GroupSummarizer end
-PercentRank(column::Symbol) = PercentRank{column}()
+PercentRank(column::ColumnSpec) = withterms(PercentRank{colname(column)}(), column)
 
 struct PercentRankState{N,D,L} <: SummarizerState end
 
@@ -1905,55 +2090,67 @@ value(st::WindowTrackState{C,N,T}) where {C,N,T} =
     NamedTuple{(N,),Tuple{T}}((@inbounds(st.vals[st.front]),))
 
 """
-    Min(column::Symbol) -> Summarizer
+    Min(column::ColumnSpec) -> Summarizer
 
 The minimum of `column`, in `:{column}_min`, with `column`'s element type
 (`missing` for no rows). In a sliding window it keeps the values that could
 still become the minimum, up to the whole window when `column` rises.
+
+# Arguments
+- `column`: a column name, or a row term `name => f` (see [`ColumnSpec`](@ref)).
 """
 struct Min{C} <: GroupSummarizer end
-Min(column::Symbol) = Min{column}()
+Min(column::ColumnSpec) = withterms(Min{colname(column)}(), column)
 
 emptyvalue(::Min{C}) where {C} = NamedTuple{(Symbol(C, :_min),)}((missing,))
 fresh(::Min{C}, intypes::NamedTuple) where {C} =
     TrackState{C,Symbol(C, :_min),intypes[C],typeof(min)}()
 
 """
-    Max(column::Symbol) -> Summarizer
+    Max(column::ColumnSpec) -> Summarizer
 
 The maximum of `column`, in `:{column}_max`, with `column`'s element type
 (`missing` for no rows). In a sliding window it keeps the values that could
 still become the maximum, up to the whole window when `column` falls.
+
+# Arguments
+- `column`: a column name, or a row term `name => f` (see [`ColumnSpec`](@ref)).
 """
 struct Max{C} <: GroupSummarizer end
-Max(column::Symbol) = Max{column}()
+Max(column::ColumnSpec) = withterms(Max{colname(column)}(), column)
 
 emptyvalue(::Max{C}) where {C} = NamedTuple{(Symbol(C, :_max),)}((missing,))
 fresh(::Max{C}, intypes::NamedTuple) where {C} =
     TrackState{C,Symbol(C, :_max),intypes[C],typeof(max)}()
 
 """
-    First(column::Symbol) -> Summarizer
+    First(column::ColumnSpec) -> Summarizer
 
 The value of `column` in the first row folded, in `:{column}_first`, with
 `column`'s element type (`missing` for no rows). In a sliding window it keeps
 every value in the window, O(window) memory per key.
+
+# Arguments
+- `column`: a column name, or a row term `name => f` (see [`ColumnSpec`](@ref)).
 """
 struct First{C} <: GroupSummarizer end
-First(column::Symbol) = First{column}()
+First(column::ColumnSpec) = withterms(First{colname(column)}(), column)
 
 emptyvalue(::First{C}) where {C} = NamedTuple{(Symbol(C, :_first),)}((missing,))
 fresh(::First{C}, intypes::NamedTuple) where {C} =
     TrackState{C,Symbol(C, :_first),intypes[C],typeof(keepfirst)}()
 
 """
-    Last(column::Symbol) -> Summarizer
+    Last(column::ColumnSpec) -> Summarizer
 
 The value of `column` in the last row folded, in `:{column}_last`, with
 `column`'s element type (`missing` for no rows).
+
+# Arguments
+- `column`: a column name, or a row term `name => f` (see [`ColumnSpec`](@ref)).
 """
 struct Last{C} <: GroupSummarizer end
-Last(column::Symbol) = Last{column}()
+Last(column::ColumnSpec) = withterms(Last{colname(column)}(), column)
 
 emptyvalue(::Last{C}) where {C} = NamedTuple{(Symbol(C, :_last),)}((missing,))
 fresh(::Last{C}, intypes::NamedTuple) where {C} =
@@ -2019,7 +2216,9 @@ model package (most models also need MLJBase, which `using MLJ` loads).
 - `predictors`: a column name, or a non-empty collection of distinct names.
   They reach the model as a column table of their own element types, without
   scientific-type coercion (coerce upstream with [`addcolumns`](@ref)), and
-  `missing` is passed through.
+  `missing` is passed through. A row term (see [`ColumnSpec`](@ref)) is an
+  `ArgumentError`: [`applymodels`](@ref) predicts from another stream, which
+  would lack its column.
 - `response`: the response column, which may not be a predictor.
 
 # Keywords
@@ -2045,6 +2244,12 @@ function FitModel(model, predictors, response::Symbol; name::Symbol = :model,
             mljloaded() ?
             "FitModel model must be an MLJ model, got a $(typeof(model))" : MLJHINT,
         ),
+    )
+    # `applymodels` predicts from another stream, where a row term's virtual
+    # column does not exist.
+    (predictors isa Pair || any(p -> p isa Pair, predictors)) && throw(
+        ArgumentError(
+            "FitModel predictors must be column names, got a row term"),
     )
     ps = Tuple(Symbol(p) for p in predictors)
     isempty(ps) && throw(ArgumentError("FitModel requires at least one predictor"))

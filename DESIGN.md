@@ -1632,7 +1632,8 @@ Output column names are deterministic, formed by suffixing the column name:
 `Sum(:x)` produces `:x_sum`, `Min(:x)` produces `:x_min`, and `SumPower(:x, 2)`
 and `Moment(:x, 2)` carry their exponent in the suffix to produce
 `:x_sumpower_2` and `:x_moment_2`; `Count()` reads no column and produces
-`:count`. `LinearRegression` is the one summarizer that departs from the
+`:count`. A row term is named like a column (`Sum(:r => f)` produces `:r_sum`;
+see "Row terms"). `LinearRegression` is the one summarizer that departs from the
 suffixing rule: it emits several columns, some of them model-level rather than
 per-input, and takes an optional `name` prefixing all of them (see below).
 
@@ -1955,7 +1956,64 @@ mutate `fresh` copies, one per key group (and, for `summarizecycles`, per
 cycle). Before running, prototypes are **deduplicated by output-name tuple** —
 identical configurations collapse to one shared instance — and the surviving
 output names must be pairwise disjoint; the requested (emitted) names must
-additionally be distinct from `:time` and the key columns.
+additionally be distinct from `:time` and the key columns. The same pass
+unwraps row terms (below) at any depth, dependencies included, and collects
+them by name.
+
+### Row terms
+
+Every summarizer constructor but `FitModel`'s takes a `ColumnSpec` wherever it
+takes a column (one `ColumnSpec` per column argument, never a method per
+Symbol/Pair combination): a
+column name, or a *row term* `name => f`. A row term is a **virtual input
+column**: `name` holds `f(row)` for each row, and the summarizer is built over
+`name` exactly as over a real column, so `Sum(:mfv => f)` is `Sum{:mfv}`, emits
+`:mfv_sum` by the ordinary suffixing rule, and `DotProduct(:tp => f, :volume)`
+canonicalizes by `:tp` like any column name. Many sums are of a per-row
+expression (a range, a money-flow volume, a typical price times volume), and
+without row terms each needed an `addcolumns` step that widened every chunk
+with a scratch column, leaked it into the output unless dropped, and could not
+be declared by a dependent summarizer.
+
+The constructor gets the summarizer from the names and hands it, with the
+specs, to `withterms`, which returns it unchanged when no spec is a pair and
+otherwise wraps it in the unexported `Termed` carrier. `Termed` forwards only
+`emptyvalue`; `prototypes` strips it and returns the collected terms alongside
+the prototypes, so no state, tier or kernel ever sees one, and a summarizer's
+structure (`GroupSummarizer` and so on) is untouched. Because stripping happens
+during expansion, a custom summarizer's `dependencies` may return a `Termed`
+summarizer, which is how a downstream package declares a hidden term.
+
+Per chunk, each summarizing transform builds its input with `terminput`: the
+chunk's column table merged with one vector per term, computed behind the same
+`rowvalues` barrier `addcolumns` uses. The input types are read from that merged
+table, so a term's element type follows its values chunk by chunk and widens
+through the ordinary `widenstate` path; there is no `promote_op` over `f`.
+Everything downstream — compensation, nonfinite and `missing` counting,
+the running tier's eviction, rolling buffers — sees an ordinary column, and
+`f` runs once per row however many summarizers read the term. The cost is one
+vector per term per chunk, never per row. The term columns exist only in the
+summarizers' input, never in a transform's output.
+
+Terms are identified by name, so the same name must mean the same function,
+compared with `===`: two different functions under one name are an
+`ArgumentError` (`summarize row term :mfv is defined by more than one
+function`), from `withterms` within one constructor or from `prototypes`
+across summarizers. `===` accepts one function reused and closures of one type
+with egal captures, and rejects two copies of a lambda literal, which have
+distinct types; comparing types alone would silently merge closures capturing
+different values. A term may not be named `:time` (checked at construction),
+and a term named like an input column, key columns included, is an
+`ArgumentError` on every chunk (a `haskey` per term), since shadowing a real
+column would be silent. A term's function sees only the real input row, never
+another term.
+
+Dependents need nothing extra: `Mean(:x => f)` depends on `Sum(:x)` and
+`Count()`, which read the virtual column registered by the `Mean`.
+
+`FitModel` takes no row terms (a pair among its predictors is an
+`ArgumentError`): its fitted model is applied by `applymodels` to a stream in
+which the virtual column does not exist.
 
 ### Dependent summarizers
 

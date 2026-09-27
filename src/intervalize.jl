@@ -40,7 +40,8 @@ Empty values widen the output types (`Mean` gives `Union{Missing, Float64}`).
 function intervalize(clk::CausalPipeline, summarizers; key = nothing,
     keyset = nothing, closelast::Bool = false)
     keycols = keycolumns(key, "intervalize")
-    protos, requested = prototypes(tosummarizers(summarizers), keycols, "intervalize")
+    protos, requested, terms =
+        prototypes(tosummarizers(summarizers), keycols, "intervalize")
     ks = tokeyset(keyset, keycols, "intervalize")
     keynames = Val(Tuple(keycols))
     outs = Val(requested)
@@ -49,7 +50,7 @@ function intervalize(clk::CausalPipeline, summarizers; key = nothing,
         return CausalPipeline() do ctx::Context
             T = timetype(ctx)
             st = IntervalizeState{T}(IntervalCursor{T}(clk.run(ctx)), T[], 2,
-                SummaryFold(), false, false)
+                SummaryFold(terms, "intervalize"), false, false)
             step = function (c)
                 if ks !== nothing
                     intervalstepdense!(st, protos, ks, keycols, keynames, outs,

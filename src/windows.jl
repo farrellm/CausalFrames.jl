@@ -51,10 +51,11 @@ Each summarizer's window slides in O(1) per row when it is a
 function summarizewindows(clk::CausalPipeline, lookback, summarizers;
     key = nothing, keyset = nothing)
     keycols = keycolumns(key, "summarizewindows")
-    protos, requested = prototypes(tosummarizers(summarizers), keycols, "summarizewindows")
+    protos, requested, terms =
+        prototypes(tosummarizers(summarizers), keycols, "summarizewindows")
     ks = tokeyset(keyset, keycols, "summarizewindows")
     cfg = WindowConfig(keycols, Val(Tuple(keycols)), lookback, protos,
-        Val(requested), Val(isempty(keycols)), ks)
+        Val(requested), Val(isempty(keycols)), ks, terms)
     return function (p::CausalPipeline)
         return CausalPipeline() do ctx::Context
             T = timetype(ctx)
@@ -70,7 +71,7 @@ summarizewindows(p::CausalPipeline, clk::CausalPipeline, lookback, summarizers;
 
 # `grid` (keyless) and the declared key set (`Nothing` unless dense) are type
 # parameters, so neither costs a per-row branch.
-struct WindowConfig{KN,LB,P<:Tuple,O,G,KS<:Union{Nothing,KeySet}}
+struct WindowConfig{KN,LB,P<:Tuple,O,G,KS<:Union{Nothing,KeySet},TM<:NamedTuple}
     keycols::Vector{Symbol}
     keynames::Val{KN}
     lookback::LB
@@ -78,6 +79,7 @@ struct WindowConfig{KN,LB,P<:Tuple,O,G,KS<:Union{Nothing,KeySet}}
     outs::Val{O}
     grid::Val{G}
     ks::KS
+    terms::TM  # the row terms, from `prototypes`
 end
 
 # Per-run state. The untyped fields are per-chunk setup; per-row work sits
@@ -174,11 +176,11 @@ function windowstep!(st::WindowState{T}, cfg::WindowConfig,
     end
     # Every tick is closed, so no later row falls in any window.
     exhausted(st.cur) && isempty(st.ticks) && return nothing
-    types = promotetypes(st.types, chunktypes(c))
+    nt = terminput(c, cfg.terms, "summarizewindows")
+    types = promotetypes(st.types, chunktypes(nt))
     moved = st.types === nothing || types != st.types
     st.types = types
     moved && preparewindows!(st, cfg, types)
-    nt = Tables.columntable(c)
     pullpast!(st.ticks, st.cur, last(nt.time))
     RT, emptyrow = windowtypes(st, cfg)
     rows = RT[]

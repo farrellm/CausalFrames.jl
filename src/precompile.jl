@@ -73,6 +73,8 @@
         )
         DataFrame(load(ctx, p |> summarize([Count(), Sum(:v)]; key = :sym)))
         DataFrame(load(ctx, p |> summarizecycles(Sum(:v); key = :sym)))
+        # A row term: the term-column setup (the kernels are the ones above).
+        DataFrame(load(ctx, p |> summarize(Sum(:vq => r -> r.v * r.qty))))
         DataFrame(
             load(
                 ctx,

@@ -166,7 +166,11 @@ These need `using MLJ`.
 ## Summarizers
 
 Output columns are named by suffix, shown here for columns `:x` and `:y`.
-Most summarize no rows as `missing`; the rest give the identity shown.
+Most summarize no rows as `missing`; the rest give the identity shown. Every
+summarizer but `FitModel` also takes a [row term](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/)
+`name => f` in place of a column, reading `f(row)` as a virtual column `name`
+that never reaches the output: `Sum(:range => r -> r.high - r.low)` produces
+`:range_sum`.
 
 | Summarizer | Output | Structure | Semantics |
 |---|---|---|---|

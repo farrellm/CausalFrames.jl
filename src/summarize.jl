@@ -99,8 +99,10 @@ end
 # (post-order depth-first), so every state precedes its dependents. Output
 # names must be unique across the whole set, but only the *requested* names
 # are checked against :time and the key columns, since hidden dependencies
-# never reach the output. Returns the prototypes as a tuple (so the states are
-# a concrete tuple) and the requested output names, in request order.
+# never reach the output. Row terms (`Termed`) are unwrapped here, at any
+# depth, and collected by name. Returns the prototypes as a tuple (so the
+# states are a concrete tuple), the requested output names, in request order,
+# and the row terms as a NamedTuple of functions.
 function prototypes(
     ss::Vector{Summarizer},
     keycols::Vector{Symbol},
@@ -113,7 +115,12 @@ function prototypes(
     seen = Tuple{Vararg{Symbol}}[]      # finished, by output-name tuple
     visiting = Tuple{Vararg{Symbol}}[]  # walk in progress: cycle guard
     used = Set{Symbol}()
-    function expand(s::Summarizer)
+    terms = Pair{Symbol,Any}[]
+    function expand(t::Summarizer)
+        for (n, f) in pairs(rowterms(t))
+            addterm!(terms, n, f, op)
+        end
+        s = unterm(t)
         outnames = keys(emptyvalue(s))
         outnames in seen && return
         outnames in visiting && throw(
@@ -151,12 +158,27 @@ function prototypes(
             n in requested || push!(requested, n)
         end
     end
-    return Tuple(protos), Tuple(requested)
+    return Tuple(protos), Tuple(requested), termtuple(terms)
 end
 
 # Input column element types, mirroring the row access in update!.
 chunktypes(c::DataFrame) =
     NamedTuple{Tuple(propertynames(c))}(Tuple(eltype(col) for col in eachcol(c)))
+chunktypes(nt::NamedTuple) = map(eltype, nt)
+
+# The summarizers' input for one chunk: its column table plus a column per row
+# term, each computed behind `rowvalues`' function barrier. Only the
+# summarizers read it, so term columns never reach a transform's output.
+function terminput(c::DataFrame, terms::NamedTuple, op::String)
+    nt = Tables.columntable(c)
+    isempty(terms) && return nt
+    for n in keys(terms)
+        haskey(nt, n) && throw(
+            ArgumentError("$op row term $(repr(n)) collides with an input column"),
+        )
+    end
+    return merge(nt, map(f -> rowvalues(f, nt), terms))
+end
 
 # A column's element type may differ between chunks, so the state types track
 # the promotion of every input type seen.
@@ -338,19 +360,23 @@ mutable struct SummaryFold
     groups::Any            # keyed transforms: a GroupTable or DenseGroups
     cycletime::Any         # summarizecycles: the open cycle's time
     checked::Bool          # addsummarycolumns: collision check done
+    const terms::NamedTuple  # the row terms, from `prototypes`
+    const op::String       # the transform, for messages
 end
-SummaryFold() = SummaryFold(nothing, false, nothing, nothing, nothing, nothing,
-    false)
+SummaryFold(terms::NamedTuple, op::String) =
+    SummaryFold(nothing, false, nothing, nothing, nothing, nothing, false,
+        terms, op)
 
 # Per-chunk setup: promote the schema, then build the states on the first
 # chunk or widen them when the promotion changes. A declared `keyset` uses
-# `DenseGroups` rather than a `GroupTable`. Returns the column table.
+# `DenseGroups` rather than a `GroupTable`. Returns the column table, with the
+# row terms' columns.
 function preparechunk!(fold::SummaryFold, protos::Tuple, keyed::Bool,
     keynames::Val, c::DataFrame; keyset::Union{Nothing,KeySet} = nothing)
-    types = promotetypes(fold.types, chunktypes(c))
+    nt = terminput(c, fold.terms, fold.op)
+    types = promotetypes(fold.types, chunktypes(nt))
     fold.widened = fold.types !== nothing && types != fold.types
     fold.types = types
-    nt = Tables.columntable(c)
     if fold.stateprotos === nothing
         fold.stateprotos = newstates(protos, types)
         if keyset !== nothing
@@ -509,11 +535,12 @@ function summarize(summarizers; key = nothing)
     return function (p::CausalPipeline)
         return CausalPipeline() do ctx::Context
             keycols = tokeycolumns(key)
-            protos, requested = prototypes(tosummarizers(summarizers), keycols, "summarize")
+            protos, requested, terms =
+                prototypes(tosummarizers(summarizers), keycols, "summarize")
             keynames = Val(Tuple(keycols))
             outs = Val(requested)
             keyed = !isempty(keycols)
-            fold = SummaryFold()
+            fold = SummaryFold(terms, "summarize")
             step = function (c)
                 nt = preparechunk!(fold, protos, keyed, keynames, c)
                 keyed ? foldgroups!(fold.groups, fold.stateprotos, nt, keynames) :
@@ -567,12 +594,12 @@ function summarizecycles(summarizers; key = nothing, keyset = nothing)
     return function (p::CausalPipeline)
         return CausalPipeline() do ctx::Context
             keycols = tokeycolumns(key)
-            protos, requested =
+            protos, requested, terms =
                 prototypes(tosummarizers(summarizers), keycols, "summarizecycles")
             keynames = Val(Tuple(keycols))
             outs = Val(requested)
             keyed = !isempty(keycols)
-            fold = SummaryFold()
+            fold = SummaryFold(terms, "summarizecycles")
             step = function (c)
                 nt = preparechunk!(fold, protos, keyed, keynames, c; keyset = ks)
                 rows = if ks !== nothing
@@ -639,12 +666,12 @@ function addsummarycolumns(summarizers; key = nothing)
     return function (p::CausalPipeline)
         return CausalPipeline() do ctx::Context
             keycols = tokeycolumns(key)
-            protos, requested =
+            protos, requested, terms =
                 prototypes(tosummarizers(summarizers), keycols, "addsummarycolumns")
             keynames = Val(Tuple(keycols))
             outs = Val(requested)
             keyed = !isempty(keycols)
-            fold = SummaryFold()
+            fold = SummaryFold(terms, "addsummarycolumns")
             step = function (c)
                 if !fold.checked   # needs the schema: first chunk only
                     for n in requested   # hidden dependencies are never added

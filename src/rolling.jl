@@ -46,7 +46,7 @@ function addrollingcolumns(windows, summarizers; key = nothing,
     allunique(windownames) ||
         throw(ArgumentError("addrollingcolumns window names must be unique"))
     keycols = keycolumns(key, "addrollingcolumns")
-    protos, requested =
+    protos, requested, terms =
         prototypes(tosummarizers(summarizers), Symbol[], "addrollingcolumns")
     prefixednames = Symbol[]
     for w in windownames, n in requested
@@ -62,7 +62,7 @@ function addrollingcolumns(windows, summarizers; key = nothing,
             source = from === nothing ? p : from
             cfg = RollingConfig(windownames, lookbacks, keycols,
                 Val(Tuple(keycols)), protos, Val(requested),
-                prefixednames)
+                prefixednames, terms)
             rs = RollingState(source.run(rollingcontext(ctx, lookbacks)))
             return chunkmap(c -> rollchunk!(rs, cfg, c), p.run(ctx))
         end
@@ -92,7 +92,7 @@ function rollingcontext(ctx::Context, lookbacks::Tuple)
     return Context(minimum(starts), ctx.stop)
 end
 
-struct RollingConfig{KN,LB<:Tuple,P<:Tuple,O}
+struct RollingConfig{KN,LB<:Tuple,P<:Tuple,O,TM<:NamedTuple}
     windownames::Tuple{Vararg{Symbol}}
     lookbacks::LB
     keycols::Vector{Symbol}
@@ -100,6 +100,7 @@ struct RollingConfig{KN,LB<:Tuple,P<:Tuple,O}
     protos::P
     outs::Val{O}
     prefixednames::Vector{Symbol}
+    terms::TM          # the row terms, from `prototypes`
 end
 
 # Per-run state. The untyped fields are per-chunk setup; per-row work sits
@@ -178,10 +179,11 @@ function pullsummarized!(rs::RollingState, cfg::RollingConfig)
     end
     rs.stypes === nothing && checkkeycolumns(cfg.keycols, chunk,
         "addrollingcolumns", "the summarized input")
-    types = promotetypes(rs.stypes, chunktypes(chunk))
+    nt = terminput(chunk, cfg.terms, "addrollingcolumns")
+    types = promotetypes(rs.stypes, chunktypes(nt))
     moved = rs.stypes === nothing || types != rs.stypes
     rs.stypes = types
-    rs.snt = Tables.columntable(chunk)
+    rs.snt = nt
     rs.spos = 1
     if moved
         tg = tiering(cfg.protos, types)

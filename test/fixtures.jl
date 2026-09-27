@@ -204,3 +204,16 @@ function lcgsequence(seed::Integer, n::Int, m::Int)
     end
     return vals
 end
+
+# A test-local summarizer whose one dependency declares a row term, as a
+# downstream package's hidden term would.
+rangeterm(r) = r.high - r.low
+struct RangeTotal <: Summarizer end
+struct RangeTotalState <: SummarizerState end
+CausalFrames.emptyvalue(::RangeTotal) = (; rangetotal = 0.0)
+CausalFrames.dependencies(::RangeTotal) = (Sum(:range => rangeterm),)
+CausalFrames.fresh(::RangeTotal, ::NamedTuple) = RangeTotalState()
+CausalFrames.fresh(st::RangeTotalState) = st
+CausalFrames.update!(::RangeTotalState, row) = nothing
+CausalFrames.value(::RangeTotalState, vals::NamedTuple) =
+    (; rangetotal = vals.range_sum)
