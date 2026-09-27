@@ -181,6 +181,7 @@ CausalFrames.dependencies
 CausalFrames.combine!
 CausalFrames.downdate!
 CausalFrames.isinvertible
+CausalFrames.barwindow
 CausalFrames.ColumnSpec
 CausalFrames.withterms
 ```

@@ -1628,6 +1628,10 @@ The interface, extended by concrete subtypes (unexported — extend
   that folds an absorbing value past recovery returns `false`, and the window
   transforms fold that summarizer through a segment tree instead.
 
+Beside the interface, `barwindow(s, n, intypes)` builds a state over the last
+`n` rows for a summarizer whose own state needs a trailing window; see "Count
+windows inside a state" below.
+
 Output column names are deterministic, formed by suffixing the column name:
 `Sum(:x)` produces `:x_sum`, `Min(:x)` produces `:x_min`, and `SumPower(:x, 2)`
 and `Moment(:x, 2)` carry their exponent in the suffix to produce
@@ -2188,6 +2192,62 @@ this structure (see "Rolling windows" and "Window summarization"). The classific
 A custom summarizer that declares neither still works everywhere; the window
 transforms re-fold it, and only it, per window.
 
+### Count windows inside a state
+
+Some recursive states need a trailing window of their *own* rows mid-update:
+an adaptive moving average's volatility sum, a mean deviation, a
+stochastic range. `addrollingcolumns` cannot supply one, since the window is
+read inside another summarizer's `update!`. The unexported
+`barwindow(s, n, intypes) -> SummarizerState` is extension API for that: a
+state holding `s`'s states over the last `n` rows folded into it.
+
+- **Structure.** `s`'s dependencies are expanded and deduplicated by
+  `prototypes` and partitioned by `tiering`, as in the window transforms.
+  Groups slide their windowed states: `update!` on admission, `downdate!` once
+  a row is `n` rows old, strictly oldest first, so the `downdate!` law holds.
+  The other monoids sit in a **two-stack queue** of preallocated state tuples:
+  a front stack of suffix combines over an older batch of rows, and a back
+  state folding the rows since. An empty front flips the back rows (still in
+  the ring) into it, one `update!` and one `combine!` per row, and a value
+  combines the front's top with the back once. Fieldless dependents read the
+  others at `value` time. A summarizer that would need re-folding (a plain one
+  with state) is an `ArgumentError`, not a silent O(n) path.
+- **Rows.** A `RowRing` (`ring.jl`, the package's one ring buffer, shared with
+  `Bars` windows) of `n + 1` rows, so the row leaving is still there to
+  downdate after the push. Rows are stored with their row terms evaluated:
+  a term's type is inferred from `intypes` (there is no chunk to take it
+  from) and must be concrete or a `Union` of concrete types, and a row is
+  downdated with exactly the values it was folded with.
+- **Value.** Every output is `missing` until `n` rows have arrived, the
+  `Bars(n)` partial-window rule; the value type is the summary type promoted
+  field-wise with an all-`missing` row (`missingfields`), the empty values'
+  promotion path.
+- **Nesting.** A count window runs inside an outer state's `update!` and
+  `value`, which the transforms call from `updateall!` and `summaryvalues`.
+  Inference limits a repeated caller-to-callee edge (its recursion
+  heuristic), so the window using those same folds had its inner fold cut
+  short: the embedded path dispatched and allocated per row, depending on
+  what had compiled first. It has private generated folds instead
+  (`barupdate!`, `barvalues`, …), whose edges never repeat the outer ones.
+  `test/jet.jl` checks the embedded path through a fixture summarizer.
+- **Typing.** The tiers come from runtime `isinvertible` values, so the state's
+  type is not inferrable from the argument types. An outer state takes it as a
+  type parameter and builds it once in `fresh(s, intypes)`; `fresh`, `fresh!`
+  and the per-row path are concretely typed. `widenstate` re-tiers for the new
+  types (a group that stops inverting moves to the queue) and replays the ring.
+
+Measured per row (admit and read the value) against a segment tree over the
+same states (the tree tier's structure, with the head advanced per row), with
+100,000 rows:
+
+| states | n | queue | segment tree |
+|---|---|---|---|
+| `Product` | 5 / 20 / 200 | 7.2 / 7.0 / 6.7 ns | 30 / 35 / 66 ns |
+| `Max` (as a monoid) | 5 / 20 / 200 | 8.8 / 9.5 / 9.0 ns | 36 / 44 / 118 ns |
+| `Std` (as a monoid) | 5 / 20 / 200 | 42 / 44 / 45 ns | 113 / 144 / 228 ns |
+
+The queue is flat in `n` and 3–13 times faster, and neither allocates.
+
 ## Interval semantics
 
 - **Sources** clip to the half-open interval `[start, stop)`. Adjacent
@@ -2295,8 +2355,10 @@ the second.
 | `src/lastrow.jl` | the last-row-per-key transform (`lastrow`), over the join's store |
 | `src/sortcycles.jl` | the within-timestamp stable sort (`sortcycles`) and its `cycleperm!` barrier |
 | `src/fill.jl` | the missing-value fills: the stateful `forwardfill` and the row-wise `fillmissing` |
+| `src/ring.jl` | `RowRing`, the fixed-capacity row ring behind `barwindow` and `Bars` windows |
 | `src/segtree.jl` | the monoid segment tree behind the rolling and window tree tiers |
 | `src/tiers.jl` | the per-accumulator window tiers shared by `addrollingcolumns` and `summarizewindows`: partitioning, running groups, state merging |
+| `src/barwindow.jl` | the count-window state (`barwindow`, extension API): groups slid over a ring, other monoids in a two-stack queue |
 | `src/rolling.jl` | the rolling-window summarization transform (`addrollingcolumns`) |
 | `src/intervalize.jl` | the interval-summarization transform (`intervalize`) |
 | `src/windows.jl` | the clock-sampled trailing-window summarization transform (`summarizewindows`) |

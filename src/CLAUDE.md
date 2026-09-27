@@ -297,6 +297,10 @@ design rationale and performance constraints behind each module.
   column, which folds the write out of the unrolled kernel. `tolerance` widens
   the input context as `asofjoin` does, so `clipstart!` drops the pre-`start`
   rows the fill was allowed to see
+- `src/ring.jl` — `RowRing`, the package's one ring buffer: preallocated,
+  overwriting its oldest row when full, with `ringback(r, j)` reading the j-th
+  newest. A caller that downdates the row leaving sizes it one past its window
+  and reads that row back after the push
 - `src/segtree.jl` — the monoid segment tree behind the rolling and window
   tree tiers: an implicit array tree of `combine!`d partial state tuples,
   append-only rows, logical front expiry (`head`), amortized rebuilds, and
@@ -328,6 +332,19 @@ design rationale and performance constraints behind each module.
   rebuild from the live rows. Built-in states only demote, so the buffer a
   rebuild needs already exists; `treebuffer` gathers one from the trees for a
   custom state that promotes
+- `src/barwindow.jl` — `barwindow`, the count-window state (unexported
+  extension API for recursive states needing their own trailing n rows). It
+  reuses `prototypes` and `tiering`: groups slide windowed states over a
+  `RowRing` of `n + 1` stored rows (row terms evaluated on admission, their
+  types inferred from `intypes`), the other monoids sit in `BarQueue`, a
+  preallocated two-stack queue (measured 3-13x faster than a segment tree and
+  flat in `n`; DESIGN.md has the table), and a plain summarizer is rejected.
+  It must not call the transforms' tuple folds (`updateall!`, `freshall!`,
+  `summaryvalues`, `combinenodes!`): it runs inside an outer state's
+  `update!`/`value`, which those folds call, and inference's recursion limit
+  on a repeated caller-to-callee edge would leave the inner fold dispatching
+  and allocating per row. Its generated `bar*` folds have edges of their own;
+  `test/jet.jl` guards the embedded path
 - `src/rolling.jl` — `addrollingcolumns`: one kernel, `rollsegment!`, over a
   `RollTiers` (a shared row buffer with per-window eviction heads, per-window
   running tables, per-key trees owning their rows, refold templates). Per row:
