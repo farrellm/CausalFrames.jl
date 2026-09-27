@@ -277,18 +277,30 @@ valuetype(::Type{S}, ::Val{R}) where {S,R} =
 # values' type (from the states `S`) promoted field-wise with the empty values',
 # so `Min` over `Int` gives `Union{Missing, Int}`. The `Union` fallback covers
 # a `promote_op` that fails to concretize.
-function promotedvaluetype(::Type{S}, protos::Tuple, outs::Val) where {S}
-    VT = valuetype(S, outs)
-    e = emptyvalues(protos, outs)
-    E = typeof(e)
-    (VT <: NamedTuple && isconcretetype(VT) && fieldnames(VT) == keys(e)) ||
+promotedvaluetype(::Type{S}, protos::Tuple, outs::Val) where {S} =
+    promotefields(valuetype(S, outs), typeof(emptyvalues(protos, outs)))
+
+# Field-wise promotion of the value type VT with the NamedTuple type E of the
+# same names, or their Union should VT not be a concrete NamedTuple.
+function promotefields(::Type{VT}, ::Type{E}) where {VT,E<:NamedTuple}
+    (VT <: NamedTuple && isconcretetype(VT) && fieldnames(VT) == fieldnames(E)) ||
         return Union{VT,E}
-    return NamedTuple{keys(e),
+    return NamedTuple{fieldnames(E),
         Tuple{
             ntuple(i -> promote_type(fieldtype(VT, i), fieldtype(E, i)),
                 fieldcount(E))...,
         }}
 end
+
+# The value type of a count window (`Bars`, `barwindow`), which emits all
+# `missing` until it holds its count: VT promoted with an all-missing row, by
+# the same path as the empty values above.
+missingfields(::Type{VT}, ::Val{R}) where {VT,R} =
+    promotefields(VT, NamedTuple{R,NTuple{length(R),Missing}})
+
+# The all-missing row of a count window's value type V.
+missingrow(::Type{V}, ::Val{R}) where {V,R} =
+    convert(V, NamedTuple{R}(ntuple(_ -> missing, Val(length(R)))))
 
 # A keyed grid row (`:time`, the key, then the values) and its type, for paths
 # that emit empty values beside summaries.
