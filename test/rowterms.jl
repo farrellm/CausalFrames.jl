@@ -144,6 +144,59 @@
         @test_throws MethodError Sum(:range => 1)
     end
 
+    @testset "every column summarizer takes row terms" begin
+        # Each form over a term must equal the same summarizer over the column
+        # an `addcolumns` step made, across the running, tree and refold tiers.
+        mid = r -> (r.high + r.low) / 2
+        addedmid = src |> addcolumns(r -> (; range = rng(r), mid = mid(r)))
+        forms = [
+            (t -> CountDistinct(t), :range), (t -> SumPower(t, 3), :range),
+            (t -> Product(t), :range), (t -> AgeWeightedSum(t), :range),
+            (t -> Moment(t, 2), :range), (t -> Mean(t), :range),
+            (t -> Variance(t), :range), (t -> Std(t; corrected = false), :range),
+            (t -> CausalFrames.SortedValues(t), :range),
+            (t -> Quantile(t, [0.25, 0.5]), :range),
+            (t -> Quantile(t, 0.9; interpolation = :nearestrank), :range),
+            (t -> Median(t), :range), (t -> PercentRank(t), :range),
+            (t -> Min(t), :range), (t -> Max(t), :range),
+            (t -> First(t), :range), (t -> Last(t), :range),
+        ]
+        for (make, c) in forms
+            s = make(:range => rng)
+            @test CausalFrames.unterm(s) == make(c)
+            s isa CausalFrames.Termed{<:CausalFrames.SortedValues} && continue
+            @test isequal(
+                run(src |> addrollingcolumns((w2 = 2,), s; key = :k)),
+                select(run(added |> addrollingcolumns((w2 = 2,), make(c); key = :k)),
+                    Not(:range)),
+            )
+        end
+        # Two-column forms, with the term in either position.
+        for make in (DotProduct, Covariance, Correlation,
+            (a, b) -> Covariance(a, b; corrected = false))
+            for (a, b) in ((:range => rng, :mid => mid), (:mid => mid, :v),
+                (:v, :range => rng))
+                plain(x) = x isa Pair ? first(x) : x
+                @test isequal(run(src |> summarize(make(a, b); key = :k)),
+                    run(addedmid |> summarize(make(plain(a), plain(b)); key = :k)))
+            end
+        end
+        # LinearRegression, with terms as predictors and as the response.
+        lr = LinearRegression([:range => rng, :v], :mid => mid; name = :m)
+        @test CausalFrames.rowterms(lr) === (; range = rng, mid = mid)
+        @test isequal(run(src |> summarize(lr)),
+            run(addedmid |> summarize(LinearRegression([:range, :v], :mid; name = :m))))
+        lone = LinearRegression(:range => rng, :v)
+        @test CausalFrames.unterm(lone) == LinearRegression(:range, :v)
+        @test isequal(run(src |> summarize(lone)),
+            run(added |> summarize(LinearRegression(:range, :v))))
+        # A dependent over a term registers it once for its dependencies.
+        protos, _, terms = CausalFrames.prototypes(
+            Summarizer[Variance(:range => rng), Mean(:range => rng)], Symbol[])
+        @test terms === (; range = rng)
+        @test Sum{:range}() in protos
+    end
+
     @testset "allocations do not grow with rows" begin
         function rollallocs(n)
             df = DataFrame(time = 1:n, k = repeat(["a", "b"], n ÷ 2),

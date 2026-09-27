@@ -174,6 +174,13 @@ predsame(x, y) =
         @test_throws ArgumentError FitModel(ToyOLS(), Symbol[], :y)
         @test_throws ArgumentError FitModel(ToyOLS(), [:x, :x], :y)
         @test_throws ArgumentError FitModel(ToyOLS(), [:x, :y], :y)
+        # applymodels' stream would lack a row term's virtual column.
+        dbl = r -> 2 * r.x
+        @test_throws "FitModel predictors must be column names, got a row term" FitModel(
+            ToyOLS(), [:z => dbl], :y)
+        @test_throws "FitModel predictors must be column names, got a row term" FitModel(
+            ToyOLS(), :z => dbl, :y)
+        @test_throws MethodError FitModel(ToyOLS(), [:x], :z => dbl)
     end
 
     @testset "without MLJModelInterface" begin

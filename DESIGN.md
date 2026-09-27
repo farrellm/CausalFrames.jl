@@ -1962,7 +1962,9 @@ them by name.
 
 ### Row terms
 
-`Sum` and `DotProduct` take a `ColumnSpec` wherever they take a column: a
+Every summarizer constructor but `FitModel`'s takes a `ColumnSpec` wherever it
+takes a column (one `ColumnSpec` per column argument, never a method per
+Symbol/Pair combination): a
 column name, or a *row term* `name => f`. A row term is a **virtual input
 column**: `name` holds `f(row)` for each row, and the summarizer is built over
 `name` exactly as over a real column, so `Sum(:mfv => f)` is `Sum{:mfv}`, emits
@@ -2006,8 +2008,12 @@ and a term named like an input column, key columns included, is an
 column would be silent. A term's function sees only the real input row, never
 another term.
 
-`FitModel` takes no row terms: its fitted model is applied by `applymodels` to
-a stream in which the virtual column does not exist.
+Dependents need nothing extra: `Mean(:x => f)` depends on `Sum(:x)` and
+`Count()`, which read the virtual column registered by the `Mean`.
+
+`FitModel` takes no row terms (a pair among its predictors is an
+`ArgumentError`): its fitted model is applied by `applymodels` to a stream in
+which the virtual column does not exist.
 
 ### Dependent summarizers
 
