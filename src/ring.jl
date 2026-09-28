@@ -36,13 +36,3 @@ end
 end
 
 emptyring!(r::RowRing) = (r.first = 1; r.len = 0; r)
-
-# The same rows, oldest first, in a new ring of row type `R` and capacity `cap`
-# (at least the ring's length); for a widening.
-function convertring(::Type{R}, r::RowRing, cap::Int) where {R}
-    out = RowRing{R}(cap)
-    for j in ringlength(r):-1:1
-        ringpush!(out, convert(R, ringback(r, j)))
-    end
-    return out
-end

@@ -121,6 +121,13 @@ end
         @test all(ismissing, CF.value(st))
         foreach(x -> CF.update!(st, (; x)), (5.0, 6.0))
         @test CF.value(st) == (x_product = 30.0,)
+        # groups only: no queue to reset
+        st = CF.barwindow(Mean(:x), 2, (x = Float64,))
+        foreach(x -> CF.update!(st, (; x)), (2.0, 3.0, 4.0))
+        @test CF.fresh!(st) === st
+        @test all(ismissing, CF.value(st))
+        foreach(x -> CF.update!(st, (; x)), (5.0, 6.0))
+        @test CF.value(st) == (x_mean = 5.5,)
     end
 
     @testset "widening mid-stream" begin
