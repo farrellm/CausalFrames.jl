@@ -36,16 +36,16 @@ as a type parameter.
 st = CausalFrames.barwindow(Mean(:x), 2, (x = Float64,))
 map(1.0:4.0) do x
     CausalFrames.update!(st, (; x))
-    CausalFrames.value(st)
+    CausalFrames.value(st).x_mean
 end
 
 # output
 
-4-element Vector{@NamedTuple{x_mean::Union{Missing, Float64}}}:
- (x_mean = missing,)
- (x_mean = 1.5,)
- (x_mean = 2.5,)
- (x_mean = 3.5,)
+4-element Vector{Union{Missing, Float64}}:
+  missing
+ 1.5
+ 2.5
+ 3.5
 ```
 
 Rows leave the window oldest first, so a wrapped [`downdate!`](@ref) sees the
