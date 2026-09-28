@@ -268,6 +268,17 @@ for (nm, w) in (("w0", 0), ("w5", 5), ("w250", 250))
 end
 SUITE["rolling"]["refold"] = @benchmarkable load(RCTX,
     RSRC |> addrollingcolumns((; w25 = 25), [RefoldWrap(Sum(:qty))]))
+# Bar-count windows, at about the w25 windows' size (four rows per time unit):
+# eviction by count from per-key rings instead of by time from the buffer.
+SUITE["rolling"]["bars-running"] = @benchmarkable load(RCTX,
+    RSRC |> addrollingcolumns((; b100 = Bars(100)), [Sum(:qty), Mean(:qty)]))
+SUITE["rolling"]["bars-running-keyed"] = @benchmarkable load(RCTX,
+    RSRC |> addrollingcolumns((; b100 = Bars(100)), [Sum(:qty), Mean(:qty)];
+        key = :sym))
+SUITE["rolling"]["bars-tree"] = @benchmarkable load(RCTX,
+    RSRC |> addrollingcolumns((; b100 = Bars(100)), [Product(:qty)]))
+SUITE["rolling"]["bars-mixed-keyed"] = @benchmarkable load(RCTX,
+    RSRC |> addrollingcolumns((; b100 = Bars(100)), MIXED; key = :sym))
 
 # The causal as-of join against its acausal forward mirror, over the same two
 # sources. futurejoin's per-key row buffers are the cost the comparison

@@ -549,11 +549,11 @@ end
         # tuple, so quadrupling the rows adds only logarithmic buffer growth.
         # (Not MinMax: its `fresh!` is the allocating default, which a tree
         # query calls per window.)
-        function rollallocs(ss, n)
+        function rollallocs(ss, n, windows = (w5 = 5, w50 = 50))
             src = DataFrame(time = 1:n, k = repeat(["a", "b"], n ÷ 2),
                 x = mod.(1:n, 7), y = mod.(1:n, 5))
             p = CausalPipeline(ctx -> [src])
-            t = addrollingcolumns((w5 = 5, w50 = 50), ss; key = :k)
+            t = addrollingcolumns(windows, ss; key = :k)
             load(Context(0, n + 1), p |> t)
             return @allocations load(Context(0, n + 1), p |> t)
         end
@@ -562,6 +562,9 @@ end
             spanset, orderset)
 
             @test rollallocs(ss, 8000) - rollallocs(ss, 2000) < 200
+            barwins = (b5 = Bars(5), w5 = 5, b50 = Bars(50))
+            @test rollallocs(ss, 8000, barwins) - rollallocs(ss, 2000, barwins) <
+                  200
         end
     end
 
@@ -577,5 +580,230 @@ end
                     [Min(:x), Sum(:x)])),
         )
         @test df.h1_x_min == [1, 1, 2]
+    end
+    @testset "Bars windows" begin
+        bars = (b1 = Bars(1), b4 = Bars(4), b25 = Bars(25))
+        barred(p, ss; kwargs...) = DataFrame(load(Context(0, 1000),
+            p |> addrollingcolumns(bars, ss; kwargs...)))
+
+        # The independent oracle: each row's window is the last n rows at or
+        # before its time (under its key), all missing until there are n.
+        function barsoracle(p, ss; key = nothing)
+            df = DataFrame(load(Context(0, 1000), p))
+            protos, requested =
+                CausalFrames.prototypes(CausalFrames.tosummarizers(ss), Symbol[])
+            types = map(eltype, Tables.columntable(df))
+            rows = Tables.rowtable(df)
+            out = copy(df)
+            for (w, lb) in pairs(bars)
+                vals = map(eachindex(rows)) do i
+                    idx = [
+                        j for j in eachindex(rows)
+                        if rows[j].time <= rows[i].time &&
+                            (key === nothing || isequal(rows[j][key], rows[i][key]))
+                    ]
+                    length(idx) < lb.n && return nothing
+                    states = CausalFrames.newstates(protos, types)
+                    foreach(j -> CausalFrames.updateall!(states, rows[j]),
+                        idx[(end-lb.n+1):end])
+                    return CausalFrames.summaryvalues(states, Val(requested))
+                end
+                for n in requested
+                    out[!, Symbol(w, '_', n)] =
+                        [v === nothing ? missing : v[n] for v in vals]
+                end
+            end
+            return out
+        end
+
+        @testset "differential against the re-fold oracle" begin
+            for p in (intdata, floatdata, missingfloatdata), ss in allsets
+                agrees(barred(p, ss), barred(p, map(Opaque, ss)))
+                agrees(barred(p, ss; key = :k),
+                    barred(p, map(Opaque, ss); key = :k))
+            end
+        end
+
+        @testset "against the brute-force oracle" begin
+            for p in (intdata, missingfloatdata),
+                ss in ([Sum(:x), Mean(:x), First(:x), Last(:x)],
+                    [Product(:x), Max(:x)])
+
+                for key in (nothing, :k)
+                    agrees(barred(p, ss; key), barsoracle(p, ss; key))
+                    agrees(barred(p, map(Opaque, ss); key), barsoracle(p, ss; key))
+                end
+            end
+        end
+
+        @testset "partial windows are missing, typed Union{Missing, T}" begin
+            p = onechunk(time = [1, 2, 3], x = [1, 2, 3])
+            df = DataFrame(
+                load(Context(0, 10),
+                    p |> addrollingcolumns(:b2 => Bars(2), [Count(), Sum(:x)])),
+            )
+            @test isequal(df.b2_count, [missing, 2, 2])
+            @test isequal(df.b2_x_sum, [missing, 3, 5])
+            @test eltype(df.b2_count) == Union{Missing,Int}
+            @test eltype(df.b2_x_sum) == Union{Missing,Int}
+            # beside a time window, whose empty values are not missing
+            df = DataFrame(
+                load(Context(0, 10),
+                    p |> addrollingcolumns((b2 = Bars(2), t0 = 0), Count())),
+            )
+            @test isequal(df.b2_count, [missing, 2, 2])
+            @test df.t0_count == [1, 1, 1]
+            @test eltype(df.t0_count) == Int
+        end
+
+        @testset "uniformly spaced rows match a time look-back" begin
+            p = onechunk(time = 1:40, x = map(v -> v - 3, lcgsequence(5, 40, 7)))
+            ss = [Sum(:x), Mean(:x), Min(:x), Product(:x), PlainSum(:x)]
+            df = DataFrame(
+                load(Context(0, 100),
+                    p |> addrollingcolumns((b5 = Bars(5), t4 = 4), ss)),
+            )
+            for n in ("x_sum", "x_mean", "x_min", "x_product", "x_plainsum")
+                @test all(ismissing, df[1:4, "b5_"*n])
+                @test isequal(df[5:end, "b5_"*n], df[5:end, "t4_"*n])
+            end
+        end
+
+        @testset "mixed with time windows" begin
+            for p in (intdata, floatdata), ss in (mixedset, spanset),
+                key in (nothing, :k)
+
+                mixed = DataFrame(
+                    load(Context(0, 1000),
+                        p |> addrollingcolumns((w3 = 3, b4 = Bars(4), w20 = 20), ss;
+                            key)),
+                )
+                timed = rolled(p, ss; key)
+                barsonly = barred(p, ss; key)
+                agrees(select(mixed, r"^(time|k|x|y|w3_|w20_)"),
+                    select(timed, r"^(time|k|x|y|w3_|w20_)"))
+                agrees(select(mixed, r"^b4_"), select(barsonly, r"^b4_"))
+            end
+        end
+
+        @testset "ties" begin
+            # a tie's later rows are in the earlier row's window
+            p = onechunk(time = [1, 1, 2, 3, 3, 4, 5],
+                k = [:a, :b, :a, :a, :b, :b, :a], x = 1.0:7.0)
+            for ss in ([Sum(:x), First(:x)], [Opaque(Sum(:x)), Opaque(First(:x))],
+                [AsMonoid(Sum(:x)), AsMonoid(First(:x))])
+
+                df = DataFrame(
+                    load(Context(0, 10),
+                        p |> addrollingcolumns(:b2 => Bars(2), ss)),
+                )
+                @test isequal(df.b2_x_sum, [3.0, 3.0, 5.0, 9.0, 9.0, 11.0, 13.0])
+                @test isequal(df.b2_x_first, [1.0, 1.0, 2.0, 4.0, 4.0, 5.0, 6.0])
+                df = DataFrame(
+                    load(Context(0, 10),
+                        p |> addrollingcolumns(:b2 => Bars(2), ss; key = :k)),
+                )
+                @test isequal(df.b2_x_sum,
+                    [missing, missing, 4.0, 7.0, 7.0, 11.0, 11.0])
+                @test isequal(df.b2_x_first,
+                    [missing, missing, 1.0, 3.0, 2.0, 5.0, 4.0])
+            end
+        end
+
+        @testset "from counts the summarized stream's rows" begin
+            p = onechunk(time = [2, 4, 6], k = [:a, :a, :b])
+            src = onechunk(time = [1, 1, 3, 3, 5], k = [:a, :b, :a, :a, :b],
+                x = [1, 10, 2, 3, 20])
+            for ss in ([Sum(:x)], [Opaque(Sum(:x))], [AsMonoid(Sum(:x))])
+                df = DataFrame(
+                    load(Context(0, 10),
+                        p |> addrollingcolumns(:b2 => Bars(2), ss; key = :k,
+                            from = src)),
+                )
+                @test isequal(df.b2_x_sum, [missing, 5, 30])
+            end
+        end
+
+        @testset "nonfinite and missing rows recover on expiry" begin
+            p = onechunk(time = 1:6, x = [1.0, NaN, 2.0, 3.0, Inf, 4.0])
+            q = onechunk(time = 1:5, x = [1.0, missing, 2.0, 3.0, 4.0])
+            for ss in ([Sum(:x)], [Opaque(Sum(:x))], [AsMonoid(Sum(:x))])
+                df = DataFrame(
+                    load(Context(0, 10),
+                        p |> addrollingcolumns(:b2 => Bars(2), ss)),
+                )
+                @test isequal(df.b2_x_sum, [missing, NaN, NaN, 5.0, Inf, Inf])
+                df = DataFrame(
+                    load(Context(0, 10),
+                        q |> addrollingcolumns(:b2 => Bars(2), ss)),
+                )
+                @test isequal(df.b2_x_sum, [missing, missing, missing, 5.0, 7.0])
+            end
+        end
+
+        @testset "the context is not widened" begin
+            p = readtable(DataFrame(time = 1:6, x = 1:6))  # clipped to the context
+            df = DataFrame(
+                load(Context(4, 10),
+                    p |> addrollingcolumns(:b2 => Bars(2), Sum(:x))),
+            )
+            @test isequal(df.b2_x_sum, [missing, 9, 11])
+            # a time window in the same call widens the one summarized stream,
+            # and a Bars window counts whatever rows it sees
+            df = DataFrame(
+                load(Context(4, 10),
+                    p |> addrollingcolumns((b2 = Bars(2), t1 = 1), Sum(:x))),
+            )
+            @test df.b2_x_sum == [7, 9, 11]
+            @test df.t1_x_sum == [7, 9, 11]
+        end
+
+        @testset "widening mid-stream" begin
+            widening = CausalPipeline(
+                ctx -> [
+                    DataFrame(time = times[r], k = ks[r],
+                        x = r == 1:100 ? xs[r] : Float64.(xs[r]) ./ 4, y = ys[r])
+                    for r in ranges
+                ])
+            for ss in ([Sum(:x), Mean(:x)], [FragileSum(:x), Sum(:y), Last(:x)],
+                    [FragileSum(:x), Product(:y)], [FragileSum(:x), PlainSum(:y)],
+                    [LateSum(:x)], [LateSum(:x), Product(:y)]),
+                windows in (bars, (w3 = 3, b4 = Bars(4))),
+                key in (nothing, :k)
+
+                agrees(
+                    DataFrame(
+                        load(Context(0, 1000),
+                            widening |> addrollingcolumns(windows, ss; key)),
+                    ),
+                    DataFrame(
+                        load(Context(0, 1000),
+                            widening |> addrollingcolumns(windows, map(Opaque, ss);
+                                key)),
+                    ))
+            end
+        end
+
+        @testset "an empty summarized stream" begin
+            p = onechunk(time = [1, 2], x = [1, 2])
+            df = DataFrame(
+                load(Context(0, 10),
+                    p |> addrollingcolumns((b2 = Bars(2), w2 = 2), Sum(:x);
+                        from = emptyframe())),
+            )
+            @test all(ismissing, df.b2_x_sum)
+            @test eltype(df.b2_x_sum) == Union{Missing,Int}
+            @test df.w2_x_sum == [0, 0]
+        end
+
+        @testset "validation" begin
+            @test_throws ArgumentError("Bars count must be positive, got 0") Bars(0)
+            @test_throws ArgumentError Bars(-3)
+            @test Bars(Int8(3)).n === 3
+            @test_throws ArgumentError(
+                "summarizewindows lookback must be a time span, got Bars(2); " *
+                "`Bars` look-backs are for `addrollingcolumns`",
+            ) summarizewindows(clock(1), Bars(2), Sum(:x))
+        end
     end
 end

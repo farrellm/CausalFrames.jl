@@ -39,6 +39,7 @@ include("fixtures.jl")
     include("windows.jl")
     include("summarize.jl")
     include("summarizers.jl")
+    include("barwindow.jl")
     include("rowterms.jl")
     include("models.jl")
 

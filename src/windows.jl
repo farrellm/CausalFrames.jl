@@ -50,6 +50,12 @@ Each summarizer's window slides in O(1) per row when it is a
 """
 function summarizewindows(clk::CausalPipeline, lookback, summarizers;
     key = nothing, keyset = nothing)
+    lookback isa Bars && throw(
+        ArgumentError(
+            "summarizewindows lookback must be a time span, got $lookback; " *
+            "`Bars` look-backs are for `addrollingcolumns`",
+        ),
+    )
     keycols = keycolumns(key, "summarizewindows")
     protos, requested, terms =
         prototypes(tosummarizers(summarizers), keycols, "summarizewindows")

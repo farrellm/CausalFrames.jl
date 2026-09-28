@@ -297,6 +297,10 @@ design rationale and performance constraints behind each module.
   column, which folds the write out of the unrolled kernel. `tolerance` widens
   the input context as `asofjoin` does, so `clipstart!` drops the pre-`start`
   rows the fill was allowed to see
+- `src/ring.jl` — `RowRing`, the package's one ring buffer: preallocated,
+  overwriting its oldest row when full, with `ringback(r, j)` reading the j-th
+  newest. A caller that downdates the row leaving sizes it one past its window
+  and reads that row back after the push
 - `src/segtree.jl` — the monoid segment tree behind the rolling and window
   tree tiers: an implicit array tree of `combine!`d partial state tuples,
   append-only rows, logical front expiry (`head`), amortized rebuilds, and
@@ -328,6 +332,19 @@ design rationale and performance constraints behind each module.
   rebuild from the live rows. Built-in states only demote, so the buffer a
   rebuild needs already exists; `treebuffer` gathers one from the trees for a
   custom state that promotes
+- `src/barwindow.jl` — `barwindow`, the count-window state (unexported
+  extension API for recursive states needing their own trailing n rows). It
+  reuses `prototypes` and `tiering`: groups slide windowed states over a
+  `RowRing` of `n + 1` stored rows (row terms evaluated on admission, their
+  types inferred from `intypes`), the other monoids sit in `BarQueue`, a
+  preallocated two-stack queue (measured 3-13x faster than a segment tree and
+  flat in `n`; DESIGN.md has the table), and a plain summarizer is rejected.
+  It must not call the transforms' tuple folds (`updateall!`, `freshall!`,
+  `summaryvalues`, `combinenodes!`): it runs inside an outer state's
+  `update!`/`value`, which those folds call, and inference's recursion limit
+  on a repeated caller-to-callee edge would leave the inner fold dispatching
+  and allocating per row. Its generated `bar*` folds have edges of their own;
+  `test/jet.jl` guards the embedded path
 - `src/rolling.jl` — `addrollingcolumns`: one kernel, `rollsegment!`, over a
   `RollTiers` (a shared row buffer with per-window eviction heads, per-window
   running tables, per-key trees owning their rows, refold templates). Per row:
@@ -337,7 +354,17 @@ design rationale and performance constraints behind each module.
   window's own head, so it needs no time test. Widening rebuilds every tier
   from the live rows, re-partitioning (a non-invertible widening demotes only
   that accumulator); float sums stay running because the compensated states
-  evict NaN/±Inf rows cleanly
+  evict NaN/±Inf rows cleanly. `Bars(n)` windows change membership only: each
+  key keeps a `RowRing` of its newest rows (sized for the longest count, plus
+  one), a row leaves on admission when pushed `n + 1` deep (`admitbars!`
+  downdates it), the tree queries the key's last `n` rows, the refold tier
+  folds the ring, and a tier seeing fewer than `n` rows returns `nothing`,
+  whose empty row is all `missing`. The shared buffer serves only time windows;
+  a Bars window's head sits at its end. Windows now differ in value type, so
+  `wins` peels each window's (look-back, empty row, value vector) together:
+  never index the value vectors by a runtime window number. A widening with
+  Bars windows rebuilds rings and trees from each key's longest live suffix
+  (`barsuffixes`)
 - `src/intervalize.jl` — `intervalize`, the third binary transform: summarize
   over the intervals a `clock` pipeline defines (`[bₖ, bₖ₊₁)`, timestamped at
   `bₖ₊₁`). It is the `summarizecycles` fold, closing on clock boundaries.

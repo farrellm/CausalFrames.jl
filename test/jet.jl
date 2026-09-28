@@ -253,17 +253,24 @@ const JETTIERSETS = ([Count(), Sum(:x), Mean(:x), Last(:x), Min(:x),
     types = (time = Int, k = String, x = Float64)
     lnt = (time = [1, 3, 6], k = ["a", "b", "a"], x = [0.0, 0.0, 0.0])
     snt = (time = [1, 2, 6], k = ["a", "b", "a"], x = [1.0, 2.0, 3.0])
-    for ss in JETTIERSETS, kn in (Val((:k,)), Val(()))
+    # time windows, a Bars window beside one (their value types differ), and
+    # Bars windows alone (no buffer)
+    for ss in JETTIERSETS, kn in (Val((:k,)), Val(())),
+        lookbacks in ((1, 5), (Bars(2), 5), (Bars(2), Bars(3)))
+
         protos, requested = CausalFrames.prototypes(
             CausalFrames.tosummarizers(ss), Symbol[])
         outs = Val(requested)
         tg = CausalFrames.tiering(protos, types)
-        tiers = CausalFrames.rolltiers(tg, types, kn, 2, nothing)
-        V = CausalFrames.tieredvaluetype(tg, protos, outs)
-        emptyrow = convert(V, CausalFrames.emptyvalues(protos, outs))
-        vals = (Vector{V}(undef, 3), Vector{V}(undef, 3))
-        JET.@test_opt CausalFrames.rollsegment!(vals, tiers, lnt, 1, snt, 1,
-            true, (1, 5), kn, outs, emptyrow)
+        tiers = CausalFrames.rolltiers(tg, types, kn, lookbacks, nothing)
+        rs = CausalFrames.RollingState(())
+        cfg = CausalFrames.RollingConfig((:a, :b), lookbacks, Symbol[], kn,
+            protos, outs, Symbol[], (;))
+        CausalFrames.setvaltype!(rs, cfg, tg)
+        wins = map((lb, e, T) -> (lb, e, Vector{T}(undef, 3)), lookbacks,
+            rs.emptyrows, rs.valtypes)
+        JET.@test_opt CausalFrames.rollsegment!(wins, tiers, lnt, 1, snt, 1,
+            true, lookbacks, kn, outs)
     end
 end
 
@@ -381,4 +388,24 @@ end
     tnt = merge(nt, (; range = CausalFrames.rowvalues(rangeterm, nt)))
     states = CausalFrames.newstates(protos, CausalFrames.chunktypes(tnt))
     JET.@test_opt CausalFrames.foldall!(states, tnt)
+end
+
+@testset "barwindow, alone and embedded in an outer state" begin
+    # The count-window helper exists to live inside another state, whose
+    # update!/value the transforms' own tuple folds call: its per-row path must
+    # stay dispatch-free there too, where a shared fold would hit inference's
+    # recursion limit.
+    for s in (Std(:x), Product(:x), Sum(:d => r -> 2r.x))
+        st = CausalFrames.barwindow(s, 5, (x = Float64,))
+        JET.@test_opt CausalFrames.update!(st, (x = 1.0,))
+        JET.@test_opt CausalFrames.value(st)
+    end
+    protos, requested = CausalFrames.prototypes(
+        CausalFrames.tosummarizers([LastNMean(:x, 3), Sum(:x)]), Symbol[])
+    outs = Val(requested)
+    states = CausalFrames.newstates(protos, (time = Int, x = Float64))
+    nt = (time = [1, 2, 3, 4], x = [1.0, 2.0, 3.0, 4.0])
+    JET.@test_opt CausalFrames.foldall!(states, nt)
+    JET.@test_opt CausalFrames.summaryvalues(states, outs)
+    JET.@test_opt CausalFrames.foldrunning!(states, nt, 4, outs)
 end

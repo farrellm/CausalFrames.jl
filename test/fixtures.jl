@@ -217,3 +217,28 @@ CausalFrames.fresh(st::RangeTotalState) = st
 CausalFrames.update!(::RangeTotalState, row) = nothing
 CausalFrames.value(::RangeTotalState, vals::NamedTuple) =
     (; rangetotal = vals.range_sum)
+
+# A summarizer embedding a count window mid-state, as a recursive indicator
+# would: the mean of the last `n` rows, read back per row. The window's state
+# type is a parameter, as `barwindow`'s docstring asks.
+struct LastNMean{C} <: Summarizer
+    n::Int
+end
+LastNMean(column::Symbol, n::Int) = LastNMean{column}(n)
+struct LastNMeanState{C,N,W<:SummarizerState} <: SummarizerState
+    window::W
+end
+LastNMeanState{C,N}(window::W) where {C,N,W} = LastNMeanState{C,N,W}(window)
+CausalFrames.emptyvalue(::LastNMean{C}) where {C} =
+    NamedTuple{(Symbol(C, :_lastnmean),)}((missing,))
+CausalFrames.fresh(s::LastNMean{C}, intypes::NamedTuple) where {C} =
+    LastNMeanState{C,Symbol(C, :_lastnmean)}(
+        CausalFrames.barwindow(Mean(C), s.n, NamedTuple{(C,)}((intypes[C],))))
+CausalFrames.fresh(st::LastNMeanState{C,N}) where {C,N} =
+    LastNMeanState{C,N}(CausalFrames.fresh(st.window))
+CausalFrames.update!(st::LastNMeanState, row) = CausalFrames.update!(st.window, row)
+# The declared field type, not the value's: `missing` until the window fills.
+function CausalFrames.value(st::LastNMeanState{C,N}) where {C,N}
+    v = CausalFrames.value(st.window)
+    return NamedTuple{(N,),Tuple{fieldtype(typeof(v), 1)}}((v[1],))
+end
