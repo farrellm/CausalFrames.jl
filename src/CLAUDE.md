@@ -354,7 +354,17 @@ design rationale and performance constraints behind each module.
   window's own head, so it needs no time test. Widening rebuilds every tier
   from the live rows, re-partitioning (a non-invertible widening demotes only
   that accumulator); float sums stay running because the compensated states
-  evict NaN/±Inf rows cleanly
+  evict NaN/±Inf rows cleanly. `Bars(n)` windows change membership only: each
+  key keeps a `RowRing` of its newest rows (sized for the longest count, plus
+  one), a row leaves on admission when pushed `n + 1` deep (`admitbars!`
+  downdates it), the tree queries the key's last `n` rows, the refold tier
+  folds the ring, and a tier seeing fewer than `n` rows returns `nothing`,
+  whose empty row is all `missing`. The shared buffer serves only time windows;
+  a Bars window's head sits at its end. Windows now differ in value type, so
+  `wins` peels each window's (look-back, empty row, value vector) together:
+  never index the value vectors by a runtime window number. A widening with
+  Bars windows rebuilds rings and trees from each key's longest live suffix
+  (`barsuffixes`)
 - `src/intervalize.jl` — `intervalize`, the third binary transform: summarize
   over the intervals a `clock` pipeline defines (`[bₖ, bₖ₊₁)`, timestamped at
   `bₖ₊₁`). It is the `summarizecycles` fold, closing on clock boundaries.

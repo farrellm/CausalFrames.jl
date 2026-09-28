@@ -253,17 +253,24 @@ const JETTIERSETS = ([Count(), Sum(:x), Mean(:x), Last(:x), Min(:x),
     types = (time = Int, k = String, x = Float64)
     lnt = (time = [1, 3, 6], k = ["a", "b", "a"], x = [0.0, 0.0, 0.0])
     snt = (time = [1, 2, 6], k = ["a", "b", "a"], x = [1.0, 2.0, 3.0])
-    for ss in JETTIERSETS, kn in (Val((:k,)), Val(()))
+    # time windows, a Bars window beside one (their value types differ), and
+    # Bars windows alone (no buffer)
+    for ss in JETTIERSETS, kn in (Val((:k,)), Val(())),
+        lookbacks in ((1, 5), (Bars(2), 5), (Bars(2), Bars(3)))
+
         protos, requested = CausalFrames.prototypes(
             CausalFrames.tosummarizers(ss), Symbol[])
         outs = Val(requested)
         tg = CausalFrames.tiering(protos, types)
-        tiers = CausalFrames.rolltiers(tg, types, kn, 2, nothing)
-        V = CausalFrames.tieredvaluetype(tg, protos, outs)
-        emptyrow = convert(V, CausalFrames.emptyvalues(protos, outs))
-        vals = (Vector{V}(undef, 3), Vector{V}(undef, 3))
-        JET.@test_opt CausalFrames.rollsegment!(vals, tiers, lnt, 1, snt, 1,
-            true, (1, 5), kn, outs, emptyrow)
+        tiers = CausalFrames.rolltiers(tg, types, kn, lookbacks, nothing)
+        rs = CausalFrames.RollingState(())
+        cfg = CausalFrames.RollingConfig((:a, :b), lookbacks, Symbol[], kn,
+            protos, outs, Symbol[], (;))
+        CausalFrames.setvaltype!(rs, cfg, tg)
+        wins = map((lb, e, T) -> (lb, e, Vector{T}(undef, 3)), lookbacks,
+            rs.emptyrows, rs.valtypes)
+        JET.@test_opt CausalFrames.rollsegment!(wins, tiers, lnt, 1, snt, 1,
+            true, lookbacks, kn, outs)
     end
 end
 

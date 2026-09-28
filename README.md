@@ -136,7 +136,7 @@ key is emitted each time.
 | [`intervalize(clock, ss; key, keyset, closelast)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizing/#intervalize) | each interval between clock ticks, emitted at its end |
 | [`summarizewindows(clock, lookback, ss; key, keyset)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizing/#summarizewindows) | the window `[τ - lookback, τ)` at each clock tick `τ` |
 | [`addsummarycolumns(ss; key)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizing/#addsummarycolumns) | append running summaries of every row so far |
-| [`addrollingcolumns(windows, ss; key, from)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizing/#addrollingcolumns) | append summaries of `[t - lookback, t]` for each named window |
+| [`addrollingcolumns(windows, ss; key, from)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizing/#addrollingcolumns) | append summaries of `[t - lookback, t]`, or of the last `n` rows under [`Bars(n)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizing/#Bars), for each named window |
 
 ```julia
 p |> addrollingcolumns((m1 = Minute(1), h1 = Hour(1)), Mean(:mid)) |>

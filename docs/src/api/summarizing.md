@@ -39,3 +39,9 @@ addsummarycolumns
 ```@docs
 addrollingcolumns
 ```
+
+## `Bars`
+
+```@docs
+Bars
+```

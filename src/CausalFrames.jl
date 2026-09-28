@@ -20,7 +20,7 @@ export Context, CausalFrame, CausalPipeline, load, stream, scan, context,
     DotProduct, Mean, Variance, Std, Covariance, Correlation,
     LinearRegression, Quantile, Median, PercentRank, Min, Max,
     First, Last, FitModel, FittedModel, summarize, summarizecycles,
-    addsummarycolumns, addrollingcolumns, asofjoin, lookupjoin, intervalize,
+    addsummarycolumns, addrollingcolumns, Bars, asofjoin, lookupjoin, intervalize,
     summarizewindows, applymodels, addpredictions, modelreports
 
 include("context.jl")

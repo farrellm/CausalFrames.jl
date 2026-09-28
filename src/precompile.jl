@@ -126,6 +126,14 @@
                     key = :sym),
             ),
         )
+        # a Bars window beside a time window: per-key rings plus the buffer
+        DataFrame(
+            load(
+                ctx,
+                p |> addrollingcolumns((b3 = Bars(3), w2 = 2),
+                    [Sum(:v), Mean(:v)]; key = :sym),
+            ),
+        )
         DataFrame(
             load(
                 ctx,
