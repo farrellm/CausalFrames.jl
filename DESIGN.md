@@ -1778,6 +1778,10 @@ Concrete summarizers provided, for an input column of element type `T`:
 | `SortedValues(column)` (unexported) | `:x_sortedvalues` | the state itself, borrowed | `missing` |
 | `Min(column)` | `:x_min` | `T` | `missing` |
 | `Max(column)` | `:x_max` | `T` | `missing` |
+| `MinIndex(column)` | `:x_minindex` | `Int` | `missing` |
+| `MaxIndex(column)` | `:x_maxindex` | `Int` | `missing` |
+| `MinWithIndex(column)` | `:x_min`, `:x_minindex` | `T`, `Int` | `missing` |
+| `MaxWithIndex(column)` | `:x_max`, `:x_maxindex` | `T`, `Int` | `missing` |
 | `First(column)` | `:x_first` | `T` | `missing` |
 | `Last(column)` | `:x_last` | `T` | `missing` |
 | `FitModel(model, predictors, response; name, verbosity)` | `:model`, or `name` | `FittedModel{P,M}` | `missing` |
@@ -1787,7 +1791,7 @@ an MLJ model fit to the rows folded, buffered at the input's own types and fit
 when the summary is emitted. It needs the MLJ extension, and its design is in
 "Model fitting (MLJ)".
 
-`LinearRegression` is the only summarizer emitting a block of columns: for `K`
+`LinearRegression` emits a block of columns: for `K`
 predictors, `:n`, `:r2`, `:stderr`, then `:intercept_beta`/`:intercept_tstat`
 with an intercept, then a `:p_beta`/`:p_tstat` pair per predictor in order —
 `2K + 5` columns, or `2K + 3` without an intercept. An optional `name` prefixes
@@ -1805,6 +1809,31 @@ the uncentered R², as is conventional.
 `Min`/`Max`/`First`/`Last` produce the input column's element type verbatim;
 all four are backed by one shared state type, parameterized by the combining
 function, and slide one shared windowed state (see "Structured subtypes").
+
+`MinIndex`/`MaxIndex` give *where* the extreme is, as the number of rows since
+it (`0` for the newest row) — an absolute row number means nothing in a stream —
+so they are `Int` whatever the column. This is the basis of Aroon and TA-Lib's
+`MININDEX`/`MAXINDEX`. Of tied extremes the most recent wins, and `NaN` and
+`missing` are extremes as they are for `Min`/`Max`, so their position is
+reported until they leave the window. `MinWithIndex`/`MaxWithIndex` emit the
+extreme and its index from one state, which is the point of them: `Max` and
+`MaxIndex` side by side fold two (deduplication is by output name, and nothing
+fuses them behind the caller's back), and `Max` with `MaxWithIndex` collide on
+`:x_max`. All four share an ordinary state, `IndexState` — the extreme, its
+rows-since and the count of rows folded, which `combine!` shifts the older
+side's position by, the newer side winning ties — and slide the `Min`/`Max`
+deque, which already numbers its rows; a type parameter picks which of value,
+index or both `value` reports. Measured over a million rows on one thread,
+`MaxWithIndex` against `Max` and `MaxIndex` is 51 against 66 ms in a 25-unit
+`addrollingcolumns` and 36 against 53 ms in a 5000-unit `summarizewindows`:
+less than half, since emitting the columns costs the same either way. The index
+parameter left `Min` and `Max` within run-to-run noise.
+
+TA-Lib (at `2aa8eb0`) isn't one rule to match. `ta_AROON.c` takes the most
+recent of tied extremes, as here. `ta_MAXINDEX.c`/`ta_MININDEX.c` take the newest
+tie as a row arrives (`>=`) but the oldest when they rescan after the extreme
+leaves the window (`>`), so which tie they report depends on history; no
+associative summarizer can reproduce that, and these don't.
 `Sum` and `SumPower` produce the element type `Base.sum` would: small signed
 and unsigned integers widen (`Int32` sums to `Int64`, `Bool` to `Int64`,
 `UInt8` to `UInt64`), everything else keeps its type (`Float32` sums to
@@ -2272,7 +2301,8 @@ this structure (see "Rolling windows" and "Window summarization"). The classific
   no-ops, and the window transforms give them no tier at all — their
   effective structure is that of their dependencies.
 - **Groups through a windowed state**: `Min`, `Max`, `First`, `Last`,
-  `CountDistinct`. Their ordinary states have no inverse — a minimum or a set
+  `CountDistinct`, and the arg-extremes `MinIndex`, `MaxIndex`,
+  `MinWithIndex`, `MaxWithIndex`. Their ordinary states have no inverse — a minimum or a set
   forgets what it would need — but combine over ordered sub-ranges (for
   `First`/`Last` *because* the ranges are ordered, which is why the law
   requires it), and fold everywhere but a sliding window at a fixed size.
@@ -2294,7 +2324,10 @@ this structure (see "Rolling windows" and "Window summarization"). The classific
   count, unlike the last row's time, tells tied rows apart. Measured, that is
   1.1–2.2 ns per row against the deque's 5.7–8.4, and 23 ms against 38 ms for a
   keyless `summarizewindows` of `Last` over the benchmark's million rows.
-  `CountDistinct` counts rows per value (see above).
+  `CountDistinct` counts rows per value (see above). The arg-extremes slide
+  the `Min`/`Max` deque and report the front's rows-since, the newest row's
+  sequence number less the front's; a tie pops the older value, so the most
+  recent extreme is reported, as their ordinary state's `combine!` has it.
 - **Groups through a sorted multiset**: `SortedValues`, and so `Quantile`,
   `Median` and `PercentRank` (with `Last`). One ordinary state serves every
   tier: insertion and one-copy deletion invert, and a merge combines.
@@ -2490,7 +2523,8 @@ Exports: `Context`, `CausalFrame`, `CausalPipeline`, `load`, `stream`,
 `SummarizerState`, `Count`, `CountDistinct`, `Sum`, `SumPower`,
 `AgeWeightedSum`, `Moment`, `Product`, `DotProduct`, `Mean`, `Variance`,
 `Std`, `Covariance`, `Correlation`, `LinearRegression`, `Quantile`, `Median`,
-`PercentRank`, `Min`, `Max`, `First`, `Last`, `FitModel`, `FittedModel`,
+`PercentRank`, `Min`, `Max`, `MinIndex`, `MaxIndex`, `MinWithIndex`,
+`MaxWithIndex`, `First`, `Last`, `FitModel`, `FittedModel`,
 `applymodels`, `addpredictions`, `modelreports`, `summarize`,
 `summarizecycles`, `intervalize`, `summarizewindows`, `addsummarycolumns`,
 `addrollingcolumns`, `Bars`, `asofjoin`, `lookupjoin`, `lag`, `warmup`, `settime`, `head`,

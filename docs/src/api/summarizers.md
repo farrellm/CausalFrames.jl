@@ -142,6 +142,30 @@ Min
 Max
 ```
 
+## `MinIndex`
+
+```@docs
+MinIndex
+```
+
+## `MaxIndex`
+
+```@docs
+MaxIndex
+```
+
+## `MinWithIndex`
+
+```@docs
+MinWithIndex
+```
+
+## `MaxWithIndex`
+
+```@docs
+MaxWithIndex
+```
+
 ## `First`
 
 ```@docs

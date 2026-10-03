@@ -195,6 +195,10 @@ that never reaches the output: `Sum(:range => r -> r.high - r.low)` produces
 | [`CausalFrames.SortedValues(:x)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#SortedValues) | `:x_sortedvalues` | group | the sorted values the three above read (unexported, for summarizers of your own) |
 | [`Min(:x)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#Min) | `:x_min` | group | minimum |
 | [`Max(:x)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#Max) | `:x_max` | group | maximum |
+| [`MinIndex(:x)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#MinIndex) | `:x_minindex` | group | rows since the minimum (`Int`; ties go to the newest) |
+| [`MaxIndex(:x)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#MaxIndex) | `:x_maxindex` | group | rows since the maximum (`Int`; ties go to the newest) |
+| [`MinWithIndex(:x)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#MinWithIndex) | `:x_min`, `:x_minindex` | group | both, from one state |
+| [`MaxWithIndex(:x)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#MaxWithIndex) | `:x_max`, `:x_maxindex` | group | both, from one state |
 | [`First(:x)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#First) | `:x_first` | group | value in the first row |
 | [`Last(:x)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#Last) | `:x_last` | group | value in the last row |
 | [`FitModel(model, predictors, response; name, verbosity)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#FitModel) | `:model` | — | a fitted MLJ model (needs `using MLJ`, where `Count` must be written `CausalFrames.Count`) |
@@ -218,7 +222,7 @@ Moments, variances, correlations and regressions are computed from shared
 counts and sums, which are folded once however many summarizers need them and
 appear in the output only if requested. An output column takes its element type
 from the input: `Min`, `Max`, `First` and `Last` keep it, and `Sum` widens as
-`Base.sum` does.
+`Base.sum` does. Counts and row indices are `Int`.
 
 The structure column sets each summarizer's window algorithm in
 `addrollingcolumns` and `summarizewindows`: a group slides in O(1) per row, a

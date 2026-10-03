@@ -253,6 +253,9 @@ SUITE["rolling"]["running-keyed"] = @benchmarkable load(RCTX,
         key = :sym))
 SUITE["rolling"]["tracking"] = @benchmarkable load(RCTX,
     RSRC |> addrollingcolumns((; w25 = 25), [Min(:qty), Max(:qty)]))
+# The arg-extremes slide the same deque, reading the front's row number too.
+SUITE["rolling"]["argextreme"] = @benchmarkable load(RCTX,
+    RSRC |> addrollingcolumns((; w25 = 25), [MinWithIndex(:qty), MaxWithIndex(:qty)]))
 SUITE["rolling"]["countdistinct"] = @benchmarkable load(RCTX,
     RSRC |> addrollingcolumns((; w25 = 25), [CountDistinct(:qty)]))
 SUITE["rolling"]["quantile"] = @benchmarkable load(RCTX,

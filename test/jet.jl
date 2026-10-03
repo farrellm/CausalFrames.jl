@@ -304,7 +304,8 @@ end
 @testset "windowed states and the age-weighted sum" begin
     for T in (Float64, Int, Union{Missing,Float64}),
         s in (Min(:x), First(:x),
-            Last(:x), CountDistinct(:x), AgeWeightedSum(:x))
+            Last(:x), CountDistinct(:x), AgeWeightedSum(:x), MaxIndex(:x),
+            MinWithIndex(:x))
 
         st = CausalFrames.freshwindowed(s, (time = Int, x = T))
         row = (time = 1, x = one(nonmissingtype(T)))
@@ -315,6 +316,15 @@ end
     end
     st = CausalFrames.fresh(AgeWeightedSum(:x), (time = Int, x = Float64))
     JET.@test_opt CausalFrames.combine!(st, st, st)
+    # the arg-extremes' ordinary state, which the plain folds and the tree use
+    for T in (Float64, Union{Missing,Float64}), s in (MaxIndex(:x), MinWithIndex(:x))
+        st = CausalFrames.fresh(s, (time = Int, x = T))
+        row = (time = 1, x = one(nonmissingtype(T)))
+        JET.@test_opt CausalFrames.update!(st, row)
+        CausalFrames.update!(st, row)
+        JET.@test_opt CausalFrames.value(st)
+        JET.@test_opt CausalFrames.combine!(st, st, CausalFrames.fresh(st))
+    end
 end
 
 # A FitModel fold is a typed push per column (the fit itself is opaque and runs

@@ -733,14 +733,16 @@ end
             AgeWeightedSum(:x), Moment(:x, 2), Mean(:x), Variance(:x), Std(:x),
             Covariance(:x, :y), Correlation(:x, :y),
             LinearRegression(:x, :y), LinearRegression([:x, :y], :y),
-            Min(:x), Max(:x), First(:x), Last(:x), CountDistinct(:x)])
+            Min(:x), Max(:x), First(:x), Last(:x), CountDistinct(:x),
+            MinIndex(:x), MaxIndex(:x), MinWithIndex(:x), MaxWithIndex(:x)])
     @test all(s -> s isa MonoidSummarizer && !(s isa GroupSummarizer),
         [Product(:x), MinMax(:x)])
     @test !(Opaque(Sum(:x)) isa MonoidSummarizer)
 
     monoids = [Count(), Sum(:x), SumPower(:x, 2), DotProduct(:x, :y),
         AgeWeightedSum(:x), Product(:x), Min(:x), Max(:x), First(:x), Last(:x),
-        MinMax(:x), CountDistinct(:x)]
+        MinMax(:x), CountDistinct(:x), MinIndex(:x), MaxIndex(:x),
+        MinWithIndex(:x), MaxWithIndex(:x)]
 
     # fresh! must be indistinguishable from fresh: the transforms reuse state
     # tuples per cycle, interval and window query, so an incomplete reset leaks
@@ -748,7 +750,8 @@ end
     # exercises the `fresh(st)` default.
     selfcontained = [Count(), Sum(:x), SumPower(:x, 2), DotProduct(:x, :y),
         AgeWeightedSum(:x), Product(:x), Min(:x), Max(:x), First(:x), Last(:x),
-        MinMax(:x), CountDistinct(:x), Opaque(Sum(:x))]
+        MinMax(:x), CountDistinct(:x), MinIndex(:x), MaxIndex(:x),
+        MinWithIndex(:x), MaxWithIndex(:x), Opaque(Sum(:x))]
     for s in selfcontained
         reused = CausalFrames.fresh!(fold(s, rows))   # folded, then zeroed
         rebuilt = CausalFrames.fresh(s, intypes)      # never folded
@@ -781,7 +784,8 @@ end
     # on.
     for s in [Count(), Sum(:x), SumPower(:x, 2), DotProduct(:x, :y),
         AgeWeightedSum(:x), Product(:x), Min(:x), Max(:x), First(:x), Last(:x),
-        CountDistinct(:x)]
+        CountDistinct(:x), MinIndex(:x), MaxIndex(:x), MinWithIndex(:x),
+        MaxWithIndex(:x)]
         st = fold(s, rows)
         CausalFrames.fresh!(st)
         # CountDistinct is in this list because `empty!` keeps a Set's slots:
@@ -1266,8 +1270,10 @@ end
         [3, 1, 4, 1, 5, 9, 2, 6],
         ["b", "a", "c", "a"],
     ]
-    for vals in pools, s in (Min(:x), Max(:x), First(:x), Last(:x),
-            CountDistinct(:x))
+    for vals in pools,
+        s in (Min(:x), Max(:x), First(:x), Last(:x),
+            CountDistinct(:x), MinIndex(:x), MaxIndex(:x), MinWithIndex(:x),
+            MaxWithIndex(:x))
 
         intypes = (time = Int, x = eltype(vals))
         ws = CausalFrames.freshwindowed(s, intypes)
@@ -1313,12 +1319,128 @@ end
         end
         return nothing
     end
-    for s in (Min(:x), Max(:x), First(:x), Last(:x), CountDistinct(:x))
+    for s in (Min(:x), Max(:x), First(:x), Last(:x), CountDistinct(:x),
+        MaxIndex(:x), MinWithIndex(:x))
         ws = CausalFrames.freshwindowed(s, (time = Int, x = Float64))
         foreach(t -> CausalFrames.update!(ws, slrow(t)), -49:0)
         slidealloc(ws, 1, 1000)
         @test (@allocated slidealloc(ws, 1001, 1000)) == 0
     end
+end
+
+@testset "arg-extreme summarizers" begin
+    # The definition: rows since the extreme, the most recent of tied extremes
+    # winning, under the same selection Min and Max make (isequal, so NaN and
+    # missing are extremes and -0.0 < 0.0).
+    function naive(F, xs)
+        best = 1
+        for i in 2:length(xs)
+            isequal(F(xs[best], xs[i]), xs[i]) && (best = i)
+        end
+        return (xs[best], length(xs) - best)
+    end
+    function fold(s, intypes, xs)
+        st = CausalFrames.fresh(s, intypes)
+        foreach(i -> CausalFrames.update!(st, (time = i, x = xs[i])), eachindex(xs))
+        return st
+    end
+    pools = [
+        [3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5],
+        Union{Missing,Float64}[1.0, 2.0, 2.0, -0.0, 0.0, NaN, missing, 3.0, -1.0],
+    ]
+    cases = ((MaxIndex, MaxWithIndex, max, :x_max, :x_maxindex),
+        (MinIndex, MinWithIndex, min, :x_min, :x_minindex))
+    for vals in pools, (Index, WithIndex, F, vname, iname) in cases
+        intypes = (time = Int, x = eltype(vals))
+        for seed in 1:20
+            xs = vals[lcgsequence(seed, 1+seed%12, length(vals)) .+ 1]
+            v, i = naive(F, xs)
+            @test isequal(CausalFrames.value(fold(Index(:x), intypes, xs)),
+                NamedTuple{(iname,)}((i,)))
+            @test isequal(CausalFrames.value(fold(WithIndex(:x), intypes, xs)),
+                NamedTuple{(vname, iname)}((v, i)))
+            # every split point, and a three-way split both ways round, give
+            # the fold of the whole: the combine is associative, with fresh
+            # as its identity on either side
+            whole = CausalFrames.value(fold(WithIndex(:x), intypes, xs))
+            for k in 0:length(xs)
+                a = fold(WithIndex(:x), intypes, xs[1:k])
+                b = fold(WithIndex(:x), intypes, xs[(k+1):end])
+                CausalFrames.combine!(a, a, b)
+                @test isequal(CausalFrames.value(a), whole)
+                id = CausalFrames.fresh(a)
+                CausalFrames.combine!(id, id, a)
+                @test isequal(CausalFrames.value(id), whole)
+                CausalFrames.combine!(a, a, CausalFrames.fresh(a))
+                @test isequal(CausalFrames.value(a), whole)
+            end
+            j, k = sort([seed % (length(xs) + 1), (3seed) % (length(xs) + 1)])
+            p1, p2, p3 = (
+                fold(WithIndex(:x), intypes, xs[r])
+                for r in (1:j, (j+1):k, (k+1):length(xs))
+            )
+            l, r = CausalFrames.fresh(p1), CausalFrames.fresh(p1)
+            CausalFrames.combine!(l, p1, p2)
+            CausalFrames.combine!(l, l, p3)
+            CausalFrames.combine!(r, p2, p3)
+            CausalFrames.combine!(r, p1, r)
+            @test isequal(CausalFrames.value(l), whole)
+            @test isequal(CausalFrames.value(r), whole)
+        end
+    end
+
+    # The combined summarizer is the two single ones side by side, on the
+    # running, tree and re-fold paths of every window transform; and a NaN or
+    # missing is the extreme until it leaves the window, then the window
+    # recovers.
+    df = DataFrame(time = 1:10,
+        x = Union{Missing,Float64}[2, 5, NaN, 5, 1, 4, missing, 3, 3, 0])
+    roll(ss) = DataFrame(load(Context(0, 20),
+        readtable(df) |> addrollingcolumns((w2 = 2,), ss)))
+    expected = roll([Max(:x), MaxIndex(:x)])
+    @test isequal(expected.w2_x_maxindex, [0, 0, 0, 1, 2, 2, 0, 1, 2, 1])
+    @test isequal(expected.w2_x_max, [2, 5, NaN, NaN, NaN, 5, missing, missing,
+        missing, 3])
+    for ss in ([MaxWithIndex(:x)], [AsMonoid(MaxWithIndex(:x))],
+        [Opaque(MaxWithIndex(:x))])
+        @test isequal(roll(ss)[!, [:w2_x_max, :w2_x_maxindex]],
+            expected[!, [:w2_x_max, :w2_x_maxindex]])
+    end
+    @test isequal(roll([AsMonoid(MinIndex(:x))]).w2_x_minindex,
+        roll([MinIndex(:x)]).w2_x_minindex)
+
+    # empty input: missing, and an Int index otherwise, whatever the column
+    p = readtable(DataFrame(time = Int[], x = Float32[]))
+    out = DataFrame(load(Context(0, 1), p |> summarize(MinWithIndex(:x))))
+    @test isequal(out.x_min, [missing]) && isequal(out.x_minindex, [missing])
+    st = CausalFrames.fresh(MaxWithIndex(:x), (time = Int, x = Float32))
+    CausalFrames.update!(st, (time = 1, x = 1.0f0))
+    @test @inferred(CausalFrames.value(st)) === (x_max = 1.0f0, x_maxindex = 0)
+    ws = CausalFrames.freshwindowed(MinIndex(:x), (time = Int, x = Int8))
+    CausalFrames.update!(ws, (time = 1, x = Int8(1)))
+    @test @inferred(CausalFrames.value(ws)) === (x_minindex = 0,)
+
+    # a summarizer requested twice folds once; beside Max of the same column,
+    # the shared output name is an error
+    protos, _ = CausalFrames.prototypes(
+        Summarizer[MaxWithIndex(:x), MaxWithIndex(:x)], Symbol[])
+    @test length(protos) == 1
+    @test_throws ArgumentError(
+        "summarize output column :x_max is produced by more than one summarizer",
+    ) load(Context(0, 20), readtable(df) |> summarize([Max(:x), MaxWithIndex(:x)]))
+
+    # widening converts the extreme and keeps where it was
+    st = CausalFrames.fresh(MaxWithIndex(:x), (time = Int, x = Int32))
+    for (t, x) in enumerate(Int32[4, 7, 2])
+        CausalFrames.update!(st, (time = t, x))
+    end
+    w = CausalFrames.widenstate(st, (time = Int, x = Float64))
+    @test CausalFrames.value(w) === (x_max = 7.0, x_maxindex = 1)
+    CausalFrames.update!(w, (time = 4, x = 7.0))
+    @test CausalFrames.value(w) === (x_max = 7.0, x_maxindex = 0)
+    unseen = CausalFrames.fresh(st)
+    @test CausalFrames.widenstate(unseen, (time = Int, x = Float64)).n == 0
+    @test CausalFrames.widenstate(st, (time = Int, x = Int32)) === st
 end
 
 @testset "age-weighted sum" begin

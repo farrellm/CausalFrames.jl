@@ -17,7 +17,7 @@
             load(
                 ctx,
                 p |> summarize([Count(), Sum(:v), SumPower(:v, 2),
-                    Moment(:v, 2), Min(:v), Max(:v),
+                    Moment(:v, 2), Min(:v), Max(:v), MaxIndex(:v),
                     Product(:v), Mean(:v), Variance(:v),
                     Std(:v), DotProduct(:v, :qty),
                     Covariance(:v, :qty),
@@ -147,7 +147,7 @@
             load(
                 ctx,
                 p |> addrollingcolumns((w2 = 2,),
-                    [Min(:v), Last(:v), Product(:v), Mean(:v),
+                    [Min(:v), Last(:v), Product(:v), Mean(:v), MaxWithIndex(:v),
                         Quantile(:v, [0.25, 0.75]), Median(:v), PercentRank(:v)];
                     key = :sym),
             ),
