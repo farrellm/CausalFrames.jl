@@ -141,8 +141,12 @@ design rationale and performance constraints behind each module.
     deque. `CountDistinct` folds a `Set` but slides a `Dict{T,Int}` of counts,
     because a count increment hashes twice and is 1.4-1.7x slower than `push!`
     on the non-window folds (DESIGN.md has the table). A windowed state is
-    never combined or widened. `Product` is the only built-in monoid that is
-    not a group
+    never combined or widened. `MinIndex`/`MaxIndex` and
+    `MinWithIndex`/`MaxWithIndex` fold `IndexState` (the extreme, its
+    rows-since and a row count, for `combine!`) and slide the same deque, a
+    type parameter `K` (`:value`, `:index`, `:both`) choosing what `value`
+    reports, so wanting both costs one deque, not two. `Product` is the only
+    built-in monoid that is not a group
   - the dependent summarizers (`Moment`, `Mean`, `Variance`, `Std`,
     `Covariance`, `Correlation`, `LinearRegression`) have empty state structs:
     they declare `dependencies` and read those values back through the

@@ -325,6 +325,8 @@ end
         LinearRegression(:x, :y; name = :m1),
         LinearRegression([:x, :y], :y; name = :m2)]
     trackset = [Min(:x), Max(:x), First(:x), Last(:x), CountDistinct(:x)]
+    # the arg-extremes slide the same deque; the small integer pools tie often
+    indexset = [MinIndex(:x), MaxIndex(:x), MinWithIndex(:y), MaxWithIndex(:y)]
     monoidset = [Product(:x), MinMax(:y)]                 # the tree alone
     mixedset = [Sum(:x), Min(:x), MinMax(:y), Product(:x)] # running + tree
     plainset = [Sum(:x), TestVar(:x), PlainSum(:y)]       # running + re-fold
@@ -332,8 +334,8 @@ end
     # the sorted accumulator and its dependents, PercentRank through Last
     orderset = [Quantile(:x, [0.1, 0.5, 0.9]), Median(:x), PercentRank(:x),
         Quantile(:y, [0.07, 0.25, 1.0]; interpolation = :nearestrank)]
-    allsets = (groupset, trackset, monoidset, mixedset, plainset, spanset,
-        orderset)
+    allsets = (groupset, trackset, indexset, monoidset, mixedset, plainset,
+        spanset, orderset)
 
     @testset "differential against the re-fold oracle" begin
         for p in (intdata, floatdata), ss in allsets
@@ -348,7 +350,7 @@ end
         # the running path must equal the re-fold oracle with missing in the
         # summarized column, which the counting states keep on the running path
         for p in (missingintdata, missingfloatdata),
-            ss in (groupset, trackset, mixedset, spanset, orderset)
+            ss in (groupset, trackset, indexset, mixedset, spanset, orderset)
 
             agrees(rolled(p, ss), rolled(p, map(Opaque, ss)))
             agrees(rolled(p, ss; key = :k),
@@ -358,14 +360,17 @@ end
 
     @testset "the tree tier agrees with the running one" begin
         # AsMonoid hides the groups down to monoids, so the sorted accumulator
-        # merges through the segment tree's combine! instead of sliding
-        for p in (intdata, floatdata, missingfloatdata), key in (nothing, :k)
-            agrees(rolled(p, orderset; key), rolled(p, map(AsMonoid, orderset); key))
+        # and the arg-extremes merge through the segment tree's combine!
+        # instead of sliding
+        for p in (intdata, floatdata, missingfloatdata), key in (nothing, :k),
+            ss in (orderset, indexset)
+
+            agrees(rolled(p, ss; key), rolled(p, map(AsMonoid, ss); key))
         end
     end
 
     @testset "streaming agrees with loading" begin
-        for ss in (groupset, trackset, spanset, orderset)
+        for ss in (groupset, trackset, indexset, spanset, orderset)
             t = addrollingcolumns(windows, ss; key = :k)
             loaded = DataFrame(load(Context(0, 1000), intdata |> t))
             streamed = reduce(vcat,
@@ -506,6 +511,8 @@ end
               (:running, :running, :derived, :derived)
         @test tiers(map(AsMonoid, [PercentRank(:x)]), it) ==
               (:tree, :tree, :derived)
+        # the arg-extremes slide their deque
+        @test tiers(indexset, it) == (:running, :running, :running, :running)
         # Last is a group, so beside Mean the whole call slides
         @test tiers([Last(:x), Mean(:x)], it) ==
               (:running, :running, :running, :derived)
