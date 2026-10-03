@@ -732,6 +732,81 @@ shiftchunk!(c::DataFrame, delta) = (c[!, :time] = shifttime(c.time, delta); c)
 shifttime(times::AbstractVector, delta) = times .+ delta
 
 """
+    warmup(lookback, f) -> (CausalPipeline -> CausalPipeline)
+    warmup(p::CausalPipeline, lookback, f) -> CausalPipeline
+
+A transform running `f(p)` over `[start - lookback, stop)` and dropping its
+output rows before `start`, so a stateful transform enters the window already
+warmed up instead of restarting at its first row. `f` sees the lead-in as input:
+[`summarize`](@ref) folds it and [`head`](@ref) counts it.
+
+If `lookback` covers everything `f` remembers, loading `[a, b)` and `[b, c)` and
+concatenating the results equals loading `[a, c)`. That holds exactly for finite
+memory (time windows, `forwardfill` with a `tolerance`, and [`Bars`](@ref) when
+`lookback` spans the bars), and only to decay tolerance for a recursive state.
+It never holds for a path-dependent state, such as a cumulative
+[`Sum`](@ref) in [`addsummarycolumns`](@ref), nor for output aligned to the
+context's start, such as [`clock`](@ref) ticks.
+
+# Arguments
+- `lookback`: how far before `start` `f` runs, in a type that can be subtracted
+  from the time type (a `Dates.Period`, a number). Must be non-negative, checked
+  when the pipeline runs; `0` and `nothing` are the identity.
+- `f`: a function mapping a `CausalPipeline` to a `CausalPipeline`, such as a
+  transform or a chain of them. Called once, when `warmup` is applied; any other
+  return value is an `ArgumentError`.
+
+```jldoctest
+df = DataFrame(time = [1, 4, 6], bid = [1.0, missing, missing])
+p = readtable(df) |> warmup(5, forwardfill(:bid))
+DataFrame(load(Context(3, 10), p))
+
+# output
+
+2×2 DataFrame
+ Row │ time   bid
+     │ Int64  Float64?
+─────┼─────────────────
+   1 │     4       1.0
+   2 │     6       1.0
+```
+"""
+function warmup(lookback, f)
+    return function (p::CausalPipeline)
+        q = f(p)
+        q isa CausalPipeline || throw(ArgumentError(
+            "warmup f must return a CausalPipeline, got $(typeof(q))"))
+        return CausalPipeline() do ctx::Context
+            st = LeadInDrop(ctx.start)
+            return chunkmap(c -> dropleadin!(st, c),
+                q.run(widenstart(ctx, lookback, "warmup lookback")))
+        end
+    end
+end
+warmup(p::CausalPipeline, lookback, f) = warmup(lookback, f)(p)
+
+# Per-run state of `warmup`'s drop. Times are non-decreasing, so once a row at
+# or after `start` has been seen every later chunk passes through untouched.
+mutable struct LeadInDrop{T}
+    const start::T
+    passed::Bool
+end
+LeadInDrop(start::T) where {T} = LeadInDrop{T}(start, false)
+
+function dropleadin!(st::LeadInDrop, c::DataFrame)
+    st.passed && return c
+    i = firstkept(c.time, st.start)
+    i > nrow(c) && return nothing
+    st.passed = true
+    # The straddling chunk is sliced, not `deleteat!`ed: column vectors may be
+    # shared (see `sinkchunk`), so none is mutated in place.
+    return i == 1 ? c : c[i:end, :]
+end
+
+# Function barrier: the search specializes on the concretely typed column.
+firstkept(times::AbstractVector, start) = searchsortedfirst(times, start)
+
+"""
     head(n) -> (CausalPipeline -> CausalPipeline)
     head(p::CausalPipeline, n) -> CausalPipeline
 

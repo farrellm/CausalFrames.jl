@@ -735,6 +735,132 @@ end
     @test isequal(DataFrame(load(ctx, lag(src, 2))), df)
 end
 
+@testset "warmup" begin
+    # chunks of 4 over the context; v carries the time, k alternates keys, and
+    # m is missing except every fifth row
+    src =
+        clock(1; batchsize = 4) |> addcolumns(
+            r -> (; v = float(r.time),
+                k = isodd(r.time) ? "a" : "b",
+                m = r.time % 5 == 0 ? float(r.time) : missing),
+        )
+    splitload(p, a, b, c) = vcat(DataFrame(load(Context(a, b), p)),
+        DataFrame(load(Context(b, c), p)))
+
+    @testset "split contexts concatenate" begin
+        # a time window widens its own input, so it already composes; under
+        # warmup it still does
+        roll = addrollingcolumns((w3 = 3,), [Sum(:v), Count()]; key = :k)
+        @test isequal(splitload(src |> warmup(3, roll), 0, 13, 30),
+            DataFrame(load(Context(0, 30), src |> warmup(3, roll))))
+
+        # forwardfill without a tolerance and Bars(n) start cold at b; m is
+        # present every 10 rows per key, and 6 time units span 3 rows per key
+        for (lookback, op) in ((10, forwardfill(:m; key = :k)),
+            (6, addrollingcolumns((b3 = Bars(3),), Mean(:v); key = :k)))
+            @test isequal(splitload(src |> warmup(lookback, op), 0, 13, 30),
+                DataFrame(load(Context(0, 30), src |> warmup(lookback, op))))
+            @test !isequal(splitload(src |> op, 0, 13, 30),
+                DataFrame(load(Context(0, 30), src |> op)))
+        end
+
+        # a cumulative mean is path-dependent: exact only when the lead-in
+        # reaches the start of the data
+        data = DataFrame(time = 0:29, k = repeat(["a", "b"], 15),
+            v = float.(0:29))
+        cum = addsummarycolumns(Mean(:v); key = :k)
+        p = readtable(data) |> warmup(20, cum)
+        @test isequal(splitload(p, 0, 13, 30), DataFrame(load(Context(0, 30), p)))
+        @test !isequal(splitload(readtable(data) |> warmup(5, cum), 0, 13, 30),
+            DataFrame(load(Context(0, 30), p)))
+    end
+
+    @testset "drop" begin
+        ctx = Context(5, 20)
+        # lookback 3 runs src over [2, 20): chunks [2..5], [6..9], ... so the
+        # first chunk straddles start; rows at exactly start are kept
+        df = DataFrame(load(ctx, src |> warmup(3, identity)))
+        @test df.time == 5:19
+        @test isequal(df, DataFrame(load(ctx, src)))
+
+        # a lead-in of whole chunks: [0..3] dropped entirely, [4..7] sliced
+        @test DataFrame(load(ctx, src |> warmup(5, identity))).time == 5:19
+        # a lead-in that is the whole input: zero rows, only :time
+        early = readtable(DataFrame(time = [1, 2], x = [1, 2]))
+        out = load(ctx, early |> warmup(10, identity))
+        @test nrow(out) == 0
+        @test names(DataFrame(out)) == ["time"]
+
+        # f sees the lead-in as input: summarize folds it, emitted at stop
+        s = DataFrame(load(ctx, src |> warmup(5, summarize(Count()))))
+        @test s.time == [20]
+        @test s.count == [20]
+    end
+
+    @testset "lookback" begin
+        ctx = Context(0, 10)
+        ff = forwardfill(:m)
+        # 0 and nothing are the identity
+        @test isequal(DataFrame(load(ctx, src |> warmup(0, ff))),
+            DataFrame(load(ctx, src |> ff)))
+        @test isequal(DataFrame(load(ctx, src |> warmup(nothing, ff))),
+            DataFrame(load(ctx, src |> ff)))
+        # negative: rejected when the pipeline runs
+        p = src |> warmup(-1, ff)
+        @test_throws ArgumentError("warmup lookback must be non-negative, got -1") load(
+            ctx, p)
+
+        # the input runs over the widened context
+        seen = Ref{Any}(nothing)
+        recorder = CausalPipeline() do c
+            seen[] = c
+            [DataFrame(time = [c.start], v = [1.0])]
+        end
+        load(ctx, recorder |> warmup(3, identity))
+        @test seen[] == Context(-3, 10)
+        # nested warm-ups and inner widenings add up
+        load(ctx, recorder |> warmup(3, q -> q |> warmup(2, lag(1))))
+        @test seen[] == Context(-6, 9)
+
+        # Dates time with a Period lookback
+        t0 = DateTime(2026, 1, 1)
+        dsrc = readtable(DataFrame(time = t0 .+ Hour.([0, 2, 5]),
+            x = [1.0, missing, missing]))
+        dctx = Context(t0 + Hour(1), t0 + Hour(6))
+        ddf = DataFrame(load(dctx, dsrc |> warmup(Hour(3), forwardfill(:x))))
+        @test ddf.time == t0 .+ Hour.([2, 5])
+        @test isequal(ddf.x, [1.0, 1.0])
+    end
+
+    @testset "f must return a pipeline" begin
+        @test_throws ArgumentError(
+            "warmup f must return a CausalPipeline, got Int64") warmup(1, q -> 1)(src)
+    end
+
+    @testset "stream and reuse" begin
+        ctx = Context(5, 30)
+        p = src |> warmup(4, addsummarycolumns(Sum(:v); key = :k))
+        df = DataFrame(load(ctx, p))
+        frames = collect(stream(ctx, p))
+        @test isequal(reduce(vcat, DataFrame.(frames)), df)
+        @test context(first(frames)).start == 5
+        # the drop's state is per run: a second load is identical
+        @test isequal(DataFrame(load(ctx, p)), df)
+    end
+
+    @testset "closed source" begin
+        t = DataFrame(time = 0:10, x = float.(0:10))
+        p = readtable(t; closed = true) |> warmup(2, forwardfill(:x))
+        df = DataFrame(load(Context(3, 8), p))
+        @test df.time == 3:8
+    end
+
+    # the pipeline-first form equals the |> chain
+    ff = forwardfill(:m)
+    @test isequal(DataFrame(load(Context(3, 20), warmup(src, 4, ff))),
+        DataFrame(load(Context(3, 20), src |> warmup(4, ff))))
+end
+
 @testset "head" begin
     ctx = Context(0, 100)
     src = clock(1; batchsize = 4)

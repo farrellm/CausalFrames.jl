@@ -115,6 +115,7 @@ boundaries.
 | `asofjoin(right; key, tolerance, strict, leftprefix, rightprefix, righttime)` | transform | append the latest right row at or before each row (see "As-of join") |
 | `lookupjoin(table; key, unmatched, leftprefix, rightprefix)` | transform | append the row with the same key from a table without time (see "Lookup join") |
 | `lag(offset)` | transform | move every row `offset` later (see "Lead and lag") |
+| `warmup(lookback, f)` | transform | run `f` over `[start - lookback, stop)` and drop the rows before `start` (see "Warm-up") |
 | `settime(spec)` | transform | recompute `:time`; rows may only move later (see "Retiming") |
 | `head(n)` | transform | the first `n` rows, then stop pulling (see "Truncation") |
 | `lastrow(; key)` | transform | the last row per key, retimed to `stop` (see "Last row") |
@@ -864,6 +865,57 @@ causality contract), and treat `offset == 0` as the identity. The shared
 `src/operators.jl` and is imported into the submodule; `lead` shifts by
 `-offset`.
 
+## Warm-up
+
+Every stateful transform restarts at its context's first row, so loading
+`[a, c)` differs from concatenating `[a, b)` and `[b, c)`. A recursive
+indicator's state, a running `Mean`, a `forwardfill` and a `Bars(n)` window all
+start cold at `b`. Loading a wider context by hand and truncating does not fit
+inside a pipeline, so `warmup(lookback, f)` is a transform of transforms: it
+runs `f(p)` over `[start - lookback, stop)` and drops output rows with
+`time < start`.
+
+- **Causality.** The widened context only *adds* earlier input, so output at
+  `t` still depends only on input at or before `t`: `warmup` is causal and
+  exported.
+- **Construction.** `f(p)` is built once, when `warmup` is applied; anything but
+  a `CausalPipeline` is an `ArgumentError` there. Each run then calls
+  `f(p).run` over the widened context, so a transform inside `f` that widens
+  further (`addrollingcolumns`, `lag`, `asofjoin`, a nested `warmup`) widens
+  the already-widened context and nesting needs no code.
+- **The drop.** Only rows before `start` are dropped, never rows at `stop`:
+  the widened context keeps `stop`, so `f(p)` is bounded as it would be
+  without the warm-up, and a transform's rows at `stop` (`summarize`'s) are
+  legal output. Rows at exactly `start` are kept. `dropleadin!` slices only
+  the chunk straddling `start`, copying it rather than `deleteat!`ing, since
+  column vectors may be shared (the `writecsv` hand-off argument); whole
+  lead-in chunks become `nothing` and `chunkmap` skips them. Times are
+  non-decreasing, so once a chunk reaches `start` a per-run flag passes every
+  later chunk untouched. `forwardfill`'s `tolerance` shares the same step.
+- **`lookback`.** It goes through `widenstart`, so a negative one is rejected
+  when the pipeline runs (`warmup lookback must be non-negative, got -1`),
+  `0` is the identity, and `nothing` widens nothing. A `closed = true` source
+  changes only the upper bound, so the widened lower bound is inclusive
+  either way.
+- **Streaming.** The emitted chunks all lie in `[start, stop]`, so `stream`
+  tiles `[start, stop)` exactly as without `warmup`, and its frames
+  concatenate to `load`.
+
+`f` sees the lead-in as input, not only as state: `summarize` and `lastrow`
+fold it and `head` counts it. That is the definition, and it is why the
+restored property depends on what `f` remembers. If `lookback` covers it,
+loading `[a, b)` and `[b, c)` under `warmup` and concatenating the results
+equals loading `[a, c)`:
+
+- exactly, for finite memory: time windows, `forwardfill` with a `tolerance`,
+  and `Bars(n)` once `lookback` spans `n` rows of every key (a bar count has no
+  time span, and sources read only forward, so the caller picks the time);
+- to decay tolerance, for recursive states;
+- never, for a path-dependent state (a windowless cumulative `Sum`, `head`), or
+  for output aligned to the context's start (`clock` ticks, and so
+  `intervalize` and `summarizewindows`), whose grid moves to
+  `start - lookback`.
+
 ## Retiming
 
 `settime(spec)` is the general form of the constant shift: it recomputes `:time`
@@ -999,8 +1051,8 @@ the row itself, and every row sharing its timestamp, is in its own window.
     summarized context: the first `n - 1` rows of each key are `missing`.
     Time look-backs in the same call still widen it, and since the call
     summarizes one stream, a `Bars` window counts those earlier rows too.
-    Reading further back is a job for a warm-up, not a guess at how far `n`
-    rows reach.
+    Reading further back is a job for [`warmup`](#warm-up), not a guess at
+    how far `n` rows reach.
   - *`from`.* The count is over the summarized stream's rows under the key,
     not the augmented stream's.
   - `summarizewindows` rejects `Bars` with an `ArgumentError`: nothing needs
@@ -1583,7 +1635,8 @@ context to `[start - tolerance, stop)` so rows near `start` can be filled from
 before the window — and, as there, without a `tolerance` there is no finite
 amount to widen by, so the input sees only `[start, stop)`. The widening is the
 one thing `forwardfill` must undo: `load` rejects a chunk beginning before
-`start`, so the pre-window rows update the cells and are then clipped away.
+`start`, so the pre-window rows update the cells and are then clipped away, by
+the `dropleadin!` step [`warmup`](#warm-up) uses.
 
 Element types may move from chunk to chunk, as everywhere else, and the cells
 track their promotion. The *set* of columns being filled may not: it fixes the
@@ -1594,7 +1647,8 @@ rule, narrowed to the columns that matter here.
 `forwardfill` is **causal** — the value at time `t` came from a row with time
 `<= t` — and **stateful** in the streaming sense: concatenating its streamed
 frames equals loading the window, while split contexts do not compose, since
-the second half starts with nothing carried.
+the second half starts with nothing carried. With a `tolerance`, wrapping it in
+`warmup(tolerance, forwardfill(…))` restores them exactly.
 
 A *backward* fill would be acausal, and would have to buffer output rows until
 the next non-missing value arrived — a `HeadProducer`-shaped operator in the
@@ -2372,7 +2426,9 @@ boundaries rather than restarting per chunk:
 Concatenating the frames of `stream(ctx, p)` therefore always equals
 `load(ctx, p)`. The chunk-concatenation property over *split contexts* does not
 hold for stateful operators, with one exception: `sortcycles`, since a split at
-`b` sends every row at `b` to the later half and never divides a cycle.
+`b` sends every row at `b` to the later half and never divides a cycle. The
+remedy is [`warmup`](#warm-up), which runs a stateful transform from
+`lookback` before each context so that its state is already warm at `start`.
 
 `settime` is the odd one out: it carries only a `prevtime` for validation, so it
 is not stateful in the sense above, yet it still loses the chunk-concatenation
@@ -2389,7 +2445,7 @@ the second.
 | `src/frame.jl` | `CausalFrame{T}`, invariants, Tables.jl interface |
 | `src/chunks.jl` | internal chunk-iterator machinery (`ChunkSource`, `chunkmap`, `PullCursor`) |
 | `src/pipeline.jl` | `CausalPipeline{F}`, `load`, `stream`, `scan` |
-| `src/operators.jl` | sources (including the n-ary `concatenate`), the CSV sink, row-wise transforms, the causal time shift (`lag`) with the shared `shiftchunk!`, the column projections and `reordercolumns` over one shared selector vocabulary, the truncating `head` with its `HeadProducer`, and the causal retiming (`settime`) with the shared `settimechunk!` |
+| `src/operators.jl` | sources (including the n-ary `concatenate`), the CSV sink, row-wise transforms, the causal time shift (`lag`) with the shared `shiftchunk!`, the context-widening `warmup` with the shared `dropleadin!`, the column projections and `reordercolumns` over one shared selector vocabulary, the truncating `head` with its `HeadProducer`, and the causal retiming (`settime`) with the shared `settimechunk!` |
 | `src/merge.jl` | the n-ary time-interleaving source (`Base.merge`) and its per-pipeline cursors |
 | `src/parquet.jl` | the parquet operators, their docstrings, and backend selection |
 | `ext/CausalFramesDuckDBExt.jl` | the DuckDB backend: the preferred reader, the fallback writer |
@@ -2426,7 +2482,7 @@ Exports: `Context`, `CausalFrame`, `CausalPipeline`, `load`, `stream`,
 `PercentRank`, `Min`, `Max`, `First`, `Last`, `FitModel`, `FittedModel`,
 `applymodels`, `addpredictions`, `modelreports`, `summarize`,
 `summarizecycles`, `intervalize`, `summarizewindows`, `addsummarycolumns`,
-`addrollingcolumns`, `Bars`, `asofjoin`, `lookupjoin`, `lag`, `settime`, `head`,
+`addrollingcolumns`, `Bars`, `asofjoin`, `lookupjoin`, `lag`, `warmup`, `settime`, `head`,
 `lastrow`, `sortcycles`, `forwardfill`, `fillmissing`.
 
 `merge` is not in that list: it is `Base.merge`, extended for `CausalPipeline`

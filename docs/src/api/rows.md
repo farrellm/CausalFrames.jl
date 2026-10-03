@@ -40,6 +40,12 @@ sortcycles
 lag
 ```
 
+## `warmup`
+
+```@docs
+warmup
+```
+
 ## `Acausal.lead`
 
 ```@docs
