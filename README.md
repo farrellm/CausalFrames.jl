@@ -107,6 +107,7 @@ time,bid,ask,mid
 | [`lastrow(; key)`](https://farrellm.github.io/CausalFrames.jl/dev/api/rows/#lastrow) | the last row (per key), retimed to `stop` |
 | [`sortcycles(by; rev)`](https://farrellm.github.io/CausalFrames.jl/dev/api/rows/#sortcycles) | stably sort the rows sharing each time |
 | [`lag(offset)`](https://farrellm.github.io/CausalFrames.jl/dev/api/rows/#lag) | move every row `offset` later |
+| [`warmup(lookback, f)`](https://farrellm.github.io/CausalFrames.jl/dev/api/rows/#warmup) | run `f` from `lookback` before the window, so its state starts warm |
 | [`settime(spec)`](https://farrellm.github.io/CausalFrames.jl/dev/api/rows/#settime) | recompute `:time` from a column or function; rows may only move later |
 
 ### Column transformations

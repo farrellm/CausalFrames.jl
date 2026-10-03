@@ -61,7 +61,10 @@ function forwardfill(selectors...; key = nothing, tolerance = nothing)
     return function (p::CausalPipeline)
         return CausalPipeline() do ctx::Context
             st = ForwardFillState(keycols, selectors)
-            step = c -> fillchunk!(st, keynames, tolerance, ctx.start, c)
+            # With `tolerance` the input runs over a widened context: rows
+            # before `ctx.start` fill the cells and are then dropped.
+            drop = LeadInDrop(ctx.start)
+            step = c -> dropleadin!(drop, fillchunk!(st, keynames, tolerance, c))
             return chunkmap(
                 step,
                 p.run(widenstart(ctx, tolerance, "forwardfill tolerance")),
@@ -94,20 +97,18 @@ mutable struct ForwardFillState
     fillval::Any     # Val{Tuple(fillnames)}, memoized alongside it
     types::Union{Nothing,NamedTuple}          # promotion of every schema seen
     cells::Any       # keyless: the NamedTuple of cells; keyed: Dict{K,NT} of them
-    passedstart::Bool                         # a row at or after ctx.start seen
 end
 ForwardFillState(keycols::Vector{Symbol}, selectors::Tuple) =
     ForwardFillState(keycols, selectors, nothing, nothing, nothing, nothing,
-        nothing, false)
+        nothing)
 
-function fillchunk!(st::ForwardFillState, keynames::Val, tolerance, start,
-    c::DataFrame)
+function fillchunk!(st::ForwardFillState, keynames::Val, tolerance, c::DataFrame)
     resolvefill!(st, c)
     types = promotetypes(st.types, chunktypes(c))
     widened = st.types !== nothing && types != st.types
     st.types = types
     fillprepared!(st, keynames, st.fillval, tolerance, types, widened, c)
-    return clipstart!(st, c, start)
+    return c
 end
 
 # The columns to fill, in the chunk's order, memoized against the names they
@@ -257,17 +258,6 @@ end
         outcol === nothing || (@inbounds outcol[i] = x)
     end
     return fillrow!(i, t, tolerance, Base.tail(groups), Base.tail(cells))
-end
-
-# With `tolerance` the input ran over a widened context: rows before
-# `ctx.start` fill the cells and are then dropped. Once a chunk reaches the
-# window, every later chunk is inside it.
-function clipstart!(st::ForwardFillState, c::DataFrame, start)
-    st.passedstart && return c
-    lo = searchsortedfirst(c.time, start)
-    lo > nrow(c) && return nothing
-    st.passedstart = true
-    return lo == 1 ? c : c[lo:end, :]
 end
 
 # --- fillmissing -----------------------------------------------------------

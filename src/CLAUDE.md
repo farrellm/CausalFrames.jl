@@ -59,6 +59,12 @@ design rationale and performance constraints behind each module.
     that shift, sharing `settimechunk!` with `Acausal.settime`; it cannot widen
     the context (the shift is data-dependent), so it needs three independent
     order checks instead (see DESIGN.md's "Retiming")
+  - `warmup` runs `f(p)` (built once, at application) over `widenstart`'s
+    context and drops the lead-in with `dropleadin!`, which `forwardfill`'s
+    `tolerance` shares. Its `LeadInDrop` is created per run, never per
+    construction, and passes chunks untouched once one reaches `start`; the
+    straddling chunk is sliced, never `deleteat!`ed (the `writecsv` hand-off
+    argument)
   - `head` is the one transform not built on `chunkmap`, which cannot stop
     early: it drives the upstream iterator from a `HeadProducer` behind a
     `ChunkSource`. A second early-exit operator would be the point to extract
@@ -295,7 +301,7 @@ design rationale and performance constraints behind each module.
   `Union{Nothing,V}` to box (as with `KeyBuffer`). A selected column whose
   promoted type admits no `Missing` gets `nothing` instead of a replacement
   column, which folds the write out of the unrolled kernel. `tolerance` widens
-  the input context as `asofjoin` does, so `clipstart!` drops the pre-`start`
+  the input context as `asofjoin` does, so `warmup`'s `dropleadin!` drops the pre-`start`
   rows the fill was allowed to see
 - `src/ring.jl` — `RowRing`, the package's one ring buffer: preallocated,
   overwriting its oldest row when full, with `ringback(r, j)` reading the j-th

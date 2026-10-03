@@ -57,6 +57,7 @@
         DataFrame(load(ctx, pm |> forwardfill(:m)))
         DataFrame(load(ctx, pm |> forwardfill(:m; key = :sym, tolerance = 2)))
         DataFrame(load(ctx, pm |> fillmissing(:m => 0.0)))
+        DataFrame(load(Context(2, 5), pm |> warmup(1, forwardfill(:m))))
         DataFrame(
             load(
                 ctx,
