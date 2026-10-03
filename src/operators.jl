@@ -750,8 +750,8 @@ context's start, such as [`clock`](@ref) ticks.
 
 Warm-ups compose by adding their lookbacks: for non-negative `x` and `y`,
 `warmup(x, warmup(y, f))` equals `warmup(x + y, f)` whenever
-`(start - x) - y == start - (x + y)`. That fails for floating-point
-rounding, and for calendar periods near a month's end.
+`(start - x) - y == start - (x + y)`, which floating-point rounding and
+calendar periods near a month's end can break.
 
 # Arguments
 - `lookback`: how far before `start` `f` runs, in a type that can be subtracted
