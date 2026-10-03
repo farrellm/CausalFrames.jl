@@ -883,6 +883,17 @@ runs `f(p)` over `[start - lookback, stop)` and drops output rows with
   `f(p).run` over the widened context, so a transform inside `f` that widens
   further (`addrollingcolumns`, `lag`, `asofjoin`, a nested `warmup`) widens
   the already-widened context and nesting needs no code.
+- **Nesting.** `warmup(x, warmup(y, f))` equals `warmup(x + y, f)`. The nested
+  form runs `f(p)` over `[(start - x) - y, stop)` and drops rows before
+  `start - x`, then before `start`. The inner drop is subsumed by the outer
+  one, and `stop` is the same, so `f` sees the same input and the same rows
+  survive. Two conditions apply. Each `warmup` checks its own `lookback`,
+  so a negative part is an error even when the sum is non-negative, which is
+  right, since a negative inner lookback would look ahead. The subtraction must
+  also be associative, which floating-point rounding and calendar periods break:
+  from `2026-03-31`, `Day(1)` then `Month(1)` lands on Feb 28, while the
+  compound `Day(1) + Month(1)` applies the month first and lands on Feb 27.
+  Each form is still correct; they differ only in where the lead-in begins.
 - **The drop.** Only rows before `start` are dropped, never rows at `stop`:
   the widened context keeps `stop`, so `f(p)` is bounded as it would be
   without the warm-up, and a transform's rows at `stop` (`summarize`'s) are
