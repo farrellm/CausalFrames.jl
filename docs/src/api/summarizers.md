@@ -136,6 +136,12 @@ MeanAbsDev
 CausalFrames.SortedValues
 ```
 
+## `WindowValues`
+
+```@docs
+CausalFrames.WindowValues
+```
+
 ## `Min`
 
 ```@docs

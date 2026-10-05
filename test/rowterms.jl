@@ -155,6 +155,7 @@
             (t -> Moment(t, 2), :range), (t -> Mean(t), :range),
             (t -> Variance(t), :range), (t -> Std(t; corrected = false), :range),
             (t -> CausalFrames.SortedValues(t), :range),
+            (t -> CausalFrames.WindowValues(t), :range), (t -> MeanAbsDev(t), :range),
             (t -> Quantile(t, [0.25, 0.5]), :range),
             (t -> Quantile(t, 0.9; interpolation = :nearestrank), :range),
             (t -> Median(t), :range), (t -> PercentRank(t), :range),
@@ -164,7 +165,10 @@
         for (make, c) in forms
             s = make(:range => rng)
             @test CausalFrames.unterm(s) == make(c)
-            s isa CausalFrames.Termed{<:CausalFrames.SortedValues} && continue
+            s isa CausalFrames.Termed{
+                <:Union{CausalFrames.SortedValues,CausalFrames.WindowValues},
+            } &&
+                continue
             @test isequal(
                 run(src |> addrollingcolumns((w2 = 2,), s; key = :k)),
                 select(run(added |> addrollingcolumns((w2 = 2,), make(c); key = :k)),
