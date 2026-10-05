@@ -94,6 +94,24 @@ A single folded row returns exactly 0 rather than reading the sums: after
 sliding, compensated `Σd²` need not equal `d·d` bit for bit, and a corrected
 one-row variance must be `0/0 = NaN`, not `±Inf`.
 
+### The `Bars(2)` floor, and why recentring more often doesn't lower it
+
+CausalIndicators' port of TA-Lib's `test_stddev.c` checks shift invariance
+to `1e-9 + 4c·eps/σ`. With this design it passes in every cell except
+`Bars(2)` at `c = 1e6`, where the tolerance is tightest and the c-independent
+floor above (pairs of near-equal values far from the shift) exceeds it. Its
+non-negativity leg passes.
+
+Recentring once a *quarter* of the rows postdate the shift (so `Bars(2)`
+shifts to the newest row on every row) made it worse: `Bars(2)` 1.1e-6 and
+`Bars(5)` 7.1e-13 worst. Moving the shift by δ rewrites the sums with error
+~`eps·n·δ²`, at the scale of the jump, so more frequent moves add error rather
+than remove it. Lowering the floor needs the deviations' squares and the
+rewrite carried exactly: error-free products (`fma`) into the compensated sums
+and a double-double evaluation in `value`, all local to `CoMomentState`. That
+was left as a possible follow-up; it would cost roughly another fma and
+compensated step per product per row.
+
 ## Cost
 
 200,000 rows, single-threaded, ns/row (master → this design):
