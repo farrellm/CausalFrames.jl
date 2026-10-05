@@ -929,7 +929,7 @@ end
     ]
     relerr(v, r) = r == 0 ? abs(v) : abs(v - r) / r
     base = [1000 * sin(1.7i) * cos(0.3i^2) for i in 1:400]
-    for (n, tol) in ((2, 1e-5), (5, 1e-11), (20, 1e-13)), c in (0.0, 1e6, 1e8, 1e10)
+    for (n, tol) in ((2, 1e-9), (5, 1e-13), (20, 1e-14)), c in (0.0, 1e6, 1e8, 1e10)
         x = base .+ c
         v, r = winvar(x, n), exactvar(x, n)
         @test maximum(i -> relerr(v[i], r[i]), n:length(x)) < tol
@@ -939,7 +939,7 @@ end
     x = [1e8 + ((i * 13) % 7 - 3) * 0.01 for i in 0:499]
     v, r = winvar(x, 2), exactvar(x, 2)
     @test all(>=(0), skipmissing(v))
-    @test maximum(i -> relerr(v[i], r[i]), 2:length(x)) < 1e-6
+    @test maximum(i -> relerr(v[i], r[i]), 2:length(x)) < 1e-14
 
     # a flat window is exactly zero, at any level
     for level in (1e-6, 1.0, 1e8, 1e15)
@@ -952,7 +952,36 @@ end
     # a long window over a drifting level stays accurate: the shift follows
     y = [1e5 + 0.5i + sin(i) for i in 1:20_000]
     v, r = winvar(y, 5), exactvar(y, 5)
-    @test maximum(i -> relerr(v[i], r[i]), 5:length(y)) < 1e-10
+    @test maximum(i -> relerr(v[i], r[i]), 5:length(y)) < 1e-14
+
+    # two near-equal values far from the shift (issue #91): the products and
+    # the final subtraction are carried exactly, so nothing is lost at the
+    # scale of the distance (TA-Lib test_stddev.c's LCG series)
+    function lcgsym(seed, n)
+        state = UInt32(seed)
+        return map(1:n) do _
+            state = state * 0x41c64e6d + 0x00003039
+            Float64((state >> 8) & 0x00ffffff) / 8388608.0 - 1.0
+        end
+    end
+    x = 100 .+ 20 .* lcgsym(0x5EED1234, 300)
+    v, r = winvar(x, 2), exactvar(x, 2)
+    @test maximum(i -> relerr(v[i], r[i]), 2:length(x)) < 1e-14
+    # ... so it scales as c² (the CausalIndicators leg, 1e-9 there)
+    for c in (3.0, 1e3, 1e-3)
+        w = winvar(c .* x, 2)
+        @test maximum(i -> relerr(w[i], c^2 * v[i]), 2:length(x)) < 1e-10
+    end
+    # ... and a covariance of the pair is exact likewise
+    y = 50 .+ 5 .* lcgsym(0x0BADCAFE, 300)
+    out = DataFrame(
+        load(Context(0, 301),
+            readtable((time = collect(1:300), x = x, y = y)) |>
+            addrollingcolumns((w = Bars(2),), Covariance(:x, :y; corrected = false))),
+    )
+    exactcov(i) = Float64((big(x[i]) - big(x[i-1])) * (big(y[i]) - big(y[i-1])) / 4)
+    @test maximum(i -> relerr(abs(out.w_x_y_covariance[i]), abs(exactcov(i))),
+        2:300) < 1e-14
 
     # combine! re-expresses one side at the other's shift; states folded at
     # far-apart levels still combine to the exact answer

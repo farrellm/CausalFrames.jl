@@ -2244,10 +2244,18 @@ round-off at the scale of the spread, since it is shift-invariant:
   mean so that deviations stay exact differences of inputs: the running tier
   and a re-fold then agree exactly wherever the inputs allow (a flat window is
   exactly `0` on both), which the mean, generally inexact, breaks;
-- the value is `(n·Σd_a·d_b − Σd_a·Σd_b) / n`, one rounding over an exact
-  integer numerator, and a single row's is exactly `0` (after sliding,
-  compensated `Σd²` need not equal `d·d` bit for bit, and a corrected one-row
-  variance must stay `0/0 = NaN`);
+- each sum `Σd_a·d_b` is about `n·D²` for `D` the distance from the shift to
+  the window, against a co-moment at the scale of the spread `s`, so a float
+  state rounds nothing at the scale of `D²` (issue #91): each product
+  `d_a·d_b`, and each term of the recentring rewrite, is folded error-free (an
+  `fma` two-product, its rounding error added to the compensation), and the
+  value reads each compensated sum as the double-double `total + comp`;
+- the value is `(n·Σd_a·d_b − Σd_a·Σd_b) / n`, its leading products formed
+  exactly and rounded once at the end (for integers, one rounding over an
+  exact numerator). With exact sums every low part is `0`, so states agreeing
+  on a zero co-moment still agree exactly. A single row's value is exactly `0`
+  (after sliding, compensated `Σd²` need not equal `d·d` bit for bit, and a
+  corrected one-row variance must stay `0/0 = NaN`);
 - `combine!` re-expresses one side's sums at the other's shifts by the same
   expansion, and a fresh state (no rows, no shift) is its identity;
 - only rows with both values present and finite are folded. A `missing` row is
@@ -2257,11 +2265,14 @@ round-off at the scale of the spread, since it is shift-invariant:
 - the value with `a = b` is clamped at zero, so round-off never makes a
   variance negative; integer input folds exactly, giving `Float64`.
 
-What remains at short windows is not offset-dependent: a window whose spread
-is tiny against its distance from the shift (two near-equal rows after a large
-jump) still loses `eps · (distance / spread)²` relatively, the same at a level
-of `0` as of `1e10`. `notes/variance-cancellation.md` records the measurements
-and the alternatives rejected (Welford/Chan updates, error-free squares).
+What remains is the deviation `x − K` itself, one subtraction, exact when `x`
+and `K` are within a factor of two (Sterbenz) and otherwise rounded at
+`eps · D`, which costs `eps · D / s` relatively: a window of near-equal values
+near zero, far from a shift on the other side of zero. Recentring more often
+does not help: the rewrite is exact now, but the shift still lags the window.
+`notes/variance-cancellation.md` records the measurements and the alternatives
+rejected (Welford/Chan updates, error-free squares on the shared raw sums,
+recentring on every row).
 
 `Variance`, `Std`, and `Covariance` follow `Statistics`: a `corrected::Bool`
 keyword (default `true`) selects the divisor `n − Int(corrected)`, so the

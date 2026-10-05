@@ -916,6 +916,69 @@ end
 # The value's type, from that arithmetic: integer input gives Float64.
 comomenttype(::Type{T}) where {T} = Base.promote_op(comomentof, Int, T, T, T)
 
+# A float state's sums are each `Σd·d` ≈ n·D² for D the distance from the shift
+# to the window, while the co-moment is at the scale of the spread s, so any
+# rounding at the scale of D² costs eps·(D/s)² (issue #91: a two-row window of
+# near-equal values). Hence every product entering the sums is error-free (an
+# fma two-product, its error folded into the compensation), and `value` reads
+# each Compensated pair `total + comp` as a double-double rather than rounding
+# it to one float. Plain storage (integers, BigFloat) uses ordinary arithmetic.
+@inline twoprod(x, y) = (p = x * y; (p, fma(x, y, -p)))
+
+# Fold the pair p + e: p takes the Neumaier step, the small e goes straight to
+# the compensation. A nonfinite p (overflow) is counted as compadd counts it.
+@inline function compaddpair(s::Compensated{A}, p::A, e::A) where {A}
+    isfinite(p) || return compadd(s, p)
+    t, c = neumaier(s.total, s.comp, p)
+    return Compensated{A}(t, c + e, s.nans, s.posinf, s.neginf)
+end
+# Its inverse over the identically computed pair.
+@inline function compsubpair(s::Compensated{A}, p::A, e::A) where {A}
+    isfinite(p) || return compsub(s, p)
+    t, c = neumaier(s.total, s.comp, -p)
+    return Compensated{A}(t, c - e, s.nans, s.posinf, s.neginf)
+end
+
+# s ± x·y.
+@inline accaddprod(s, x, y) = s + x * y
+@inline accaddprod(s::Compensated, x, y) = compaddpair(s, twoprod(x, y)...)
+@inline accsubprod(s, x, y) = s - x * y
+@inline accsubprod(s::Compensated, x, y) = compsubpair(s, twoprod(x, y)...)
+
+# s - x·y for y an accumulator in s's storage: x times y's total exactly, plus x
+# times its compensation, already at eps² of the product.
+@inline accsubscaled(s, x, y) = s - x * y
+@inline function accsubscaled(s::Compensated{A}, x::A, y::Compensated{A}) where {A}
+    p, e = twoprod(x, y.total)
+    return compsubpair(s, p, e + x * y.comp)
+end
+
+# s + n·x·y, n a row count: n·x is formed exactly first.
+@inline accaddprod3(s, n, x, y) = s + n * x * y
+@inline function accaddprod3(s::Compensated{A}, n::A, x::A, y::A) where {A}
+    q, f = twoprod(n, x)
+    p, e = twoprod(q, y)
+    return compaddpair(s, p, e + f * y)
+end
+
+# `comomentof` over the sums as stored: (n·sab - sa·sb)/n in double-double for
+# compensated sums, the leading products formed exactly. With exact sums and
+# products every low part is 0 and this is `comomentof` itself, so the exact
+# agreement on a zero co-moment survives. A sum holding an overflowed term falls
+# back to the IEEE reconstruction.
+@inline comomentvalue(n::Int, sab, sa, sb) = comomentof(n, sab, sa, sb)
+@inline function comomentvalue(n::Int, sab::Compensated{A}, sa::Compensated{A},
+    sb::Compensated{A}) where {A}
+    compfinite(sab) && compfinite(sa) && compfinite(sb) ||
+        return comomentof(n, compvalue(sab), compvalue(sa), compvalue(sb))
+    nf = convert(A, n)
+    p1, e1 = twoprod(nf, sab.total)
+    p2, e2 = twoprod(sa.total, sb.total)
+    lo = (e1 + nf * sab.comp) - (e2 + (sa.total * sb.comp + sa.comp * sb.total))
+    return ((p1 - p2) + lo) / n
+end
+@inline compfinite(s::Compensated) = s.nans == 0 && s.posinf == 0 && s.neginf == 0
+
 fresh(st::CoMomentState{N,A,B,T,M,S}) where {N,A,B,T,M,S} =
     CoMomentState{N,A,B,T,M,S}(0, 0, convert(T, 0), convert(T, 0),
         acczero(S), acczero(S), acczero(S), 0, 0)
@@ -953,7 +1016,7 @@ end
     db = b - st.kb
     st.sa = accadd(st.sa, da)
     A === B || (st.sb = accadd(st.sb, db))
-    st.sab = accadd(st.sab, da * db)
+    st.sab = accaddprod(st.sab, da, db)
     st.n += 1
     compensable(T) && 2 * st.age > st.n && recentre!(st, a, b)
     return nothing
@@ -983,23 +1046,24 @@ end
         db = b - st.kb
         st.sa = accsub(st.sa, da)
         A === B || (st.sb = accsub(st.sb, db))
-        st.sab = accsub(st.sab, da * db)
+        st.sab = accsubprod(st.sab, da, db)
     end
     return nothing
 end
 
 # Move the shifts to (ka, kb). With δ the move,
 # Σ(a - ka - δa)(b - kb - δb) = Σab - δb·Σa - δa·Σb + n·δa·δb, each term folded
-# into the compensated sums.
+# into the compensated sums exactly (to eps² of the term).
 @inline function recentre!(st::CoMomentState{N,A,B,T}, ka::T, kb::T) where {N,A,B,T}
     n = convert(T, st.n)
-    sa = accvalue(st.sa)
-    sb = A === B ? sa : accvalue(st.sb)
+    sa = st.sa
+    sb = A === B ? sa : st.sb
     δa = ka - st.ka
     δb = kb - st.kb
-    st.sab = accadd(accadd(accadd(st.sab, -(δb * sa)), -(δa * sb)), n * δa * δb)
-    st.sa = accadd(st.sa, -(n * δa))
-    A === B || (st.sb = accadd(st.sb, -(n * δb)))
+    st.sab = accaddprod3(accsubscaled(accsubscaled(st.sab, δb, sa), δa, sb),
+        n, δa, δb)
+    st.sa = accsubprod(st.sa, n, δa)
+    A === B || (st.sb = accsubprod(st.sb, n, δb))
     st.ka = ka
     st.kb = kb
     st.age = 0
@@ -1021,12 +1085,13 @@ function combine!(dest::CoMomentState{N,A,B,T,M,S}, a::CoMomentState{N,A,B,T,M,S
         nb = convert(T, b.n)
         δa = b.ka - a.ka
         δb = b.kb - a.kb
-        bsa = accvalue(b.sa)
-        bsb = A === B ? bsa : accvalue(b.sb)
-        sa = accadd(accmerge(a.sa, b.sa), nb * δa)
-        sb = A === B ? a.sb : accadd(accmerge(a.sb, b.sb), nb * δb)
-        sab = accadd(accadd(accadd(accmerge(a.sab, b.sab), δa * bsb), δb * bsa),
-            nb * δa * δb)
+        bsb = A === B ? b.sa : b.sb
+        sa = accaddprod(accmerge(a.sa, b.sa), nb, δa)
+        sb = A === B ? a.sb : accaddprod(accmerge(a.sb, b.sb), nb, δb)
+        # + δa·Σb + δb·Σa, as the subtraction of the negated shift (exact).
+        sab = accaddprod3(
+            accsubscaled(accsubscaled(accmerge(a.sab, b.sab), -δa, bsb), -δb, b.sa),
+            nb, δa, δb)
         n, age, ka, kb = a.n + b.n, a.age + b.n, a.ka, a.kb
     end
     dest.n, dest.age, dest.ka, dest.kb = n, age, ka, kb
@@ -1047,9 +1112,7 @@ end
     # need not reproduce bit for bit (Σd² minus d·d leaves round-off), and a
     # corrected single-row variance must be 0/0 = NaN, not ±Inf.
     st.n <= 1 && return NamedTuple{(N,),Tuple{R}}((zero(V),))
-    sa = accvalue(st.sa)
-    sb = A === B ? sa : accvalue(st.sb)
-    c = comomentof(st.n, accvalue(st.sab), sa, sb)
+    c = comomentvalue(st.n, st.sab, st.sa, A === B ? st.sa : st.sb)
     return NamedTuple{(N,),Tuple{R}}((A === B ? max(c, zero(c)) : c,))
 end
 

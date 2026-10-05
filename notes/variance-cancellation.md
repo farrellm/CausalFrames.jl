@@ -96,6 +96,8 @@ one-row variance must be `0/0 = NaN`, not `±Inf`.
 
 ### The `Bars(2)` floor, and why recentring more often doesn't lower it
 
+(Superseded by "Error-free products" below, which removed this floor.)
+
 CausalIndicators' port of TA-Lib's `test_stddev.c` checks shift invariance
 to `1e-9 + 4c·eps/σ`. With this design it passes in every cell except
 `Bars(2)` at `c = 1e6`, where the tolerance is tightest and the c-independent
@@ -111,6 +113,56 @@ rewrite carried exactly: error-free products (`fma`) into the compensated sums
 and a double-double evaluation in `value`, all local to `CoMomentState`. That
 was left as a possible follow-up; it would cost roughly another fma and
 compensated step per product per row.
+
+## Error-free products (issue #91)
+
+The floor above was then removed by the follow-up it names, kept local to
+`CoMomentState`: each `d_a·d_b` is an `fma` two-product whose error goes
+straight into the Neumaier compensation (so `downdate!` removes the identical
+pair), the recentring and `combine!` rewrites form `δ·Σd` against the
+compensated pair's total exactly and `n·δa·δb` as two two-products, and
+`value` evaluates `n·Σab − Σa·Σb` over the pairs `total + comp` in
+double-double, rounding once. Integer and `BigFloat` states keep plain
+arithmetic. With exact inputs every low part is zero, so the formula reduces
+to the old one and exact agreement on a zero co-moment is unchanged.
+
+The #90 table again (same data, same exact reference):
+
+| window | c = 0 | c = 1e6 | c = 1e8 | c = 1e10 |
+|---|---|---|---|---|
+| `Bars(2)` | 8.3e-12 | 0 | 0 | 0 |
+| `Bars(5)` | 4.3e-15 | 3.4e-16 | 3.3e-16 | 3.3e-16 |
+| `Bars(20)` | 4.6e-16 | 3.4e-16 | 3.0e-16 | 2.8e-16 |
+
+The issue's LCG series (`100 + 20·u`, TA-Lib's `test_stddev.c`) is now exact
+at `Bars(2)` on every row (was 5e-7), and `var(c·x)` matches `c²·var(x)` to
+8e-12 for `c ∈ {3, 1e3, 1e-3}`. The 20,000-row drift at `Bars(5)` is within
+3.5e-16 of exact.
+
+The remaining `c = 0` error is the deviation `x − K`: one subtraction, exact
+when `x` and `K` are within a factor of two (Sterbenz), else rounded at
+`eps·D`, costing `eps·D/s`. The test data there crosses zero, so x and K
+can't be within 2× of each other. An exact `TwoDiff` deviation would remove
+it, but then the recentring shift `δ` has to be carried as a pair too, which
+makes every rewrite term double-double. It was left as is: a linear `eps·D/s`
+only matters for a spread many orders below its distance to the previous level.
+
+The issue's own suggestion, moving `K` to the newest row (or the window mean)
+on every eviction, was not taken: the quarter-threshold measurement above
+already showed that with an inexact rewrite it adds error, and with an exact
+one it buys nothing, since the deviations no longer round at `D²`.
+
+Cost, 200,000 rows, single-threaded, ns/row, mean of two interleaved runs
+(run-to-run noise here is about ±10%):
+
+| case | before | error-free |
+|---|---|---|
+| `Std`, `Bars(20)` | 121 | 122 |
+| `Std`, time window 50 | 97 | 91 |
+| `Correlation`, `Bars(20)` | 136 | 150 |
+| `LinearRegression` K = 1, `Bars(20)` | 204 | 231 |
+| `LinearRegression` K = 3, `Bars(20)` | 1203 | 1236 |
+| `summarize(Variance)` | 14.5 | 16.3 |
 
 ## Cost
 

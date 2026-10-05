@@ -180,11 +180,16 @@ design rationale and performance constraints behind each module.
     `M`) and nonfinite rows apart so it stays a group. It recentres `K` to the
     newest row once more than half its rows postdate the shift — the newest
     row, not the mean, so deviations stay exact input differences and the
-    running tier agrees exactly with a re-fold. `combine!` re-expresses one
-    side at the other's shift. It costs 20-26% on regressions and
-    `Correlation` over the old raw sums; `notes/variance-cancellation.md` has
-    the numbers and the rejected designs (Welford, error-free squares, a
-    per-fit multivariate accumulator)
+    running tier agrees exactly with a re-fold. Every product entering the sums
+    is error-free (`twoprod`, its error added to the compensation) and `value`
+    reads the compensated pairs as double-doubles (`comomentvalue`), since the
+    sums sit at the scale of the squared distance to the shift and the
+    co-moment at the spread's (issue #91). `combine!` re-expresses one side at
+    the other's shift. It costs 20-26% on regressions and
+    `Correlation` over the old raw sums, and the error-free products up to
+    ~13% more; `notes/variance-cancellation.md` has
+    the numbers and the rejected designs (Welford, error-free squares on the
+    raw sums, a per-fit multivariate accumulator)
   - `AgeWeightedSum` (`Σ k·y`, k the row's age) can't be a term functor, since
     its update reads its own `S₁`, so it has its own plain and compensated
     states, reusing the `Compensated` helpers and counting `missing` through
