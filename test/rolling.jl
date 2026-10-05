@@ -332,7 +332,7 @@ end
     plainset = [Sum(:x), TestVar(:x), PlainSum(:y)]       # running + re-fold
     spanset = [TierSpan(:x), Mean(:y), Last(:y)]          # every tier at once
     # the sorted accumulator and its dependents, PercentRank through Last
-    orderset = [Quantile(:x, [0.1, 0.5, 0.9]), Median(:x), PercentRank(:x),
+    orderset = [Quantile(:x, [0.1, 0.5, 0.9]), Median(:x), PercentRank(:x), MeanAbsDev(:x),
         Quantile(:y, [0.07, 0.25, 1.0]; interpolation = :nearestrank)]
     allsets = (groupset, trackset, indexset, monoidset, mixedset, plainset,
         spanset, orderset)

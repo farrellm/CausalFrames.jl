@@ -234,7 +234,7 @@ end
     mixedset = [Sum(:x), Min(:x), MinMax(:y), Product(:y)] # running + tree
     plainset = [Sum(:x), TestVar(:x), PlainSum(:y)]       # running + re-fold
     spanset = [TierSpan(:y), Mean(:x), Last(:x)]          # every tier at once
-    orderset = [Quantile(:x, [0.1, 0.5]), Median(:y), PercentRank(:x),
+    orderset = [Quantile(:x, [0.1, 0.5]), Median(:y), PercentRank(:x), MeanAbsDev(:y),
         Quantile(:y, 0.25; interpolation = :nearestrank)]
     allsets = (groupset, trackset, monoidset, mixedset, plainset, spanset,
         orderset)

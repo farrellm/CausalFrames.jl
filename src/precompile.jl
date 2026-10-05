@@ -148,7 +148,8 @@
                 ctx,
                 p |> addrollingcolumns((w2 = 2,),
                     [Min(:v), Last(:v), Product(:v), Mean(:v), MaxWithIndex(:v),
-                        Quantile(:v, [0.25, 0.75]), Median(:v), PercentRank(:v)];
+                        Quantile(:v, [0.25, 0.75]), Median(:v), PercentRank(:v),
+                        MeanAbsDev(:v)];
                     key = :sym),
             ),
         )

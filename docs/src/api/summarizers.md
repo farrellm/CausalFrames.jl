@@ -124,6 +124,12 @@ Median
 PercentRank
 ```
 
+## `MeanAbsDev`
+
+```@docs
+MeanAbsDev
+```
+
 ## `SortedValues`
 
 ```@docs

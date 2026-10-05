@@ -1775,6 +1775,7 @@ Concrete summarizers provided, for an input column of element type `T`:
 | `Quantile(column, p; interpolation)` | `:x_quantile_50` for `p = 0.5`, one per `p` | `Float64` for integers (linear), `T` (nearest rank) | `missing` |
 | `Median(column)` | `:x_median` | as linear `Quantile` | `missing` |
 | `PercentRank(column)` | `:x_percentrank` | `Float64` | `missing` |
+| `MeanAbsDev(column)` | `:x_meanabsdev` | as `Mean` | `missing` |
 | `SortedValues(column)` (unexported) | `:x_sortedvalues` | the state itself, borrowed | `missing` |
 | `Min(column)` | `:x_min` | `T` | `missing` |
 | `Max(column)` | `:x_max` | `T` | `missing` |
@@ -1955,7 +1956,8 @@ so `summarize`, `intervalize` and the cycle folds keep the `Set`.
 The order statistics are the other summarizers whose state is not O(1). One
 accumulator, `SortedValues(column)` (unexported, but documented so an outside
 summarizer can depend on it), keeps the column's values in a sorted `Vector`,
-and `Quantile`, `Median` and `PercentRank` are fieldless dependents reading it.
+and `Quantile`, `Median`, `PercentRank` and `MeanAbsDev` are fieldless
+dependents reading it.
 A sorted multiset is a lawful group: an insert is undone by deleting one copy,
 and two multisets merge, so every order statistic of a window stays on the
 running tier at a binary search plus a memmove per row (`insert!`/`deleteat!`
@@ -2010,6 +2012,18 @@ compares the newest value strictly against the `N` rows before it and scales by
 `PERCENTRANK.INC`. A single row is `0/0 = NaN`, as a one-row corrected
 variance is. It reads the newest value from `Last(column)`, which is a group
 through its windowed state, so a call containing it stays on the running tier.
+
+`MeanAbsDev(column)` is the mean absolute deviation about the mean,
+`Σ|x − mean| / n`. That is Excel's `AVEDEV`, TA-Lib's `AVGDEV` and the
+deviation in TA-Lib's `CCI`. It cannot be a group of its own: the deviations
+are taken from the current mean, so every row's term changes whenever a row
+enters or leaves. It is instead a dependent over the sorted accumulator and
+`Mean`, sharing both, and it stays on the running tier. Each emission scans the
+window's values once, a pairwise `sum` of `abs(v − mean)`, which is O(window)
+per row. TA-Lib pays the same cost, and an indicator's window is short. The
+mean is the compensated `Mean`, so the deviations are taken from the correctly
+rounded centre, not a drifting running sum. `missing` and NaN propagate as for
+the order statistics.
 
 `Sum`, `SumPower`, `Product`, `DotProduct`, and `CountDistinct` have an
 identity element, so they summarize no rows as `0` (`Product` as `1`). The
@@ -2523,7 +2537,7 @@ Exports: `Context`, `CausalFrame`, `CausalPipeline`, `load`, `stream`,
 `SummarizerState`, `Count`, `CountDistinct`, `Sum`, `SumPower`,
 `AgeWeightedSum`, `Moment`, `Product`, `DotProduct`, `Mean`, `Variance`,
 `Std`, `Covariance`, `Correlation`, `LinearRegression`, `Quantile`, `Median`,
-`PercentRank`, `Min`, `Max`, `MinIndex`, `MaxIndex`, `MinWithIndex`,
+`PercentRank`, `MeanAbsDev`, `Min`, `Max`, `MinIndex`, `MaxIndex`, `MinWithIndex`,
 `MaxWithIndex`, `First`, `Last`, `FitModel`, `FittedModel`,
 `applymodels`, `addpredictions`, `modelreports`, `summarize`,
 `summarizecycles`, `intervalize`, `summarizewindows`, `addsummarycolumns`,

@@ -190,8 +190,8 @@ design rationale and performance constraints behind each module.
     counts nonfinites, so the accumulator stays invertible. `Union{Missing,_}`
     appears only in `value`'s return, never in an accumulation field. With `M`
     false the count is never touched and its tests compile away
-  - the order statistics (`Quantile`, `Median`, `PercentRank`) are fieldless
-    dependents over one accumulator, the unexported `SortedValues`: a sorted
+  - the order statistics (`Quantile`, `Median`, `PercentRank`) and
+    `MeanAbsDev` are fieldless dependents over one accumulator, the unexported `SortedValues`: a sorted
     `Vector` (binary search plus memmove: under 300 ns per row to a 1,000-row
     window, growing linearly past ~10,000; DESIGN.md has the table) with
     `missing` and NaN counted, not stored, so it stays a group and every window
@@ -202,7 +202,10 @@ design rationale and performance constraints behind each module.
     Statistics' type-7 arithmetic because `quantile(v; sorted = true)` scans
     all of `v` per call; `nearestrank` corrects `ceil(p * n)` to TA-Lib's exact
     rank. `PercentRank` reads the newest value from `Last`, a group via
-    `WindowLastState`, so it keeps the running tier too
+    `WindowLastState`, so it keeps the running tier too. `MeanAbsDev` also
+    reads `Mean` and scans the sorted values once per emission (a pairwise
+    `sum`): deviations from a moving centre have no inverse, so O(window) per
+    row is the floor, and it is TA-Lib's cost
   - row terms (`name => f`, a `ColumnSpec`) are virtual input columns, not a
     summarizer feature: a constructor builds the summarizer over `name` and
     hands the specs to `withterms`, which wraps it in the inert `Termed`

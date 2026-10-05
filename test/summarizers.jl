@@ -1722,7 +1722,7 @@ end
     # a steady window slides, and emits, without allocating
     protos, requested = CausalFrames.prototypes(
         CausalFrames.tosummarizers(
-            [Quantile(:x, [0.1, 0.5]), Median(:x), PercentRank(:x),
+            [Quantile(:x, [0.1, 0.5]), Median(:x), PercentRank(:x), MeanAbsDev(:x),
             Quantile(:x, 0.9; interpolation = :nearestrank)]), Symbol[])
     intypes = (time = Int, x = Union{Missing,Float64})
     states = map(s -> CausalFrames.freshwindowed(s, intypes), protos)
@@ -1739,4 +1739,63 @@ end
     foreach(t -> CausalFrames.updateall!(states, slrow(t)), -49:0)
     slide(states, 1, 1000)
     @test (@allocated slide(states, 1001, 1000)) == 0
+end
+
+@testset "MeanAbsDev" begin
+    mad(w) = sum(abs.(w .- Statistics.mean(w))) / length(w)
+    summarized(xs, ss) = DataFrame(
+        load(Context(0, 99),
+            readtable(DataFrame(time = eachindex(xs), x = xs)) |> addsummarycolumns(ss),
+        ),
+    )
+
+    @test CausalFrames.emptyvalue(MeanAbsDev(:x)) === (x_meanabsdev = missing,)
+    @test MeanAbsDev(:x) isa GroupSummarizer
+    # it shares the sorted accumulator and the mean with the other order
+    # statistics and with Mean itself
+    protos, requested = CausalFrames.prototypes(
+        CausalFrames.tosummarizers([MeanAbsDev(:x), Median(:x), Mean(:x)]), Symbol[])
+    @test count(s -> s isa CausalFrames.SortedValues, protos) == 1
+    @test count(s -> s isa Sum, protos) == 1
+    @test requested == (:x_meanabsdev, :x_median, :x_mean)
+
+    # against the definition over every prefix of a sequence with ties
+    xs = map(v -> v - 5, lcgsequence(17, 60, 11))
+    got = summarized(xs, MeanAbsDev(:x)).x_meanabsdev
+    @test all(n -> got[n] ≈ mad(xs[1:n]), eachindex(xs))
+    @test got[1] === 0.0
+
+    # element types follow Mean: integers float, Float32 stays, Missing admits
+    for (T, V) in ((Int, Float64), (Float32, Float32),
+        (Union{Missing,Int}, Union{Missing,Float64}))
+        df = summarized(T[3, 1, 2], MeanAbsDev(:x))
+        @test eltype(df.x_meanabsdev) == V
+        @test df.x_meanabsdev[end] ≈ 2 / 3
+    end
+
+    # a missing gives missing and a NaN gives NaN; a sliding window recovers
+    # once the row leaves, matching a naive scan of each window
+    vals = Union{Missing,Float64}[1, 4, missing, 2, 8, NaN, 3, 3, 5, -1, 0, 2]
+    df = DataFrame(time = eachindex(vals), x = vals)
+    for n in (1, 3, 4)
+        got = DataFrame(
+            load(Context(0, 99),
+                readtable(df) |> addrollingcolumns((b = Bars(n),), MeanAbsDev(:x))),
+        ).b_x_meanabsdev
+        for i in eachindex(vals)
+            i < n && (@test ismissing(got[i]); continue)
+            w = vals[(i-n+1):i]
+            want = any(ismissing, w) ? missing : mad(w)
+            @test isequal(got[i], want) || got[i] ≈ want
+        end
+    end
+
+    # a time window: the same definition over the rows in [t - 2, t]
+    ys = Float64.(lcgsequence(5, 40, 13))
+    got = DataFrame(
+        load(Context(0, 99),
+            readtable(DataFrame(time = eachindex(ys), x = ys)) |>
+            addrollingcolumns((w = 2,), MeanAbsDev(:x))),
+    ).w_x_meanabsdev
+    @test all(i -> got[i] ≈ mad(ys[max(1, i-2):i]), eachindex(ys))
 end

@@ -1959,12 +1959,76 @@ fresh(::PercentRank{C}, ::NamedTuple) where {C} =
     return NamedTuple{(N,),Tuple{V}}((below / (length(vs) - 1),))
 end
 
+"""
+    MeanAbsDev(column::ColumnSpec) -> Summarizer
+
+The mean absolute deviation of `column` about its mean, `Σ|x - mean| / n`, in
+`:{column}_meanabsdev` (`missing` for no rows). This is Excel's `AVEDEV`,
+TA-Lib's `AVGDEV` and the deviation in its `CCI`. Integer input gives `Float64`,
+and `Float32` stays `Float32`. A `missing` in the rows gives `missing` and a NaN
+gives NaN, and in a sliding window it recovers once that row leaves. It is
+computed from [`CausalFrames.SortedValues`](@ref CausalFrames.SortedValues) and
+[`Mean`](@ref), so memory is O(window) per key, and each emission scans the
+window's values once.
+
+# Arguments
+- `column`: the column to summarize, or a row term `name => f` (see [`ColumnSpec`](@ref)).
+
+```jldoctest
+df = DataFrame(time = 1:5, x = [1, 2, 6, 3, 3])
+p = readtable(df) |> addrollingcolumns((b3 = Bars(3),), MeanAbsDev(:x))
+DataFrame(load(Context(0, 10), p))
+
+# output
+
+5×3 DataFrame
+ Row │ time   x      b3_x_meanabsdev
+     │ Int64  Int64  Float64?
+─────┼───────────────────────────────
+   1 │     1      1    missing
+   2 │     2      2    missing
+   3 │     3      6          2.0
+   4 │     4      3          1.55556
+   5 │     5      3          1.33333
+```
+"""
+struct MeanAbsDev{C} <: GroupSummarizer end
+MeanAbsDev(column::ColumnSpec) = withterms(MeanAbsDev{colname(column)}(), column)
+
+struct MeanAbsDevState{N,D,M} <: SummarizerState end
+
+dependencies(::MeanAbsDev{C}) where {C} = (SortedValues(C), Mean(C))
+emptyvalue(::MeanAbsDev{C}) where {C} =
+    NamedTuple{(Symbol(C, :_meanabsdev),)}((missing,))
+fresh(::MeanAbsDev{C}, ::NamedTuple) where {C} =
+    MeanAbsDevState{Symbol(C, :_meanabsdev),sortedname(C),Symbol(C, :_mean)}()
+@inline value(::MeanAbsDevState{N,D,M}, vals::NamedTuple) where {N,D,M} =
+    meanabsdev(Val(N), vals[D], vals[M], fieldtype(typeof(vals), M))
+
+# The sorted values hold every finite row (NaN and missing are only counted),
+# so the scan is the whole window. `sum` over them is pairwise, so the deviations'
+# rounding grows as O(log n).
+@inline function meanabsdev(::Val{N}, st::SortedState{C,S,T,M}, mean,
+    ::Type{A}) where {N,C,S,T,M,A}
+    V0 = Base.promote_op(absdevmean, Vector{T}, nonmissingtype(A))
+    V = M ? Union{Missing,V0} : V0
+    M && st.missings > 0 && return NamedTuple{(N,),Tuple{V}}((missing,))
+    st.nans > 0 && return NamedTuple{(N,),Tuple{V}}((nanof(V0),))
+    # mean is present here, but the compiler can't know it; the test splits
+    # the Union
+    ismissing(mean) && return NamedTuple{(N,),Tuple{V}}((missing,))
+    return NamedTuple{(N,),Tuple{V}}((absdevmean(st.vals, mean),))
+end
+
+@inline absdevmean(v::Vector, m) = sum(x -> abs(x - m), v) / length(v)
+
 # The derived states are fieldless (their value comes from the dependencies'
 # at emission), so folding, combining and downdating are no-ops. The window
 # transforms give them no tier (tiers.jl) except in a set made only of
 # fieldless states, which these methods serve.
 const DerivedState = Union{AliasState,CountRatioState,StdState,CovarianceState,
-    CorrelationState,LinearRegressionState,QuantileState,PercentRankState}
+    CorrelationState,LinearRegressionState,QuantileState,PercentRankState,
+    MeanAbsDevState}
 fresh(st::DerivedState) = st
 @inline update!(::DerivedState, row) = nothing
 combine!(::DerivedState, ::DerivedState, ::DerivedState) = nothing
