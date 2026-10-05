@@ -2159,13 +2159,17 @@ fresh(::MeanAbsDev{C}, ::NamedTuple) where {C} =
     return NamedTuple{(N,),Tuple{V}}((absdevmean(vs, mean),))
 end
 
-# A plain loop rather than `sum(f, v)`: on Julia 1.10, `sum` over a closure
+# An `@simd` loop rather than `sum(f, v)`: on Julia 1.10, `sum` over a closure
 # reaches a runtime-dispatched empty-collection fallback, though `v` is never
-# empty here.
+# empty here. `@simd` lets the additions reassociate, so the loop vectorizes as
+# `sum` does; without it the loop is ten times slower at a 1,000-row window.
+# When 1.10 support is dropped, consider going back to `sum(x -> abs(x - m), v)`:
+# re-check JET and the allocation tests, and benchmark it against this loop
+# (`@simd` measured slightly faster than `sum` at windows of 14 to 1,000 rows).
 @inline function absdevmean(v::AbstractVector, m)
     s = zero(abs(zero(eltype(v)) - m))
-    @inbounds for x in v
-        s += abs(x - m)
+    @simd for i in eachindex(v)
+        @inbounds s += abs(v[i] - m)
     end
     return s / length(v)
 end

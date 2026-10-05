@@ -2019,7 +2019,7 @@ deviation in TA-Lib's `CCI`. It cannot be a group of its own: the deviations
 are taken from the current mean, so every row's term changes whenever a row
 enters or leaves. It is instead a dependent over `Mean` and the window's
 values, and it stays on the running tier. Each emission scans the values once,
-a sum of `abs(v − mean)` in a plain loop, which is O(window) per row. TA-Lib pays
+a sum of `abs(v − mean)` in an `@simd` loop, which is O(window) per row. TA-Lib pays
 the same cost, and an indicator's window is short. The mean is the compensated
 `Mean`, so the deviations are taken from the correctly rounded centre, not a
 drifting running sum. `missing` and NaN propagate as for the order statistics.
