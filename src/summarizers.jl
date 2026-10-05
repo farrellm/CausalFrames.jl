@@ -848,6 +848,231 @@ fresh(::DotProduct{A,B}, intypes::NamedTuple) where {A,B} =
     accumfresh(PairProductTerm{A,B}(), dotname(A, B),
         dottype(intypes[A], intypes[B]))
 
+# The centred co-moment `Σ(a - ā)(b - b̄)`: the accumulator behind
+# Variance (a = b), Covariance and a LinearRegression with an intercept.
+# Unexported, and only ever requested in canonical (`isless`-sorted) order, so
+# it needs no alias. The raw-sum identity `Σab - Σa·Σb/n` cancels
+# catastrophically when the mean is large against the spread: each `x * x` term
+# is already rounded at the scale of x², and Σx² reaches the subtraction
+# rounded to one float, so no summation can save it (issue #89;
+# notes/variance-cancellation.md). This state folds sums of *shifted* values,
+# `d = x - K` for a shift K near the data, over which the same identity is
+# exact up to round-off at the scale of the spread.
+struct CoMoment{A,B} <: GroupSummarizer end
+
+comomentname(a, b) = Symbol(a, :_, b, :_comoment)
+canonicalcomoment(a::Symbol, b::Symbol) =
+    isless(b, a) ? CoMoment{b,a}() : CoMoment{a,b}()
+canonicalcomomentname(a::Symbol, b::Symbol) =
+    isless(b, a) ? comomentname(b, a) : comomentname(a, b)
+
+emptyvalue(::CoMoment{A,B}) where {A,B} = NamedTuple{(comomentname(A, B),)}((0,))
+fresh(s::CoMoment{A,B}, intypes::NamedTuple) where {A,B} =
+    comomentfresh(s, dottype(intypes[A], intypes[B]))
+
+# Only rows whose two values are present and finite are folded (`n` of them),
+# so every sum runs over the same rows and the shift can be moved as a whole. A
+# `missing` row is counted under the flag M, as in `AccumState`, and a
+# nonfinite one in `nonfinite` (the value is then NaN, as `Statistics.var`
+# gives), so both evict exactly and the state stays a group. The shifts are
+# set from the first folded row, and the sums restart at exactly zero whenever
+# `n` returns to 0. With A === B, `sb` stays zero and `sa` stands in for it.
+#
+# A float state recentres once more than half its rows arrived since the shift
+# last moved (`age`), moving the shift to the row just folded: a steady window
+# of w rows recentres every w/2 rows, a growing fold each time it doubles. It
+# is a reparameterization of the same sums, so later `downdate!`s stay
+# consistent, and it keeps the shift near the data as the level drifts. The
+# new shift is a data value rather than the mean, so deviations stay exact
+# differences of inputs: states folding the same rows under different shifts
+# then agree exactly where the inputs allow (a flat window is exactly 0).
+mutable struct CoMomentState{N,A,B,T,M,S} <: SummarizerState
+    n::Int
+    age::Int
+    ka::T
+    kb::T
+    sa::S   # Σ(a - ka)
+    sb::S   # Σ(b - kb)
+    sab::S  # Σ(a - ka)(b - kb)
+    nonfinite::Int
+    missings::Int
+end
+
+# The state for accumulator type T, chosen as `accumfresh` chooses.
+function comomentfresh(s::CoMoment{A,B}, ::Type{T}) where {A,B,T}
+    N = comomentname(A, B)
+    T === Missing && return MissingState{N,CoMoment{A,B}}(s, 0)
+    M = Missing <: T
+    Tn = M ? nonmissingtype(T) : T
+    S = accstorage(Tn)
+    return CoMomentState{N,A,B,Tn,M,S}(0, 0, convert(Tn, 0), convert(Tn, 0),
+        acczero(S), acczero(S), acczero(S), 0, 0)
+end
+
+# The co-moment from the shifted sums, with one rounding: the numerator is
+# exact for integers (and for floats whose products are), so states holding
+# the same rows under different shifts agree exactly on a zero co-moment.
+@inline comomentof(n::Int, sab, sa, sb) = (n * sab - sa * sb) / n
+# The value's type, from that arithmetic: integer input gives Float64.
+comomenttype(::Type{T}) where {T} = Base.promote_op(comomentof, Int, T, T, T)
+
+fresh(st::CoMomentState{N,A,B,T,M,S}) where {N,A,B,T,M,S} =
+    CoMomentState{N,A,B,T,M,S}(0, 0, convert(T, 0), convert(T, 0),
+        acczero(S), acczero(S), acczero(S), 0, 0)
+@inline function fresh!(st::CoMomentState{N,A,B,T,M,S}) where {N,A,B,T,M,S}
+    st.n = 0
+    st.age = 0
+    st.sa = acczero(S)
+    st.sb = acczero(S)
+    st.sab = acczero(S)
+    st.nonfinite = 0
+    st.missings = 0
+    return st
+end
+
+@inline function update!(st::CoMomentState{N,A,B,T,M}, row) where {N,A,B,T,M}
+    va = getproperty(row, A)
+    vb = getproperty(row, B)
+    if M && (ismissing(va) || ismissing(vb))
+        st.missings += 1
+        return nothing
+    end
+    a = convert(T, va)
+    b = convert(T, vb)
+    if !(isfinite(a) && isfinite(b))
+        st.nonfinite += 1
+        return nothing
+    end
+    if st.n == 0
+        st.ka = a
+        st.kb = b
+    else
+        st.age += 1
+    end
+    da = a - st.ka
+    db = b - st.kb
+    st.sa = accadd(st.sa, da)
+    A === B || (st.sb = accadd(st.sb, db))
+    st.sab = accadd(st.sab, da * db)
+    st.n += 1
+    compensable(T) && 2 * st.age > st.n && recentre!(st, a, b)
+    return nothing
+end
+
+@inline function downdate!(st::CoMomentState{N,A,B,T,M,S}, row) where {N,A,B,T,M,S}
+    va = getproperty(row, A)
+    vb = getproperty(row, B)
+    if M && (ismissing(va) || ismissing(vb))
+        st.missings -= 1
+        return nothing
+    end
+    a = convert(T, va)
+    b = convert(T, vb)
+    if !(isfinite(a) && isfinite(b))
+        st.nonfinite -= 1
+        return nothing
+    end
+    st.n -= 1
+    if st.n == 0
+        st.age = 0
+        st.sa = acczero(S)
+        st.sb = acczero(S)
+        st.sab = acczero(S)
+    else
+        da = a - st.ka
+        db = b - st.kb
+        st.sa = accsub(st.sa, da)
+        A === B || (st.sb = accsub(st.sb, db))
+        st.sab = accsub(st.sab, da * db)
+    end
+    return nothing
+end
+
+# Move the shifts to (ka, kb). With δ the move,
+# Σ(a - ka - δa)(b - kb - δb) = Σab - δb·Σa - δa·Σb + n·δa·δb, each term folded
+# into the compensated sums.
+@inline function recentre!(st::CoMomentState{N,A,B,T}, ka::T, kb::T) where {N,A,B,T}
+    n = convert(T, st.n)
+    sa = accvalue(st.sa)
+    sb = A === B ? sa : accvalue(st.sb)
+    δa = ka - st.ka
+    δb = kb - st.kb
+    st.sab = accadd(accadd(accadd(st.sab, -(δb * sa)), -(δa * sb)), n * δa * δb)
+    st.sa = accadd(st.sa, -(n * δa))
+    A === B || (st.sb = accadd(st.sb, -(n * δb)))
+    st.ka = ka
+    st.kb = kb
+    st.age = 0
+    return nothing
+end
+
+# Reads every input before writing, since `dest` may alias either. b's sums
+# are re-expressed at a's shifts (δ = b's shift - a's) by the same expansion as
+# `recentre!`; an empty side contributes only its counts.
+function combine!(dest::CoMomentState{N,A,B,T,M,S}, a::CoMomentState{N,A,B,T,M,S},
+    b::CoMomentState{N,A,B,T,M,S}) where {N,A,B,T,M,S}
+    nonfinite = a.nonfinite + b.nonfinite
+    missings = a.missings + b.missings
+    if b.n == 0
+        n, age, ka, kb, sa, sb, sab = a.n, a.age, a.ka, a.kb, a.sa, a.sb, a.sab
+    elseif a.n == 0
+        n, age, ka, kb, sa, sb, sab = b.n, b.age, b.ka, b.kb, b.sa, b.sb, b.sab
+    else
+        nb = convert(T, b.n)
+        δa = b.ka - a.ka
+        δb = b.kb - a.kb
+        bsa = accvalue(b.sa)
+        bsb = A === B ? bsa : accvalue(b.sb)
+        sa = accadd(accmerge(a.sa, b.sa), nb * δa)
+        sb = A === B ? a.sb : accadd(accmerge(a.sb, b.sb), nb * δb)
+        sab = accadd(accadd(accadd(accmerge(a.sab, b.sab), δa * bsb), δb * bsa),
+            nb * δa * δb)
+        n, age, ka, kb = a.n + b.n, a.age + b.n, a.ka, a.kb
+    end
+    dest.n, dest.age, dest.ka, dest.kb = n, age, ka, kb
+    dest.sa, dest.sb, dest.sab = sa, sb, sab
+    dest.nonfinite, dest.missings = nonfinite, missings
+    return nothing
+end
+
+# `missing` while a missing row is folded, else NaN while a nonfinite one is.
+# A variance (A === B) is clamped at zero, so round-off never makes it
+# negative.
+@inline function value(st::CoMomentState{N,A,B,T,M}) where {N,A,B,T,M}
+    V = comomenttype(T)
+    R = maybemissing(V, M)
+    M && st.missings > 0 && return NamedTuple{(N,),Tuple{R}}((missing,))
+    st.nonfinite > 0 && return NamedTuple{(N,),Tuple{R}}((convert(V, NaN),))
+    # One row deviates from its own mean by exactly 0, which sliding sums
+    # need not reproduce bit for bit (Σd² minus d·d leaves round-off), and a
+    # corrected single-row variance must be 0/0 = NaN, not ±Inf.
+    st.n <= 1 && return NamedTuple{(N,),Tuple{R}}((zero(V),))
+    sa = accvalue(st.sa)
+    sb = A === B ? sa : accvalue(st.sb)
+    c = comomentof(st.n, accvalue(st.sab), sa, sb)
+    return NamedTuple{(N,),Tuple{R}}((A === B ? max(c, zero(c)) : c,))
+end
+
+function widenstate(st::CoMomentState{N,A,B}, intypes::NamedTuple) where {N,A,B}
+    w = comomentfresh(CoMoment{A,B}(), dottype(intypes[A], intypes[B]))
+    typeof(w) === typeof(st) && return st
+    return comomentwiden!(w, st)
+end
+function comomentwiden!(
+    w::CoMomentState{N,A,B,T,M,S},
+    st::CoMomentState,
+) where {N,A,B,T,M,S}
+    w.n, w.age = st.n, st.age
+    w.ka, w.kb = convert(T, st.ka), convert(T, st.kb)
+    w.sa = widenacc(S, st.sa)
+    w.sb = widenacc(S, st.sb)
+    w.sab = widenacc(S, st.sab)
+    w.nonfinite, w.missings = st.nonfinite, st.missings
+    return w
+end
+
+withmissings!(w::CoMomentState, n::Int) = (w.missings = n; w)
+
 """
     AgeWeightedSum(column::ColumnSpec) -> Summarizer
 
@@ -1143,8 +1368,10 @@ fresh(::Mean{C}, ::NamedTuple) where {C} =
     Variance(column::ColumnSpec; corrected = true) -> Summarizer
 
 The variance of `column`, as `Statistics.var`, in `:{column}_variance`
-(`missing` for no rows). Computed from [`Count`](@ref), [`Sum`](@ref) and
-[`SumPower`](@ref)`(column, 2)`; integer input gives `Float64`.
+(`missing` for no rows, `NaN` if a value is NaN or ±Inf). Integer input gives
+`Float64`. The state folds deviations from a shift near the data, so a large
+level beside a small spread doesn't cancel, and round-off never makes the
+variance negative.
 
 # Arguments
 - `column`: a column name, or a row term `name => f` (see [`ColumnSpec`](@ref)).
@@ -1160,21 +1387,13 @@ end
 Variance(column::ColumnSpec; corrected::Bool = true) =
     withterms(Variance{colname(column)}(corrected), column)
 
-# The compile-time value type of the (co)variance identity
-# `(q - sa * sb / n) / (n - corrected)`, from the dependencies' field types.
-_covtype(::Type{Q}, ::Type{Sa}, ::Type{Sb}) where {Q,Sa,Sb} =
-    Base.promote_op(/,
-        Base.promote_op(-, Q,
-            Base.promote_op(/, Base.promote_op(*, Sa, Sb), Int)), Int)
-
-dependencies(::Variance{C}) where {C} = (Count(), Sum(C), SumPower(C, 2))
+dependencies(::Variance{C}) where {C} = (Count(), CoMoment{C,C}())
 emptyvalue(::Variance{C}) where {C} =
     NamedTuple{(Symbol(C, :_variance),)}((missing,))
-# A variance is the covariance of a column with itself, the power sum standing
-# in for the dot product, so it uses CovarianceState (below).
+# A variance is the covariance of a column with itself, so it uses
+# CovarianceState (below) over the co-moment of the column with itself.
 fresh(v::Variance{C}, ::NamedTuple) where {C} =
-    CovarianceState{C,C,Symbol(C, :_variance),Symbol(C, :_sumpower_, 2),
-        Symbol(C, :_sum),Symbol(C, :_sum),v.corrected}()
+    CovarianceState{Symbol(C, :_variance),comomentname(C, C),v.corrected}()
 
 """
     Std(column::ColumnSpec; corrected = true) -> Summarizer
@@ -1213,8 +1432,9 @@ end
     Covariance(a::ColumnSpec, b::ColumnSpec; corrected = true) -> Summarizer
 
 The covariance of `a` and `b`, as `Statistics.cov`, in `:{a}_{b}_covariance`
-(`missing` for no rows). Computed from [`Count`](@ref), [`Sum`](@ref) of each
-column and [`DotProduct`](@ref)`(a, b)`.
+(`missing` for no rows, `NaN` if a value is NaN or ±Inf). Like
+[`Variance`](@ref), it folds deviations from a shift near the data, so large
+levels don't cancel.
 
 # Arguments
 - `a`, `b`: column names or row terms `name => f` (see [`ColumnSpec`](@ref)).
@@ -1229,31 +1449,23 @@ end
 Covariance(a::ColumnSpec, b::ColumnSpec; corrected::Bool = true) =
     withterms(Covariance{colname(a),colname(b)}(corrected), a, b)
 
-# R (the corrected flag) is a type parameter so the state stays fieldless; the
-# divisor is `n - Int(R)`. Variance uses it too, with A = B.
-struct CovarianceState{A,B,N,D,SA,SB,R} <: SummarizerState end
+# The co-moment D over the divisor `n - Int(R)`, emitted as N. R (the
+# corrected flag) is a type parameter so the state stays fieldless. Variance
+# uses it too, over the co-moment of a column with itself.
+struct CovarianceState{N,D,R} <: SummarizerState end
 
 covname(a, b) = Symbol(a, :_, b, :_covariance)
-# Reads the canonically ordered dot product: Covariance(:y, :x) produces
-# :y_x_covariance from the shared :x_y_dotproduct accumulator.
+# Reads the canonically ordered co-moment: Covariance(:y, :x) produces
+# :y_x_covariance from the shared :x_y_comoment accumulator.
 dependencies(::Covariance{A,B}) where {A,B} =
-    (Count(), Sum(A), Sum(B), canonicaldot(A, B))
+    (Count(), canonicalcomoment(A, B))
 emptyvalue(::Covariance{A,B}) where {A,B} =
     NamedTuple{(covname(A, B),)}((missing,))
 fresh(c::Covariance{A,B}, ::NamedTuple) where {A,B} =
-    CovarianceState{A,B,covname(A, B),canonicaldotname(A, B),Symbol(A, :_sum),
-        Symbol(B, :_sum),c.corrected}()
-@inline function value(::CovarianceState{A,B,N,D,SA,SB,R},
-    vals::NamedTuple) where {A,B,N,D,SA,SB,R}
-    Df = fieldtype(typeof(vals), D)
-    Saf = fieldtype(typeof(vals), SA)
-    Sbf = fieldtype(typeof(vals), SB)
-    V = _covtype(Df, Saf, Sbf)
-    d = vals[D]
-    sa = vals[SA]
-    sb = vals[SB]
-    n = vals.count
-    return NamedTuple{(N,),Tuple{V}}(((d - sa * sb / n) / (n - Int(R)),))
+    CovarianceState{covname(A, B),canonicalcomomentname(A, B),c.corrected}()
+@inline function value(::CovarianceState{N,D,R}, vals::NamedTuple) where {N,D,R}
+    V = ratiotype(fieldtype(typeof(vals), D), Int)
+    return NamedTuple{(N,),Tuple{V}}((vals[D] / (vals.count - Int(R)),))
 end
 
 """
@@ -1349,10 +1561,12 @@ The statistics share one element type (`Float64` for integer input) and admit
 rows) gives `NaN` rather than an error; with no residual degrees of freedom the
 coefficients are exact but `stderr` and the t statistics are `NaN`.
 
-The fit is computed from [`Count`](@ref), [`SumPower`](@ref)`(·, 2)`,
-[`DotProduct`](@ref) and (with an intercept) [`Sum`](@ref), so regressions over
-overlapping columns, and [`Covariance`](@ref)s or [`Variance`](@ref)s beside
-them, share accumulators. With `K ≥ 2` each emitted row allocates a `K × K`
+With an intercept the fit is computed from the same centred accumulators as
+[`Variance`](@ref) and [`Covariance`](@ref), so large levels don't cancel, plus
+[`Count`](@ref) and each column's [`Sum`](@ref) for the means. Without one it
+is computed from [`Count`](@ref), [`SumPower`](@ref)`(·, 2)` and
+[`DotProduct`](@ref). Either way, regressions over overlapping columns, and the
+statistics beside them, share accumulators. With `K ≥ 2` each emitted row allocates a `K × K`
 workspace; `K = 1` allocates nothing.
 """
 struct LinearRegression{P,Y} <: GroupSummarizer
@@ -1408,12 +1622,16 @@ function regnames(P::Tuple, name, intercept::Bool)
     return Tuple(ns)
 end
 
-# Cross products use the canonical dot product. A squared term uses
-# SumPower(c, 2) rather than DotProduct(c, c): the same value, under the name
-# Variance, Std and Correlation depend on.
-crossdep(a::Symbol, b::Symbol) =
+# The cross products a fit reads. With an intercept they are the centred
+# co-moments, which Variance, Covariance and Correlation share and which don't
+# cancel under a large level. Without one the fit is on the raw products by
+# definition: the canonical dot product, with a squared term as SumPower(c, 2)
+# rather than DotProduct(c, c), the same value under a name Moment shares.
+crossdep(a::Symbol, b::Symbol, intercept::Bool) =
+    intercept ? canonicalcomoment(a, b) :
     a === b ? SumPower(a, 2) : canonicaldot(a, b)
-crossname(a::Symbol, b::Symbol) =
+crossname(a::Symbol, b::Symbol, intercept::Bool) =
+    intercept ? canonicalcomomentname(a, b) :
     a === b ? Symbol(a, :_sumpower_2) : canonicaldotname(a, b)
 
 # Entry (i, j), i <= j, of a K x K matrix packed row-major over its upper
@@ -1422,12 +1640,13 @@ crossname(a::Symbol, b::Symbol) =
     (i - 1) * K - ((i - 1) * (i - 2)) ÷ 2 + (j - i + 1)
 
 function dependencies(r::LinearRegression{P,Y}) where {P,Y}
-    ds = Summarizer[Count(), SumPower(Y, 2)]
+    I = r.intercept
+    ds = Summarizer[Count(), crossdep(Y, Y, I)]
     for (i, p) in pairs(P)
-        push!(ds, SumPower(p, 2))
-        push!(ds, crossdep(p, Y))
+        push!(ds, crossdep(p, p, I))
+        push!(ds, crossdep(p, Y, I))
         for j in (i+1):length(P)
-            push!(ds, crossdep(p, P[j]))
+            push!(ds, crossdep(p, P[j], I))
         end
     end
     if r.intercept
@@ -1446,9 +1665,10 @@ end
 
 function fresh(r::LinearRegression{P,Y}, ::NamedTuple) where {P,Y}
     ns = regnames(P, r.name, r.intercept)
-    gn = Tuple(crossname(P[i], P[j]) for i in eachindex(P) for j in i:length(P))
-    dn = map(p -> crossname(p, Y), P)
-    qy = (Symbol(Y, :_sumpower_2),)
+    I = r.intercept
+    gn = Tuple(crossname(P[i], P[j], I) for i in eachindex(P) for j in i:length(P))
+    dn = map(p -> crossname(p, Y, I), P)
+    qy = (crossname(Y, Y, I),)
     sy = r.intercept ? (Symbol(Y, :_sum),) : ()
     sp = r.intercept ? map(p -> Symbol(p, :_sum), P) : ()
     an = Tuple(unique((qy..., gn..., dn..., sy..., sp...)))
@@ -1467,10 +1687,12 @@ end
     Base.promote_op(depvalues, V, Val{NS})
 
 # The statistics' shared element type: the declared types promoted, run through
-# the centered identity's arithmetic, then made floating point for NaN.
-@inline _promotefields(::Type{Tuple{A}}) where {A} = A
-@inline _promotefields(::Type{T}) where {T<:Tuple} =
-    promote_type(Base.tuple_type_head(T), _promotefields(Base.tuple_type_tail(T)))
+# the centered identity's arithmetic, then made floating point for NaN. The
+# promotion is generated, so it is a constant however many fields there are: a
+# recursive one stops folding once the fields mix `Union{Missing,Float64}`
+# co-moments with `Union{Missing,Int}` sums (a K >= 2 fit over integers).
+@generated _promotefields(::Type{T}) where {T<:Tuple} =
+    promote_type(fieldtypes(T)...)
 
 _tofloat(x) = float(x)
 _tofloat(::Missing) = missing
@@ -1502,22 +1724,17 @@ end
 # Simple regression in closed form, on scalars with no workspace: the common
 # case, run per row under addsummarycolumns and addrollingcolumns. Every
 # possible 0/0 is in floating point, and sqrt arguments are clamped at zero, so
-# a degenerate window gives NaN rather than an error.
+# a degenerate window gives NaN rather than an error. With an intercept (I)
+# the cross products `g`, `d` and `qy` arrive centred, and the sums `s`, `sy`
+# serve only the means; without one they are raw.
 @inline function regstats(::Type{Vc}, ::Val{I}, ::Val{M}, n::Vc,
     g::NTuple{G,Vc}, d::NTuple{1,Vc}, s::Tuple{Vararg{Vc}}, sy::Vc,
     qy::Vc) where {Vc,I,M,G}
     nan = Vc(NaN)
-    if I
-        sxx = g[1] - s[1] * s[1] / n
-        sxy = d[1] - s[1] * sy / n
-        sst = qy - sy * sy / n
-        dof = n - 2
-    else
-        sxx = g[1]
-        sxy = d[1]
-        sst = qy
-        dof = n - 1
-    end
+    sxx = g[1]
+    sxy = d[1]
+    sst = qy
+    dof = I ? n - 2 : n - 1
     sxx > zero(Vc) || return ntuple(_ -> nan, Val(M))
     beta = sxy / sxx
     sse = sst - beta * sxy
@@ -1542,13 +1759,12 @@ end
 function regstats(::Type{Vc}, ::Val{I}, ::Val{M}, n::Vc, g::NTuple{G,Vc},
     d::NTuple{K,Vc}, s::Tuple{Vararg{Vc}}, sy::Vc, qy::Vc) where {Vc,I,M,G,K}
     nan = Vc(NaN)
-    rhs = I ? ntuple(i -> d[i] - s[i] * sy / n, Val(K)) : d
-    sst = I ? qy - sy * sy / n : qy
+    rhs = d
+    sst = qy
     dof = I ? n - K - 1 : n - K
     A = Matrix{Vc}(undef, K, K)
     for i in 1:K, j in i:K
-        A[i, j] = I ? g[gramindex(i, j, K)] - s[i] * s[j] / n :
-                  g[gramindex(i, j, K)]
+        A[i, j] = g[gramindex(i, j, K)]
     end
     F = cholesky!(Symmetric(A, :U); check = false)
     issuccess(F) || return ntuple(_ -> nan, Val(M))
