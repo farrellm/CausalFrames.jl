@@ -1061,9 +1061,12 @@ struct CountRatioState{N,D} <: SummarizerState end
 
 # The value type comes from the dependencies' declared field types, not
 # `typeof` of the quotient, so a missing sum keeps the Union{Missing,...} eltype.
+# `promote_op` is behind a function of the types, as `_covtype` is: written
+# inline here, Julia 1.10 cannot fold it to a constant for a Missing-admitting
+# sum, and the whole summary row's type widens.
+ratiotype(::Type{A}, ::Type{B}) where {A,B} = Base.promote_op(/, A, B)
 @inline function value(::CountRatioState{N,D}, vals::NamedTuple) where {N,D}
-    V = Base.promote_op(/, fieldtype(typeof(vals), D),
-        fieldtype(typeof(vals), :count))
+    V = ratiotype(fieldtype(typeof(vals), D), fieldtype(typeof(vals), :count))
     return NamedTuple{(N,),Tuple{V}}((vals[D] / vals.count,))
 end
 
@@ -2142,12 +2145,10 @@ fresh(::MeanAbsDev{C}, ::NamedTuple) where {C} =
 
 # The window's values hold every finite row (NaN and missing are only counted),
 # so the scan is the whole window; their order is not needed, which is why this
-# reads WindowValues rather than SortedValues. `sum` over them is pairwise, so
-# the deviations' rounding grows as O(log n).
+# reads WindowValues rather than SortedValues.
 @inline function meanabsdev(::Val{N}, st::WindowValuesState{C,S,T,M}, mean,
     ::Type{A}) where {N,C,S,T,M,A}
-    V0 = Base.promote_op(absdevmean, SubArray{T,1,Vector{T},Tuple{UnitRange{Int}},true},
-        nonmissingtype(A))
+    V0 = absdevtype(T, nonmissingtype(A))
     V = M ? Union{Missing,V0} : V0
     M && st.missings > 0 && return NamedTuple{(N,),Tuple{V}}((missing,))
     st.nans > 0 && return NamedTuple{(N,),Tuple{V}}((nanof(V0),))
@@ -2158,7 +2159,22 @@ fresh(::MeanAbsDev{C}, ::NamedTuple) where {C} =
     return NamedTuple{(N,),Tuple{V}}((absdevmean(vs, mean),))
 end
 
-@inline absdevmean(v::AbstractVector, m) = sum(x -> abs(x - m), v) / length(v)
+# A plain loop rather than `sum(f, v)`: on Julia 1.10, `sum` over a closure
+# reaches a runtime-dispatched empty-collection fallback, though `v` is never
+# empty here.
+@inline function absdevmean(v::AbstractVector, m)
+    s = zero(abs(zero(eltype(v)) - m))
+    @inbounds for x in v
+        s += abs(x - m)
+    end
+    return s / length(v)
+end
+
+# The scan's type from the value and mean types, so `value` needs no inference
+# of the scan itself. An all-missing column (T = Union{}) has no scan to type,
+# so its output is Missing.
+absdevtype(::Type{T}, ::Type{F}) where {T,F} = typeof(abs(zero(T) - zero(F)) / 1)
+absdevtype(::Type{Union{}}, ::Type{F}) where {F} = Union{}
 
 # The derived states are fieldless (their value comes from the dependencies'
 # at emission), so folding, combining and downdating are no-ops. The window

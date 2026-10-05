@@ -208,7 +208,7 @@ design rationale and performance constraints behind each module.
     head, appended by `update!` and advanced by `downdate!` (exact under the
     oldest-first law), compacted once the dead prefix is half the vector, so
     both are O(1) amortized and a steady window allocates nothing. It scans
-    the values once per emission (a pairwise `sum`): deviations from a moving
+    the values once per emission (a plain loop): deviations from a moving
     centre have no inverse, so O(window) per row is the floor, and it is
     TA-Lib's cost. It deliberately does not read `SortedValues`, whose
     insert/delete cost twice the whole indicator at short windows (DESIGN.md
