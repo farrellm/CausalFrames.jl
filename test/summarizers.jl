@@ -1240,6 +1240,68 @@ end
     @test updalloc(st, (x = missing,)) == 0
 end
 
+@testset "all-missing column" begin
+    # A column whose eltype is exactly Missing has no non-missing type to
+    # accumulate at: the sum family, AgeWeightedSum and Product count its rows
+    # in a MissingState instead, valued missing, a fresh one the identity.
+    mall = (time = Int64, x = Missing)
+    st = CausalFrames.fresh(Sum(:x), mall)
+    @test st isa CausalFrames.MissingState
+    foreach(_ -> CausalFrames.update!(st, (; x = missing)), 1:3)
+    @test st.n == 3
+    @test CausalFrames.value(st) isa NamedTuple{(:x_sum,),Tuple{Missing}}
+    dest = CausalFrames.fresh(st)
+    CausalFrames.combine!(dest, dest, st)
+    @test dest.n == 3
+    CausalFrames.downdate!(dest, (; x = missing))
+    @test dest.n == 2 && CausalFrames.fresh!(dest).n == 0
+    @test CausalFrames.fresh(AgeWeightedSum(:x), mall) isa CausalFrames.MissingState
+    @test CausalFrames.fresh(Product(:x), mall) isa CausalFrames.MissingState
+
+    # every transform, and every dependent of these, gives a Missing column
+    df = DataFrame(time = 1:3, x = fill(missing, 3), y = [1.0, 2.0, 3.0])
+    ss = (Sum(:x), SumPower(:x, 3), DotProduct(:x, :y), AgeWeightedSum(:x),
+        Product(:x), Mean(:x), Moment(:x, 2), Variance(:x), Std(:x),
+        Covariance(:x, :y), Correlation(:x, :y), MeanAbsDev(:x))
+    ops = (addsummarycolumns(ss), summarize(ss),
+        addrollingcolumns((w = Bars(2),), ss))
+    for op in ops
+        out = DataFrame(load(Context(0, 10), readtable(df) |> op))
+        for c in names(out)
+            c in ("time", "x", "y") && continue
+            @test eltype(out[!, c]) === Missing
+        end
+    end
+    # a time window's column promotes with the empty values, but every window
+    # holding rows is missing (over [2, 6) both ticks' windows hold rows)
+    for (ctx, op) in ((Context(0, 10), addrollingcolumns((w = 2,), ss)),
+        (Context(2, 6), summarizewindows(clock(2), 3, ss)))
+        out = DataFrame(load(ctx, readtable(df) |> op))
+        for c in names(out)
+            c in ("time", "x", "y") && continue
+            @test all(ismissing, out[!, c])
+        end
+    end
+    out = DataFrame(load(Context(0, 10),
+        readtable(df) |> addsummarycolumns(LinearRegression(:y, :x))))
+    @test all(ismissing, out.r2) && out.n == [1, 2, 3]
+
+    # widening carries the count: a Bars(3) window over the two missing rows
+    # stays missing until both have left
+    c1 = DataFrame(time = 1:2, x = fill(missing, 2))
+    c2 = DataFrame(time = 3:5, x = [1.0, 2.0, 4.0])
+    p = concatenate(readtable(c1), readtable(c2))
+    out = DataFrame(load(Context(0, 10), p |> addrollingcolumns((w = Bars(3),),
+        (Sum(:x), AgeWeightedSum(:x), Product(:x), Mean(:x)))))
+    @test isequal(out.w_x_sum, [missing, missing, missing, missing, 7.0])
+    @test isequal(out.w_x_ageweightedsum, [missing, missing, missing, missing, 4.0])
+    @test isequal(out.w_x_product, [missing, missing, missing, missing, 8.0])
+    @test isequal(out.w_x_mean, [missing, missing, missing, missing, 7.0 / 3])
+    out = DataFrame(load(Context(0, 10), p |> addsummarycolumns((Sum(:x), Product(:x)))))
+    @test all(ismissing, out.x_sum) && all(ismissing, out.x_product)
+    @test eltype(out.x_sum) === Union{Missing,Float64}
+end
+
 # A pseudo-random walk over a sliding window: each step admits a row or evicts
 # the oldest, and the check runs after every step. Admissions win two times in
 # three, so the window grows, drains and refills.

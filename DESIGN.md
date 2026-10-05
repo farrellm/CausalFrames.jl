@@ -1909,6 +1909,15 @@ and, when `missing` first appears, onto the counting path (missings start at
 zero, the existing total carried) — by rebuilding the state for the new types
 and carrying the accumulator across with `widenacc`.
 
+A column whose element type is exactly `Missing` has no non-missing type to
+accumulate at (`sumtype(Missing)` and `prodtype(Missing)` are `Missing`), so
+the sum family, `AgeWeightedSum` and `Product` fold it into a `MissingState`
+instead. That state only counts rows, its value is always `missing` (the output
+column is `Missing`, as `Base.sum` of such a column is), and a fresh one is
+still the identity. When a later chunk widens the column, `widenstate` builds
+the ordinary state for the new type and hands it that count as its `missing`
+terms, so a window still holding those rows stays `missing` until they leave.
+
 `AgeWeightedSum(column)` is the sum family's one accumulator that the term
 functor cannot express, because its update reads its own running total: it
 folds `Σₖ k·yₖ`, where `k` is the row's age in rows (`0` for the newest). With

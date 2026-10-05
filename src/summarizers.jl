@@ -461,9 +461,11 @@ mutable struct AccumState{N,A,T,M,S} <: SummarizerState
 end
 
 # The sum family's constructor, from the accumulator type. An all-Missing
-# column (nonmissingtype `Union{}`) stays off the counting path.
+# column (accumulator type `Missing`) has no non-missing type to fold at, so it
+# gets a `MissingState` (below).
 function accumfresh(term, N::Symbol, ::Type{A}) where {A}
-    M = Missing <: A && nonmissingtype(A) !== Union{}
+    A === Missing && return MissingState{N,typeof(term)}(term, 0)
+    M = Missing <: A
     An = M ? nonmissingtype(A) : A
     S = accstorage(An)
     return AccumState{N,An,typeof(term),M,S}(term, acczero(S), 0)
@@ -512,6 +514,38 @@ function widenstate(st::AccumState{N}, intypes::NamedTuple) where {N}
     w.missings = st.missings
     return w
 end
+
+# The state of a sum-family, AgeWeightedSum or Product accumulator over an
+# all-`missing` input (accumulator type `Missing`). Every term is missing, so it
+# only counts rows; a fresh state is still the identity, and the value is always
+# `missing`. `recipe` (a sum-family term functor, or the summarizer) rebuilds the
+# real state when a later chunk widens the input, which then takes the count, so
+# a window over the missing rows still gives `missing` after the widening.
+mutable struct MissingState{N,R} <: SummarizerState
+    recipe::R
+    n::Int
+end
+
+fresh(st::MissingState{N,R}) where {N,R} = MissingState{N,R}(st.recipe, 0)
+@inline fresh!(st::MissingState) = (st.n = 0; st)
+@inline update!(st::MissingState, row) = (st.n += 1; nothing)
+@inline downdate!(st::MissingState, row) = (st.n -= 1; nothing)
+combine!(dest::MissingState{N,R}, a::MissingState{N,R}, b::MissingState{N,R}) where {N,R} =
+    (dest.n = a.n + b.n; nothing)
+value(::MissingState{N}) where {N} = NamedTuple{(N,),Tuple{Missing}}((missing,))
+function widenstate(st::MissingState{N}, intypes::NamedTuple) where {N}
+    w = refresh(st.recipe, N, intypes)
+    w isa MissingState && return st
+    return withmissings!(w, st.n)
+end
+
+# The state a wider input calls for, from a MissingState's recipe.
+refresh(term::Union{ColumnTerm,PowerTerm,PairProductTerm}, N::Symbol,
+    intypes::NamedTuple) = accumfresh(term, N, acctype(term, intypes))
+refresh(s::Summarizer, ::Symbol, intypes::NamedTuple) = fresh(s, intypes)
+
+# Fold `n` missing rows into a fresh state, whose type admits `missing`.
+withmissings!(w::AccumState, n::Int) = (w.missings = n; w)
 
 # A Compensated at a wider float type, with its counters unchanged.
 widencomp(::Type{A2}, a::Compensated) where {A2} =
@@ -725,8 +759,10 @@ mutable struct ProductState{C,N,A} <: SummarizerState
 end
 
 emptyvalue(::Product{C}) where {C} = NamedTuple{(Symbol(C, :_product),)}((1,))
+# An all-Missing column has no `1` to start from, so it gets a `MissingState`.
 function fresh(::Product{C}, intypes::NamedTuple) where {C}
     A = prodtype(intypes[C])
+    A === Missing && return MissingState{Symbol(C, :_product),Product{C}}(Product{C}(), 0)
     return ProductState{C,Symbol(C, :_product),A}(convert(A, 1))
 end
 fresh(::ProductState{C,N,A}) where {C,N,A} = ProductState{C,N,A}(convert(A, 1))
@@ -743,6 +779,7 @@ function widenstate(st::ProductState{C,N,A}, intypes::NamedTuple) where {C,N,A}
     A2 === A && return st
     return ProductState{C,N,A2}(convert(A2, st.total))
 end
+withmissings!(w::ProductState, n::Int) = (n > 0 && (w.total = missing); w)
 
 # Emits, under its own name N, the value a dependency computed under D, which
 # the topological expansion puts in `vals` first. Fieldless, so it joins
@@ -882,9 +919,12 @@ fresh(::AgeWeightedSum{C}, intypes::NamedTuple) where {C} =
     agesumfresh(Val(agesumname(C)), Val(C), sumtype(intypes[C]))
 
 # The state for accumulator type A, chosen as `accumfresh` chooses: the fold is
-# at the non-missing type, compensated for a fixed-precision float.
+# at the non-missing type, compensated for a fixed-precision float, and an
+# all-Missing column gets a `MissingState`.
 function agesumfresh(::Val{N}, ::Val{C}, ::Type{A}) where {N,C,A}
-    M = Missing <: A && nonmissingtype(A) !== Union{}
+    A === Missing &&
+        return MissingState{N,AgeWeightedSum{C}}(AgeWeightedSum{C}(), 0)
+    M = Missing <: A
     An = M ? nonmissingtype(A) : A
     compensable(An) && return CompensatedAgeSumState{N,C,An,M}(0, compzero(An),
         compzero(An), Int8(0), 0)
@@ -1035,6 +1075,10 @@ end
 # To an arbitrary-precision float: the plain state, from the IEEE values.
 agesumwiden(w::AgeSumState, st::CompensatedAgeSumState) =
     agesumfrom(w, st.n, compvalue(st.s1), agesumvalue(st), st.missings)
+
+# n missing rows age the (zero) sums and leave `newest` at 0.
+withmissings!(w::Union{AgeSumState,CompensatedAgeSumState}, n::Int) =
+    (w.n = n; w.missings = n; w)
 
 """
     Moment(column::ColumnSpec, n::Integer) -> Summarizer
