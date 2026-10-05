@@ -170,6 +170,21 @@ design rationale and performance constraints behind each module.
     row for the Cholesky; `K = 1` takes a closed form over scalars). It reads
     its dependencies through `NamedTuple{names}(vals)` projections, so no name
     is a runtime value on the emission path
+  - `CoMoment{a,b}` (unexported, no docstring, canonical `isless` order only)
+    is the centred co-moment `Σ(a−ā)(b−b̄)` that `Variance`, `Covariance` and
+    an intercept `LinearRegression` read instead of the raw sums, which cancel
+    catastrophically under a large level (issue #89; compensating the raw sums
+    can't help, since each `x*x` term and the read-back `Σx²` are already
+    rounded at the scale of `x²`). Its state folds compensated sums of `x − K`
+    over rows with both values present and finite, counting `missing` (flag
+    `M`) and nonfinite rows apart so it stays a group. It recentres `K` to the
+    newest row once more than half its rows postdate the shift — the newest
+    row, not the mean, so deviations stay exact input differences and the
+    running tier agrees exactly with a re-fold. `combine!` re-expresses one
+    side at the other's shift. It costs 20-26% on regressions and
+    `Correlation` over the old raw sums; `notes/variance-cancellation.md` has
+    the numbers and the rejected designs (Welford, error-free squares, a
+    per-fit multivariate accumulator)
   - `AgeWeightedSum` (`Σ k·y`, k the row's age) can't be a term functor, since
     its update reads its own `S₁`, so it has its own plain and compensated
     states, reusing the `Compensated` helpers and counting `missing` through
