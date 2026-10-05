@@ -189,7 +189,12 @@ design rationale and performance constraints behind each module.
     non-missing type, counting `missing` terms as the compensated storage
     counts nonfinites, so the accumulator stays invertible. `Union{Missing,_}`
     appears only in `value`'s return, never in an accumulation field. With `M`
-    false the count is never touched and its tests compile away
+    false the count is never touched and its tests compile away. An
+    all-`Missing` column (accumulator type `Missing`) has no type to fold at,
+    so it gets a count-only `MissingState` instead (also for `AgeWeightedSum`
+    and `Product`). It is valued `missing`, its fresh state is still the
+    identity, and on widening it rebuilds the real state from its `recipe`,
+    handing over the count (`withmissings!`)
   - the order statistics (`Quantile`, `Median`, `PercentRank`) are fieldless
     dependents over one accumulator, the unexported `SortedValues`: a sorted
     `Vector` (binary search plus memmove: under 300 ns per row to a 1,000-row
