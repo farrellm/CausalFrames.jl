@@ -298,19 +298,13 @@ end
     @test @inferred(CausalFrames.value(st, (count = 3, x_sum = Int64(6)))) ===
           (x_mean = 2.0,)
     st = CausalFrames.fresh(Variance(:x), (time = Int64, x = Int32))
-    @test @inferred(
-        CausalFrames.value(st,
-            (count = 3, x_sum = Int64(6), x_sumpower_2 = Int64(14)))
-    ) ===
+    @test @inferred(CausalFrames.value(st, (count = 3, x_x_comoment = 2.0))) ===
           (x_variance = 1.0,)
     st = CausalFrames.fresh(Std(:x), (time = Int64, x = Int32))
     @test @inferred(CausalFrames.value(st, (x_variance = 4.0,))) === (x_std = 2.0,)
     st = CausalFrames.fresh(Covariance(:x, :y), (time = Int64, x = Int32, y = Int32))
-    @test @inferred(
-        CausalFrames.value(st,
-            (count = 3, x_sum = Int64(6), y_sum = Int64(11),
-                x_y_dotproduct = Int64(19)))
-    ) === (x_y_covariance = -1.5,)
+    @test @inferred(CausalFrames.value(st, (count = 3, x_y_comoment = -3.0))) ===
+          (x_y_covariance = -1.5,)
 
     # nested dependency expansion (Std -> Variance -> raw sums) stays inferrable
     # through the accumulate-then-project fold, and hidden dependencies are
@@ -405,15 +399,18 @@ end
     @test requested === (:x_y_dotproduct, :y_x_dotproduct)
     @test accumulators(protos) == [:x_y_dotproduct]
     @test CausalFrames.fresh(DotProduct(:y, :x), intypes) isa CausalFrames.AliasState
-    # a Covariance written either way reaches the same accumulator
-    # (compared as a set: the two orders expand their Sums in their own order)
+    # a Covariance written either way reaches the same co-moment accumulator
     for cov in (Covariance(:x, :y), Covariance(:y, :x))
         protos, _ = CausalFrames.prototypes(
             Summarizer[DotProduct(:x, :y), cov], Symbol[])
         @test Set(accumulators(protos)) ==
-              Set([:x_y_dotproduct, :count, :x_sum, :y_sum])
-        @test length(accumulators(protos)) == 4
+              Set([:x_y_dotproduct, :count, :x_y_comoment])
+        @test length(accumulators(protos)) == 3
     end
+    # ... and Covariance(:x, :x) shares Variance(:x)'s
+    protos, _ = CausalFrames.prototypes(
+        Summarizer[Variance(:x), Covariance(:x, :x)], Symbol[])
+    @test accumulators(protos) == [:count, :x_x_comoment]
     # ... as does a Correlation, transitively through its Covariance
     protos, _ = CausalFrames.prototypes(
         Summarizer[DotProduct(:x, :y), Correlation(:y, :x)], Symbol[])
@@ -612,9 +609,8 @@ end
     st = CausalFrames.fresh(LinearRegression(:x, :y), intypes)
     @test @inferred(
         CausalFrames.value(st,
-            (count = 5, x_sumpower_2 = Int64(55), y_sumpower_2 = Int64(200),
-                x_y_dotproduct = Int64(100), x_sum = Int64(15),
-                y_sum = Int64(30)))
+            (count = 5, x_x_comoment = 10.0, y_y_comoment = 20.0,
+                x_y_comoment = 10.0, x_sum = Int64(15), y_sum = Int64(30)))
     ).x_beta ≈ 1.0
     st = CausalFrames.fresh(LinearRegression(:x, :y; intercept = false), intypes)
     @test @inferred(
@@ -625,10 +621,10 @@ end
     st = CausalFrames.fresh(LinearRegression([:x, :z], :y), intypes)
     @test @inferred(
         CausalFrames.value(st,
-            (count = 5, x_sumpower_2 = Int64(55), z_sumpower_2 = Int64(55),
-                y_sumpower_2 = Int64(200), x_z_dotproduct = Int64(50),
-                x_y_dotproduct = Int64(100), y_z_dotproduct = Int64(90),
-                x_sum = Int64(15), z_sum = Int64(15), y_sum = Int64(30)))
+            (count = 5, x_x_comoment = 10.0, z_z_comoment = 10.0,
+                y_y_comoment = 20.0, x_z_comoment = 5.0, x_y_comoment = 10.0,
+                y_z_comoment = 0.0, x_sum = Int64(15), z_sum = Int64(15),
+                y_sum = Int64(30)))
     ) isa
           NamedTuple
 
@@ -642,18 +638,18 @@ end
         if length(keys(CausalFrames.emptyvalue(s))) == 1
     ]
     @test count(==(:count), folded) == 1
-    @test count(==(:x_z_dotproduct), folded) == 1
-    @test count(==(:x_sumpower_2), folded) == 1
+    @test count(==(:x_z_comoment), folded) == 1
+    @test count(==(:x_x_comoment), folded) == 1
     @test count(==(:x_sum), folded) == 1
     # the response-specific work is not shared, and appears once each
-    @test count(==(:x_y_dotproduct), folded) == 1
-    @test count(==(:w_x_dotproduct), folded) == 1
+    @test count(==(:x_y_comoment), folded) == 1
+    @test count(==(:w_x_comoment), folded) == 1
     @test requested === (outnames(LinearRegression([:x, :z], :y; name = :m1))...,
         outnames(LinearRegression([:x, :z], :w; name = :m2))...)
 
-    # a regression shares with the statistical summarizers too: the squared
-    # term goes through SumPower, the cross product through the canonically
-    # (sorted) ordered DotProduct
+    # a regression with an intercept shares with the statistical summarizers
+    # too, every cross product (squared terms included) going through the
+    # canonically (sorted) ordered co-moment
     protos, _ = CausalFrames.prototypes(
         Summarizer[LinearRegression(:x, :y; name = :m1), Variance(:y),
             Covariance(:x, :y)], Symbol[])
@@ -661,8 +657,8 @@ end
         only(keys(CausalFrames.emptyvalue(s))) for s in protos
         if length(keys(CausalFrames.emptyvalue(s))) == 1
     ]
-    @test count(==(:y_sumpower_2), folded) == 1
-    @test count(==(:x_y_dotproduct), folded) == 1
+    @test count(==(:y_y_comoment), folded) == 1
+    @test count(==(:x_y_comoment), folded) == 1
     @test count(==(:x_sum), folded) == 1
     # ... and the sharing survives a Covariance written the other way round,
     # since every symmetric summarizer folds under the canonical order
@@ -673,8 +669,17 @@ end
         only(keys(CausalFrames.emptyvalue(s))) for s in protos
         if length(keys(CausalFrames.emptyvalue(s))) == 1
     ]
-    @test count(==(:x_y_dotproduct), folded) == 1
-    @test !(:y_x_dotproduct in folded)
+    @test count(==(:x_y_comoment), folded) == 1
+    @test !(:y_x_comoment in folded)
+    # without an intercept the fit is on the raw products, as SumPower and
+    # the canonical DotProduct
+    protos, _ = CausalFrames.prototypes(
+        Summarizer[LinearRegression(:x, :y; intercept = false)], Symbol[])
+    @test Set(
+        keys(CausalFrames.emptyvalue(s))
+        for s in protos if length(keys(CausalFrames.emptyvalue(s))) == 1
+    ) ⊇
+          Set([(:x_sumpower_2,), (:y_sumpower_2,), (:x_y_dotproduct,)])
 
     # the whole accumulate-then-project fold stays inferrable
     protos, requested = CausalFrames.prototypes(
@@ -730,6 +735,7 @@ end
     # is neither
     @test all(s -> s isa GroupSummarizer,
         [Count(), Sum(:x), SumPower(:x, 2), DotProduct(:x, :y),
+            CausalFrames.CoMoment{:x,:x}(), CausalFrames.CoMoment{:x,:y}(),
             AgeWeightedSum(:x), Moment(:x, 2), Mean(:x), Variance(:x), Std(:x),
             Covariance(:x, :y), Correlation(:x, :y),
             LinearRegression(:x, :y), LinearRegression([:x, :y], :y),
@@ -740,6 +746,7 @@ end
     @test !(Opaque(Sum(:x)) isa MonoidSummarizer)
 
     monoids = [Count(), Sum(:x), SumPower(:x, 2), DotProduct(:x, :y),
+        CausalFrames.CoMoment{:x,:x}(), CausalFrames.CoMoment{:x,:y}(),
         AgeWeightedSum(:x), Product(:x), Min(:x), Max(:x), First(:x), Last(:x),
         MinMax(:x), CountDistinct(:x), MinIndex(:x), MaxIndex(:x),
         MinWithIndex(:x), MaxWithIndex(:x)]
@@ -749,6 +756,7 @@ end
     # values into the next emission. MinMax doesn't implement fresh!, which
     # exercises the `fresh(st)` default.
     selfcontained = [Count(), Sum(:x), SumPower(:x, 2), DotProduct(:x, :y),
+        CausalFrames.CoMoment{:x,:x}(), CausalFrames.CoMoment{:x,:y}(),
         AgeWeightedSum(:x), Product(:x), Min(:x), Max(:x), First(:x), Last(:x),
         MinMax(:x), CountDistinct(:x), MinIndex(:x), MaxIndex(:x),
         MinWithIndex(:x), MaxWithIndex(:x), Opaque(Sum(:x))]
@@ -783,6 +791,7 @@ end
     # Zeroing a built-in state allocates nothing, which every reuse path relies
     # on.
     for s in [Count(), Sum(:x), SumPower(:x, 2), DotProduct(:x, :y),
+        CausalFrames.CoMoment{:x,:x}(), CausalFrames.CoMoment{:x,:y}(),
         AgeWeightedSum(:x), Product(:x), Min(:x), Max(:x), First(:x), Last(:x),
         CountDistinct(:x), MinIndex(:x), MaxIndex(:x), MinWithIndex(:x),
         MaxWithIndex(:x)]
@@ -856,7 +865,8 @@ end
     # the group inverse: downdating the oldest rows equals folding the rest —
     # exact for integer accumulators
     # (AgeWeightedSum's is walked far harder under "age-weighted sum")
-    for s in [Count(), Sum(:x), SumPower(:x, 2), DotProduct(:x, :y)]
+    for s in [Count(), Sum(:x), SumPower(:x, 2), DotProduct(:x, :y),
+        CausalFrames.CoMoment{:x,:x}(), CausalFrames.CoMoment{:x,:y}()]
         st = fold(s, rows)
         @test @inferred(CausalFrames.downdate!(st, rows[1])) === nothing
         CausalFrames.downdate!(st, rows[2])
@@ -896,6 +906,120 @@ end
     for s in [Sum(:x), SumPower(:x, 2), DotProduct(:x, :y)]
         @test CausalFrames.isinvertible(CausalFrames.fresh(s, mintypes))
     end
+end
+
+@testset "co-moment accumulator" begin
+    # Variance, Covariance and an intercept LinearRegression fold deviations
+    # from a shift near the data, so a large level beside a small spread no
+    # longer cancels (issue #89). Errors are measured against an exact
+    # (BigFloat) answer over the *same* rounded inputs, so they exclude
+    # representation error and must not grow with the level.
+    winvar(x, n) =
+        let st = CausalFrames.barwindow(Variance(:x; corrected = false), n,
+                (x = Float64,))
+            [
+                (CausalFrames.update!(st, (; x = v)); CausalFrames.value(st).x_variance)
+                for v in x
+            ]
+        end
+    exactvar(x, n) = [
+        i < n ? missing :
+        (w = big.(x[(i-n+1):i]); Float64(sum((w .- sum(w) / n) .^ 2) / n))
+        for i in eachindex(x)
+    ]
+    relerr(v, r) = r == 0 ? abs(v) : abs(v - r) / r
+    base = [1000 * sin(1.7i) * cos(0.3i^2) for i in 1:400]
+    for (n, tol) in ((2, 1e-5), (5, 1e-11), (20, 1e-13)), c in (0.0, 1e6, 1e8, 1e10)
+        x = base .+ c
+        v, r = winvar(x, n), exactvar(x, n)
+        @test maximum(i -> relerr(v[i], r[i]), n:length(x)) < tol
+    end
+
+    # the issue's negative variance: a 1e8 level with 0.01 steps
+    x = [1e8 + ((i * 13) % 7 - 3) * 0.01 for i in 0:499]
+    v, r = winvar(x, 2), exactvar(x, 2)
+    @test all(>=(0), skipmissing(v))
+    @test maximum(i -> relerr(v[i], r[i]), 2:length(x)) < 1e-6
+
+    # a flat window is exactly zero, at any level
+    for level in (1e-6, 1.0, 1e8, 1e15)
+        @test all(==(0), skipmissing(winvar(fill(level, 30), 5)))
+    end
+    # ... including after the level jumps, once the window is flat again
+    v = winvar([fill(1.0, 10); fill(3e9 + 0.25, 10)], 4)
+    @test all(==(0), v[14:end])
+
+    # a long window over a drifting level stays accurate: the shift follows
+    y = [1e5 + 0.5i + sin(i) for i in 1:20_000]
+    v, r = winvar(y, 5), exactvar(y, 5)
+    @test maximum(i -> relerr(v[i], r[i]), 5:length(y)) < 1e-10
+
+    # combine! re-expresses one side at the other's shift; states folded at
+    # far-apart levels still combine to the exact answer
+    intypes = (time = Int64, x = Float64, y = Float64)
+    rows = [(time = i, x = 1e9 + 0.125 * (i % 5), y = -2e8 + 0.5 * (i % 3))
+            for i in 1:12]
+    exactcomoment(rs, a, b) =
+        let xs = big.(getproperty.(rs, a)), ys = big.(getproperty.(rs, b))
+            Float64(sum((xs .- sum(xs) / length(xs)) .* (ys .- sum(ys) / length(ys))))
+        end
+    for (s, a, b) in ((CausalFrames.CoMoment{:x,:x}(), :x, :x),
+        (CausalFrames.CoMoment{:x,:y}(), :x, :y))
+        for k in 1:11
+            l = CausalFrames.fresh(s, intypes)
+            r = CausalFrames.fresh(s, intypes)
+            foreach(row -> CausalFrames.update!(l, row), rows[1:k])
+            foreach(row -> CausalFrames.update!(r, row), rows[(k+1):end])
+            CausalFrames.combine!(l, l, r)
+            @test only(CausalFrames.value(l)) ≈ exactcomoment(rows, a, b) rtol = 1e-12
+        end
+    end
+
+    # NaN and ±Inf rows are counted, not folded: NaN while one is in the
+    # window, as Statistics.var gives, and exact again once it leaves
+    x = [1.0, 2.0, Inf, 4.0, 5.0, 6.0, NaN, 8.0, 9.0, 10.0] .+ 1e8
+    v = winvar(x, 3)
+    @test all(isnan, v[3:5]) && all(isnan, v[7:9])
+    @test v[6] ≈ exactvar(x, 3)[6] && v[10] ≈ exactvar(x, 3)[10]
+
+    # missing rows likewise: missing while in the window
+    df = DataFrame(time = 1:6, x = [1e8, 1e8 + 1, missing, 1e8 + 3, 1e8 + 4, 1e8 + 6])
+    out = DataFrame(
+        load(Context(0, 10),
+            readtable(df) |> addrollingcolumns((w = Bars(2),), Variance(:x))),
+    )
+    @test isequal(out.w_x_variance, [missing, 0.5, missing, missing, 0.5, 2.0])
+    @test eltype(out.w_x_variance) == Union{Missing,Float64}
+
+    # integer input folds exactly, and widens to a float accumulator mid-stream
+    chunks(cs...) = CausalPipeline(ctx -> collect(cs))
+    p = chunks(DataFrame(time = [1, 2], x = [10^9, 10^9 + 2], y = [3, 1]),
+        DataFrame(time = [3, 4], x = [1e9 + 1, 1e9 + 5], y = [2.0, 7.0]))
+    out = DataFrame(
+        load(Context(0, 9),
+            p |> summarize([Variance(:x), Covariance(:y, :x), Correlation(:x, :y)])),
+    )
+    xs, ys = [1e9, 1e9 + 2, 1e9 + 1, 1e9 + 5], [3.0, 1.0, 2.0, 7.0]
+    @test only(out.x_variance) == Statistics.var(xs .- 1e9)
+    @test only(out.y_x_covariance) ≈ Statistics.cov(ys, xs .- 1e9)
+    @test only(out.x_y_correlation) ≈ Statistics.cor(xs .- 1e9, ys)
+
+    # a fit with an intercept is shift-invariant in everything but the
+    # intercept itself
+    xs = [sin(0.7i) + 0.01i for i in 1:60]
+    ys = [2xs[i] + 0.3cos(1.3i) for i in 1:60]
+    fit(dx, dy) = DataFrame(
+        load(Context(0, 100),
+            readtable(DataFrame(time = 1:60, x = xs .+ dx, y = ys .+ dy)) |>
+            addrollingcolumns((w = Bars(10),), LinearRegression(:x, :y))),
+    )
+    a, b = fit(0.0, 0.0), fit(1e8, -1e8)
+    for c in (:w_r2, :w_stderr, :w_x_beta, :w_x_tstat)
+        @test all(i -> isapprox(a[i, c], b[i, c]; rtol = 1e-5), 10:60)
+    end
+    @test all(
+        i -> isapprox(b[i, :w_intercept_beta],
+            a[i, :w_intercept_beta] - 1e8 - 1e8 * a[i, :w_x_beta]; rtol = 1e-5), 10:60)
 end
 
 @testset "SumPower term specialization" begin
@@ -1257,6 +1381,8 @@ end
     @test dest.n == 2 && CausalFrames.fresh!(dest).n == 0
     @test CausalFrames.fresh(AgeWeightedSum(:x), mall) isa CausalFrames.MissingState
     @test CausalFrames.fresh(Product(:x), mall) isa CausalFrames.MissingState
+    @test CausalFrames.fresh(CausalFrames.CoMoment{:x,:x}(), mall) isa
+          CausalFrames.MissingState
 
     # widening hands the row count to the rebuilt state as missing terms, onto
     # both AgeWeightedSum states (rows age, so n is the count too)

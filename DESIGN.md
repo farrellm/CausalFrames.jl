@@ -1778,6 +1778,7 @@ Concrete summarizers provided, for an input column of element type `T`:
 | `MeanAbsDev(column)` | `:x_meanabsdev` | as `Mean` | `missing` |
 | `WindowValues(column)` (unexported) | `:x_windowvalues` | the state itself, borrowed | `missing` |
 | `SortedValues(column)` (unexported) | `:x_sortedvalues` | the state itself, borrowed | `missing` |
+| `CoMoment{a,b}()` (unexported, internal) | `:a_b_comoment` | `Float64` for integers, else as `Ta * Tb` | `0` |
 | `Min(column)` | `:x_min` | `T` | `missing` |
 | `Max(column)` | `:x_max` | `T` | `missing` |
 | `MinIndex(column)` | `:x_minindex` | `Int` | `missing` |
@@ -1860,8 +1861,8 @@ cannot specialize on a runtime value, so every row pays a general power where a
 move or a multiply would do. `SumPower(c, 1)` and `SumPower(c, 2)` therefore
 borrow the terms that hold their exponent in the *type* — `ColumnTerm{c}` and
 `PairProductTerm{c,c}` — which is worth roughly 3× on the fold, and matters
-well beyond `SumPower` itself since every `Variance`, `Std`, `Covariance`,
-`Correlation`, and `LinearRegression` depends on the squared power sum. This is
+well beyond `SumPower` itself since `Moment(c, 2)` and every
+`LinearRegression` without an intercept depend on the squared power sum. This is
 an implementation detail: the output column keeps its own name and the
 accumulator type is unchanged (`powertype(T, 1) === sumtype(T)` and
 `powertype(T, 2) === dottype(T, T)`), so no schema changes. The term value is
@@ -2211,16 +2212,56 @@ implementing `dependencies(s)` — a tuple of summarizer configurations — and
 the two-argument `value(st, vals)`. `Moment(:x, n)`, the `n`-th raw moment,
 is the built-in example: it depends on `Count()` and `SumPower(:x, n)` and
 emits their quotient. `Mean`, `Variance`, `Std`, and `Covariance` are the
-statistical dependents: `Mean(:x)` is `Sum(:x) / Count()`; `Variance(:x)`
-combines `Count()`, `Sum(:x)`, and `SumPower(:x, 2)` by the computational
-identity `(Σx² − (Σx)²/n) / (n − corrected)`; `Std(:x)` is the square root of
-`Variance(:x)`; `Covariance(:x, :y)` combines `Count()`, `Sum(:x)`,
-`Sum(:y)`, and the canonically ordered `DotProduct` analogously; and
+statistical dependents: `Mean(:x)` is `Sum(:x) / Count()`; `Variance(:x)` is
+`C / (n − corrected)` for the centred co-moment `C = Σ(x − x̄)²` and the row
+count `Count()`; `Std(:x)` is the square root of `Variance(:x)`;
+`Covariance(:x, :y)` is the same over `Σ(x − x̄)(y − ȳ)`; and
 `Correlation(:x, :y)` is
 `Covariance(:x, :y) / (Std(:x) · Std(:y))`, clamped to `[-1, 1]`. Dependencies
 may themselves be dependent — `Std` depends on `Variance`, which depends on the
-raw sums, and `Correlation` depends on all three — and the topological
+co-moment, and `Correlation` depends on all three — and the topological
 expansion handles that.
+
+The co-moment is the unexported accumulator `CoMoment{a,b}`, requested only in
+canonical (`isless`) order. It does **not** use the raw-sum identity
+`Σab − ΣaΣb/n` over `Sum` and `DotProduct`, which cancels catastrophically
+when the mean is large against the spread (issue #89: a two-row window at a
+`1e8` level gave a variance of `-2.0`). Two things are lost before the
+subtraction, so no summation can recover them: each `x * x` term is rounded at
+the scale of `x²`, and the dependent reads `Σx²` rounded to one float. Instead
+the state folds compensated sums of *shifted* values `d = x − K`,
+`Σd_a`, `Σd_b` and `Σd_a·d_b`, over which the same identity is exact up to
+round-off at the scale of the spread, since it is shift-invariant:
+
+- the shifts are set from the first row folded, and the sums restart at
+  exactly zero when the state empties;
+- a float state *recentres* once more than half its rows arrived since the
+  shift last moved, moving `K` to the row just folded and rewriting the sums
+  (`Σd·d' − δ'Σd − δΣd' + nδδ'`). A steady window of `w` rows recentres every
+  `w / 2` rows, a growing fold each time it doubles, so the shift follows a
+  drifting level. It is a reparameterization of the same sums, so later
+  `downdate!`s stay consistent. The target is a data value rather than the
+  mean so that deviations stay exact differences of inputs: the running tier
+  and a re-fold then agree exactly wherever the inputs allow (a flat window is
+  exactly `0` on both), which the mean, generally inexact, breaks;
+- the value is `(n·Σd_a·d_b − Σd_a·Σd_b) / n`, one rounding over an exact
+  integer numerator, and a single row's is exactly `0` (after sliding,
+  compensated `Σd²` need not equal `d·d` bit for bit, and a corrected one-row
+  variance must stay `0/0 = NaN`);
+- `combine!` re-expresses one side's sums at the other's shifts by the same
+  expansion, and a fresh state (no rows, no shift) is its identity;
+- only rows with both values present and finite are folded. A `missing` row is
+  counted under the flag `M`, as in the sum family, and a NaN or ±Inf row in a
+  separate count that makes the value `NaN` (as `Statistics.var` gives), so
+  both evict exactly and windows keep the running tier;
+- the value with `a = b` is clamped at zero, so round-off never makes a
+  variance negative; integer input folds exactly, giving `Float64`.
+
+What remains at short windows is not offset-dependent: a window whose spread
+is tiny against its distance from the shift (two near-equal rows after a large
+jump) still loses `eps · (distance / spread)²` relatively, the same at a level
+of `0` as of `1e10`. `notes/variance-cancellation.md` records the measurements
+and the alternatives rejected (Welford/Chan updates, error-free squares).
 
 `Variance`, `Std`, and `Covariance` follow `Statistics`: a `corrected::Bool`
 keyword (default `true`) selects the divisor `n − Int(corrected)`, so the
@@ -2235,18 +2276,20 @@ clamped to `[-1, 1]`, both matching `Statistics.cor`.
 
 `LinearRegression(predictors, response)` is the largest dependent: the whole
 ordinary-least-squares system, and every statistic drawn from it, is a function
-of `Count()`, `SumPower(pᵢ, 2)`, `SumPower(response, 2)`, the pairwise
-`DotProduct`s, and — only when there is an intercept — `Sum(pᵢ)` and
-`Sum(response)`. That is what makes the sharing free: two regressions over
-overlapping columns fold each cross product once, and because a squared term is
-requested as `SumPower(c, 2)` rather than `DotProduct(c, c)`, and every genuine
-cross product under the canonical order described below, a regression also
-shares with a `Variance`, `Std`, `Correlation`, or `Covariance` the user asked
-for separately, whichever way round the latter's arguments are written. With
-an intercept the normal equations are centered on the column
-means — the multivariate form of the `Covariance` identity, better conditioned
-and one dimension smaller than carrying a column of ones — and the intercept is
-recovered as `ȳ − Σᵢ βᵢ x̄ᵢ`. The system is symmetric positive semidefinite, so
+of `Count()` and the pairwise cross products of the predictors and response.
+With an intercept the normal equations are centered on the column means — the
+multivariate form of the `Covariance` identity, better conditioned and one
+dimension smaller than carrying a column of ones — so the cross products are
+the centred `CoMoment`s (which don't cancel under a large level, as above),
+`Sum(pᵢ)` and `Sum(response)` supply the means, and the intercept is recovered
+as `ȳ − Σᵢ βᵢ x̄ᵢ`. Without an intercept the fit is on the raw products by
+definition: `SumPower(pᵢ, 2)`, `SumPower(response, 2)` and the pairwise
+`DotProduct`s. That is what makes the sharing free: two regressions over
+overlapping columns fold each cross product once, and because every cross
+product is requested under the canonical order described below, a regression
+with an intercept also shares with a `Variance`, `Std`, `Correlation`, or
+`Covariance` the user asked for separately, whichever way round the latter's
+arguments are written. The system is symmetric positive semidefinite, so
 it is solved by a Cholesky factorization taken with `check = false`: rank
 deficiency becomes `NaN` output rather than a `PosDefException`, and the
 factor's inverse supplies both the coefficients' standard errors and the
@@ -2280,20 +2323,17 @@ whichever fits:
 - **Something already dependent**, like `Covariance`, needs no new layer: it
   simply names the canonical form in `dependencies` and reads it back under
   the canonical name. `Covariance(:y, :x)` produces `:y_x_covariance` from the
-  one `:x_y_dotproduct` accumulator.
+  one `:x_y_comoment` accumulator, which is never requested reversed at all.
 
 Deduplication is by output name, so this composes: asking both ways in one
 call, or asking one way beside a `LinearRegression` needing the same product,
 costs one accumulator plus a free fieldless rename.
 
-The rule is about argument *order*, and one related gap is deliberately left
-open: `Covariance(:x, :x)` still depends on `DotProduct(:x, :x)` rather than
-`SumPower(:x, 2)`, so it does not share with `Variance(:x)`. That is a
-question of which *representation* a squared term takes, not which order its
-arguments are in. `LinearRegression` resolves it in its own favour — its
-diagonal terms go to `SumPower(c, 2)` — but changing `Covariance` to match
-would alter an existing summarizer's dependency set for no case the regression
-does not already handle.
+The rule is about argument *order*. The co-moment behind `Variance` and
+`Covariance` has one representation for a squared term, `CoMoment{x,x}`, so
+`Covariance(:x, :x)` shares with `Variance(:x)` too. A no-intercept
+`LinearRegression` sends its raw squared terms to `SumPower(c, 2)` rather than
+`DotProduct(c, c)`, sharing with `Moment(c, 2)`.
 
 Before running, the transforms expand the requested summarizers into the
 full set to fold: each one's dependencies recursively, in topological order
@@ -2333,7 +2373,8 @@ declaring what a summarizer's states support beyond folding:
 `addrollingcolumns` and `summarizewindows` select their window algorithm from
 this structure (see "Rolling windows" and "Window summarization"). The classification of the built-ins:
 
-- **Groups**: `Count`, `Sum`, `SumPower`, `DotProduct`, `AgeWeightedSum` —
+- **Groups**: `Count`, `Sum`, `SumPower`, `DotProduct`, `AgeWeightedSum`,
+  and the internal `CoMoment` —
   subtraction is the exact inverse of addition for integer accumulators;
   float accumulators use the compensated, nonfinite-counting states (see
   above), leaving only the compensated round-off; and a `Missing`-admitting

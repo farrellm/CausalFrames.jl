@@ -35,18 +35,17 @@ end
     lr = (time = Int, x = Float64, z = Float64, y = Float64)
     st = CausalFrames.fresh(LinearRegression(:x, :y), lr)
     JET.@test_opt CausalFrames.value(st,
-        (count = 5, x_sumpower_2 = 55.0, y_sumpower_2 = 200.0,
-            x_y_dotproduct = 100.0, x_sum = 15.0, y_sum = 30.0))
+        (count = 5, x_x_comoment = 10.0, y_y_comoment = 20.0,
+            x_y_comoment = 10.0, x_sum = 15.0, y_sum = 30.0))
     st = CausalFrames.fresh(LinearRegression(:x, :y; intercept = false), lr)
     JET.@test_opt CausalFrames.value(st,
         (count = 5, x_sumpower_2 = 55.0, y_sumpower_2 = 200.0,
             x_y_dotproduct = 100.0))
     st = CausalFrames.fresh(LinearRegression([:x, :z], :y), lr)
     JET.@test_opt CausalFrames.value(st,
-        (count = 5, x_sumpower_2 = 55.0, z_sumpower_2 = 55.0,
-            y_sumpower_2 = 200.0, x_z_dotproduct = 50.0,
-            x_y_dotproduct = 100.0, y_z_dotproduct = 90.0,
-            x_sum = 15.0, z_sum = 15.0, y_sum = 30.0))
+        (count = 5, x_x_comoment = 10.0, z_z_comoment = 10.0,
+            y_y_comoment = 20.0, x_z_comoment = 5.0, x_y_comoment = 10.0,
+            y_z_comoment = 0.0, x_sum = 15.0, z_sum = 15.0, y_sum = 30.0))
 
     # The Missing-admitting variants, where the early return is live and the
     # dependency values are Union-typed. Both arities are checked, since a
@@ -55,9 +54,9 @@ end
     st = CausalFrames.fresh(LinearRegression(:x, :y),
         (time = Int, x = MF, y = Float64))
     JET.@test_opt CausalFrames.value(st,
-        NamedTuple{(:count, :x_sumpower_2, :y_sumpower_2, :x_y_dotproduct,
+        NamedTuple{(:count, :x_x_comoment, :y_y_comoment, :x_y_comoment,
             :x_sum, :y_sum),
-            Tuple{Int,MF,Float64,MF,MF,Float64}}((5, 55.0, 200.0, 100.0, 15.0,
+            Tuple{Int,MF,Float64,MF,MF,Float64}}((5, 10.0, 20.0, 10.0, 15.0,
             30.0)))
     for T in (MF, Union{Missing,Int})
         protos, requested = CausalFrames.prototypes(
@@ -98,6 +97,24 @@ end
     JET.@test_opt CausalFrames.update!(st, row)
     JET.@test_opt CausalFrames.downdate!(st, row)
     JET.@test_opt CausalFrames.value(st)
+end
+
+@testset "co-moment accumulator" begin
+    # Variance's and Covariance's accumulator, over every storage it takes:
+    # exact integers, compensated floats (with recentring) and the
+    # missing-counting flag
+    for T in (Int, Float64, Union{Missing,Int}, Union{Missing,Float64}),
+        s in (CausalFrames.CoMoment{:x,:x}(), CausalFrames.CoMoment{:x,:y}())
+
+        st = CausalFrames.fresh(s, (time = Int, x = T, y = T))
+        row = (time = 1, x = one(nonmissingtype(T)), y = one(nonmissingtype(T)))
+        JET.@test_opt CausalFrames.update!(st, row)
+        JET.@test_opt CausalFrames.downdate!(st, row)
+        JET.@test_opt CausalFrames.value(st)
+        JET.@test_opt CausalFrames.combine!(st, st, CausalFrames.fresh(st))
+    end
+    st = CausalFrames.fresh(Covariance(:y, :x), (time = Int, x = Float64, y = Float64))
+    JET.@test_opt CausalFrames.value(st, (count = 3, x_y_comoment = -3.0))
 end
 
 @testset "missing-counting accumulators" begin
@@ -245,8 +262,9 @@ end
 # The tier combinations the window kernels specialize on: each tier alone, and
 # all of them with a dependent spanning them (TierSpan, test/fixtures.jl), over
 # a String key so the key is non-isbits.
-const JETTIERSETS = ([Count(), Sum(:x), Mean(:x), Last(:x), Min(:x),
-    CountDistinct(:x), AgeWeightedSum(:x)], [Product(:x)], [PlainSum(:x)],
+const JETTIERSETS = (
+    [Count(), Sum(:x), Mean(:x), Last(:x), Min(:x),
+        CountDistinct(:x), AgeWeightedSum(:x), Std(:x)], [Product(:x)], [PlainSum(:x)],
     [TierSpan(:x), Mean(:x), First(:x)])
 
 @testset "addrollingcolumns kernel" begin
@@ -405,7 +423,8 @@ end
     # update!/value the transforms' own tuple folds call: its per-row path must
     # stay dispatch-free there too, where a shared fold would hit inference's
     # recursion limit.
-    for s in (Std(:x), Product(:x), Sum(:d => r -> 2r.x))
+    for s in (Std(:x), Covariance(:x, :d => r -> 2r.x), Product(:x),
+        Sum(:d => r -> 2r.x))
         st = CausalFrames.barwindow(s, 5, (x = Float64,))
         JET.@test_opt CausalFrames.update!(st, (x = 1.0,))
         JET.@test_opt CausalFrames.value(st)
