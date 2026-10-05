@@ -10,7 +10,7 @@ MLJModelInterface = "e80e1ace-859a-464e-9ed9-23947d8ae3ea"
 Parquet2 = "98572fba-bba0-415d-956f-fa77e587d26d"
 
 [compat]
-CSV = "0.10"
+CSV = "0.10, 1.1"
 DataFrames = "1.8.2"
 Dates = "< 0.0.1, 1"
 Documenter = "1.17.0"
