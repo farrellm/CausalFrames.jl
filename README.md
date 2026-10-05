@@ -192,7 +192,9 @@ that never reaches the output: `Sum(:range => r -> r.high - r.low)` produces
 | [`Quantile(:x, p; interpolation)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#Quantile) | `:x_quantile_50` for `p = 0.5`, one per `p` | group | quantiles, linear as `Statistics.quantile` or nearest-rank as TA-Lib's `PERCENTILE` |
 | [`Median(:x)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#Median) | `:x_median` | group | median |
 | [`PercentRank(:x)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#PercentRank) | `:x_percentrank` | group | fraction of the other rows below the newest |
+| [`MeanAbsDev(:x)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#MeanAbsDev) | `:x_meanabsdev` | group | mean absolute deviation about the mean |
 | [`CausalFrames.SortedValues(:x)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#SortedValues) | `:x_sortedvalues` | group | the sorted values the three above read (unexported, for summarizers of your own) |
+| [`CausalFrames.WindowValues(:x)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#WindowValues) | `:x_windowvalues` | group | the values in arrival order `MeanAbsDev` reads (unexported, for summarizers of your own) |
 | [`Min(:x)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#Min) | `:x_min` | group | minimum |
 | [`Max(:x)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#Max) | `:x_max` | group | maximum |
 | [`MinIndex(:x)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#MinIndex) | `:x_minindex` | group | rows since the minimum (`Int`; ties go to the newest) |

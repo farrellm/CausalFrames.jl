@@ -1775,6 +1775,8 @@ Concrete summarizers provided, for an input column of element type `T`:
 | `Quantile(column, p; interpolation)` | `:x_quantile_50` for `p = 0.5`, one per `p` | `Float64` for integers (linear), `T` (nearest rank) | `missing` |
 | `Median(column)` | `:x_median` | as linear `Quantile` | `missing` |
 | `PercentRank(column)` | `:x_percentrank` | `Float64` | `missing` |
+| `MeanAbsDev(column)` | `:x_meanabsdev` | as `Mean` | `missing` |
+| `WindowValues(column)` (unexported) | `:x_windowvalues` | the state itself, borrowed | `missing` |
 | `SortedValues(column)` (unexported) | `:x_sortedvalues` | the state itself, borrowed | `missing` |
 | `Min(column)` | `:x_min` | `T` | `missing` |
 | `Max(column)` | `:x_max` | `T` | `missing` |
@@ -2010,6 +2012,38 @@ compares the newest value strictly against the `N` rows before it and scales by
 `PERCENTRANK.INC`. A single row is `0/0 = NaN`, as a one-row corrected
 variance is. It reads the newest value from `Last(column)`, which is a group
 through its windowed state, so a call containing it stays on the running tier.
+
+`MeanAbsDev(column)` is the mean absolute deviation about the mean,
+`Σ|x − mean| / n`. That is Excel's `AVEDEV`, TA-Lib's `AVGDEV` and the
+deviation in TA-Lib's `CCI`. It cannot be a group of its own: the deviations
+are taken from the current mean, so every row's term changes whenever a row
+enters or leaves. It is instead a dependent over `Mean` and the window's
+values, and it stays on the running tier. Each emission scans the values once,
+a sum of `abs(v − mean)` in an `@simd` loop, which is O(window) per row. TA-Lib pays
+the same cost, and an indicator's window is short. The mean is the compensated
+`Mean`, so the deviations are taken from the correctly rounded centre, not a
+drifting running sum. `missing` and NaN propagate as for the order statistics.
+
+The scan needs every value but not their order, so the values come from their
+own accumulator, `WindowValues(column)` (unexported, documented like
+`SortedValues`), rather than from the sorted one. It keeps them in arrival
+order in a `Vector` with a moving head: `update!` appends, and `downdate!`
+advances the head, which the oldest-first law makes exact, compacting once the
+dead prefix is half the vector. Both are O(1) amortized, where the sorted
+vector pays a binary search and a memmove per row. `missing` and NaN are
+counted, not stored, as `SortedValues` counts them; its value is the state
+itself, borrowed. Measured with `addrollingcolumns` over 200,000 random
+`Float64` rows:
+
+| window (rows) | 14 | 100 | 1,000 |
+|---|---|---|---|
+| `Mean`, ns per row | 72 | 79 | 64 |
+| `MeanAbsDev` over `SortedValues`, ns per row | 175 | 205 | 413 |
+| `MeanAbsDev` over `WindowValues`, ns per row | 98 | 86 | 180 |
+
+The cost is a second O(window) copy of the column in a call that also has an
+order statistic of it. A sorted vector would earn its keep only with prefix
+sums, which would make the deviation O(log n); `SortedValues` keeps none.
 
 `Sum`, `SumPower`, `Product`, `DotProduct`, and `CountDistinct` have an
 identity element, so they summarize no rows as `0` (`Product` as `1`). The
@@ -2331,6 +2365,9 @@ this structure (see "Rolling windows" and "Window summarization"). The classific
 - **Groups through a sorted multiset**: `SortedValues`, and so `Quantile`,
   `Median` and `PercentRank` (with `Last`). One ordinary state serves every
   tier: insertion and one-copy deletion invert, and a merge combines.
+- **Groups through an arrival-order vector**: `WindowValues`, and so
+  `MeanAbsDev` (with `Mean`). Appending inverts by advancing the head, which
+  the oldest-first law makes exact, and a merge concatenates.
 - **Monoids only**: `Product` — dividing a row back out fails outright at
   zero (the total is `0` regardless of what else was folded), truncates for
   integers, and compounds round-off for floats.
@@ -2523,7 +2560,7 @@ Exports: `Context`, `CausalFrame`, `CausalPipeline`, `load`, `stream`,
 `SummarizerState`, `Count`, `CountDistinct`, `Sum`, `SumPower`,
 `AgeWeightedSum`, `Moment`, `Product`, `DotProduct`, `Mean`, `Variance`,
 `Std`, `Covariance`, `Correlation`, `LinearRegression`, `Quantile`, `Median`,
-`PercentRank`, `Min`, `Max`, `MinIndex`, `MaxIndex`, `MinWithIndex`,
+`PercentRank`, `MeanAbsDev`, `Min`, `Max`, `MinIndex`, `MaxIndex`, `MinWithIndex`,
 `MaxWithIndex`, `First`, `Last`, `FitModel`, `FittedModel`,
 `applymodels`, `addpredictions`, `modelreports`, `summarize`,
 `summarizecycles`, `intervalize`, `summarizewindows`, `addsummarycolumns`,

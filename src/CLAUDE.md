@@ -203,6 +203,17 @@ design rationale and performance constraints behind each module.
     all of `v` per call; `nearestrank` corrects `ceil(p * n)` to TA-Lib's exact
     rank. `PercentRank` reads the newest value from `Last`, a group via
     `WindowLastState`, so it keeps the running tier too
+  - `MeanAbsDev` is a fieldless dependent over `Mean` and the unexported
+    `WindowValues`, the values in arrival order: a `Vector` with a moving
+    head, appended by `update!` and advanced by `downdate!` (exact under the
+    oldest-first law), compacted once the dead prefix is half the vector, so
+    both are O(1) amortized and a steady window allocates nothing. It scans
+    the values once per emission (an `@simd` loop): deviations from a moving
+    centre have no inverse, so O(window) per row is the floor, and it is
+    TA-Lib's cost. It deliberately does not read `SortedValues`, whose
+    insert/delete cost twice the whole indicator at short windows (DESIGN.md
+    has the numbers). Its value is borrowed and `combine!` swaps a scratch
+    vector, as for `SortedValues`
   - row terms (`name => f`, a `ColumnSpec`) are virtual input columns, not a
     summarizer feature: a constructor builds the summarizer over `name` and
     hands the specs to `withterms`, which wraps it in the inert `Termed`

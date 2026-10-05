@@ -124,10 +124,22 @@ Median
 PercentRank
 ```
 
+## `MeanAbsDev`
+
+```@docs
+MeanAbsDev
+```
+
 ## `SortedValues`
 
 ```@docs
 CausalFrames.SortedValues
+```
+
+## `WindowValues`
+
+```@docs
+CausalFrames.WindowValues
 ```
 
 ## `Min`

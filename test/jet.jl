@@ -119,7 +119,7 @@ end
     for T in (Int, Union{Missing,Float64})
         protos, requested = CausalFrames.prototypes(
             CausalFrames.tosummarizers(
-                [Quantile(:x, [0.1, 0.5]), Median(:x), PercentRank(:x),
+                [Quantile(:x, [0.1, 0.5]), Median(:x), PercentRank(:x), MeanAbsDev(:x),
                 Quantile(:x, 0.9; interpolation = :nearestrank)]), Symbol[])
         intypes = (time = Int, x = T)
         states = CausalFrames.newstates(protos, intypes)

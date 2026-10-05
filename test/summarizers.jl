@@ -1722,8 +1722,154 @@ end
     # a steady window slides, and emits, without allocating
     protos, requested = CausalFrames.prototypes(
         CausalFrames.tosummarizers(
-            [Quantile(:x, [0.1, 0.5]), Median(:x), PercentRank(:x),
+            [Quantile(:x, [0.1, 0.5]), Median(:x), PercentRank(:x), MeanAbsDev(:x),
             Quantile(:x, 0.9; interpolation = :nearestrank)]), Symbol[])
+    intypes = (time = Int, x = Union{Missing,Float64})
+    states = map(s -> CausalFrames.freshwindowed(s, intypes), protos)
+    outs = Val(requested)
+    slrow(t) = (time = t, x = Float64(mod(t * 7, 17)))
+    function slide(states, from, n)
+        for t in from:(from+n-1)
+            CausalFrames.updateall!(states, slrow(t))
+            CausalFrames.downdateall!(states, slrow(t - 50))
+            CausalFrames.summaryvalues(states, outs)
+        end
+        return nothing
+    end
+    foreach(t -> CausalFrames.updateall!(states, slrow(t)), -49:0)
+    slide(states, 1, 1000)
+    @test (@allocated slide(states, 1001, 1000)) == 0
+end
+
+@testset "MeanAbsDev" begin
+    mad(w) = sum(abs.(w .- Statistics.mean(w))) / length(w)
+    summarized(xs, ss) = DataFrame(
+        load(Context(0, 99),
+            readtable(DataFrame(time = eachindex(xs), x = xs)) |> addsummarycolumns(ss),
+        ),
+    )
+
+    @test CausalFrames.emptyvalue(MeanAbsDev(:x)) === (x_meanabsdev = missing,)
+    @test MeanAbsDev(:x) isa GroupSummarizer
+    # it reads the values in arrival order, not the sorted ones, and shares the
+    # mean with Mean itself
+    protos, requested = CausalFrames.prototypes(
+        CausalFrames.tosummarizers([MeanAbsDev(:x), Median(:x), Mean(:x)]), Symbol[])
+    @test count(s -> s isa CausalFrames.WindowValues, protos) == 1
+    @test count(s -> s isa CausalFrames.SortedValues, protos) == 1
+    @test count(s -> s isa Sum, protos) == 1
+    @test requested == (:x_meanabsdev, :x_median, :x_mean)
+
+    # against the definition over every prefix of a sequence with ties
+    xs = map(v -> v - 5, lcgsequence(17, 60, 11))
+    got = summarized(xs, MeanAbsDev(:x)).x_meanabsdev
+    @test all(n -> got[n] ≈ mad(xs[1:n]), eachindex(xs))
+    @test got[1] === 0.0
+
+    # element types follow Mean: integers float, Float32 stays, Missing admits
+    for (T, V) in ((Int, Float64), (Float32, Float32),
+        (Union{Missing,Int}, Union{Missing,Float64}))
+        df = summarized(T[3, 1, 2], MeanAbsDev(:x))
+        @test eltype(df.x_meanabsdev) == V
+        @test df.x_meanabsdev[end] ≈ 2 / 3
+    end
+
+    # a missing gives missing and a NaN gives NaN; a sliding window recovers
+    # once the row leaves, matching a naive scan of each window
+    vals = Union{Missing,Float64}[1, 4, missing, 2, 8, NaN, 3, 3, 5, -1, 0, 2]
+    df = DataFrame(time = eachindex(vals), x = vals)
+    for n in (1, 3, 4)
+        got = DataFrame(
+            load(Context(0, 99),
+                readtable(df) |> addrollingcolumns((b = Bars(n),), MeanAbsDev(:x))),
+        ).b_x_meanabsdev
+        for i in eachindex(vals)
+            i < n && (@test ismissing(got[i]); continue)
+            w = vals[(i-n+1):i]
+            want = any(ismissing, w) ? missing : mad(w)
+            @test isequal(got[i], want) || got[i] ≈ want
+        end
+    end
+
+    # a time window: the same definition over the rows in [t - 2, t]
+    ys = Float64.(lcgsequence(5, 40, 13))
+    got = DataFrame(
+        load(Context(0, 99),
+            readtable(DataFrame(time = eachindex(ys), x = ys)) |>
+            addrollingcolumns((w = 2,), MeanAbsDev(:x))),
+    ).w_x_meanabsdev
+    @test all(i -> got[i] ≈ mad(ys[max(1, i-2):i]), eachindex(ys))
+end
+
+@testset "WindowValues" begin
+    WV = CausalFrames.WindowValues
+    fold(s, intypes, xs) = foldl(xs; init = CausalFrames.fresh(s, intypes)) do st, x
+        CausalFrames.update!(st, (time = 0, x = x))
+        st
+    end
+    snapshot(st) = (st.vals[st.head:end], st.nans, st.missings)
+
+    @test CausalFrames.emptyvalue(WV(:x)) === (x_windowvalues = missing,)
+    @test WV(:x) isa GroupSummarizer
+    @test :WindowValues ∉ names(CausalFrames)
+
+    # The accumulator slid over a live window (rows leave oldest first, as
+    # windowwalk removes them) against a fresh fold of it: arrival order kept,
+    # ties and ±0.0 kept, NaN and missing counted, strings carried.
+    pools = [
+        Union{Missing,Float64}[1.0, 2.0, 2.0, -0.0, 0.0, NaN, missing, 3.0, -1.0],
+        [3, 1, 4, 1, 5, 9, 2, 6, 1],
+        ["b", "a", "c", "a"],
+    ]
+    for vals in pools
+        intypes = (time = Int, x = eltype(vals))
+        ws = CausalFrames.freshwindowed(WV(:x), intypes)
+        bad = Tuple{Symbol,Int}[]
+        windowwalk(vals, 400; seed = 6) do op, row, live
+            op === :admit ? CausalFrames.update!(ws, row) :
+            CausalFrames.downdate!(ws, row)
+            ref = fold(WV(:x), intypes, [r.x for r in live])
+            isequal(snapshot(ws), snapshot(ref)) || push!(bad, (op, row.time))
+        end
+        @test isempty(bad)
+        @test isequal(snapshot(CausalFrames.fresh!(ws)),
+            snapshot(CausalFrames.fresh(WV(:x), intypes)))
+
+        # combine! is the fold of both in order, whichever state it
+        # overwrites, including one with a dead prefix
+        a1, b1 = vals[1:(end÷2)], vals[(end÷2+1):end]
+        whole = snapshot(fold(WV(:x), intypes, vals))
+        for alias in (:none, :a, :b)
+            a, b = fold(WV(:x), intypes, a1), fold(WV(:x), intypes, b1)
+            dest = alias === :a ? a : alias === :b ? b :
+                                      fold(WV(:x), intypes, vals[1:2])
+            CausalFrames.combine!(dest, a, b)
+            @test isequal(snapshot(dest), whole)
+        end
+    end
+
+    # past the compaction threshold: a long slide keeps exactly the window
+    st = fold(WV(:x), (time = Int, x = Int), 1:10)
+    for t in 11:500
+        CausalFrames.update!(st, (time = t, x = t))
+        CausalFrames.downdate!(st, (time = t, x = t - 10))
+    end
+    @test snapshot(st) == (collect(491:500), 0, 0)
+    @test length(st.vals) < 100
+
+    # widening keeps the order, the live values only, and the counts
+    st = fold(WV(:x), (time = Int, x = Int), [3, 1, 2])
+    CausalFrames.downdate!(st, (time = 0, x = 3))
+    st = CausalFrames.widenstate(st, (time = Int, x = Union{Missing,Float64}))
+    @test st isa CausalFrames.WindowValuesState{:x,:x_windowvalues,Float64,true}
+    CausalFrames.update!(st, (time = 4, x = missing))
+    CausalFrames.update!(st, (time = 5, x = 1.5))
+    @test isequal(snapshot(st), ([1.0, 2.0, 1.5], 0, 1))
+
+    # a steady window slides, compacting, and MeanAbsDev emits, without
+    # allocating
+    protos, requested = CausalFrames.prototypes(
+        CausalFrames.tosummarizers([MeanAbsDev(:x)]), Symbol[])
     intypes = (time = Int, x = Union{Missing,Float64})
     states = map(s -> CausalFrames.freshwindowed(s, intypes), protos)
     outs = Val(requested)
