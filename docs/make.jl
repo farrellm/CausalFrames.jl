@@ -103,6 +103,9 @@ checkapilinks(joinpath(@__DIR__, "..", "README.md"),
 readme_as_index(joinpath(@__DIR__, "..", "README.md"),
     joinpath(@__DIR__, "src", "index.md"))
 
+include(joinpath(@__DIR__, "skill.jl"))
+writeskill(joinpath(@__DIR__, "..", "skills", "causalframes"), @__DIR__)
+
 makedocs(;
     modules = [CausalFrames],
     authors = "Matthew Farrell",
