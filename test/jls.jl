@@ -132,6 +132,10 @@
             serialize(io, DataFrame(time = [3, 4], x = [3, 4]))
         end
         @test_throws ArgumentError load(ctx, readjls(unsorted))
+        # ... and the file is closed when they are
+        Sys.islinux() && @test openfds(unsorted) == 0
+        # as it is for a record that is not a chunk
+        Sys.islinux() && @test openfds(notchunk) == 0
 
         # a truncated last record is reported as such, while the complete
         # records before it stay readable

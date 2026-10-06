@@ -375,7 +375,8 @@ reads back as an empty stream. The source is a `CSVProducer`-shaped
 `clipchunk!` (with no `time` or `rename`: the file was written from a stream,
 so its `:time` is already resolved), stopping at the first time past the
 window. There is no index to seek by, so a read costs the file's prefix up to
-`stop`, as CSV's does.
+`stop`, as CSV's does. The reader closes the file when it stops, whether at the
+first time past the window, at the end of the file, or on any error it raises.
 
 Three caveats, all of them `Serialization`'s: a file is readable only by a
 compatible Julia and compatible versions of the packages whose types it holds;
