@@ -270,3 +270,8 @@ from `Acausal`, mirrors `settime`.
 The [Recipes](https://farrellm.github.io/CausalFrames.jl/dev/recipes/) page covers ranking within a group, reference-table
 joins, and fitting a model once to apply later. See [DESIGN.md](DESIGN.md) for
 the full design.
+
+Coding agents can learn the package from the
+[CausalFrames skill](https://github.com/farrellm/CausalFrames.jl/tree/master/skills/causalframes),
+generated from these docs: copy that directory into a project's
+`.claude/skills/` (or `~/.claude/skills/`).
