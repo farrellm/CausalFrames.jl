@@ -194,7 +194,9 @@ design rationale and performance constraints behind each module.
     its update reads its own `S₁`, so it has its own plain and compensated
     states, reusing the `Compensated` helpers and counting `missing` through
     the flag `M`. `S₂`'s nonfinite classification is `S₁`'s minus the newest
-    row's (`newest`), whose weight is exactly 0
+    row's (`newest`), whose weight is exactly 0. The weight products in
+    `downdate!` and `combine!` are error-free (`twoprod`), as the co-moments'
+    are: a rounded `(n - 1)·y` drifted linearly on a flat series (issue #94)
   - the sum family `Sum`/`SumPower`/`DotProduct` shares one state,
     `AccumState{N,A,T,M,S}`, over a term functor `T` (`ColumnTerm`/`PowerTerm`/
     `PairProductTerm`, terms formed at accumulator width). Its storage `S` is

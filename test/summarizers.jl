@@ -1786,6 +1786,31 @@ end
     @test st2 isa CausalFrames.AgeSumState
     @test CausalFrames.value(st2) == (x_ageweightedsum = 2 * 3 + 1 * 1,)
 
+    # The age weight is taken back error-free (issue #94): a flat series loses
+    # no rounding per slide, so the windowed sum doesn't drift with the number
+    # of bars, and stays within an ulp of the exact sum.
+    n = 20_000
+    df = DataFrame(time = 1:n, x = fill(1234.5678, n))
+    for w in (3, 14)
+        a = DataFrame(
+            load(Context(0, n + 1),
+                readtable(df) |>
+                addrollingcolumns((w = Bars(w),), AgeWeightedSum(:x))),
+        ).w_x_ageweightedsum
+        exact = Float64(big(1234.5678) * (w * (w - 1) ÷ 2))
+        @test abs(a[end] - exact) <= eps(exact)
+        @test a[end] == a[w]
+    end
+    # combine! ages a's rows by b's count with the same exact product
+    xa, xb = [0.1, 0.7, 0.3], [0.9, 0.2, 0.6, 0.4, 0.8, 0.5, 0.35]
+    fa = fold((time = Int, x = Float64), [(time = 1, x = v) for v in xa])
+    fb = fold((time = Int, x = Float64), [(time = 1, x = v) for v in xb])
+    d = CausalFrames.fresh(s, (time = Int, x = Float64))
+    CausalFrames.combine!(d, fa, fb)
+    xs = vcat(xa, xb)
+    exact = Float64(sum(big.(xs) .* ((length(xs)-1):-1:0)))
+    @test abs(CausalFrames.value(d).x_ageweightedsum - exact) <= eps(exact) / 2
+
     # update!/downdate! allocate nothing on either representation (a lone row
     # in, then out: the oldest row is the only one)
     function agealloc(st, row)

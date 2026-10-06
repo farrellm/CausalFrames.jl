@@ -1949,10 +1949,13 @@ to `S₂` (every row ages by one) and then joins `S₁` at weight `0`;
 `S₂ = a.S₂ + a.S₁·b.n + b.S₂`. It uses the sum family's representations: an
 exact plain state for integers, and for fixed-precision floats Neumaier
 compensation over `S₁` and `S₂`, with `S₁`'s counters classifying each raw
-`NaN`/`±Inf` input once. `S₂`'s nonfinite terms are `S₁`'s less the newest
-row's, whose weight is `0`, so a nonfinite value contributes nothing until a
-later row ages it (a weight of zero is exact, not IEEE's `0·Inf = NaN`), and a
-window recovers once it leaves. A `missing` input is counted as the sum
+`NaN`/`±Inf` input once. The products `(n − 1)·y` and `a.S₁·b.n` enter `S₂`
+error-free (an fma two-product, its error added to the compensation): a rounded
+weight would lose the same error on every slide of a flat series, so a windowed
+sum drifted linearly with the number of rows slid (issue #94). `S₂`'s nonfinite
+terms are `S₁`'s less the newest row's, whose weight is `0`, so a nonfinite
+value contributes nothing until a later row ages it (a weight of zero is exact,
+not IEEE's `0·Inf = NaN`), and a window recovers once it leaves. A `missing` input is counted as the sum
 family's state counts it, through the same type flag `M`.
 
 `CountDistinct` is the one summarizer that departs from both of the rules
