@@ -16,7 +16,12 @@ with any API or semantics change.**
   `julia --project=docs -e 'using Pkg; Pkg.develop(path="."); Pkg.instantiate()'`).
   Documenter runs strict — an unregistered docstring fails the docs CI job.
   The home page is **generated from `README.md`** by `docs/make.jl`;
-  `docs/src/index.md` is gitignored, so edit the README, never that file
+  `docs/src/index.md` is gitignored, so edit the README, never that file.
+  The build also regenerates the agent skill in `skills/causalframes/` from
+  the README, the API pages' docstrings and the Recipes (`docs/skill.jl`);
+  never hand-edit it. In CI (`CI=true`) it only compares, and fails if the
+  committed skill is stale — so any README, docs page or docstring change
+  ships with its rebuilt skill in the same commit
 - Doctests (every example is one — see "Documentation and error-message style")
   run only in the docs build. To regenerate outputs, build once with
   `makedocs(; doctest = :fix, …)`, starting from a non-empty placeholder:
@@ -53,13 +58,15 @@ the docs job), a link in `docs/src/api/index.md`, `DESIGN.md` (module table,
 export list, semantics), `src/precompile.jl` (a workload path — the parquet and
 MLJ operators are the only exceptions, see `ext/CLAUDE.md`), `test/runtests.jl`
 (include the new test file), and the matching `README.md` operator table, the
-name linking to that header.
+name linking to that header — then the docs build regenerates
+`skills/causalframes/`, which is committed alongside.
 
 A new summarizer instead touches `src/summarizers.jl` (the type, its state, and
 which structured subtype it claims — a performance decision, not a taxonomy
 one), `docs/src/api/summarizers.md` (again its own header),
 `docs/src/api/index.md`, `DESIGN.md`'s "Summarizers" section and export list,
-`test/summarizers.jl`, and `README.md`'s summarizer table.
+`test/summarizers.jl`, and `README.md`'s summarizer table, plus the
+regenerated `skills/causalframes/`.
 
 A new keyword on the file sources (as `closed` and `skipmissing` were) is a
 field of the shared `SourceClip` in `src/operators.jl`, used by
