@@ -278,6 +278,17 @@ time,bid,ask
     @test_throws ArgumentError load(Context(0, 100), bad)
     notuple = readcsv(path; types = tt) |> addcolumns(r -> r.bid)
     @test_throws ArgumentError load(Context(0, 100), notuple)
+    # nor reuse an existing name, which it reports itself rather than as
+    # DataFrames' duplicate-name error
+    clash = readcsv(path; types = tt) |> addcolumns(r -> (; bid = 2r.bid))
+    err = try
+        load(Context(0, 100), clash)
+        nothing
+    catch e
+        e
+    end
+    @test err isa ArgumentError
+    @test occursin("addcolumns output column :bid collides", err.msg)
 
     # transforms on an empty frame are no-ops
     p = emptyframe() |> filterrows(r -> true) |> addcolumns(r -> (; y = 1))

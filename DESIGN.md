@@ -104,7 +104,7 @@ boundaries.
 | `writeparquet(path; queue, rowgroupsize, backend, ...)` | transform | pass-through parquet sink (see "Parquet I/O") |
 | `writejls(path; queue)` | transform | pass-through `Serialization` sink (see "JLS I/O") |
 | `filterrows(pred)` | transform | keep rows where `pred(row)` |
-| `addcolumns(f)` | transform | append the `NamedTuple` `f(row)`, which may **not** contain `time` (so the time invariant needs no re-validation) |
+| `addcolumns(f)` | transform | append the `NamedTuple` `f(row)`, whose names must be new: never `time` (so the time invariant needs no re-validation), nor an existing column |
 | `selectcolumns(selectors...)` / `dropcolumns(selectors...)` / `reordercolumns(selectors...)` | transform | keep, drop, or move to the front the matching columns (see "Column selectors") |
 | `summarize(ss; key)` | transform | the whole window, emitted at `stop` |
 | `summarizecycles(ss; key, keyset)` | transform | each cycle (run of rows sharing a time) |
