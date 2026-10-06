@@ -244,6 +244,16 @@ time,bid,ask
     # a writer failure propagates to the consumer
     bad = joinpath(dir, "nosuchdir", "out.csv")
     @test_throws Exception scan(ctx, p |> writecsv(bad))
+
+    # a failed run releases the writer and its file, keeping the complete
+    # prefix written before the failure
+    failed = joinpath(dir, "failed.csv")
+    checkreleased(failingsource() |> writecsv(failed), failed)
+    @test read(failed, String) == "time,x\n1,1.0\n2,2.0\n"
+    # as does a failure in the sink's own checks
+    shifty = CausalPipeline(
+        ctx -> [DataFrame(time = [1], a = [1]), DataFrame(time = [2], b = [2])])
+    checkreleased(shifty |> writecsv(failed), failed)
 end
 
 @testset "filterrows and addcolumns" begin

@@ -156,7 +156,14 @@ interrupted run still leaves a complete prefix on disk; `append` is false
 only for the first chunk, which is what makes `CSV.write` emit the header
 exactly once. The channel is `bind`ed to the task, so a writer failure
 closes it with the exception and the pipeline task sees it at the next
-`put!` rather than deadlocking on a full queue.
+`put!` rather than deadlocking on a full queue. The other direction is
+handled too: a run that fails (upstream, in the sink's own schema check, or in
+the writer) passes through `SinkGuard`, which closes the channel with the
+run's exception and joins the writer before rethrowing. The writer drains the
+queued chunks, then stops with that exception and closes its file, so a failed
+run leaves a complete CSV prefix and no task or file handle behind (a parquet
+file gets no footer). Only a stream abandoned without an error still leaves
+the writer waiting.
 
 This is the one place chunk ownership is shared, and it needs care. A
 consumer owns the chunk it is handed, and several operators use that licence

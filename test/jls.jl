@@ -91,6 +91,10 @@
         shifty = CausalPipeline(
             ctx -> [DataFrame(time = [1], a = [1]), DataFrame(time = [2], b = [2])])
         @test_throws ArgumentError scan(ctx, shifty |> writejls(joinpath(dir, "s.jls")))
+        # a failed run releases the writer and its file
+        Sys.islinux() && @test openfds(joinpath(dir, "s.jls")) == 0
+        failed = joinpath(dir, "failed.jls")
+        checkreleased(failingsource() |> writejls(failed), failed)
 
         # a writer failure propagates to the consumer
         bad = joinpath(dir, "nosuchdir", "out.jls")

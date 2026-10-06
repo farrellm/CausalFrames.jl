@@ -533,14 +533,37 @@ checkqueue(queue::Integer, op::String) =
 
 # Every file sink's transform: a pass-through chunkmap handing each chunk to a
 # `ChunkSink` built by `makesink()` when the run starts (truncating the file
-# then), and joining its writer once upstream is exhausted.
+# then), and joining its writer once upstream is exhausted. `SinkGuard` joins it
+# too when the run fails instead.
 function sinktransform(makesink)
     return function (p::CausalPipeline)
         return CausalPipeline() do ctx::Context
             sink = makesink()
-            return chunkmap(c -> sinkchunk(sink, c), p.run(ctx);
-                flush = () -> finishwrite(sink))
+            return SinkGuard(
+                chunkmap(c -> sinkchunk(sink, c), p.run(ctx);
+                    flush = () -> finishwrite(sink)),
+                sink)
         end
+    end
+end
+
+# A file sink's chunks, releasing the writer when a run fails: an error from
+# upstream, from the sink's own checks or from the writer itself would otherwise
+# leave the writer blocked on its queue, holding the file open, for good.
+struct SinkGuard{I,S}
+    inner::I
+    sink::S     # the ChunkSink, defined below
+end
+
+Base.IteratorSize(::Type{<:SinkGuard}) = Base.SizeUnknown()
+Base.eltype(::Type{<:SinkGuard}) = DataFrame
+
+function Base.iterate(g::SinkGuard, state...)
+    try
+        return iterate(g.inner, state...)
+    catch e
+        abortwrite!(g.sink, e)
+        rethrow()
     end
 end
 
@@ -598,6 +621,19 @@ end
 function finishwrite(sink::ChunkSink)
     close(sink.chan)
     wait(sink.task)
+    return nothing
+end
+
+# Called when the run fails: close the queue with the run's exception, so the
+# writer stops with it once it has drained the queued chunks (closing its file,
+# but writing no parquet footer), and join it. The writer's own failure is
+# already the run's, or subsumed by it, so it is not reported again.
+function abortwrite!(sink::ChunkSink, e)
+    close(sink.chan, e isa Exception ? e : ErrorException(string(e)))
+    try
+        wait(sink.task)
+    catch
+    end
     return nothing
 end
 

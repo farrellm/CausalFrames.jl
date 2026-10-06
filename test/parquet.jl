@@ -489,7 +489,9 @@ end
 
     # both sinks truncate when the run starts, so a failed run never leaves
     # the previous file looking current (queue = 0: the writer has opened the
-    # file before the first chunk is handed over)
+    # file before the first chunk is handed over). The failed run releases the
+    # writer, which may by then have written Parquet2's leading magic bytes,
+    # but never a footer: what is left is unreadable, not the old file.
     failing =
         clock(1; batchsize = 2) |>
         addcolumns(r -> r.time >= 4 ? error("boom") : (; y = r.time))
@@ -499,7 +501,9 @@ end
         @test filesize(stale) > 0
         @test_throws Exception scan(Context(0, 10),
             failing |> writeparquet(stale; backend = wb, queue = 0))
-        @test filesize(stale) == 0
+        @test filesize(stale) <= 4
+        @test_throws Exception load(ctx, readparquet(stale))
+        Sys.islinux() && @test openfds(stale) == 0
     end
 
     # DuckDB takes compression_codec and rejects the Parquet2-only options
@@ -620,6 +624,12 @@ end
 
     @test_throws ArgumentError writeparquet(out; queue = -1)
     @test_throws ArgumentError writeparquet(out; rowgroupsize = 0)
+
+    # a failed run releases the writer and its file, under either backend
+    for backend in (:duckdb, :parquet2)
+        failed = joinpath(dir, "failed_$backend.parquet")
+        checkreleased(failingsource() |> writeparquet(failed; backend), failed)
+    end
 end
 
 @testset "parquet and CSV interoperate" begin
