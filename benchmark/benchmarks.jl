@@ -278,6 +278,10 @@ SUITE["rolling"]["bars-running"] = @benchmarkable load(RCTX,
 SUITE["rolling"]["bars-running-keyed"] = @benchmarkable load(RCTX,
     RSRC |> addrollingcolumns((; b100 = Bars(100)), [Sum(:qty), Mean(:qty)];
         key = :sym))
+# AgeWeightedSum's own running state: its downdate! takes back an age weight
+# with an error-free product (issue #94), a cost the sum family doesn't pay.
+SUITE["rolling"]["bars-agesum"] = @benchmarkable load(RCTX,
+    RSRC |> addrollingcolumns((; b100 = Bars(100)), [AgeWeightedSum(:qty)]))
 SUITE["rolling"]["bars-tree"] = @benchmarkable load(RCTX,
     RSRC |> addrollingcolumns((; b100 = Bars(100)), [Product(:qty)]))
 SUITE["rolling"]["bars-mixed-keyed"] = @benchmarkable load(RCTX,
