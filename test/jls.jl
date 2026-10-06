@@ -91,6 +91,10 @@
         shifty = CausalPipeline(
             ctx -> [DataFrame(time = [1], a = [1]), DataFrame(time = [2], b = [2])])
         @test_throws ArgumentError scan(ctx, shifty |> writejls(joinpath(dir, "s.jls")))
+        # a failed run releases the writer and its file
+        Sys.islinux() && @test openfds(joinpath(dir, "s.jls")) == 0
+        failed = joinpath(dir, "failed.jls")
+        checkreleased(failingsource() |> writejls(failed), failed)
 
         # a writer failure propagates to the consumer
         bad = joinpath(dir, "nosuchdir", "out.jls")
@@ -128,6 +132,10 @@
             serialize(io, DataFrame(time = [3, 4], x = [3, 4]))
         end
         @test_throws ArgumentError load(ctx, readjls(unsorted))
+        # ... and the file is closed when they are
+        Sys.islinux() && @test openfds(unsorted) == 0
+        # as it is for a record that is not a chunk
+        Sys.islinux() && @test openfds(notchunk) == 0
 
         # a truncated last record is reported as such, while the complete
         # records before it stay readable

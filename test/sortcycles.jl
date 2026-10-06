@@ -107,8 +107,9 @@
             votes = [10, 30, 20, 5, 5], id = ["c", "a", "b", "e", "d"])
         p =
             readtable(films; time = :year) |>
+            addcolumns(r -> (; year = r.time)) |>
             sortcycles(r -> (-r.votes, r.id)) |>
-            addsummarycolumns(Count(); key = :time)
+            addsummarycolumns(Count(); key = :year)
         df = DataFrame(load(Context(2000, 2010), p))
         @test df.id == ["a", "b", "c", "d", "e"]
         @test df.count == [1, 2, 3, 1, 2]

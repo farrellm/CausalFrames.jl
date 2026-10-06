@@ -104,7 +104,7 @@ boundaries.
 | `writeparquet(path; queue, rowgroupsize, backend, ...)` | transform | pass-through parquet sink (see "Parquet I/O") |
 | `writejls(path; queue)` | transform | pass-through `Serialization` sink (see "JLS I/O") |
 | `filterrows(pred)` | transform | keep rows where `pred(row)` |
-| `addcolumns(f)` | transform | append the `NamedTuple` `f(row)`, which may **not** contain `time` (so the time invariant needs no re-validation) |
+| `addcolumns(f)` | transform | append the `NamedTuple` `f(row)`, whose names must be new: never `time` (so the time invariant needs no re-validation), nor an existing column |
 | `selectcolumns(selectors...)` / `dropcolumns(selectors...)` / `reordercolumns(selectors...)` | transform | keep, drop, or move to the front the matching columns (see "Column selectors") |
 | `summarize(ss; key)` | transform | the whole window, emitted at `stop` |
 | `summarizecycles(ss; key, keyset)` | transform | each cycle (run of rows sharing a time) |
@@ -131,6 +131,12 @@ rows of a column table behind a per-chunk function barrier — never
 `DataFrameRow`s, whose column access is type-unstable — so a row function
 compiles to direct field access, like a summarizer's `update!`.
 
+Every transform taking `key` validates it the same way: at construction
+(`keycolumns`), the key columns must be distinct and may not include `:time`,
+since a key of `:time` would overwrite the emitted time; on the first chunk
+(`checkkeycolumns`), each key column must be present in the input. To key on
+the time, copy it into a column of its own with `addcolumns`.
+
 Names are lowercase, with no camelCase and no shadowing of Base functions
 (`filter`, `empty`, `count`, `sum`, `join`).
 
@@ -150,7 +156,14 @@ interrupted run still leaves a complete prefix on disk; `append` is false
 only for the first chunk, which is what makes `CSV.write` emit the header
 exactly once. The channel is `bind`ed to the task, so a writer failure
 closes it with the exception and the pipeline task sees it at the next
-`put!` rather than deadlocking on a full queue.
+`put!` rather than deadlocking on a full queue. The other direction is
+handled too: a run that fails (upstream, in the sink's own schema check, or in
+the writer) passes through `SinkGuard`, which closes the channel with the
+run's exception and joins the writer before rethrowing. The writer drains the
+queued chunks, then stops with that exception and closes its file, so a failed
+run leaves a complete CSV prefix and no task or file handle behind (a parquet
+file gets no footer). Only a stream abandoned without an error still leaves
+the writer waiting.
 
 This is the one place chunk ownership is shared, and it needs care. A
 consumer owns the chunk it is handed, and several operators use that licence
@@ -362,7 +375,8 @@ reads back as an empty stream. The source is a `CSVProducer`-shaped
 `clipchunk!` (with no `time` or `rename`: the file was written from a stream,
 so its `:time` is already resolved), stopping at the first time past the
 window. There is no index to seek by, so a read costs the file's prefix up to
-`stop`, as CSV's does.
+`stop`, as CSV's does. The reader closes the file when it stops, whether at the
+first time past the window, at the end of the file, or on any error it raises.
 
 Three caveats, all of them `Serialization`'s: a file is readable only by a
 compatible Julia and compatible versions of the packages whose types it holds;
@@ -935,7 +949,10 @@ per row rather than moving every row by the same amount. `spec` is either a
 occupied, and the old `:time` disappears — or a per-row function whose result
 overwrites `:time` in place. These are `readcsv`'s two `time =` modes, applied
 mid-stream. Either way the result is converted to the context's time type and
-the chunk is re-clipped to `[start, stop)`.
+the chunk is re-clipped to `[start, stop)`. A textual result (by `istextual`, so
+`Union{Missing, String}` too) or a `missing` one is an `ArgumentError` before
+conversion, which would otherwise fail with a bare `MethodError`; `settime` has
+no `skipmissing`, since dropping rows is `filterrows`'s job.
 
 It ships as a causal/acausal pair, the same split as `lag`/`lead`:
 
@@ -1544,7 +1561,7 @@ rows sharing one timestamp — and nothing else: every row keeps its time, so th
 output is non-decreasing by construction and needs no order check. It is the
 within-timestamp half of an SQL `ORDER BY time, ...`, the half the sources'
 `sort` deliberately does not take (see "Sorting a file source"), and what makes
-a keyed `Count` over `key = :time` a rank.
+a `Count` keyed on a copy of the time a rank (no transform takes `key = :time`).
 
 - **Keys.** `by` is a column name (`Symbol` or `AbstractString`), a collection of
   names compared lexicographically, or a per-row function returning the key (a

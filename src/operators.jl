@@ -533,14 +533,37 @@ checkqueue(queue::Integer, op::String) =
 
 # Every file sink's transform: a pass-through chunkmap handing each chunk to a
 # `ChunkSink` built by `makesink()` when the run starts (truncating the file
-# then), and joining its writer once upstream is exhausted.
+# then), and joining its writer once upstream is exhausted. `SinkGuard` joins it
+# too when the run fails instead.
 function sinktransform(makesink)
     return function (p::CausalPipeline)
         return CausalPipeline() do ctx::Context
             sink = makesink()
-            return chunkmap(c -> sinkchunk(sink, c), p.run(ctx);
-                flush = () -> finishwrite(sink))
+            return SinkGuard(
+                chunkmap(c -> sinkchunk(sink, c), p.run(ctx);
+                    flush = () -> finishwrite(sink)),
+                sink)
         end
+    end
+end
+
+# A file sink's chunks, releasing the writer when a run fails: an error from
+# upstream, from the sink's own checks or from the writer itself would otherwise
+# leave the writer blocked on its queue, holding the file open, for good.
+struct SinkGuard{I,S}
+    inner::I
+    sink::S     # the ChunkSink, defined below
+end
+
+Base.IteratorSize(::Type{<:SinkGuard}) = Base.SizeUnknown()
+Base.eltype(::Type{<:SinkGuard}) = DataFrame
+
+function Base.iterate(g::SinkGuard, state...)
+    try
+        return iterate(g.inner, state...)
+    catch e
+        abortwrite!(g.sink, e)
+        rethrow()
     end
 end
 
@@ -601,6 +624,19 @@ function finishwrite(sink::ChunkSink)
     return nothing
 end
 
+# Called when the run fails: close the queue with the run's exception, so the
+# writer stops with it once it has drained the queued chunks (closing its file,
+# but writing no parquet footer), and join it. The writer's own failure is
+# already the run's, or subsumed by it, so it is not reported again.
+function abortwrite!(sink::ChunkSink, e)
+    close(sink.chan, e isa Exception ? e : ErrorException(string(e)))
+    try
+        wait(sink.task)
+    catch
+    end
+    return nothing
+end
+
 """
     filterrows(pred) -> (CausalPipeline -> CausalPipeline)
     filterrows(p::CausalPipeline, pred) -> CausalPipeline
@@ -648,8 +684,8 @@ A transform appending columns computed from each row.
 # Arguments
 - `f`: a function `row -> NamedTuple`, where the `NamedTuple` maps each new
   column name to its value in that row. `row` is as for [`filterrows`](@ref).
-  The names must be new, and may not include `time`; returning anything but a
-  `NamedTuple` is an `ArgumentError`.
+  Returning anything but a `NamedTuple`, or a name already in the input
+  (including `time`), is an `ArgumentError`.
 
 ```jldoctest
 p = readtable(DataFrame(time = [1, 2], bid = [10.0, 10.5], ask = [10.2, 10.7]))
@@ -682,6 +718,12 @@ function addchunk(f, c::DataFrame)
     )
     :time in keys(first(vals)) && throw(ArgumentError(
         "addcolumns function may not return a time column"))
+    for n in keys(first(vals))
+        columnindex(c, n) > 0 && throw(
+            ArgumentError(
+                "addcolumns output column $(repr(n)) collides with an existing column"),
+        )
+    end
     # The chunk is owned, so its columns can be adopted rather than copied.
     return hcat(c, DataFrame(vals); copycols = false)
 end
@@ -889,8 +931,9 @@ type and clipped to `[start, stop)`; other columns pass through.
 
 Each of these is an `ArgumentError` when the pipeline runs: a row whose new
 time is earlier than its old one (see
-[`Acausal.settime`](@ref CausalFrames.Acausal.settime)), and a new time column
-that decreases within or across chunks.
+[`Acausal.settime`](@ref CausalFrames.Acausal.settime)), a new time column
+that decreases within or across chunks, a textual new time, and a `missing` one
+(drop such rows first with [`filterrows`](@ref)).
 
 The input is not widened: it runs over `[start, stop)`, so a row outside the
 window is never seen, even if `spec` would move it inside. Hence loading
@@ -969,12 +1012,19 @@ end
 newtimes(spec::Function, c::DataFrame, opname::String) =
     checktimevalues(maptime(spec, Tables.columntable(c)), opname)
 
-checktimevalues(v::AbstractVector, opname::String) =
-    eltype(v) <: AbstractString ?
-    throw(
+# The raw new time values, refused if textual or if any is `missing`.
+function checktimevalues(v::AbstractVector, opname::String)
+    istextual(v) && throw(
         ArgumentError("$opname produced a textual time column (element type \
             $(eltype(v))); parse it to an ordered type first"),
-    ) : v
+    )
+    Missing <: eltype(v) && any(ismissing, v) &&
+        throw(
+            ArgumentError("$opname produced a missing time; drop those rows first \
+            with `filterrows`"),
+        )
+    return v
+end
 
 # The new column takes the context's time type, as every source's does.
 function converttimes(::Type{T}, times::AbstractVector, opname::String) where {T}

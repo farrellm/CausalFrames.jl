@@ -244,6 +244,16 @@ time,bid,ask
     # a writer failure propagates to the consumer
     bad = joinpath(dir, "nosuchdir", "out.csv")
     @test_throws Exception scan(ctx, p |> writecsv(bad))
+
+    # a failed run releases the writer and its file, keeping the complete
+    # prefix written before the failure
+    failed = joinpath(dir, "failed.csv")
+    checkreleased(failingsource() |> writecsv(failed), failed)
+    @test read(failed, String) == "time,x\n1,1.0\n2,2.0\n"
+    # as does a failure in the sink's own checks
+    shifty = CausalPipeline(
+        ctx -> [DataFrame(time = [1], a = [1]), DataFrame(time = [2], b = [2])])
+    checkreleased(shifty |> writecsv(failed), failed)
 end
 
 @testset "filterrows and addcolumns" begin
@@ -278,6 +288,17 @@ time,bid,ask
     @test_throws ArgumentError load(Context(0, 100), bad)
     notuple = readcsv(path; types = tt) |> addcolumns(r -> r.bid)
     @test_throws ArgumentError load(Context(0, 100), notuple)
+    # nor reuse an existing name, which it reports itself rather than as
+    # DataFrames' duplicate-name error
+    clash = readcsv(path; types = tt) |> addcolumns(r -> (; bid = 2r.bid))
+    err = try
+        load(Context(0, 100), clash)
+        nothing
+    catch e
+        e
+    end
+    @test err isa ArgumentError
+    @test occursin("addcolumns output column :bid collides", err.msg)
 
     # transforms on an empty frame are no-ops
     p = emptyframe() |> filterrows(r -> true) |> addcolumns(r -> (; y = 1))
@@ -969,6 +990,11 @@ end
     # a textual column cannot be ordered against the window
     @test_throws ArgumentError load(ctx,
         src |> addcolumns(r -> (; s = "x")) |> settime(:s))
+    # as is one that admits missing, and a missing new time
+    optional = readtable(DataFrame(time = [1, 2], s = Union{Missing,String}["3", "4"]))
+    @test_throws ArgumentError load(ctx, optional |> settime(:s))
+    @test_throws ArgumentError load(ctx,
+        src |> settime(r -> r.time > 1 ? missing : r.time))
     # and the named column must exist
     @test_throws ArgumentError load(ctx, src |> settime(:nope))
 

@@ -242,3 +242,37 @@ function CausalFrames.value(st::LastNMeanState{C,N}) where {C,N}
     v = CausalFrames.value(st.window)
     return NamedTuple{(N,),Tuple{fieldtype(typeof(v), 1)}}((v[1],))
 end
+
+# How many of this process's file descriptors refer to `path`: Linux only, via
+# /proc, so callers guard on `Sys.islinux()`. For checking that a failed run
+# leaves no file open.
+function openfds(path::AbstractString)
+    target = realpath(path)
+    n = 0
+    for fd in readdir("/proc/self/fd"; join = true)
+        link = try
+            readlink(fd)
+        catch
+            continue    # closed between the listing and the read
+        end
+        n += link == target
+    end
+    return n
+end
+
+# A source emitting one chunk and then failing: the run errors after a sink
+# downstream has already received data.
+failingsource() = CausalPipeline() do _
+    (
+        i == 1 ? DataFrame(time = [1, 2], x = [1.0, 2.0]) :
+        throw(ArgumentError("failingsource: boom")) for i in 1:2
+    )
+end
+
+# Run `p` expecting `failingsource`'s error, then check that the sink writing
+# `path` released it.
+function checkreleased(p::CausalPipeline, path::AbstractString)
+    @test_throws ArgumentError scan(Context(0, 10), p)
+    Sys.islinux() && @test openfds(path) == 0
+    return nothing
+end

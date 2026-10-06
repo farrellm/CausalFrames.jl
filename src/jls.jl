@@ -101,7 +101,13 @@ function (p::JLSProducer)()
                 ),
             )
         )
-        out = clipchunk!(clip, df)
+        # a data error (times out of order, say) ends the run: close the file
+        out = try
+            clipchunk!(clip, df)
+        catch
+            finishjls!(p)
+            rethrow()
+        end
         clip.done && finishjls!(p)
         out === nothing || return out
     end

@@ -544,16 +544,17 @@ A transform summarizing the whole window, emitted at `stop`, with columns
   and nothing for an empty input.
 """
 function summarize(summarizers; key = nothing)
+    keycols = keycolumns(key, "summarize")
+    protos, requested, terms =
+        prototypes(tosummarizers(summarizers), keycols, "summarize")
+    keynames = Val(Tuple(keycols))
+    outs = Val(requested)
+    keyed = !isempty(keycols)
     return function (p::CausalPipeline)
         return CausalPipeline() do ctx::Context
-            keycols = tokeycolumns(key)
-            protos, requested, terms =
-                prototypes(tosummarizers(summarizers), keycols, "summarize")
-            keynames = Val(Tuple(keycols))
-            outs = Val(requested)
-            keyed = !isempty(keycols)
             fold = SummaryFold(terms, "summarize")
             step = function (c)
+                fold.types === nothing && checkkeycolumns(keycols, c, "summarize")
                 nt = preparechunk!(fold, protos, keyed, keynames, c)
                 keyed ? foldgroups!(fold.groups, fold.stateprotos, nt, keynames) :
                 foldall!(fold.states, nt)
@@ -602,17 +603,19 @@ then the summaries; the input columns are dropped.
   without rows.
 """
 function summarizecycles(summarizers; key = nothing, keyset = nothing)
-    ks = tokeyset(keyset, tokeycolumns(key), "summarizecycles")
+    keycols = keycolumns(key, "summarizecycles")
+    protos, requested, terms =
+        prototypes(tosummarizers(summarizers), keycols, "summarizecycles")
+    ks = tokeyset(keyset, keycols, "summarizecycles")
+    keynames = Val(Tuple(keycols))
+    outs = Val(requested)
+    keyed = !isempty(keycols)
     return function (p::CausalPipeline)
         return CausalPipeline() do ctx::Context
-            keycols = tokeycolumns(key)
-            protos, requested, terms =
-                prototypes(tosummarizers(summarizers), keycols, "summarizecycles")
-            keynames = Val(Tuple(keycols))
-            outs = Val(requested)
-            keyed = !isempty(keycols)
             fold = SummaryFold(terms, "summarizecycles")
             step = function (c)
+                fold.types === nothing &&
+                    checkkeycolumns(keycols, c, "summarizecycles")
                 nt = preparechunk!(fold, protos, keyed, keynames, c; keyset = ks)
                 rows = if ks !== nothing
                     RT, emptyrow = densetypes(eltype(nt.time), fold.stateprotos,
@@ -675,17 +678,18 @@ so far, itself included.
   [`Count`](@ref) numbers the rows of each key.
 """
 function addsummarycolumns(summarizers; key = nothing)
+    keycols = keycolumns(key, "addsummarycolumns")
+    protos, requested, terms =
+        prototypes(tosummarizers(summarizers), keycols, "addsummarycolumns")
+    keynames = Val(Tuple(keycols))
+    outs = Val(requested)
+    keyed = !isempty(keycols)
     return function (p::CausalPipeline)
         return CausalPipeline() do ctx::Context
-            keycols = tokeycolumns(key)
-            protos, requested, terms =
-                prototypes(tosummarizers(summarizers), keycols, "addsummarycolumns")
-            keynames = Val(Tuple(keycols))
-            outs = Val(requested)
-            keyed = !isempty(keycols)
             fold = SummaryFold(terms, "addsummarycolumns")
             step = function (c)
                 if !fold.checked   # needs the schema: first chunk only
+                    checkkeycolumns(keycols, c, "addsummarycolumns")
                     for n in requested   # hidden dependencies are never added
                         String(n) in names(c) && throw(
                             ArgumentError(

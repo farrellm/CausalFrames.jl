@@ -59,7 +59,8 @@ function tiering(protos::Tuple, intypes::NamedTuple)
         pick(REFOLDTIER, states), pick(DERIVEDTIER, states), Val(perm))
 end
 
-# Each state's tier, in topological order; for tests and debugging only.
+# Each state's tier, in topological order: `barwindow` refuses a refold tier
+# by it, and the tests read it.
 tiernames(::Tiering{SR,ST,SF,SD,P}) where {SR,ST,SF,SD,P} =
     map(c -> TIERNAMES[first(c)], P)
 

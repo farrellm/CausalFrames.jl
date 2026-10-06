@@ -364,6 +364,9 @@ end
 
     # order is still required, within a chunk and across chunk boundaries
     @test_throws ArgumentError load(ctx, src |> settime(r -> 9 - r.time))
+    # a missing new time is refused, not converted
+    @test_throws ArgumentError load(ctx,
+        src |> settime(r -> r.time > 1 ? missing : r.time - 1))
     twochunks = CausalPipeline() do _
         [DataFrame(time = [1, 2], x = [5, 9]), DataFrame(time = [3, 4], x = [6, 7])]
     end

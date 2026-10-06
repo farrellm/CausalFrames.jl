@@ -523,3 +523,28 @@ time,sym,qty
               DataFrame(load(Context(0, 9), uncurried))
     end
 end
+
+@testset "summarization key validation" begin
+    p = readtable(DataFrame(time = [1, 2], k = ["a", "b"], x = [1.0, 2.0]))
+    ctx = Context(0, 10)
+    for (op, f) in (
+        ("summarize", (ss; kw...) -> summarize(ss; kw...)),
+        ("summarizecycles", (ss; kw...) -> summarizecycles(ss; kw...)),
+        ("addsummarycolumns", (ss; kw...) -> addsummarycolumns(ss; kw...)),
+    )
+        # rejected where the transform is built, before any data
+        @test_throws ArgumentError f(Count(); key = :time)
+        @test_throws ArgumentError f(Count(); key = [:k, :time])
+        @test_throws ArgumentError f(Count(); key = [:k, :k])
+        @test_throws ArgumentError f(Summarizer[])
+        # a key column the input lacks, on the first chunk
+        err = try
+            load(ctx, p |> f(Count(); key = :zz))
+            nothing
+        catch e
+            e
+        end
+        @test err isa ArgumentError
+        @test occursin("$op key column :zz not found", err.msg)
+    end
+end

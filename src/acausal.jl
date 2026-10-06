@@ -224,8 +224,8 @@ end
 
 **Acausal.** The permissive [`settime`](@ref CausalFrames.settime): the same
 `spec`, conversion and clip to `[start, stop)`, but rows may move earlier. The
-new time column must still be non-decreasing within and across chunks (an
-`ArgumentError` otherwise).
+new time column must still be non-decreasing within and across chunks, and
+neither textual nor `missing` (an `ArgumentError` otherwise).
 
 Not exported even from `Acausal`, so that `using CausalFrames.Acausal` leaves
 the causal `settime` unambiguous; call it as `CausalFrames.Acausal.settime`.
