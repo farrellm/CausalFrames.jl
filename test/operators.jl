@@ -969,6 +969,11 @@ end
     # a textual column cannot be ordered against the window
     @test_throws ArgumentError load(ctx,
         src |> addcolumns(r -> (; s = "x")) |> settime(:s))
+    # as is one that admits missing, and a missing new time
+    optional = readtable(DataFrame(time = [1, 2], s = Union{Missing,String}["3", "4"]))
+    @test_throws ArgumentError load(ctx, optional |> settime(:s))
+    @test_throws ArgumentError load(ctx,
+        src |> settime(r -> r.time > 1 ? missing : r.time))
     # and the named column must exist
     @test_throws ArgumentError load(ctx, src |> settime(:nope))
 

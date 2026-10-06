@@ -941,7 +941,10 @@ per row rather than moving every row by the same amount. `spec` is either a
 occupied, and the old `:time` disappears — or a per-row function whose result
 overwrites `:time` in place. These are `readcsv`'s two `time =` modes, applied
 mid-stream. Either way the result is converted to the context's time type and
-the chunk is re-clipped to `[start, stop)`.
+the chunk is re-clipped to `[start, stop)`. A textual result (by `istextual`, so
+`Union{Missing, String}` too) or a `missing` one is an `ArgumentError` before
+conversion, which would otherwise fail with a bare `MethodError`; `settime` has
+no `skipmissing`, since dropping rows is `filterrows`'s job.
 
 It ships as a causal/acausal pair, the same split as `lag`/`lead`:
 

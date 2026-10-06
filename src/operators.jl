@@ -889,8 +889,9 @@ type and clipped to `[start, stop)`; other columns pass through.
 
 Each of these is an `ArgumentError` when the pipeline runs: a row whose new
 time is earlier than its old one (see
-[`Acausal.settime`](@ref CausalFrames.Acausal.settime)), and a new time column
-that decreases within or across chunks.
+[`Acausal.settime`](@ref CausalFrames.Acausal.settime)), a new time column
+that decreases within or across chunks, a textual new time, and a `missing` one
+(drop such rows first with [`filterrows`](@ref)).
 
 The input is not widened: it runs over `[start, stop)`, so a row outside the
 window is never seen, even if `spec` would move it inside. Hence loading
@@ -969,12 +970,19 @@ end
 newtimes(spec::Function, c::DataFrame, opname::String) =
     checktimevalues(maptime(spec, Tables.columntable(c)), opname)
 
-checktimevalues(v::AbstractVector, opname::String) =
-    eltype(v) <: AbstractString ?
-    throw(
+# The raw new time values, refused if textual or if any is `missing`.
+function checktimevalues(v::AbstractVector, opname::String)
+    istextual(v) && throw(
         ArgumentError("$opname produced a textual time column (element type \
             $(eltype(v))); parse it to an ordered type first"),
-    ) : v
+    )
+    Missing <: eltype(v) && any(ismissing, v) &&
+        throw(
+            ArgumentError("$opname produced a missing time; drop those rows first \
+            with `filterrows`"),
+        )
+    return v
+end
 
 # The new column takes the context's time type, as every source's does.
 function converttimes(::Type{T}, times::AbstractVector, opname::String) where {T}
