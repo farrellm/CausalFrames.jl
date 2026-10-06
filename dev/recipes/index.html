@@ -11,26 +11,27 @@ CausalFrame{Int64} with 4 rows over [0, 10]
    1 │     1  a           1
    2 │     1  b           1
    3 │     2  a           2
-   4 │     3  a           3</code></pre><p>It counts in stream order, which is time order: SQL&#39;s <code>row_number() OVER (PARTITION BY symbol ORDER BY time)</code>. To rank by something else, partition by <code>:time</code> itself, whose rows may arrive in any order, and order them with <a href="../api/rows/#CausalFrames.sortcycles"><code>sortcycles</code></a>:</p><pre><code class="language-julia hljs">films = DataFrame(year = [2021, 2020, 2020, 2020, 2021],
+   4 │     3  a           3</code></pre><p>It counts in stream order, which is time order: SQL&#39;s <code>row_number() OVER (PARTITION BY symbol ORDER BY time)</code>. To rank by something else, partition by a copy of the time (a key may not be <code>:time</code> itself), whose rows may arrive in any order, and order them with <a href="../api/rows/#CausalFrames.sortcycles"><code>sortcycles</code></a>:</p><pre><code class="language-julia hljs">films = DataFrame(year = [2021, 2020, 2020, 2020, 2021],
                   id = [4, 1, 2, 3, 5], votes = [1, 5, 9, 9, 7])
 
 # :time is the year; within a year, votes descending, ties by id
 readtable(films; time = :year, sort = true) |&gt;
+    addcolumns(r -&gt; (; year = r.time)) |&gt;
     sortcycles(r -&gt; (-r.votes, r.id)) |&gt;
-    addsummarycolumns(Count(); key = :time) |&gt;
+    addsummarycolumns(Count(); key = :year) |&gt;
     filterrows(r -&gt; r.count &lt;= 2) |&gt;      # the 2 most-voted films of each year
     load(Context(2020, 2030))
 
 # output
 
 CausalFrame{Int64} with 4 rows over [2020, 2030]
- Row │ time   id     votes  count
-     │ Int64  Int64  Int64  Int64
-─────┼────────────────────────────
-   1 │  2020      2      9      1
-   2 │  2020      3      9      2
-   3 │  2021      5      7      1
-   4 │  2021      4      1      2</code></pre><p>The time half of that <code>ORDER BY year, votes DESC, id</code> belongs to the source: <code>sort = true</code> on <a href="../api/io/#CausalFrames.readparquet"><code>readparquet</code></a>, <a href="../api/io/#CausalFrames.readcsv"><code>readcsv</code></a> or <a href="../api/sources/#CausalFrames.readtable"><code>readtable</code></a> sorts data not stored in time order, since a sort across time cannot stream. The within-time half can go anywhere, because <code>sortcycles</code> never moves a row in time.</p><h2 id="Joining-a-reference-table"><a class="docs-heading-anchor" href="#Joining-a-reference-table">Joining a reference table</a><a id="Joining-a-reference-table-1"></a><a class="docs-heading-anchor-permalink" href="#Joining-a-reference-table" title="Permalink"></a></h2><p><a href="../api/columns/#CausalFrames.lookupjoin"><code>lookupjoin</code></a> appends the columns of a table without time, such as a dimension table, to every row with the same key:</p><pre><code class="language-julia hljs">facts = readtable(DataFrame(time = [1, 2, 3], id = [&quot;a&quot;, &quot;b&quot;, &quot;c&quot;], qty = [5, 6, 7]))
+ Row │ time   id     votes  year   count
+     │ Int64  Int64  Int64  Int64  Int64
+─────┼───────────────────────────────────
+   1 │  2020      2      9   2020      1
+   2 │  2020      3      9   2020      2
+   3 │  2021      5      7   2021      1
+   4 │  2021      4      1   2021      2</code></pre><p>The time half of that <code>ORDER BY year, votes DESC, id</code> belongs to the source: <code>sort = true</code> on <a href="../api/io/#CausalFrames.readparquet"><code>readparquet</code></a>, <a href="../api/io/#CausalFrames.readcsv"><code>readcsv</code></a> or <a href="../api/sources/#CausalFrames.readtable"><code>readtable</code></a> sorts data not stored in time order, since a sort across time cannot stream. The within-time half can go anywhere, because <code>sortcycles</code> never moves a row in time.</p><h2 id="Joining-a-reference-table"><a class="docs-heading-anchor" href="#Joining-a-reference-table">Joining a reference table</a><a id="Joining-a-reference-table-1"></a><a class="docs-heading-anchor-permalink" href="#Joining-a-reference-table" title="Permalink"></a></h2><p><a href="../api/columns/#CausalFrames.lookupjoin"><code>lookupjoin</code></a> appends the columns of a table without time, such as a dimension table, to every row with the same key:</p><pre><code class="language-julia hljs">facts = readtable(DataFrame(time = [1, 2, 3], id = [&quot;a&quot;, &quot;b&quot;, &quot;c&quot;], qty = [5, 6, 7]))
 dim = DataFrame(id = [&quot;a&quot;, &quot;b&quot;], sector = [&quot;tech&quot;, &quot;energy&quot;])
 facts |&gt; lookupjoin(dim; key = :id) |&gt; load(Context(0, 10))
 
@@ -116,4 +117,4 @@ CausalFrame{Dates.Date} with 1 rows over [2025-01-01, 2025-01-02]
  Row │ time        report
      │ Date        Nothing
 ─────┼─────────────────────
-   1 │ 2025-01-01</code></pre></article><nav class="docs-footer"><a class="docs-footer-prevpage" href="../">« Home</a><a class="docs-footer-nextpage" href="../api/">Overview »</a><div class="flexbox-break"></div><p class="footer-message">Powered by <a href="https://github.com/JuliaDocs/Documenter.jl">Documenter.jl</a> and the <a href="https://julialang.org/">Julia Programming Language</a>.</p></nav></div><div class="modal" id="documenter-settings"><div class="modal-background"></div><div class="modal-card"><header class="modal-card-head"><p class="modal-card-title">Settings</p><button class="delete"></button></header><section class="modal-card-body"><p><label class="label">Theme</label><div class="select"><select id="documenter-themepicker"><option value="auto">Automatic (OS)</option><option value="documenter-light">documenter-light</option><option value="documenter-dark">documenter-dark</option><option value="catppuccin-latte">catppuccin-latte</option><option value="catppuccin-frappe">catppuccin-frappe</option><option value="catppuccin-macchiato">catppuccin-macchiato</option><option value="catppuccin-mocha">catppuccin-mocha</option></select></div></p><hr/><p>This document was generated with <a href="https://github.com/JuliaDocs/Documenter.jl">Documenter.jl</a> version 1.19.0 on <span class="colophon-date" title="Monday 5 October 2026 23:03">Monday 5 October 2026</span>. Using Julia version 1.13.1.</p></section><footer class="modal-card-foot"></footer></div></div></div></body></html>
+   1 │ 2025-01-01</code></pre></article><nav class="docs-footer"><a class="docs-footer-prevpage" href="../">« Home</a><a class="docs-footer-nextpage" href="../api/">Overview »</a><div class="flexbox-break"></div><p class="footer-message">Powered by <a href="https://github.com/JuliaDocs/Documenter.jl">Documenter.jl</a> and the <a href="https://julialang.org/">Julia Programming Language</a>.</p></nav></div><div class="modal" id="documenter-settings"><div class="modal-background"></div><div class="modal-card"><header class="modal-card-head"><p class="modal-card-title">Settings</p><button class="delete"></button></header><section class="modal-card-body"><p><label class="label">Theme</label><div class="select"><select id="documenter-themepicker"><option value="auto">Automatic (OS)</option><option value="documenter-light">documenter-light</option><option value="documenter-dark">documenter-dark</option><option value="catppuccin-latte">catppuccin-latte</option><option value="catppuccin-frappe">catppuccin-frappe</option><option value="catppuccin-macchiato">catppuccin-macchiato</option><option value="catppuccin-mocha">catppuccin-mocha</option></select></div></p><hr/><p>This document was generated with <a href="https://github.com/JuliaDocs/Documenter.jl">Documenter.jl</a> version 1.19.0 on <span class="colophon-date" title="Tuesday 6 October 2026 03:17">Tuesday 6 October 2026</span>. Using Julia version 1.13.1.</p></section><footer class="modal-card-foot"></footer></div></div></div></body></html>
