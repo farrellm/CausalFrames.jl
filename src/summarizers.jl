@@ -1287,6 +1287,14 @@ end
     return Compensated{A}(t, c, 0, 0, 0)
 end
 
+# S2 - k·x with the product folded error-free (issue #94: a rounded age weight
+# loses the same error on every slide of a flat series, so the windowed sum
+# drifted linearly with the number of rows slid).
+@inline function pairsubprod(a::Compensated{A}, k::A, x::A) where {A}
+    p, e = twoprod(k, x)
+    return pairadd(a, -p, -e)
+end
+
 fresh(::CompensatedAgeSumState{N,C,A,M}) where {N,C,A,M} =
     CompensatedAgeSumState{N,C,A,M}(0, compzero(A), compzero(A), Int8(0), 0)
 @inline function fresh!(st::CompensatedAgeSumState{N,C,A}) where {N,C,A}
@@ -1317,7 +1325,7 @@ end
         st.missings -= 1
     else
         x = convert(A, v)
-        isfinite(x) && (st.s2 = pairadd(st.s2, -(convert(A, st.n - 1) * x), zero(A)))
+        isfinite(x) && (st.s2 = pairsubprod(st.s2, convert(A, st.n - 1), x))
         st.s1 = compsub(st.s1, x)
     end
     st.n -= 1
@@ -1328,7 +1336,8 @@ function combine!(dest::CompensatedAgeSumState{N,C,A,M},
     a::CompensatedAgeSumState{N,C,A,M},
     b::CompensatedAgeSumState{N,C,A,M}) where {N,C,A,M}
     k = convert(A, b.n)
-    s2 = pairadd(pairadd(a.s2, a.s1.total * k, a.s1.comp * k), b.s2.total, b.s2.comp)
+    p, e = twoprod(a.s1.total, k)
+    s2 = pairadd(pairadd(a.s2, p, e + a.s1.comp * k), b.s2.total, b.s2.comp)
     s1 = compmerge(a.s1, b.s1)
     newest = b.n > 0 ? b.newest : a.newest
     n = a.n + b.n
