@@ -30,8 +30,8 @@ CausalFrame{Int64} with 4 rows over [0, 10]
 
 It counts in stream order, which is time order: SQL's
 `row_number() OVER (PARTITION BY symbol ORDER BY time)`. To rank by something
-else, partition by `:time` itself, whose rows may arrive in any order, and order
-them with [`sortcycles`](@ref):
+else, partition by a copy of the time (a key may not be `:time` itself), whose
+rows may arrive in any order, and order them with [`sortcycles`](@ref):
 
 ```jldoctest
 films = DataFrame(year = [2021, 2020, 2020, 2020, 2021],
@@ -39,21 +39,22 @@ films = DataFrame(year = [2021, 2020, 2020, 2020, 2021],
 
 # :time is the year; within a year, votes descending, ties by id
 readtable(films; time = :year, sort = true) |>
+    addcolumns(r -> (; year = r.time)) |>
     sortcycles(r -> (-r.votes, r.id)) |>
-    addsummarycolumns(Count(); key = :time) |>
+    addsummarycolumns(Count(); key = :year) |>
     filterrows(r -> r.count <= 2) |>      # the 2 most-voted films of each year
     load(Context(2020, 2030))
 
 # output
 
 CausalFrame{Int64} with 4 rows over [2020, 2030]
- Row │ time   id     votes  count
-     │ Int64  Int64  Int64  Int64
-─────┼────────────────────────────
-   1 │  2020      2      9      1
-   2 │  2020      3      9      2
-   3 │  2021      5      7      1
-   4 │  2021      4      1      2
+ Row │ time   id     votes  year   count
+     │ Int64  Int64  Int64  Int64  Int64
+─────┼───────────────────────────────────
+   1 │  2020      2      9   2020      1
+   2 │  2020      3      9   2020      2
+   3 │  2021      5      7   2021      1
+   4 │  2021      4      1   2021      2
 ```
 
 The time half of that `ORDER BY year, votes DESC, id` belongs to the source:

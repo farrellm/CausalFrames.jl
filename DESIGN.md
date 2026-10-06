@@ -131,6 +131,12 @@ rows of a column table behind a per-chunk function barrier — never
 `DataFrameRow`s, whose column access is type-unstable — so a row function
 compiles to direct field access, like a summarizer's `update!`.
 
+Every transform taking `key` validates it the same way: at construction
+(`keycolumns`), the key columns must be distinct and may not include `:time`,
+since a key of `:time` would overwrite the emitted time; on the first chunk
+(`checkkeycolumns`), each key column must be present in the input. To key on
+the time, copy it into a column of its own with `addcolumns`.
+
 Names are lowercase, with no camelCase and no shadowing of Base functions
 (`filter`, `empty`, `count`, `sum`, `join`).
 
@@ -1544,7 +1550,7 @@ rows sharing one timestamp — and nothing else: every row keeps its time, so th
 output is non-decreasing by construction and needs no order check. It is the
 within-timestamp half of an SQL `ORDER BY time, ...`, the half the sources'
 `sort` deliberately does not take (see "Sorting a file source"), and what makes
-a keyed `Count` over `key = :time` a rank.
+a `Count` keyed on a copy of the time a rank (no transform takes `key = :time`).
 
 - **Keys.** `by` is a column name (`Symbol` or `AbstractString`), a collection of
   names compared lexicographically, or a per-row function returning the key (a
