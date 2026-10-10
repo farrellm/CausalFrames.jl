@@ -13,7 +13,10 @@ design rationale and performance constraints behind each module.
   producer draining its input, a binary transform pulling its second stream):
   sticky `pull!`, state in fields, touched per chunk only. Not
   `Iterators.Stateful`, which on Julia 1.10 prefetches and would break
-  `head`'s early exit
+  `head`'s early exit. `teesides` splits one run into two `ChunkSource`s over
+  a shared `PullCursor`, queueing for the side that is behind a
+  `copycols = false` index of each chunk (the `writecsv` hand-off argument),
+  for a transform reading the same stream at two paces
 - `src/frame.jl` — `CausalFrame{T}`: opaque, backed by a vector of
   time-ordered DataFrame chunks. The public inner constructor checks the
   invariants; `load`/`stream` build through a `Trusted`-token constructor that
@@ -393,7 +396,12 @@ design rationale and performance constraints behind each module.
   on a repeated caller-to-callee edge would leave the inner fold dispatching
   and allocating per row. Its generated `bar*` folds have edges of their own;
   `test/jet.jl` guards the embedded path
-- `src/rolling.jl` — `addrollingcolumns`: one kernel, `rollsegment!`, over a
+- `src/rolling.jl` — `addrollingcolumns`. Summarizing its own input it runs it
+  once (`rollinginputs`), teed to both sides, the output side dropping the
+  lead-in with `warmup`'s `dropleadin!`: a run per side made a chain of d
+  stages run its source 2^d times (issue #98). `sharedrun = false` keeps the
+  second run over `ctx` when a time look-back widens the context. One kernel,
+  `rollsegment!`, over a
   `RollTiers` (a shared row buffer with per-window eviction heads, per-window
   running tables, per-key trees owning their rows, refold templates). Per row:
   admit into every tier, advance each window's head (downdating running
@@ -412,7 +420,9 @@ design rationale and performance constraints behind each module.
   `wins` peels each window's (look-back, empty row, value vector) together:
   never index the value vectors by a runtime window number. A widening with
   Bars windows rebuilds rings and trees from each key's longest live suffix
-  (`barsuffixes`)
+  (`barsuffixes`). Every admitted row passes through `join.jl`'s `rowat`, which
+  builds it with `ntuple` over `Val`, not `map`: Base's tuple `map` stops
+  unrolling at 32 columns, a 10x cliff on a wide input (issue #98)
 - `src/intervalize.jl` — `intervalize`, the third binary transform: summarize
   over the intervals a `clock` pipeline defines (`[bₖ, bₖ₊₁)`, timestamped at
   `bₖ₊₁`). It is the `summarizecycles` fold, closing on clock boundaries.

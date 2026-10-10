@@ -119,15 +119,73 @@
         @test df.a_count == [0]
         @test df.b_count == [1]
 
-        # self-summarization runs the pipeline twice: once as is for the
-        # rows, once over the widened context for the summaries
+        # self-summarization runs the pipeline once, over the widened
+        # context; without `sharedrun`, a second time as is for the rows
         ctxs = []
         selfrec = CausalPipeline() do ctx
             push!(ctxs, ctx)
             [DataFrame(time = [max(ctx.start, 3)], x = [1])]
         end
         load(Context(3, 10), selfrec |> addrollingcolumns((w2 = 2,), Count()))
+        @test ctxs == [Context(1, 10)]
+        empty!(ctxs)
+        load(Context(3, 10),
+            selfrec |> addrollingcolumns((w2 = 2,), Count(); sharedrun = false))
         @test sort(ctxs; by = c -> c.start) == [Context(1, 10), Context(3, 10)]
+    end
+
+    @testset "self-summarization shares one run" begin
+        df = DataFrame(time = repeat(1:30, inner = 2),
+            k = repeat(["a", "b"], 30), x = Float64.(mod.(1:60, 7)))
+        runs = Ref(0)
+        counted = CausalPipeline(ctx -> (runs[] += 1; readtable(df).run(ctx)))
+        chain(lb, depth; kw...) = foldl(1:depth; init = counted) do p, n
+            p |> addrollingcolumns(NamedTuple{(Symbol(:w, n),)}((lb(n),)),
+                Sum(:x); key = :k, kw...)
+        end
+        ctx = Context(5, 100)
+        for lb in (Bars, identity), depth in 1:4
+            runs[] = 0
+            shared = DataFrame(load(ctx, chain(lb, depth)))
+            @test runs[] == 1
+            runs[] = 0
+            unshared = DataFrame(load(ctx, chain(lb, depth; sharedrun = false)))
+            # Without a time look-back the contexts agree, so the run is
+            # shared either way; otherwise each stage runs its input twice.
+            @test runs[] == (lb === Bars ? 1 : 2^depth)
+            # Sum(:x) over the source's own column doesn't depend on history
+            # before the window, so the two settings agree.
+            @test isequal(shared, unshared)
+            @test minimum(shared.time) == 5
+        end
+
+        # An input whose rows depend on history (a Bars stage) differs: shared,
+        # the output shows the widened run the summaries were computed over.
+        p = readtable(df) |> addrollingcolumns((b2 = Bars(2),), Sum(:x); key = :k)
+        t(sr) = addrollingcolumns((w1 = 1,), Count(); key = :k, sharedrun = sr)
+        shared = DataFrame(load(ctx, p |> t(true)))
+        unshared = DataFrame(load(ctx, p |> t(false)))
+        @test all(ismissing, unshared.b2_x_sum[1:2])
+        @test !any(ismissing, shared.b2_x_sum)
+        @test shared.b2_x_sum ==
+              DataFrame(load(Context(4, 100), p)).b2_x_sum[3:end]
+        @test shared.w1_count == unshared.w1_count
+
+        # one chunk per row: a timestamp straddling chunks still has its
+        # later rows in the earlier row's window, and lead-in chunks are dropped
+        rowchunks = CausalPipeline(
+            ctx -> (
+                c for c in
+                (df[i:i, :] for i in 1:nrow(df))
+                if ctx.start <= c.time[1] < ctx.stop
+            ),
+        )
+        whole = CausalPipeline(ctx -> [df[ctx.start .<= df.time .< ctx.stop, :]])
+        rt = addrollingcolumns((w3 = 3, b2 = Bars(2)), Sum(:x))
+        @test isequal(DataFrame(load(ctx, rowchunks |> rt)),
+            DataFrame(load(ctx, whole |> rt)))
+        @test isequal(reduce(vcat, DataFrame.(stream(ctx, rowchunks |> rt))),
+            DataFrame(load(ctx, whole |> rt)))
     end
 
     @testset "windows argument forms" begin

@@ -297,6 +297,13 @@ const WIDESRC = let df = DataFrame(load(RCTX, RSRC))
 end
 SUITE["rolling"]["bars-wide-keyed"] = @benchmarkable load(RCTX,
     WIDESRC |> addrollingcolumns((; b14 = Bars(14)), [Sum(:qty)]; key = :sym))
+# Eight self-summarizing stages chained: each runs its input once, so this
+# should cost about eight single stages, not 2^8 runs of the source (#98).
+const CHAIN8 = foldl(2:9; init = RSRC) do p, n
+    p |> addrollingcolumns(NamedTuple{(Symbol(:b, n),)}((Bars(n),)),
+        [Sum(:qty)]; key = :sym)
+end
+SUITE["rolling"]["chain8-keyed"] = @benchmarkable load(RCTX, CHAIN8)
 
 # The causal as-of join against its acausal forward mirror, over the same two
 # sources. futurejoin's per-key row buffers are the cost the comparison

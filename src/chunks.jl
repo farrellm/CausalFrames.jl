@@ -88,3 +88,29 @@ function advance(it::ChunkMap, next)
     out isa DataFrame && nrow(out) > 0 && return (out, Flushed())
     return nothing
 end
+
+# Splits one single-pass chunk iterator into two, for a consumer reading the
+# same stream twice at different paces (`addrollingcolumns` summarizing its own
+# input). A side with queued chunks reads its queue; otherwise it pulls
+# upstream and queues the chunk for the other side as a private index over the
+# same vectors (sound by the `writecsv` hand-off argument), so each side owns
+# what it is given. A queue holds only the chunks the other side is ahead by.
+struct ChunkTee{I}
+    upstream::PullCursor{I}
+    queues::NTuple{2,Vector{DataFrame}}
+end
+
+function teesides(iter)
+    tee = ChunkTee(PullCursor(iter), (DataFrame[], DataFrame[]))
+    return (ChunkSource(() -> teepull!(tee, 1)),
+        ChunkSource(() -> teepull!(tee, 2)))
+end
+
+function teepull!(tee::ChunkTee, side::Int)
+    q = tee.queues[side]
+    isempty(q) || return popfirst!(q)
+    c = pull!(tee.upstream)
+    c === nothing && return nothing
+    push!(tee.queues[3-side], DataFrame(c::DataFrame; copycols = false))
+    return c
+end

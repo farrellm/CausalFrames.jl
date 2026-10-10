@@ -55,8 +55,8 @@ struct Bars
 end
 
 """
-    addrollingcolumns(windows, summarizers; key = nothing,
-                      from = nothing) -> (CausalPipeline -> CausalPipeline)
+    addrollingcolumns(windows, summarizers; key = nothing, from = nothing,
+                      sharedrun = true) -> (CausalPipeline -> CausalPipeline)
     addrollingcolumns(p::CausalPipeline, windows, summarizers;
                       ...) -> CausalPipeline
 
@@ -80,14 +80,21 @@ longest time look-back, so the first row already sees a full window.
   rows with the same key.
 - `from = nothing`: a pipeline to summarize instead of the input itself. Its
   rows relate to the output rows by time and key only. By default the input is
-  summarized, so it runs twice.
+  summarized.
+- `sharedrun = true`: without `from`, run the input once, over the widened
+  context, and drop the rows before `start` from the output, so the output
+  rows are the rows summarized. `false` takes the output rows from a run over
+  the window itself, as a pipeline without this transform would give them; a
+  time look-back then runs the input twice, once per context. The two agree
+  without a time look-back, and on an input whose rows at or after `start`
+  don't depend on earlier ones. Ignored with `from`.
 
 An empty time window, including one for an unseen key, gives the summarizers'
 empty values, so a column's type may widen (`Min` gives `Union{Missing, T}`).
 A `Bars` window holding fewer than `n` rows gives `missing` instead.
 """
 function addrollingcolumns(windows, summarizers; key = nothing,
-    from::Union{Nothing,CausalPipeline} = nothing)
+    from::Union{Nothing,CausalPipeline} = nothing, sharedrun::Bool = true)
     windownames, lookbacks = towindows(windows)
     isempty(windownames) &&
         throw(ArgumentError("addrollingcolumns requires at least one window"))
@@ -107,14 +114,31 @@ function addrollingcolumns(windows, summarizers; key = nothing,
     end
     return function (p::CausalPipeline)
         return CausalPipeline() do ctx::Context
-            source = from === nothing ? p : from
             cfg = RollingConfig(windownames, lookbacks, keycols,
                 Val(Tuple(keycols)), protos, Val(requested),
                 prefixednames, terms)
-            rs = RollingState(source.run(rollingcontext(ctx, lookbacks)))
-            return chunkmap(c -> rollchunk!(rs, cfg, c), p.run(ctx))
+            summarized, augmented = rollinginputs(p, from, sharedrun, ctx,
+                rollingcontext(ctx, lookbacks))
+            rs = RollingState(summarized)
+            return chunkmap(c -> rollchunk!(rs, cfg, c), augmented)
         end
     end
+end
+
+# The summarized and augmented chunk streams. Summarizing its own input, the
+# transform runs it once and tees it, since a run per side would make a chain
+# of d stages run its source 2^d times (issue #98). Over a widened context the
+# augmented side drops the lead-in, as `warmup` does, unless `sharedrun` is
+# off, when it keeps its own run over `ctx`.
+function rollinginputs(p::CausalPipeline, from, sharedrun::Bool, ctx::Context,
+    sctx::Context)
+    from === nothing || return from.run(sctx), p.run(ctx)
+    widened = sctx.start != ctx.start
+    widened && !sharedrun && return p.run(sctx), p.run(ctx)
+    summarized, augmented = teesides(p.run(sctx))
+    widened || return summarized, augmented
+    drop = LeadInDrop(ctx.start)
+    return summarized, chunkmap(c -> dropleadin!(drop, c), augmented)
 end
 addrollingcolumns(p::CausalPipeline, windows, summarizers; kwargs...) =
     addrollingcolumns(windows, summarizers; kwargs...)(p)

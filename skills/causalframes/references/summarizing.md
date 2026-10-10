@@ -133,8 +133,8 @@ so far, itself included.
 
 ## `addrollingcolumns`
 
-    addrollingcolumns(windows, summarizers; key = nothing,
-                      from = nothing) -> (CausalPipeline -> CausalPipeline)
+    addrollingcolumns(windows, summarizers; key = nothing, from = nothing,
+                      sharedrun = true) -> (CausalPipeline -> CausalPipeline)
     addrollingcolumns(p::CausalPipeline, windows, summarizers;
                       ...) -> CausalPipeline
 
@@ -158,7 +158,14 @@ longest time look-back, so the first row already sees a full window.
   rows with the same key.
 - `from = nothing`: a pipeline to summarize instead of the input itself. Its
   rows relate to the output rows by time and key only. By default the input is
-  summarized, so it runs twice.
+  summarized.
+- `sharedrun = true`: without `from`, run the input once, over the widened
+  context, and drop the rows before `start` from the output, so the output
+  rows are the rows summarized. `false` takes the output rows from a run over
+  the window itself, as a pipeline without this transform would give them; a
+  time look-back then runs the input twice, once per context. The two agree
+  without a time look-back, and on an input whose rows at or after `start`
+  don't depend on earlier ones. Ignored with `from`.
 
 An empty time window, including one for an unseen key, gives the summarizers'
 empty values, so a column's type may widen (`Min` gives `Union{Missing, T}`).
