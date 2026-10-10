@@ -61,7 +61,8 @@ function summarizewindows(clk::CausalPipeline, lookback, summarizers;
         prototypes(tosummarizers(summarizers), keycols, "summarizewindows")
     ks = tokeyset(keyset, keycols, "summarizewindows")
     cfg = WindowConfig(keycols, Val(Tuple(keycols)), lookback, protos,
-        Val(requested), Val(isempty(keycols)), ks, terms)
+        Val(requested), Val(isempty(keycols)), ks, terms,
+        storedcolumns(protos, keycols))
     return function (p::CausalPipeline)
         return CausalPipeline() do ctx::Context
             T = timetype(ctx)
@@ -86,6 +87,7 @@ struct WindowConfig{KN,LB,P<:Tuple,O,G,KS<:Union{Nothing,KeySet},TM<:NamedTuple}
     grid::Val{G}
     ks::KS
     terms::TM  # the row terms, from `prototypes`
+    stored::Union{Nothing,Tuple{Vararg{Symbol}}}  # from `storedcolumns`
 end
 
 # Per-run state. The untyped fields are per-chunk setup; per-row work sits
@@ -182,7 +184,7 @@ function windowstep!(st::WindowState{T}, cfg::WindowConfig,
     end
     # Every tick is closed, so no later row falls in any window.
     exhausted(st.cur) && isempty(st.ticks) && return nothing
-    nt = terminput(c, cfg.terms, "summarizewindows")
+    nt = projectinput(terminput(c, cfg.terms, "summarizewindows"), cfg.stored)
     types = promotetypes(st.types, chunktypes(nt))
     moved = st.types === nothing || types != st.types
     st.types = types

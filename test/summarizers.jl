@@ -2156,3 +2156,34 @@ end
     slide(states, 1, 1000)
     @test (@allocated slide(states, 1001, 1000)) == 0
 end
+
+@testset "every built-in summarizer declares its input columns" begin
+    # The window transforms keep every column for a summarizer left on the
+    # `nothing` default, so a built-in missing a method would silently lose
+    # the projection. `Termed` is unwrapped before any transform asks.
+    fallback = which(CausalFrames.inputcolumns, Tuple{Summarizer})
+    builtins = [
+        getfield(CausalFrames, n) for n in names(CausalFrames; all = true)
+        if isdefined(CausalFrames, n) &&
+            (T = getfield(CausalFrames, n); T isa Type) &&
+            T <: Summarizer && !isabstracttype(T) &&
+            T !== CausalFrames.Termed
+    ]
+    @test length(builtins) >= 30
+    @test isempty([
+        T for T in builtins
+              if which(CausalFrames.inputcolumns, Tuple{T}) === fallback
+    ])
+
+    @test CausalFrames.inputcolumns(Sum(:x)) == (:x,)
+    @test CausalFrames.inputcolumns(Count()) == ()
+    @test CausalFrames.inputcolumns(Mean(:x)) == ()
+    @test CausalFrames.inputcolumns(DotProduct(:y, :x)) == (:y, :x)
+    @test CausalFrames.storedcolumns(
+        CausalFrames.prototypes(
+            CausalFrames.tosummarizers([Mean(:x), Covariance(:y, :z)]),
+            Symbol[])[1],
+        [:k]) == (:time, :k, :x, :y, :z)
+    @test CausalFrames.storedcolumns((Sum(:x), Opaque(Sum(:y))), Symbol[]) ===
+          nothing
+end

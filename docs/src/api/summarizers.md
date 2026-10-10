@@ -214,6 +214,7 @@ CausalFrames.update!
 CausalFrames.value
 CausalFrames.widenstate
 CausalFrames.dependencies
+CausalFrames.inputcolumns
 CausalFrames.combine!
 CausalFrames.downdate!
 CausalFrames.isinvertible

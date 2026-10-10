@@ -153,11 +153,12 @@ function addrollingcolumns(windows, summarizers; key = nothing,
         )
         push!(prefixednames, pn)
     end
+    stored = storedcolumns(protos, keycols)
     return function (p::CausalPipeline)
         return CausalPipeline() do ctx::Context
             cfg = RollingConfig(windownames, lookbacks, keycols,
                 Val(Tuple(keycols)), protos, Val(requested),
-                prefixednames, terms)
+                prefixednames, terms, stored)
             summarized, augmented, leadin = rollinginputs(p, from, sharedrun,
                 ctx, rollingcontext(ctx, lookbacks))
             rs = RollingState(summarized)
@@ -228,6 +229,7 @@ struct RollingConfig{KN,LB<:Tuple,P<:Tuple,O,TM<:NamedTuple}
     outs::Val{O}
     prefixednames::Vector{Symbol}
     terms::TM          # the row terms, from `prototypes`
+    stored::Union{Nothing,Tuple{Vararg{Symbol}}}  # from `storedcolumns`
 end
 
 # Per-run state. The untyped fields are per-chunk setup; per-row work sits
@@ -402,7 +404,8 @@ function pullsummarized!(rs::RollingState, cfg::RollingConfig,
         checkkeycolumns(cfg.keycols, chunk, "addrollingcolumns",
             "the summarized input")
     end
-    nt = terminput(chunk, cfg.terms, "addrollingcolumns")
+    nt = projectinput(terminput(chunk, cfg.terms, "addrollingcolumns"),
+        cfg.stored)
     types = promotetypes(rs.stypes, chunktypes(nt))
     moved = rs.stypes === nothing || types != rs.stypes
     rs.stypes = types

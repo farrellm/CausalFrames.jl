@@ -121,7 +121,11 @@ design rationale and performance constraints behind each module.
   a type parameter) and `SummarizerState` (running state, typed from the input
   schema), plus their unexported interface: `emptyvalue`, `fresh`, `fresh!`,
   `freshwindowed`, `update!`, `value`, `widenstate`, `dependencies`,
-  `combine!`, `downdate!`, `isinvertible`. Within that:
+  `inputcolumns`, `combine!`, `downdate!`, `isinvertible`. Within that:
+  - `inputcolumns` (the columns a state reads, `nothing` for any) is declared
+    for every built-in in one block at the end of the file, a dependent one
+    as `()`; a test checks that no built-in falls back to `nothing`, which
+    would silently keep every column in the window transforms' stored rows
   - `fresh!` zeroes a state in place and returns it (default `fresh(st)`, so
     it is opt-in for a custom summarizer). The transforms zero a state tuple
     per cycle, per interval and per window query; see DESIGN.md's "Reusing
@@ -273,6 +277,10 @@ design rationale and performance constraints behind each module.
   `terminput`: the chunk's column table plus one vector per term (per chunk,
   behind `rowvalues`' barrier), with input types taken from that table so term
   types widen like columns. The term vectors must never reach an output.
+  The two transforms that store rows (`addrollingcolumns`,
+  `summarizewindows`) then cut that table to `storedcolumns` (`:time`, the
+  keys and the summarizers' `inputcolumns`) with `projectinput`, per chunk:
+  an unread `Union{Missing,T}` column would box every stored row
   Per-run state lives in `SummaryFold`, never in reassigned closure captures
   (those get boxed).
   The per-key states live in a `GroupTable{K,S}` (both parameters concrete),
