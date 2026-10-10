@@ -1037,7 +1037,11 @@ the row itself, and every row sharing its timestamp, is in its own window.
   minutes). The cost is a semantic choice: the output rows are the widened
   run's, so a stateful input (an earlier `Bars` stage, `forwardfill`) shows
   values that saw pre-`start` history — the same values its summaries were
-  computed over. `sharedrun = false` keeps the output rows a run over `ctx`
+  computed over. An input anchored to its run's start changes its rows, not
+  just their values: `clock` ticks and an `intervalize` grid shift with the
+  widened start unless the look-back is a whole number of ticks, and `head`
+  spends its count on the lead-in, possibly leaving no rows at all.
+  `sharedrun = false` keeps the output rows a run over `ctx`
   itself, the input as it would load without this transform; a time
   look-back then costs a second run (the self-join precedent: pipelines are
   lazy, so each `run(ctx)` builds fresh iterators, and a readcsv-backed

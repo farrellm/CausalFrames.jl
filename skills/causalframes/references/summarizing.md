@@ -165,7 +165,10 @@ longest time look-back, so the first row already sees a full window.
   the window itself, as a pipeline without this transform would give them; a
   time look-back then runs the input twice, once per context. The two agree
   without a time look-back, and on an input whose rows at or after `start`
-  don't depend on earlier ones. Ignored with `from`.
+  depend neither on earlier rows nor on where its run starts. They differ in
+  the rows themselves under an input anchored to its run's start, such as
+  `clock` ticks, an `intervalize` grid or `head`: pass
+  `false` there. Ignored with `from`.
 
 A running count depends on where its run starts. The `w2` look-back widens
 the context to start at 1, so by default the output shows the counts from
