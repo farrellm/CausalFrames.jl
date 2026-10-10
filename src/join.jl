@@ -266,9 +266,12 @@ end
 
 # `convert(V, …)` keeps the insert type-stable when a column's eltype is
 # abstract (e.g. Union{Missing,Int}); a bare map would give the values'
-# narrower types.
-@inline rowat(::Type{V}, nt::NamedTuple, i::Int) where {V} =
-    convert(V, map(col -> @inbounds(col[i]), nt))
+# narrower types. The row is built by `ntuple` over `Val`, which unrolls at any
+# width, not by `map`, whose tuple method falls back to an allocating loop
+# from 32 columns on (issue #98).
+@inline rowat(::Type{V}, nt::NamedTuple{N}, i::Int) where {V,N} =
+    convert(V, NamedTuple{N}(ntuple(j -> @inbounds(getfield(nt, j)[i]),
+        Val(length(N)))))
 @inline keyat(nt::NamedTuple, i::Int, ::Val{KN}) where {KN} =
     NamedTuple{KN}(map(c -> @inbounds(getproperty(nt, c)[i]), KN))
 

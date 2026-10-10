@@ -286,6 +286,17 @@ SUITE["rolling"]["bars-tree"] = @benchmarkable load(RCTX,
     RSRC |> addrollingcolumns((; b100 = Bars(100)), [Product(:qty)]))
 SUITE["rolling"]["bars-mixed-keyed"] = @benchmarkable load(RCTX,
     RSRC |> addrollingcolumns((; b100 = Bars(100)), MIXED; key = :sym))
+# Forty extra columns the summarizers don't read: every admitted row is still
+# built whole, past the 32 columns where Base's tuple `map` stops unrolling
+# (issue #98).
+const WIDESRC = let df = DataFrame(load(RCTX, RSRC))
+    for j in 1:40
+        df[!, "c$j"] = fill(1.0, nrow(df))
+    end
+    readtable(df)
+end
+SUITE["rolling"]["bars-wide-keyed"] = @benchmarkable load(RCTX,
+    WIDESRC |> addrollingcolumns((; b14 = Bars(14)), [Sum(:qty)]; key = :sym))
 
 # The causal as-of join against its acausal forward mirror, over the same two
 # sources. futurejoin's per-key row buffers are the cost the comparison

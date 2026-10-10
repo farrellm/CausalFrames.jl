@@ -253,6 +253,23 @@
             return @allocated call()
         end
         @test joinalloc() == 0
+
+        # A row past 32 columns, where Base's tuple `map` stops unrolling,
+        # is still built without allocating (issue #98).
+        function widerowalloc(k)
+            nt = NamedTuple{Tuple(Symbol.(:c, 1:k))}(
+                Tuple(collect(1.0:10.0) for _ in 1:k))
+            V = CausalFrames.storerowtype(map(eltype, nt))
+            rows = Vector{V}(undef, 10)
+            call() =
+                for i in 1:10
+                    rows[i] = CausalFrames.rowat(V, nt, i)
+                end
+            call()
+            return @allocated call()
+        end
+        @test widerowalloc(31) == 0
+        @test widerowalloc(40) == 0
     end
 
     @testset "empty streams" begin

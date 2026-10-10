@@ -573,6 +573,21 @@ end
             @test rollallocs(ss, 8000, barwins) - rollallocs(ss, 2000, barwins) <
                   200
         end
+
+        # A summarized input wider than 32 columns, where Base's tuple `map`
+        # stops unrolling, still admits rows without allocating (issue #98).
+        function wideallocs(n)
+            src = DataFrame(time = 1:n, k = repeat(["a", "b"], n ÷ 2),
+                x = mod.(1:n, 7))
+            for j in 1:40
+                src[!, "c$j"] = fill(1.0, n)
+            end
+            p = CausalPipeline(ctx -> [src])
+            t = addrollingcolumns((w5 = 5, b5 = Bars(5)), Sum(:x); key = :k)
+            load(Context(0, n + 1), p |> t)
+            return @allocations load(Context(0, n + 1), p |> t)
+        end
+        @test wideallocs(8000) - wideallocs(2000) < 200
     end
 
     @testset "fast paths over dates and mixed periods" begin
