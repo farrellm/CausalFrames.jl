@@ -1047,8 +1047,16 @@ the row itself, and every row sharing its timestamp, is in its own window.
   lazy, so each `run(ctx)` builds fresh iterators, and a readcsv-backed
   pipeline reads its file twice). Without a time look-back the two
   contexts are equal, and the run is teed either way. The tee's queue holds
-  only the chunks one side is ahead by: the lead-in, about one look-back of
-  rows, plus chunks sharing a boundary timestamp. `from` names a different
+  only the chunks one side is ahead by, and the lead-in is not among them:
+  before the output side pulls at all, the summarized side reads the whole
+  lead-in, admitting each row into the windows and evicting against the
+  newest admitted time (every output row is at or after it). The tee drops
+  the lead-in from the output side's view as it passes, so the queue holds at
+  most the chunk straddling `start`, and the lead-in costs only the rows the
+  windows keep, at their stored width. Pulling an output chunk first would
+  have the tee queue the whole lead-in, a look-back of chunks at the input's
+  full width, before the windows could drop any of it.
+  `benchmark/peakmemory.jl` measures it. `from` names a different
   pipeline to summarize instead, and `sharedrun` is then ignored. Either way
   summarized rows relate to output rows by time (and key) only, never by row
   identity.

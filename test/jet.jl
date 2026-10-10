@@ -288,7 +288,7 @@ const JETTIERSETS = (
         outs = Val(requested)
         tg = CausalFrames.tiering(protos, types)
         tiers = CausalFrames.rolltiers(tg, types, kn, lookbacks, nothing)
-        rs = CausalFrames.RollingState(())
+        rs = CausalFrames.RollingState((), nothing)
         cfg = CausalFrames.RollingConfig((:a, :b), lookbacks, Symbol[], kn,
             protos, outs, Symbol[], (;))
         CausalFrames.setvaltype!(rs, cfg, tg)
@@ -296,6 +296,8 @@ const JETTIERSETS = (
             rs.emptyrows, rs.valtypes)
         JET.@test_opt CausalFrames.rollsegment!(wins, tiers, lnt, 1, snt, 1,
             true, lookbacks, kn, outs)
+        JET.@test_opt CausalFrames.leadinsegment!(tiers, snt, 1, 6, lookbacks,
+            kn)
     end
 end
 

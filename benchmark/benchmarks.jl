@@ -304,6 +304,46 @@ const CHAIN8 = foldl(2:9; init = RSRC) do p, n
         [Sum(:qty)]; key = :sym)
 end
 SUITE["rolling"]["chain8-keyed"] = @benchmarkable load(RCTX, CHAIN8)
+# A time look-back widens the run to before `start`: the lead-in, a look-back
+# of rows the windows read but the output drops. A file-like source copies each
+# in-window chunk, as a reader decodes it, so a chunk held is memory held, and
+# forty unread columns make a held chunk far wider than a stored row. Each case
+# runs shared (the default) and as two runs (`sharedrun = false`), whose
+# summarized side reads the lead-in lazily; benchmark/peakmemory.jl measures
+# the peak live heap of the same cases, which allocation totals don't show.
+filesource(chunks) = CausalPipeline() do ctx
+    (
+        c[ctx.start .<= c.time .< ctx.stop, :] for c in chunks
+        if last(c.time) >= ctx.start && first(c.time) < ctx.stop
+    )
+end
+const LEADSRC = filesource(map(tradechunks(RN; chunkrows = 5_000)) do c
+    for j in 1:40
+        c[!, "c$j"] = fill(Float64(j), nrow(c))
+    end
+    c
+end)
+const LEADCTX = Context(RN ÷ 8, RN ÷ 4)   # the second half of the times
+const LEADLB = RN ÷ 8                     # half of the rows are lead-in
+const LEADCASES = (
+    "leadin-wide" =>
+        (p, sh) ->
+            p |> addrollingcolumns((; w = LEADLB),
+                [Sum(:qty), Mean(:qty)]; sharedrun = sh),
+    "leadin-wide-tree-keyed" =>
+        (p, sh) ->
+            p |> addrollingcolumns(
+                (; w = LEADLB), [Product(:qty)]; key = :sym, sharedrun = sh),
+    "leadin-chain4-keyed" =>
+        (p, sh) -> foldl(1:4; init = p) do q, n
+            q |> addrollingcolumns(NamedTuple{(Symbol(:w, n),)}((LEADLB ÷ n,)),
+                [Sum(:qty)]; key = :sym, sharedrun = sh)
+        end,
+)
+for (name, f) in LEADCASES, sh in (true, false)
+    SUITE["rolling"][sh ? name : "$name-tworuns"] =
+        @benchmarkable load(LEADCTX, $(f(LEADSRC, sh)))
+end
 
 # The causal as-of join against its acausal forward mirror, over the same two
 # sources. futurejoin's per-key row buffers are the cost the comparison

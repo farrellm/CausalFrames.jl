@@ -186,6 +186,33 @@
             DataFrame(load(ctx, whole |> rt)))
         @test isequal(reduce(vcat, DataFrame.(stream(ctx, rowchunks |> rt))),
             DataFrame(load(ctx, whole |> rt)))
+
+        # The summarized side reads the lead-in before the output side pulls,
+        # so each lead-in chunk is freed once its rows are admitted: the tee
+        # never queues the lead-in, a look-back of chunks at full width.
+        # Before each chunk, a full GC counts the lead-in chunks still alive.
+        seq = DataFrame(time = 1:400, x = Float64.(1:400))
+        leadin = WeakRef[]
+        alive = Int[]
+        tracked = CausalPipeline() do ctx
+            rows = findall(ctx.start .<= seq.time .< ctx.stop)
+            return (
+                begin
+                    GC.gc()
+                    push!(alive, count(w -> w.value !== nothing, leadin))
+                    c = seq[r, :]
+                    last(c.time) < 300 && push!(leadin, WeakRef(c.x))
+                    c
+                end for r in Iterators.partition(rows, 10)
+            )
+        end
+        out = DataFrame(
+            load(Context(300, 401),
+                tracked |> addrollingcolumns((w = 200,), Sum(:x))),
+        )
+        @test out.w_x_sum == [sum(Float64, (t-200):t) for t in 300:400]
+        @test length(leadin) == 20
+        @test maximum(alive) <= 3
     end
 
     @testset "windows argument forms" begin

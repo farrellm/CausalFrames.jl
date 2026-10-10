@@ -16,7 +16,10 @@ design rationale and performance constraints behind each module.
   `head`'s early exit. `teesides` splits one run into two `ChunkSource`s over
   a shared `PullCursor`, queueing for the side that is behind a
   `copycols = false` index of each chunk (the `writecsv` hand-off argument),
-  for a transform reading the same stream at two paces
+  for a transform reading the same stream at two paces. Its `keep` function is
+  the second side's view of every chunk (whole, sliced or skipped), so the
+  first side can read ahead through rows the second never sees without
+  queueing them
 - `src/frame.jl` — `CausalFrame{T}`: opaque, backed by a vector of
   time-ordered DataFrame chunks. The public inner constructor checks the
   invariants; `load`/`stream` build through a `Trusted`-token constructor that
@@ -397,10 +400,18 @@ design rationale and performance constraints behind each module.
   and allocating per row. Its generated `bar*` folds have edges of their own;
   `test/jet.jl` guards the embedded path
 - `src/rolling.jl` — `addrollingcolumns`. Summarizing its own input it runs it
-  once (`rollinginputs`), teed to both sides, the output side dropping the
-  lead-in with `warmup`'s `dropleadin!`: a run per side made a chain of d
-  stages run its source 2^d times (issue #98). `sharedrun = false` keeps the
-  second run over `ctx` when a time look-back widens the context. One kernel,
+  once (`rollinginputs`), teed to both sides, the tee's `keep` dropping the
+  lead-in from the output side with `warmup`'s `dropleadin!`: a run per side
+  made a chain of d stages run its source 2^d times (issue #98). Before the
+  output side's first pull (`afterleadin`), `admitleadin!` reads the whole
+  lead-in through the summarized side with its own kernel,
+  `leadinsegment!`, evicting against the newest admitted time and expiring
+  that row's key tree (`expiretree!`); an output pull first would queue the
+  lead-in at full input width. `afterleadin`'s `LeadInGate` keeps abstract
+  fields on purpose: a wrapper capturing its input's iterator type nests every
+  earlier stage's type in a chain's, and `chain8-keyed` then took inference
+  over five minutes to compile, against 8 s erased. `sharedrun = false` keeps the second run over
+  `ctx` when a time look-back widens the context. One kernel,
   `rollsegment!`, over a
   `RollTiers` (a shared row buffer with per-window eviction heads, per-window
   running tables, per-key trees owning their rows, refold templates). Per row:

@@ -158,28 +158,38 @@ function addrollingcolumns(windows, summarizers; key = nothing,
             cfg = RollingConfig(windownames, lookbacks, keycols,
                 Val(Tuple(keycols)), protos, Val(requested),
                 prefixednames, terms)
-            summarized, augmented = rollinginputs(p, from, sharedrun, ctx,
-                rollingcontext(ctx, lookbacks))
-            rs = RollingState(summarized)
-            return chunkmap(c -> rollchunk!(rs, cfg, c), augmented)
+            summarized, augmented, leadin = rollinginputs(p, from, sharedrun,
+                ctx, rollingcontext(ctx, lookbacks))
+            rs = RollingState(summarized, leadin)
+            return chunkmap(c -> rollchunk!(rs, cfg, c),
+                afterleadin(rs, cfg, augmented))
         end
     end
 end
 
-# The summarized and augmented chunk streams. Summarizing its own input, the
+# The summarized and augmented chunk streams, and the start of the shared
+# run's output rows (`nothing` without one). Summarizing its own input, the
 # transform runs it once and tees it, since a run per side would make a chain
 # of d stages run its source 2^d times (issue #98). Over a widened context the
 # augmented side drops the lead-in, as `warmup` does, unless `sharedrun` is
-# off, when it keeps its own run over `ctx`.
+# off, when it keeps its own run over `ctx`. The tee drops it, so the
+# summarized side can read the lead-in without queueing it for the other.
 function rollinginputs(p::CausalPipeline, from, sharedrun::Bool, ctx::Context,
     sctx::Context)
-    from === nothing || return from.run(sctx), p.run(ctx)
+    from === nothing || return from.run(sctx), p.run(ctx), nothing
     widened = sctx.start != ctx.start
-    widened && !sharedrun && return p.run(sctx), p.run(ctx)
-    summarized, augmented = teesides(p.run(sctx))
-    widened || return summarized, augmented
+    widened && !sharedrun && return p.run(sctx), p.run(ctx), nothing
+    widened || return teesides(p.run(sctx))..., nothing
     drop = LeadInDrop(ctx.start)
-    return summarized, chunkmap(c -> dropleadin!(drop, c), augmented)
+    return teesides(p.run(sctx), c -> dropleadin!(drop, c))..., ctx.start
+end
+
+# The augmented chunks, pulled only once the lead-in is admitted: pulling one
+# first would have the tee queue the whole lead-in for the summarized side, at
+# full width, before the windows could drop any of it.
+function afterleadin(rs, cfg, augmented)
+    gate = LeadInGate(rs, cfg, PullCursor(augmented))
+    return ChunkSource(() -> pullafterleadin!(gate))
 end
 addrollingcolumns(p::CausalPipeline, windows, summarizers; kwargs...) =
     addrollingcolumns(windows, summarizers; kwargs...)(p)
@@ -234,8 +244,9 @@ mutable struct RollingState
     vals::Any          # per-window value vectors for the chunk in progress
     passthrough::Bool  # the summarized stream produced no chunks at all
     checked::Bool      # augmented-side name/key validation done
-    RollingState(schunks) = new(PullCursor(schunks), nothing, 1,
-        nothing, nothing, nothing, nothing, nothing, false, false)
+    leadin::Any        # the shared run's output start, until its lead-in is admitted
+    RollingState(schunks, leadin) = new(PullCursor(schunks), nothing, 1,
+        nothing, nothing, nothing, nothing, nothing, false, false, leadin)
 end
 
 # The window structures for one tiering (tiers.jl), R being the stored row
@@ -446,6 +457,37 @@ function rollchunk!(rs::RollingState, cfg::RollingConfig, c::DataFrame)
     return assemble(cfg, rs, c)
 end
 
+# Admit every summarized row before `start` ahead of the first augmented pull,
+# evicting as it goes, so the windows hold only the rows a row at or after
+# `start` can still see. Type-unstable, once per chunk of the lead-in.
+function admitleadin!(rs::RollingState, cfg::RollingConfig)
+    start = rs.leadin
+    start === nothing && return nothing
+    rs.leadin = nothing
+    rs.snt === nothing && pullsummarized!(rs, cfg)
+    while rs.snt !== nothing
+        rs.spos, more = leadinsegment!(rs.tiers, rs.snt, rs.spos, start,
+            cfg.lookbacks, cfg.keynames)
+        more && !rs.summarized.done || break
+        pullsummarized!(rs, cfg)
+    end
+    return nothing
+end
+
+# `afterleadin`'s state. The fields are abstract, a dispatch per chunk, so a
+# stage's iterator type doesn't nest its input's: nested, a chain of eight
+# stages took inference minutes, not seconds, to compile.
+struct LeadInGate
+    rs::RollingState
+    cfg::RollingConfig
+    cursor::PullCursor
+end
+
+function pullafterleadin!(g::LeadInGate)
+    admitleadin!(g.rs, g.cfg)
+    return pull!(g.cursor)
+end
+
 newvals(::Type{V}, emptyrow, n::Int) where {V} =
     fill!(Vector{V}(undef, n), emptyrow)
 
@@ -507,6 +549,33 @@ function rollsegment!(wins::Tuple, tiers::RollTiers{R}, lnt::NamedTuple, i::Int,
     end
     return (i, spos, false)
 end
+
+# The lead-in's kernel: admits the summarized rows before `start` from spos.
+# Every later row is at or after the newest one admitted, at τ, so each window
+# evicts against τ, and the admitted row's key tree expires its prefix as a
+# query at τ would. Returns (spos, more): more means the chunk is used up.
+function leadinsegment!(tiers::RollTiers{R}, snt::NamedTuple, spos::Int,
+    start, lookbacks::Tuple, keynames::Val) where {R}
+    slen = length(snt.time)
+    while spos <= slen
+        τ = @inbounds snt.time[spos]
+        τ < start || return (spos, false)
+        row = rowat(R, snt, spos)
+        admitroll!(tiers, row, keynames, lookbacks)
+        evictroll!(τ, tiers, tiers.buffer, keynames, 1, lookbacks...)
+        compactbuffer!(tiers.buffer, tiers.winheads)
+        expiretree!(keytree(tiers.trees, keyvalues(row, keynames)), τ,
+            typemax(Int), lookbacks...)
+        spos += 1
+    end
+    return (spos, true)
+end
+
+# Advance the tree's head to the earliest of its windows' starts at τ.
+@inline expiretree!(tr, τ, minlo::Int, lookbacks...) = nothing
+@inline expiretree!(tr::SegTree, τ, minlo::Int) = advancetree!(tr, minlo)
+@inline expiretree!(tr::SegTree, τ, minlo::Int, lb, rest...) =
+    expiretree!(tr, τ, min(minlo, treestart(tr, τ, lb)), rest...)
 
 @inline function admitroll!(tiers::RollTiers, row, keynames::Val,
     lookbacks::Tuple)
@@ -604,18 +673,22 @@ end
 @inline treestates(::Tuple{}, t, lb) = ((), typemax(Int))
 @inline treestates(::Nothing, t, lb) = (nothing, typemax(Int))
 @inline function treestates(tr::SegTree, t, lb)
-    lo = windowstart(tr.times, tr.head, t, lb)
+    lo = treestart(tr, t, lb)
     hi = length(tr.rows)
     return (lo > hi ? nothing : treequery(tr, lo, hi)), lo
 end
-# Every admitted row is at or before t, so a Bars window is the key's last n.
-# The head never passes it: the earliest window start advances the head, and a
-# rebuild drops only rows before the head, so a key with n rows has them all.
 @inline function treestates(tr::SegTree, t, lb::Bars)
-    hi = length(tr.rows)
-    lo = hi - lb.n + 1
-    return lo < 1 ? (nothing, 1) : (treequery(tr, lo, hi), lo)
+    lo = treestart(tr, t, lb)
+    return lo < 1 ? (nothing, 1) : (treequery(tr, lo, length(tr.rows)), lo)
 end
+
+# The window's first row in the key's tree, at t.
+@inline treestart(tr::SegTree, t, lb) = windowstart(tr.times, tr.head, t, lb)
+# Every admitted row is at or before t, so a Bars window is the key's last n
+# (less than 1 for fewer rows). The head never passes it: the earliest window
+# start advances the head, and a rebuild drops only rows before the head, so a
+# key with n rows has them all.
+@inline treestart(tr::SegTree, t, lb::Bars) = length(tr.rows) - lb.n + 1
 
 # The earliest window start advances the tree's head: a row older than every
 # window is expired, and the next rebuild drops it.
