@@ -89,6 +89,44 @@ longest time look-back, so the first row already sees a full window.
   without a time look-back, and on an input whose rows at or after `start`
   don't depend on earlier ones. Ignored with `from`.
 
+A running count depends on where its run starts. The `w2` look-back widens
+the context to start at 1, so by default the output shows the counts from
+there, the ones summed:
+
+```jldoctest sharedrun
+p = clock(1) |> addsummarycolumns(Count())
+t = addrollingcolumns((w2 = 2,), Sum(:count))
+DataFrame(load(Context(3, 6), p |> t))
+
+# output
+
+3×3 DataFrame
+ Row │ time   count  w2_count_sum
+     │ Int64  Int64  Int64
+─────┼────────────────────────────
+   1 │     3      3             6
+   2 │     4      4             9
+   3 │     5      5            12
+```
+
+With `sharedrun = false` the output rows come from a run starting at 3, so
+their counts restart at 1, while the summaries still sum the widened run's:
+
+```jldoctest sharedrun
+t = addrollingcolumns((w2 = 2,), Sum(:count); sharedrun = false)
+DataFrame(load(Context(3, 6), p |> t))
+
+# output
+
+3×3 DataFrame
+ Row │ time   count  w2_count_sum
+     │ Int64  Int64  Int64
+─────┼────────────────────────────
+   1 │     3      1             6
+   2 │     4      2             9
+   3 │     5      3            12
+```
+
 An empty time window, including one for an unseen key, gives the summarizers'
 empty values, so a column's type may widen (`Min` gives `Union{Missing, T}`).
 A `Bars` window holding fewer than `n` rows gives `missing` instead.
