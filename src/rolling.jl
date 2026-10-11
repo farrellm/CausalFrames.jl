@@ -55,8 +55,8 @@ struct Bars
 end
 
 """
-    addrollingcolumns(windows, summarizers; key = nothing,
-                      from = nothing) -> (CausalPipeline -> CausalPipeline)
+    addrollingcolumns(windows, summarizers; key = nothing, from = nothing,
+                      sharedrun = true) -> (CausalPipeline -> CausalPipeline)
     addrollingcolumns(p::CausalPipeline, windows, summarizers;
                       ...) -> CausalPipeline
 
@@ -80,14 +80,62 @@ longest time look-back, so the first row already sees a full window.
   rows with the same key.
 - `from = nothing`: a pipeline to summarize instead of the input itself. Its
   rows relate to the output rows by time and key only. By default the input is
-  summarized, so it runs twice.
+  summarized.
+- `sharedrun = true`: without `from`, run the input once, over the widened
+  context, and drop the rows before `start` from the output, so the output
+  rows are the rows summarized. `false` takes the output rows from a run over
+  the window itself, as a pipeline without this transform would give them; a
+  time look-back then runs the input twice, once per context. The two agree
+  without a time look-back, and on an input whose rows at or after `start`
+  depend neither on earlier rows nor on where its run starts. They differ in
+  the rows themselves under an input anchored to its run's start, such as
+  [`clock`](@ref) ticks, an [`intervalize`](@ref) grid or [`head`](@ref): pass
+  `false` there. Ignored with `from`.
+
+A running count depends on where its run starts. The `w2` look-back widens
+the context to start at 1, so by default the output shows the counts from
+there, the ones summed:
+
+```jldoctest sharedrun
+p = clock(1) |> addsummarycolumns(Count())
+t = addrollingcolumns((w2 = 2,), Sum(:count))
+DataFrame(load(Context(3, 6), p |> t))
+
+# output
+
+3×3 DataFrame
+ Row │ time   count  w2_count_sum
+     │ Int64  Int64  Int64
+─────┼────────────────────────────
+   1 │     3      3             6
+   2 │     4      4             9
+   3 │     5      5            12
+```
+
+With `sharedrun = false` the output rows come from a run starting at 3, so
+their counts restart at 1, while the summaries still sum the widened run's:
+
+```jldoctest sharedrun
+t = addrollingcolumns((w2 = 2,), Sum(:count); sharedrun = false)
+DataFrame(load(Context(3, 6), p |> t))
+
+# output
+
+3×3 DataFrame
+ Row │ time   count  w2_count_sum
+     │ Int64  Int64  Int64
+─────┼────────────────────────────
+   1 │     3      1             6
+   2 │     4      2             9
+   3 │     5      3            12
+```
 
 An empty time window, including one for an unseen key, gives the summarizers'
 empty values, so a column's type may widen (`Min` gives `Union{Missing, T}`).
 A `Bars` window holding fewer than `n` rows gives `missing` instead.
 """
 function addrollingcolumns(windows, summarizers; key = nothing,
-    from::Union{Nothing,CausalPipeline} = nothing)
+    from::Union{Nothing,CausalPipeline} = nothing, sharedrun::Bool = true)
     windownames, lookbacks = towindows(windows)
     isempty(windownames) &&
         throw(ArgumentError("addrollingcolumns requires at least one window"))
@@ -107,14 +155,40 @@ function addrollingcolumns(windows, summarizers; key = nothing,
     end
     return function (p::CausalPipeline)
         return CausalPipeline() do ctx::Context
-            source = from === nothing ? p : from
             cfg = RollingConfig(windownames, lookbacks, keycols,
                 Val(Tuple(keycols)), protos, Val(requested),
                 prefixednames, terms)
-            rs = RollingState(source.run(rollingcontext(ctx, lookbacks)))
-            return chunkmap(c -> rollchunk!(rs, cfg, c), p.run(ctx))
+            summarized, augmented, leadin = rollinginputs(p, from, sharedrun,
+                ctx, rollingcontext(ctx, lookbacks))
+            rs = RollingState(summarized)
+            return chunkmap(c -> rollchunk!(rs, cfg, c),
+                afterleadin(rs, cfg, augmented, leadin))
         end
     end
+end
+
+# The summarized and augmented chunk streams, and the start of the shared
+# run's output rows (`nothing` without one). Summarizing its own input, the
+# transform runs it once and tees it, since a run per side would make a chain
+# of d stages run its source 2^d times (issue #98). Over a widened context the
+# augmented side drops the lead-in, as `warmup` does, unless `sharedrun` is
+# off, when it keeps its own run over `ctx`. The tee drops it, so the
+# summarized side can read the lead-in without queueing it for the other.
+function rollinginputs(p::CausalPipeline, from, sharedrun::Bool, ctx::Context,
+    sctx::Context)
+    from === nothing || return from.run(sctx), p.run(ctx), nothing
+    sctx.start == ctx.start && return teesides(p.run(sctx))..., nothing
+    sharedrun || return p.run(sctx), p.run(ctx), nothing
+    drop = LeadInDrop(ctx.start)
+    return teesides(p.run(sctx), c -> dropleadin!(drop, c))..., ctx.start
+end
+
+# The augmented chunks, pulled only once the lead-in is admitted: pulling one
+# first would have the tee queue the whole lead-in for the summarized side, at
+# full width, before the windows could drop any of it.
+function afterleadin(rs, cfg, augmented, leadin)
+    gate = LeadInGate(rs, cfg, PullCursor(augmented), leadin)
+    return ChunkSource(() -> pullafterleadin!(gate))
 end
 addrollingcolumns(p::CausalPipeline, windows, summarizers; kwargs...) =
     addrollingcolumns(windows, summarizers; kwargs...)(p)
@@ -313,15 +387,21 @@ function suffixtrees(tg::Tiering, ::Type{K}, ::Type{R}, ::Type{T}, suffixes,
 end
 
 # Pull the next summarized chunk (type-unstable, once per chunk), building the
-# tiers on the first and rebuilding them when the promoted schema changes.
-function pullsummarized!(rs::RollingState, cfg::RollingConfig)
+# tiers on the first and rebuilding them when the promoted schema changes. A
+# shared run's first chunk is the augmented input's too, and is pulled before
+# any augmented chunk, so it takes the augmented side's checks.
+function pullsummarized!(rs::RollingState, cfg::RollingConfig,
+    shared::Bool = false)
     chunk = pull!(rs.summarized)
     if chunk === nothing
         rs.snt === nothing && (rs.passthrough = true)
         return nothing
     end
-    rs.stypes === nothing && checkkeycolumns(cfg.keycols, chunk,
-        "addrollingcolumns", "the summarized input")
+    if rs.stypes === nothing
+        shared ? checkaugmented!(rs, cfg, chunk) :
+        checkkeycolumns(cfg.keycols, chunk, "addrollingcolumns",
+            "the summarized input")
+    end
     nt = terminput(chunk, cfg.terms, "addrollingcolumns")
     types = promotetypes(rs.stypes, chunktypes(nt))
     moved = rs.stypes === nothing || types != rs.stypes
@@ -351,18 +431,23 @@ function setvaltype!(rs::RollingState, cfg::RollingConfig, tg::Tiering)
     return nothing
 end
 
-function rollchunk!(rs::RollingState, cfg::RollingConfig, c::DataFrame)
-    if !rs.checked
-        checkkeycolumns(cfg.keycols, c, "addrollingcolumns", "the augmented input")
-        for pn in cfg.prefixednames
-            String(pn) in names(c) && throw(
-                ArgumentError(
-                    "addrollingcolumns output column $(repr(pn)) collides with an existing column",
-                ),
-            )
-        end
-        rs.checked = true
+# The augmented side's key and output-name checks, once per run.
+function checkaugmented!(rs::RollingState, cfg::RollingConfig, c::DataFrame)
+    rs.checked && return nothing
+    checkkeycolumns(cfg.keycols, c, "addrollingcolumns", "the augmented input")
+    for pn in cfg.prefixednames
+        String(pn) in names(c) && throw(
+            ArgumentError(
+                "addrollingcolumns output column $(repr(pn)) collides with an existing column",
+            ),
+        )
     end
+    rs.checked = true
+    return nothing
+end
+
+function rollchunk!(rs::RollingState, cfg::RollingConfig, c::DataFrame)
+    checkaugmented!(rs, cfg, c)
     rs.snt === nothing && !rs.summarized.done && pullsummarized!(rs, cfg)
     rs.passthrough && return assembleempty(cfg, c)
     lnt = Tables.columntable(c)
@@ -379,6 +464,38 @@ function rollchunk!(rs::RollingState, cfg::RollingConfig, c::DataFrame)
         pullsummarized!(rs, cfg)
     end
     return assemble(cfg, rs, c)
+end
+
+# Admit every summarized row before `start` ahead of the first augmented pull,
+# evicting as it goes, so the windows hold only the rows a row at or after
+# `start` can still see. Type-unstable, once per chunk of the lead-in.
+function admitleadin!(rs::RollingState, cfg::RollingConfig, start)
+    rs.snt === nothing && pullsummarized!(rs, cfg, true)
+    while rs.snt !== nothing
+        rs.spos, more = leadinsegment!(rs.tiers, rs.snt, rs.spos, start,
+            cfg.lookbacks, cfg.keynames)
+        more && !rs.summarized.done || break
+        pullsummarized!(rs, cfg)
+    end
+    return nothing
+end
+
+# `afterleadin`'s state. The fields are abstract, a dispatch per chunk, so a
+# stage's iterator type doesn't nest its input's: nested, a chain of eight
+# stages took inference minutes, not seconds, to compile.
+mutable struct LeadInGate
+    const rs::RollingState
+    const cfg::RollingConfig
+    const cursor::PullCursor
+    start::Any  # the shared run's output start, until its lead-in is admitted
+end
+
+function pullafterleadin!(g::LeadInGate)
+    if g.start !== nothing
+        start, g.start = g.start, nothing
+        admitleadin!(g.rs, g.cfg, start)
+    end
+    return pull!(g.cursor)
 end
 
 newvals(::Type{V}, emptyrow, n::Int) where {V} =
@@ -443,6 +560,32 @@ function rollsegment!(wins::Tuple, tiers::RollTiers{R}, lnt::NamedTuple, i::Int,
     return (i, spos, false)
 end
 
+# The lead-in's kernel: admits the summarized rows before `start` from spos.
+# Every later row is at or after the newest one admitted, at τ, so each window
+# evicts against τ, and the admitted row's key tree expires its prefix as a
+# query at τ would. Returns (spos, more): more means the chunk is used up.
+function leadinsegment!(tiers::RollTiers{R}, snt::NamedTuple, spos::Int,
+    start, lookbacks::Tuple, keynames::Val) where {R}
+    slen = length(snt.time)
+    while spos <= slen
+        τ = @inbounds snt.time[spos]
+        τ < start || return (spos, false)
+        k = admitroll!(tiers, rowat(R, snt, spos), keynames, lookbacks)
+        evictroll!(τ, tiers, tiers.buffer, keynames, 1, lookbacks...)
+        compactbuffer!(tiers.buffer, tiers.winheads)
+        expiretree!(keytree(tiers.trees, k), τ, typemax(Int), lookbacks...)
+        spos += 1
+    end
+    return (spos, true)
+end
+
+# Advance the tree's head to the earliest of its windows' starts at τ.
+@inline expiretree!(tr, τ, minlo::Int, lookbacks...) = nothing
+@inline expiretree!(tr::SegTree, τ, minlo::Int) = advancetree!(tr, minlo)
+@inline expiretree!(tr::SegTree, τ, minlo::Int, lb, rest...) =
+    expiretree!(tr, τ, min(minlo, treestart(tr, τ, lb)), rest...)
+
+# Admit the row into every tier, returning its key.
 @inline function admitroll!(tiers::RollTiers, row, keynames::Val,
     lookbacks::Tuple)
     pushrow!(tiers.buffer, row)
@@ -450,7 +593,7 @@ end
     admitrunning!(tiers.running, tiers.runprotos, k, row)
     admittree!(tiers.trees, tiers.treeprotos, k, row)
     admitbars!(tiers.rings, tiers.running, tiers.barcap, k, row, lookbacks)
-    return nothing
+    return k
 end
 
 # Push the row into its key's ring, then downdate, from each Bars window's
@@ -539,18 +682,22 @@ end
 @inline treestates(::Tuple{}, t, lb) = ((), typemax(Int))
 @inline treestates(::Nothing, t, lb) = (nothing, typemax(Int))
 @inline function treestates(tr::SegTree, t, lb)
-    lo = windowstart(tr.times, tr.head, t, lb)
+    lo = treestart(tr, t, lb)
     hi = length(tr.rows)
     return (lo > hi ? nothing : treequery(tr, lo, hi)), lo
 end
-# Every admitted row is at or before t, so a Bars window is the key's last n.
-# The head never passes it: the earliest window start advances the head, and a
-# rebuild drops only rows before the head, so a key with n rows has them all.
 @inline function treestates(tr::SegTree, t, lb::Bars)
-    hi = length(tr.rows)
-    lo = hi - lb.n + 1
-    return lo < 1 ? (nothing, 1) : (treequery(tr, lo, hi), lo)
+    lo = treestart(tr, t, lb)
+    return lo < 1 ? (nothing, 1) : (treequery(tr, lo, length(tr.rows)), lo)
 end
+
+# The window's first row in the key's tree, at t.
+@inline treestart(tr::SegTree, t, lb) = windowstart(tr.times, tr.head, t, lb)
+# Every admitted row is at or before t, so a Bars window is the key's last n
+# (less than 1 for fewer rows). The head never passes it: the earliest window
+# start advances the head, and a rebuild drops only rows before the head, so a
+# key with n rows has them all.
+@inline treestart(tr::SegTree, t, lb::Bars) = length(tr.rows) - lb.n + 1
 
 # The earliest window start advances the tree's head: a row older than every
 # window is expired, and the next rebuild drops it.

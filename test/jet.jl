@@ -26,6 +26,13 @@ using JET
     JET.@test_opt CausalFrames.foldrunning!(states, nt, 3, outs)
 end
 
+@testset "wide rows" begin
+    # Past 32 columns, Base's tuple `map` falls back to dispatch (issue #98).
+    nt = NamedTuple{Tuple(Symbol.(:c, 1:40))}(Tuple(rand(3) for _ in 1:40))
+    V = CausalFrames.storerowtype(map(eltype, nt))
+    JET.@test_opt CausalFrames.rowat(V, nt, 2)
+end
+
 @testset "dependent summarizer emission" begin
     # A dependent summarizer's `value` runs per emitted row under
     # addsummarycolumns and addrollingcolumns, so it must be dispatch-free too.
@@ -289,6 +296,8 @@ const JETTIERSETS = (
             rs.emptyrows, rs.valtypes)
         JET.@test_opt CausalFrames.rollsegment!(wins, tiers, lnt, 1, snt, 1,
             true, lookbacks, kn, outs)
+        JET.@test_opt CausalFrames.leadinsegment!(tiers, snt, 1, 6, lookbacks,
+            kn)
     end
 end
 

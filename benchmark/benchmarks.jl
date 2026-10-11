@@ -286,6 +286,64 @@ SUITE["rolling"]["bars-tree"] = @benchmarkable load(RCTX,
     RSRC |> addrollingcolumns((; b100 = Bars(100)), [Product(:qty)]))
 SUITE["rolling"]["bars-mixed-keyed"] = @benchmarkable load(RCTX,
     RSRC |> addrollingcolumns((; b100 = Bars(100)), MIXED; key = :sym))
+# Forty extra columns the summarizers don't read: every admitted row is still
+# built whole, past the 32 columns where Base's tuple `map` stops unrolling
+# (issue #98).
+const WIDESRC = let df = DataFrame(load(RCTX, RSRC))
+    for j in 1:40
+        df[!, "c$j"] = fill(1.0, nrow(df))
+    end
+    readtable(df)
+end
+SUITE["rolling"]["bars-wide-keyed"] = @benchmarkable load(RCTX,
+    WIDESRC |> addrollingcolumns((; b14 = Bars(14)), [Sum(:qty)]; key = :sym))
+# Eight self-summarizing stages chained: each runs its input once, so this
+# should cost about eight single stages, not 2^8 runs of the source (#98).
+const CHAIN8 = foldl(2:9; init = RSRC) do p, n
+    p |> addrollingcolumns(NamedTuple{(Symbol(:b, n),)}((Bars(n),)),
+        [Sum(:qty)]; key = :sym)
+end
+SUITE["rolling"]["chain8-keyed"] = @benchmarkable load(RCTX, CHAIN8)
+# A time look-back widens the run to before `start`: the lead-in, a look-back
+# of rows the windows read but the output drops. A file-like source copies each
+# in-window chunk, as a reader decodes it, so a chunk held is memory held, and
+# forty unread columns make a held chunk far wider than a stored row. Each case
+# runs shared (the default) and as two runs (`sharedrun = false`), whose
+# summarized side reads the lead-in lazily; benchmark/peakmemory.jl measures
+# the peak live heap of the same cases, which allocation totals don't show.
+filesource(chunks) = CausalPipeline() do ctx
+    (
+        c[ctx.start .<= c.time .< ctx.stop, :] for c in chunks
+        if last(c.time) >= ctx.start && first(c.time) < ctx.stop
+    )
+end
+const LEADSRC = filesource(map(tradechunks(RN; chunkrows = 5_000)) do c
+    for j in 1:40
+        c[!, "c$j"] = fill(Float64(j), nrow(c))
+    end
+    c
+end)
+const LEADCTX = Context(RN ÷ 8, RN ÷ 4)   # the second half of the times
+const LEADLB = RN ÷ 8                     # half of the rows are lead-in
+const LEADCASES = (
+    "leadin-wide" =>
+        (p, sh) ->
+            p |> addrollingcolumns((; w = LEADLB),
+                [Sum(:qty), Mean(:qty)]; sharedrun = sh),
+    "leadin-wide-tree-keyed" =>
+        (p, sh) ->
+            p |> addrollingcolumns(
+                (; w = LEADLB), [Product(:qty)]; key = :sym, sharedrun = sh),
+    "leadin-chain4-keyed" =>
+        (p, sh) -> foldl(1:4; init = p) do q, n
+            q |> addrollingcolumns(NamedTuple{(Symbol(:w, n),)}((LEADLB ÷ n,)),
+                [Sum(:qty)]; key = :sym, sharedrun = sh)
+        end,
+)
+for (name, f) in LEADCASES, sh in (true, false)
+    SUITE["rolling"][sh ? name : "$name-tworuns"] =
+        @benchmarkable load(LEADCTX, $(f(LEADSRC, sh)))
+end
 
 # The causal as-of join against its acausal forward mirror, over the same two
 # sources. futurejoin's per-key row buffers are the cost the comparison
@@ -330,7 +388,7 @@ if abspath(PROGRAM_FILE) == @__FILE__
     for (path, trial) in BenchmarkTools.leaves(results)
         t = BenchmarkTools.prettytime(time(median(trial)))
         m = BenchmarkTools.prettymemory(memory(trial))
-        println(rpad(join(path, "/"), 28), lpad(t, 12), lpad(m, 12),
+        println(rpad(join(path, "/"), 40), lpad(t, 12), lpad(m, 12),
             lpad(allocs(trial), 12), " allocs")
     end
 end

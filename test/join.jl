@@ -253,6 +253,28 @@
             return @allocated call()
         end
         @test joinalloc() == 0
+
+        # A row past 32 columns, where Base's tuple `map` stops unrolling,
+        # is still built without allocating (issue #98). The row type reaches
+        # `rowat` as a type parameter, as in the kernels: captured as a value
+        # by a closure, Julia 1.10 dispatches the call and allocates, where
+        # later versions fold it. When 1.10 support is dropped, the closure
+        # form (`call() = for i in 1:10; rows[i] = rowat(V, nt, i); end`)
+        # would do.
+        function fillrows!(rows::Vector{V}, nt) where {V}
+            for i in eachindex(rows)
+                rows[i] = CausalFrames.rowat(V, nt, i)
+            end
+        end
+        function widerowalloc(k)
+            nt = NamedTuple{Tuple(Symbol.(:c, 1:k))}(
+                Tuple(collect(1.0:10.0) for _ in 1:k))
+            rows = Vector{CausalFrames.storerowtype(map(eltype, nt))}(undef, 10)
+            fillrows!(rows, nt)
+            return @allocated fillrows!(rows, nt)
+        end
+        @test widerowalloc(31) == 0
+        @test widerowalloc(40) == 0
     end
 
     @testset "empty streams" begin

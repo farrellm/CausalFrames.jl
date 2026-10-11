@@ -111,7 +111,7 @@ boundaries.
 | `intervalize(clock, ss; key, keyset, closelast)` | transform | each interval `[bₖ, bₖ₊₁)` between clock ticks, at `bₖ₊₁` (see "Interval summarization") |
 | `summarizewindows(clock, lookback, ss; key, keyset)` | transform | `[τ - lookback, τ)` at each clock tick `τ` (see "Window summarization") |
 | `addsummarycolumns(ss; key)` | transform | append the running summary after each row |
-| `addrollingcolumns(windows, ss; key, from)` | transform | append summaries over named trailing windows (see "Rolling windows") |
+| `addrollingcolumns(windows, ss; key, from, sharedrun)` | transform | append summaries over named trailing windows (see "Rolling windows") |
 | `asofjoin(right; key, tolerance, strict, leftprefix, rightprefix, righttime)` | transform | append the latest right row at or before each row (see "As-of join") |
 | `lookupjoin(table; key, unmatched, leftprefix, rightprefix)` | transform | append the row with the same key from a table without time (see "Lookup join") |
 | `lag(offset)` | transform | move every row `offset` later (see "Lead and lag") |
@@ -1015,7 +1015,7 @@ behave differently from `settime(r -> r.time)`.
 
 ## Rolling windows
 
-`addrollingcolumns(windows, ss; key, from)` is the second binary operator:
+`addrollingcolumns(windows, ss; key, from, sharedrun)` is the second binary operator:
 it keeps every input row and column and appends, for each named window, each
 summarizer's value columns computed over that row's trailing window.
 `windows` maps window names to look-backs — a NamedTuple
@@ -1028,11 +1028,38 @@ convention, not the sources' half-open one) — so under self-summarization
 the row itself, and every row sharing its timestamp, is in its own window.
 
 - **The summarized stream.** By default the summaries are computed over the
-  pipeline being augmented itself, which then runs twice — pipelines are
-  lazy, so each `run(ctx)` builds fresh iterators (the self-join precedent;
-  a readcsv-backed pipeline reads the file twice). `from` names a different
-  pipeline to summarize instead. Either way summarized rows relate to
-  output rows by time (and key) only, never by row identity.
+  pipeline being augmented itself, which runs **once**, over the widened
+  context (below): its chunks are teed (`teesides` in `chunks.jl`) to the
+  summarized side and to the output side, which drops the rows before
+  `start` as `warmup` does. A run per side would compound under chaining —
+  each stage running its input twice makes a chain of d stages run its
+  source 2^d times (issue #98: 14 stages over a 24k-row input took 11.5
+  minutes). The cost is a semantic choice: the output rows are the widened
+  run's, so a stateful input (an earlier `Bars` stage, `forwardfill`) shows
+  values that saw pre-`start` history — the same values its summaries were
+  computed over. An input anchored to its run's start changes its rows, not
+  just their values: `clock` ticks and an `intervalize` grid shift with the
+  widened start unless the look-back is a whole number of ticks, and `head`
+  spends its count on the lead-in, possibly leaving no rows at all.
+  `sharedrun = false` keeps the output rows a run over `ctx`
+  itself, the input as it would load without this transform; a time
+  look-back then costs a second run (the self-join precedent: pipelines are
+  lazy, so each `run(ctx)` builds fresh iterators, and a readcsv-backed
+  pipeline reads its file twice). Without a time look-back the two
+  contexts are equal, and the run is teed either way. The tee's queue holds
+  only the chunks one side is ahead by, and the lead-in is not among them:
+  before the output side pulls at all, the summarized side reads the whole
+  lead-in, admitting each row into the windows and evicting against the
+  newest admitted time (every output row is at or after it). The tee drops
+  the lead-in from the output side's view as it passes, so the queue holds at
+  most the chunk straddling `start`, and the lead-in costs only the rows the
+  windows keep, at their stored width. Pulling an output chunk first would
+  have the tee queue the whole lead-in, a look-back of chunks at the input's
+  full width, before the windows could drop any of it.
+  `benchmark/peakmemory.jl` measures it. `from` names a different
+  pipeline to summarize instead, and `sharedrun` is then ignored. Either way
+  summarized rows relate to output rows by time (and key) only, never by row
+  identity.
 - **Context extension.** The summarized pipeline runs over the widened
   context `[minimum over windows of start - lookback, stop)`, so the first
   output row already sees a full look-back of history. Look-backs are never
@@ -2605,7 +2632,7 @@ the second.
 | `src/CausalFrames.jl` | module, includes, exports |
 | `src/context.jl` | `Context{T}`, and `widenstart`, the input context of every operator that reads before `start` |
 | `src/frame.jl` | `CausalFrame{T}`, invariants, Tables.jl interface |
-| `src/chunks.jl` | internal chunk-iterator machinery (`ChunkSource`, `chunkmap`, `PullCursor`) |
+| `src/chunks.jl` | internal chunk-iterator machinery (`ChunkSource`, `chunkmap`, `PullCursor`, `teesides`) |
 | `src/pipeline.jl` | `CausalPipeline{F}`, `load`, `stream`, `scan` |
 | `src/operators.jl` | sources (including the n-ary `concatenate`), the CSV sink, row-wise transforms, the causal time shift (`lag`) with the shared `shiftchunk!`, the context-widening `warmup` with the shared `dropleadin!`, the column projections and `reordercolumns` over one shared selector vocabulary, the truncating `head` with its `HeadProducer`, and the causal retiming (`settime`) with the shared `settimechunk!` |
 | `src/merge.jl` | the n-ary time-interleaving source (`Base.merge`) and its per-pipeline cursors |

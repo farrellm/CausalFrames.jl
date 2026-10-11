@@ -171,7 +171,7 @@ key is emitted each time.
 | [`intervalize(clock, ss; key, keyset, closelast)`](references/summarizing.md#intervalize) | each interval between clock ticks, emitted at its end |
 | [`summarizewindows(clock, lookback, ss; key, keyset)`](references/summarizing.md#summarizewindows) | the window `[τ - lookback, τ)` at each clock tick `τ` |
 | [`addsummarycolumns(ss; key)`](references/summarizing.md#addsummarycolumns) | append running summaries of every row so far |
-| [`addrollingcolumns(windows, ss; key, from)`](references/summarizing.md#addrollingcolumns) | append summaries of `[t - lookback, t]`, or of the last `n` rows under [`Bars(n)`](references/summarizing.md#Bars), for each named window |
+| [`addrollingcolumns(windows, ss; key, from, sharedrun)`](references/summarizing.md#addrollingcolumns) | append summaries of `[t - lookback, t]`, or of the last `n` rows under [`Bars(n)`](references/summarizing.md#Bars), for each named window |
 
 ```julia
 p |> addrollingcolumns((m1 = Minute(1), h1 = Hour(1)), Mean(:mid)) |>
