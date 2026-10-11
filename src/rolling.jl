@@ -177,9 +177,8 @@ end
 function rollinginputs(p::CausalPipeline, from, sharedrun::Bool, ctx::Context,
     sctx::Context)
     from === nothing || return from.run(sctx), p.run(ctx), nothing
-    widened = sctx.start != ctx.start
-    widened && !sharedrun && return p.run(sctx), p.run(ctx), nothing
-    widened || return teesides(p.run(sctx))..., nothing
+    sctx.start == ctx.start && return teesides(p.run(sctx))..., nothing
+    sharedrun || return p.run(sctx), p.run(ctx), nothing
     drop = LeadInDrop(ctx.start)
     return teesides(p.run(sctx), c -> dropleadin!(drop, c))..., ctx.start
 end
@@ -560,12 +559,10 @@ function leadinsegment!(tiers::RollTiers{R}, snt::NamedTuple, spos::Int,
     while spos <= slen
         τ = @inbounds snt.time[spos]
         τ < start || return (spos, false)
-        row = rowat(R, snt, spos)
-        admitroll!(tiers, row, keynames, lookbacks)
+        k = admitroll!(tiers, rowat(R, snt, spos), keynames, lookbacks)
         evictroll!(τ, tiers, tiers.buffer, keynames, 1, lookbacks...)
         compactbuffer!(tiers.buffer, tiers.winheads)
-        expiretree!(keytree(tiers.trees, keyvalues(row, keynames)), τ,
-            typemax(Int), lookbacks...)
+        expiretree!(keytree(tiers.trees, k), τ, typemax(Int), lookbacks...)
         spos += 1
     end
     return (spos, true)
@@ -577,6 +574,7 @@ end
 @inline expiretree!(tr::SegTree, τ, minlo::Int, lb, rest...) =
     expiretree!(tr, τ, min(minlo, treestart(tr, τ, lb)), rest...)
 
+# Admit the row into every tier, returning its key.
 @inline function admitroll!(tiers::RollTiers, row, keynames::Val,
     lookbacks::Tuple)
     pushrow!(tiers.buffer, row)
@@ -584,7 +582,7 @@ end
     admitrunning!(tiers.running, tiers.runprotos, k, row)
     admittree!(tiers.trees, tiers.treeprotos, k, row)
     admitbars!(tiers.rings, tiers.running, tiers.barcap, k, row, lookbacks)
-    return nothing
+    return k
 end
 
 # Push the row into its key's ring, then downdate, from each Bars window's
