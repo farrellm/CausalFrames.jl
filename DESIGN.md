@@ -1752,6 +1752,21 @@ The interface, extended by concrete subtypes (unexported — extend
 - `dependencies(s) -> Tuple` — optional (defaults to `()`); the summarizers
   whose values `s` reads in the two-argument `value`; see "Dependent
   summarizers" below;
+- `inputcolumns(s) -> Union{Nothing,Tuple}` — optional (defaults to
+  `nothing`, any column): the columns besides `:time` that `s`'s states read
+  from a row, a row term counting under its name; every built-in declares
+  them, a dependent one as `()`. `addrollingcolumns` and `summarizewindows`
+  store the rows they summarize, and keep only `:time`, the keys and the
+  union of the declared columns, so `fresh` sees only their types; one
+  `nothing` keeps every column. The other summarizing transforms read lazy
+  column-table rows, which touch only the columns a state reads, so they
+  ignore it. A stored row is a NamedTuple of every kept column: an unread
+  column costs a copy per row, and an unread `Union{Missing,T}` column makes
+  the row type non-isbits, so every stored row is boxed. That was 12x on one
+  `Bars(14)` stage with a single such column, and 25x with 128 of them; a
+  chain of stages pays it at every stage, since each adds a
+  `Union{Missing,T}` output column (issue #98: 8 chained stages over 131
+  columns went from 6.7 s to 0.28 s);
 - `combine!(dest, a, b)` — required of a `MonoidSummarizer`'s states (see
   "Structured subtypes" below): overwrite `dest` with the state that folding
   `a`'s rows and then `b`'s rows into a fresh state would produce. The laws:

@@ -873,6 +873,20 @@ if requested. Defaults to `()`.
 
 ---
 
+    inputcolumns(s::Summarizer) -> Union{Nothing, Tuple{Vararg{Symbol}}}
+
+The input columns, besides `:time`, that `s`'s states read from a row in
+`update!` and `downdate!`; a row term counts under its name.
+`addrollingcolumns` and `summarizewindows` store the rows they
+summarize, and keep only these columns, the key columns and `:time`, so
+`fresh` is given only their types. Defaults to `nothing`: `s` may read
+any column, and every column is kept. A summarizer whose state reads no row (a
+dependent one, or `Count`) declares `()`. Declaring a column it does
+not read only costs speed; leaving out one it reads is an error when it is
+read.
+
+---
+
     combine!(dest::SummarizerState, a::SummarizerState, b::SummarizerState)
 
 Set `dest` to the state folding `a`'s rows then `b`'s would give. Required for

@@ -158,6 +158,21 @@ if requested. Defaults to `()`.
 dependencies(::Summarizer) = ()
 
 """
+    inputcolumns(s::Summarizer) -> Union{Nothing, Tuple{Vararg{Symbol}}}
+
+The input columns, besides `:time`, that `s`'s states read from a row in
+[`update!`](@ref) and [`downdate!`](@ref); a row term counts under its name.
+[`addrollingcolumns`](@ref) and [`summarizewindows`](@ref) store the rows they
+summarize, and keep only these columns, the key columns and `:time`, so
+[`fresh`](@ref) is given only their types. Defaults to `nothing`: `s` may read
+any column, and every column is kept. A summarizer whose state reads no row (a
+dependent one, or [`Count`](@ref)) declares `()`. Declaring a column it does
+not read only costs speed; leaving out one it reads is an error when it is
+read.
+"""
+inputcolumns(::Summarizer) = nothing
+
+"""
     ColumnSpec
 
 An input column as a summarizer constructor takes it: a column name (a
@@ -3099,3 +3114,30 @@ function widenstate(st::FitModelState{N,P,Y,M},
     return FitModelState{N,P,Y,M,typeof(cols),typeof(y)}(st.model, st.verbosity,
         cols, y)
 end
+
+# --- input columns -----------------------------------------------------------
+#
+# What each built-in state reads from a row, for the window transforms'
+# projection (`inputcolumns`). A dependent summarizer's state reads nothing:
+# its dependencies declare the columns. A reversed `DotProduct` is dependent
+# too, but declaring its columns anyway costs nothing, since its canonical
+# dependency reads the same two.
+inputcolumns(::Count) = ()
+inputcolumns(::CountDistinct{C}) where {C} = (C,)
+inputcolumns(::Sum{C}) where {C} = (C,)
+inputcolumns(::SumPower{C}) where {C} = (C,)
+inputcolumns(::Product{C}) where {C} = (C,)
+inputcolumns(::DotProduct{A,B}) where {A,B} = (A, B)
+inputcolumns(::CoMoment{A,B}) where {A,B} = (A, B)
+inputcolumns(::AgeWeightedSum{C}) where {C} = (C,)
+inputcolumns(::SortedValues{C}) where {C} = (C,)
+inputcolumns(::WindowValues{C}) where {C} = (C,)
+inputcolumns(
+    ::Union{Min{C},Max{C},First{C},Last{C},MinIndex{C},MaxIndex{C},
+        MinWithIndex{C},MaxWithIndex{C}},
+) where {C} = (C,)
+inputcolumns(::FitModel{N,P,Y}) where {N,P,Y} = (P..., Y)
+inputcolumns(
+    ::Union{Moment,Mean,Variance,Std,Covariance,Correlation,LinearRegression,
+        Quantile,Median,PercentRank,MeanAbsDev},
+) = ()

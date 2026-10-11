@@ -134,6 +134,31 @@
         @test sort(ctxs; by = c -> c.start) == [Context(1, 10), Context(3, 10)]
     end
 
+    @testset "stored rows keep only the columns read" begin
+        df = DataFrame(time = 1:6, k = repeat(["a", "b"], 3),
+            x = Float64.(1:6), u = fill(missing, 6), v = string.(1:6))
+        t(ss; kw...) = addrollingcolumns((w2 = 2, b2 = Bars(2)), ss; kw...)
+        declared = Recording(Sum(:x), (:x,))
+        load(Context(0, 10), readtable(df) |> t([declared]; key = :k))
+        @test !isempty(declared.seen)
+        @test all(==((:time, :k, :x)), declared.seen)
+        # a summarizer that declares nothing keeps every column, for all
+        undeclared = Recording(Sum(:x), nothing)
+        load(Context(0, 10), readtable(df) |> t([undeclared, Count()]))
+        @test !isempty(undeclared.seen)
+        @test all(==((:time, :k, :x, :u, :v)), undeclared.seen)
+        # a row term is kept under its name, after the columns it reads
+        termed = Recording(Count(), (:r,))
+        load(Context(0, 10),
+            readtable(df) |> t([termed, Sum(:r => row -> 2 * row.x)]))
+        @test !isempty(termed.seen)
+        @test all(==((:time, :r)), termed.seen)
+        # the output is still every input column plus the summaries
+        out = DataFrame(load(Context(0, 10), readtable(df) |> t(Sum(:x))))
+        @test names(out) == ["time", "k", "x", "u", "v", "w2_x_sum", "b2_x_sum"]
+        @test out.w2_x_sum == [1.0, 3.0, 6.0, 9.0, 12.0, 15.0]
+    end
+
     @testset "self-summarization shares one run" begin
         df = DataFrame(time = repeat(1:30, inner = 2),
             k = repeat(["a", "b"], 30), x = Float64.(mod.(1:60, 7)))
@@ -391,10 +416,15 @@ end
     ys = map(v -> v - 2, lcgsequence(3, nrows, 5))    # -2:2
     ks = map(v -> ("a", "b", "c")[v+1], lcgsequence(4, nrows, 3))
     ranges = [1:100, 101:220, 221:300]
+    # `z` is never summarized, so the built-ins' stored rows project it out
+    # while the Opaque oracle, declaring no input columns, keeps it.
+    zs = [isodd(i) ? missing : Float64(i) for i in 1:nrows]
     mkdata(x) = CausalPipeline(
         ctx ->
-            [DataFrame(time = times[r], k = ks[r], x = x[r], y = ys[r])
-                for r in ranges],
+            [
+                DataFrame(time = times[r], k = ks[r], x = x[r], y = ys[r],
+                    z = zs[r]) for r in ranges
+            ],
     )
     intdata = mkdata(xs)
     floatdata = mkdata(Float64.(xs) ./ 4)
