@@ -447,4 +447,15 @@ end
     JET.@test_opt CausalFrames.foldall!(states, nt)
     JET.@test_opt CausalFrames.summaryvalues(states, outs)
     JET.@test_opt CausalFrames.foldrunning!(states, nt, 4, outs)
+    # with the window's row term hoisted to the transform
+    protos, requested = CausalFrames.prototypes(
+        CausalFrames.tosummarizers([LastN(Covariance(:x, :range => rangeterm), 3)]),
+        Symbol[])
+    outs = Val(requested)
+    tnt = (time = [1, 2], x = [1.0, 2.0], high = [3.0, 4.0], low = [1.0, 1.5])
+    tnt = merge(tnt, (; range = CausalFrames.rowvalues(rangeterm, tnt)))
+    states = CausalFrames.newstates(protos, CausalFrames.chunktypes(tnt))
+    JET.@test_opt CausalFrames.foldall!(states, tnt)
+    JET.@test_opt CausalFrames.summaryvalues(states, outs)
+    JET.@test_opt CausalFrames.foldrunning!(states, tnt, 2, outs)
 end

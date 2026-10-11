@@ -1801,9 +1801,10 @@ The interface, extended by concrete subtypes (unexported — extend
   transforms fold that summarizer through a segment tree instead.
 
 Beside the interface, `barwindow(s, n, intypes)` builds a state over the last
-`n` rows for a summarizer whose own state needs a trailing window, and
-`barinputcolumns(s)` gives the columns such a window reads; see "Count windows
-inside a state" below.
+`n` rows for a summarizer whose own state needs a trailing window,
+`barinputcolumns(s)` gives the columns such a window reads, and `barterms(s)`
+its row terms, for the optional `rowterms(s) -> NamedTuple` hook (defaults to
+`(;)`) to hoist; see "Count windows inside a state" below.
 
 Output column names are deterministic, formed by suffixing the column name:
 `Sum(:x)` produces `:x_sum`, `Min(:x)` produces `:x_min`, and `SumPower(:x, 2)`
@@ -2235,7 +2236,10 @@ otherwise wraps it in the unexported `Termed` carrier. `Termed` forwards only
 the prototypes, so no state, tier or kernel ever sees one, and a summarizer's
 structure (`GroupSummarizer` and so on) is untouched. Because stripping happens
 during expansion, a custom summarizer's `dependencies` may return a `Termed`
-summarizer, which is how a downstream package declares a hidden term.
+summarizer, which is how a downstream package declares a hidden term. A custom
+summarizer may also return terms from the `rowterms(s)` hook, collected beside
+its constructor's (the `Termed` carrier's) and under the same rules; it exists
+to hoist a count window's inner terms (see "Count windows inside a state").
 
 Per chunk, each summarizing transform builds its input with `terminput`: the
 chunk's column table merged with one vector per term, computed behind the same
@@ -2540,10 +2544,23 @@ state holding `s`'s states over the last `n` rows folded into it.
 - **Input columns.** An outer summarizer's `inputcolumns` returns
   `barinputcolumns(s)`: the union of `inputcolumns` over `s`'s expansion, so
   the window transforms keep only the window's columns. It is `nothing` when
-  one of them is, or when `s` reads a row term: the window evaluates the term
-  from the rows it is handed, after the transform's projection, and which
-  columns the term's function reads is opaque (probing it with a recording row
-  misses branches and type-dependent paths, so that was rejected).
+  one of them is, or when `s` reads a row term that is not hoisted: the window
+  would evaluate the term from the rows it is handed, after the transform's
+  projection, and which columns the term's function reads is opaque (probing
+  it with a recording row misses branches and type-dependent paths, so that
+  was rejected).
+- **Hoisted row terms.** The outer summarizer returns `barterms(s)` (the terms
+  of `s`'s expansion) from its `rowterms`, so `prototypes` collects them with
+  the call's own terms: `terminput` evaluates them per chunk, before the
+  projection, and checks them against input columns and same-named terms as
+  any other. Built with `hoisted = true`, the window then reads each term as
+  a column of `intypes` (one missing from it is an `ArgumentError`) and
+  evaluates nothing, and `barinputcolumns(s; hoisted = true)` names the terms.
+  The flag is explicit rather than inferred from a term's name being in
+  `intypes`: a window that did not hoist would then silently read a real
+  column of that name in place of its term. Hoisting does not change how often
+  a term runs (once per row either way); it buys the projection, and moves
+  evaluation behind `rowvalues`' per-chunk barrier.
 - **Typing.** The tiers come from runtime `isinvertible` values, so the state's
   type is not inferrable from the argument types. An outer state takes it as a
   type parameter and builds it once in `fresh(s, intypes)`; `fresh`, `fresh!`

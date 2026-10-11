@@ -8,7 +8,8 @@
 # is preallocated, so a row costs no allocation.
 
 """
-    barwindow(s::Summarizer, n::Integer, intypes::NamedTuple) -> SummarizerState
+    barwindow(s::Summarizer, n::Integer, intypes::NamedTuple;
+              hoisted::Bool = false) -> SummarizerState
 
 A state summarizing only the last `n` rows folded into it, for a summarizer
 whose own state needs a trailing window (a moving average inside a recursive
@@ -32,6 +33,14 @@ as a type parameter.
   must be concrete, or a `Union` of concrete types; its name may not be one
   of theirs.
 
+# Keywords
+- `hoisted = false`: whether `s`'s row terms are already evaluated, as columns
+  of the rows passed to `update!`. An outer summarizer hoists them by returning
+  [`barterms`](@ref) from its [`rowterms`](@ref), so the summarizing transforms
+  evaluate them over each chunk before storing its rows; the window then reads
+  each term as a column, and a term missing from `intypes` is an
+  `ArgumentError`.
+
 ```jldoctest
 st = CausalFrames.barwindow(Mean(:x), 2, (x = Float64,))
 map(1.0:4.0) do x
@@ -51,45 +60,90 @@ end
 Rows leave the window oldest first, so a wrapped [`downdate!`](@ref) sees the
 order it expects. [`widenstate`](@ref) re-types the state and keeps its window.
 """
-function barwindow(s::Summarizer, n::Integer, intypes::NamedTuple)
+function barwindow(s::Summarizer, n::Integer, intypes::NamedTuple;
+    hoisted::Bool = false)
     n >= 1 || throw(ArgumentError("barwindow count must be positive, got $n"))
     protos, requested, terms =
         prototypes(Summarizer[s], Symbol[], "barwindow")
     for k in keys(terms)
-        haskey(intypes, k) && throw(
-            ArgumentError(
-                "barwindow row term $(repr(k)) collides with an input column"),
-        )
+        if hoisted
+            haskey(intypes, k) || throw(
+                ArgumentError(
+                    "barwindow hoisted row term $(repr(k)) not found in the input; " *
+                    "return `barterms(s)` from the outer summarizer's `rowterms`",
+                ),
+            )
+        else
+            haskey(intypes, k) && throw(
+                ArgumentError(
+                    "barwindow row term $(repr(k)) collides with an input column"),
+            )
+        end
     end
-    return newbarwindow(protos, Val(requested), terms, Int(n), intypes)
+    # A hoisted term is an ordinary column of the rows: nothing to evaluate.
+    return newbarwindow(protos, Val(requested), hoisted ? (;) : terms, Int(n),
+        intypes)
 end
 
 """
-    barinputcolumns(s::Summarizer) -> Union{Nothing, Tuple{Vararg{Symbol}}}
+    barterms(s::Summarizer) -> NamedTuple
+
+The row terms a [`barwindow`](@ref) over `s` reads, by name, from `s` and its
+dependencies at any depth. A summarizer whose state folds rows through a
+`barwindow` returns them from its own [`rowterms`](@ref) to hoist them: the
+summarizing transforms then evaluate them with their own row terms, and the
+window is built with `hoisted = true`. Two terms of one name must be the same
+function, or it is an `ArgumentError`.
+
+# Arguments
+- `s`: the summarizer the window folds, as passed to `barwindow`.
+
+```jldoctest
+double = r -> 2r.x
+CausalFrames.barterms(Mean(:d => double)) === (; d = double)
+
+# output
+
+true
+```
+"""
+barterms(s::Summarizer) = prototypes(Summarizer[s], Symbol[], "barterms")[3]
+
+"""
+    barinputcolumns(s::Summarizer; hoisted::Bool = false)
+        -> Union{Nothing, Tuple{Vararg{Symbol}}}
 
 The input columns a [`barwindow`](@ref) over `s` reads: the union of
 [`inputcolumns`](@ref) over `s` and its dependencies, expanded as `barwindow`
 expands them. A summarizer whose state folds rows through a `barwindow`
 returns it from its own `inputcolumns`, so the window transforms keep only
 those columns. It is `nothing`, any column, when one of them may read any
-column, or when `s` reads a row term: the window evaluates the term from the
-rows it is given, and which columns the term's function reads is unknown.
+column, or when `s` reads a row term that is not hoisted: the window evaluates
+the term from the rows it is given, and which columns the term's function
+reads is unknown. A hoisted term is a column of those rows, named in the
+result.
 
 # Arguments
 - `s`: the summarizer the window folds, as passed to `barwindow`.
 
+# Keywords
+- `hoisted = false`: whether the outer summarizer hoists `s`'s row terms, as
+  `barwindow`'s keyword of the same name.
+
 ```jldoctest
+term = Mean(:d => r -> 2r.x)
 (CausalFrames.barinputcolumns(Covariance(:x, :y)),
-    CausalFrames.barinputcolumns(Mean(:d => r -> 2r.x)))
+    CausalFrames.barinputcolumns(term),
+    CausalFrames.barinputcolumns(term; hoisted = true))
 
 # output
 
-((:x, :y), nothing)
+((:x, :y), nothing, (:d,))
 ```
 """
-function barinputcolumns(s::Summarizer)
+function barinputcolumns(s::Summarizer; hoisted::Bool = false)
     protos, _, terms = prototypes(Summarizer[s], Symbol[], "barinputcolumns")
-    isempty(terms) || return nothing
+    hoisted || isempty(terms) || return nothing
     return readcolumns(protos)
 end
 

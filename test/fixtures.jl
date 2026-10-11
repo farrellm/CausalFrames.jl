@@ -77,6 +77,7 @@ function CausalFrames.fresh(r::Recording, intypes::NamedTuple)
     return CausalFrames.fresh(r.inner, intypes)
 end
 CausalFrames.inputcolumns(::Recording{S,C}) where {S,C} = C
+CausalFrames.rowterms(r::Recording) = CausalFrames.rowterms(r.inner)
 
 # Opaque's monoid counterpart: a group hidden down to a monoid, so it takes the
 # tree tier rather than the running tier, putting a built-in group's `combine!`
@@ -255,6 +256,29 @@ CausalFrames.fresh(st::LastNMeanState{C,N}) where {C,N} =
 CausalFrames.update!(st::LastNMeanState, row) = CausalFrames.update!(st.window, row)
 CausalFrames.inputcolumns(::LastNMean{C}) where {C} =
     CausalFrames.barinputcolumns(Mean(C))
+
+# LastNMean's counterpart over any inner monoid, row terms included: `inner`'s
+# first value over the last `n` rows, its row terms hoisted out of the window
+# so the transforms evaluate them and the stored rows need only the terms.
+struct LastN{S<:Summarizer} <: Summarizer
+    inner::S
+    n::Int
+end
+struct LastNState{W<:SummarizerState} <: SummarizerState
+    window::W
+end
+CausalFrames.emptyvalue(::LastN) = (; lastn = missing)
+CausalFrames.rowterms(s::LastN) = CausalFrames.barterms(s.inner)
+CausalFrames.inputcolumns(s::LastN) =
+    CausalFrames.barinputcolumns(s.inner; hoisted = true)
+CausalFrames.fresh(s::LastN, intypes::NamedTuple) =
+    LastNState(CausalFrames.barwindow(s.inner, s.n, intypes; hoisted = true))
+CausalFrames.fresh(st::LastNState) = LastNState(CausalFrames.fresh(st.window))
+CausalFrames.update!(st::LastNState, row) = CausalFrames.update!(st.window, row)
+function CausalFrames.value(st::LastNState)
+    v = CausalFrames.value(st.window)
+    return NamedTuple{(:lastn,),Tuple{fieldtype(typeof(v), 1)}}((v[1],))
+end
 # The declared field type, not the value's: `missing` until the window fills.
 function CausalFrames.value(st::LastNMeanState{C,N}) where {C,N}
     v = CausalFrames.value(st.window)

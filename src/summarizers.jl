@@ -168,10 +168,10 @@ summarize, and keep only these columns, the key columns and `:time`, so
 any column, and every column is kept. A summarizer whose state reads no row (a
 dependent one, or [`Count`](@ref)) declares `()`. A state folding rows through
 [`barwindow`](@ref) declares what its inner summarizers read with
-[`barinputcolumns`](@ref). That is `nothing` when an inner summarizer reads a
-row term, since only the outer summarizer's row terms are evaluated before the
-rows are stored; such a state may instead declare the columns the term's
-function reads. Declaring a column it does not read only costs speed; leaving
+[`barinputcolumns`](@ref). An inner row term is evaluated before the rows are
+stored only when the state hoists it (see [`rowterms`](@ref)); otherwise
+`barinputcolumns` is `nothing`, and the state may instead declare the columns
+the term's function reads. Declaring a column it does not read only costs speed; leaving
 out one it reads is an error when it is read.
 """
 inputcolumns(::Summarizer) = nothing
@@ -224,6 +224,30 @@ emptyvalue(t::Termed) = emptyvalue(t.summarizer)
 
 unterm(s::Summarizer) = s
 unterm(t::Termed) = t.summarizer
+
+"""
+    rowterms(s::Summarizer) -> NamedTuple
+
+Row terms the summarizing transforms evaluate for `s`'s states besides those
+its constructor took through [`withterms`](@ref), as `name = f` functions of
+the input row; each becomes a column of the rows passed to
+[`update!`](@ref). Defaults to `(;)`. A summarizer whose state folds rows
+through [`barwindow`](@ref) uses it to hoist its window's row terms out of the
+window, so that its [`inputcolumns`](@ref) can name every column the window
+reads:
+
+```julia
+CausalFrames.rowterms(s::MyIndicator) = CausalFrames.barterms(s.inner)
+CausalFrames.inputcolumns(s::MyIndicator) =
+    CausalFrames.barinputcolumns(s.inner; hoisted = true)
+CausalFrames.fresh(s::MyIndicator, intypes::NamedTuple) =
+    MyIndicatorState(CausalFrames.barwindow(s.inner, s.n, intypes; hoisted = true))
+```
+
+A term follows the rules of [Row terms](@ref): the same name must always be
+the same function, across every summarizer of a call, and may not name an
+input column.
+"""
 rowterms(::Summarizer) = (;)
 rowterms(t::Termed) = t.terms
 

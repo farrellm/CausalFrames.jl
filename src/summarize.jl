@@ -99,8 +99,8 @@ end
 # (post-order depth-first), so every state precedes its dependents. Output
 # names must be unique across the whole set, but only the *requested* names
 # are checked against :time and the key columns, since hidden dependencies
-# never reach the output. Row terms (`Termed`) are unwrapped here, at any
-# depth, and collected by name. Returns the prototypes as a tuple (so the
+# never reach the output. Row terms (`Termed`, or a summarizer's own
+# `rowterms`) are unwrapped here, at any depth, and collected by name. Returns the prototypes as a tuple (so the
 # states are a concrete tuple), the requested output names, in request order,
 # and the row terms as a NamedTuple of functions.
 function prototypes(
@@ -121,6 +121,11 @@ function prototypes(
             addterm!(terms, n, f, op)
         end
         s = unterm(t)
+        if t isa Termed  # a summarizer's own hook, under its constructor's terms
+            for (n, f) in pairs(rowterms(s))
+                addterm!(terms, n, f, op)
+            end
+        end
         outnames = keys(emptyvalue(s))
         outnames in seen && return
         outnames in visiting && throw(

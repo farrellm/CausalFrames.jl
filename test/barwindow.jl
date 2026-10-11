@@ -192,6 +192,87 @@ end
         @test CF.barinputcolumns(Mean(:d => r -> 2r.x)) === nothing
         @test CF.barinputcolumns(RangeTotal()) === nothing
         @test CF.inputcolumns(LastNMean(:x, 3)) == (:x,)
+        # a hoisted term is a stored column
+        @test CF.barinputcolumns(Covariance(:x, :d => r -> 2r.x);
+            hoisted = true) == (:d, :x)
+        @test CF.barinputcolumns(RangeTotal(); hoisted = true) === nothing
+    end
+
+    @testset "hoisted row terms" begin
+        double = r -> 2r.x
+        @test CF.barterms(Sum(:x)) === (;)
+        @test CF.barterms(Covariance(:x, :d => double)) === (; d = double)
+        @test CF.barterms(RangeTotal()) === (; range = rangeterm)
+        # A hoisted term is read as a column, not evaluated again.
+        st = CF.barwindow(Sum(:d => double), 2, (x = Float64, d = Float64);
+            hoisted = true)
+        foreach(r -> CF.update!(st, r),
+            ((x = 1.0, d = 10.0), (x = 2.0, d = 20.0)))
+        @test CF.value(st) == (d_sum = 30.0,)
+        @test CF.value(CF.widenstate(st, (x = Float64, d = Float64))) ==
+              (d_sum = 30.0,)
+        @test_throws ArgumentError(
+            "barwindow hoisted row term :d not found in the input; " *
+            "return `barterms(s)` from the outer summarizer's `rowterms`",
+        ) CF.barwindow(Sum(:d => double), 2, (x = Float64,); hoisted = true)
+
+        # The transforms evaluate the hoisted terms, keep only them, and agree
+        # with an unhoisted window over every column.
+        df = DataFrame(time = 1:8, k = repeat(["a", "b"], 4),
+            x = Float64.(1:8), u = fill(missing, 8))
+        hoisted = LastN(Mean(:d => double), 3)
+        @test CF.rowterms(hoisted) === (; d = double)
+        @test CF.inputcolumns(hoisted) == (:d,)
+        expected = [missing, missing, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0]
+        for t in (addsummarycolumns(hoisted),
+            addrollingcolumns((w = 10,), hoisted))
+            out = DataFrame(load(Context(0, 10), readtable(df) |> t))
+            @test isequal(out[!, end], expected)
+            @test !("d" in names(out))
+        end
+        rec = Recording(hoisted, CF.inputcolumns(hoisted))
+        out = DataFrame(
+            load(Context(0, 10),
+                readtable(df) |> addrollingcolumns((w = 10,), rec)),
+        )
+        @test !isempty(rec.seen)
+        @test all(==((:time, :d)), rec.seen)
+        @test isequal(out.w_lastn, expected)
+        win = DataFrame(
+            load(Context(0, 10),
+                readtable(df) |>
+                summarizewindows(clock(1), 10, [hoisted, LastNMean(:x, 3)])),
+        )
+        @test count(!ismissing, win.lastn) >= 3
+        @test isequal(win.lastn, 2 .* win.x_lastnmean)
+        @test only(
+            eachrow(
+                DataFrame(
+                    load(Context(0, 10),
+                        readtable(df) |> summarize(hoisted)))),
+        ).lastn == 14.0
+
+        # Shared with a top-level term of the same name and function; another
+        # function under the name, or an input column of it, is an error.
+        both = DataFrame(
+            load(Context(0, 10),
+                readtable(df) |>
+                addsummarycolumns([hoisted, Sum(:d => double)])),
+        )
+        @test both.d_sum == cumsum(2.0 .* (1:8))
+        @test_throws ArgumentError(
+            "addsummarycolumns row term :d is defined by more than one " *
+            "function; bind the function once and reuse it",
+        ) addsummarycolumns([hoisted, Sum(:d => r -> 3r.x)])
+        @test_throws ArgumentError(
+            "addsummarycolumns row term :d collides with an input column",
+        ) load(Context(0, 10),
+            readtable(DataFrame(time = 1:2, x = [1.0, 2.0], d = [0.0, 0.0])) |>
+            addsummarycolumns(hoisted))
+        # The constructor's terms and the summarizer's own both count.
+        protos, _, terms = CF.prototypes(
+            CF.Summarizer[CF.Termed(hoisted, (; e = rangeterm))], Symbol[])
+        @test terms === (; e = rangeterm, d = double)
     end
 
     @testset "validation" begin
