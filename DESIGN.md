@@ -2553,14 +2553,27 @@ state holding `s`'s states over the last `n` rows folded into it.
   of `s`'s expansion) from its `rowterms`, so `prototypes` collects them with
   the call's own terms: `terminput` evaluates them per chunk, before the
   projection, and checks them against input columns and same-named terms as
-  any other. Built with `hoisted = true`, the window then reads each term as
-  a column of `intypes` (one missing from it is an `ArgumentError`) and
-  evaluates nothing, and `barinputcolumns(s; hoisted = true)` names the terms.
-  The flag is explicit rather than inferred from a term's name being in
-  `intypes`: a window that did not hoist would then silently read a real
-  column of that name in place of its term. Hoisting does not change how often
-  a term runs (once per row either way); it buys the projection, and moves
-  evaluation behind `rowvalues`' per-chunk barrier.
+  any other. `barterms` keys each term by a reserved name, `#barterm#d` for a
+  term `:d`, which only the transform's evaluation of that term can produce.
+  Built with `hoisted = true`, the window then reads each term from the
+  reserved column of `intypes` (one missing from it is an `ArgumentError`),
+  stores it under its own name and evaluates nothing, and
+  `barinputcolumns(s; hoisted = true)` names the reserved columns.
+  - The flag is explicit rather than inferred from a term's name being in
+    `intypes`, and the column name is reserved rather than the term's own,
+    for one reason: a column named after the term must never stand in for it.
+    Under the term's own name, a wrapper forwarding `fresh` but not `rowterms`
+    left the term unevaluated, and the window silently read a real input
+    column of that name. With the reserved name, the same wrapper fails with
+    the "not found" error.
+  - An input column of the term's own name is an `ArgumentError`, hoisted or
+    not, as in an unhoisted window. `barinputcolumns` keeps the term's own
+    name so the projection passes such a column through to be reported,
+    whichever transform runs. A top-level term of the same name counts as
+    such a column, so a hoisted term isn't shared with one.
+  - Hoisting doesn't change how often a term runs (once per row either way).
+    It buys the projection, and moves evaluation behind `rowvalues`'
+    per-chunk barrier.
 - **Typing.** The tiers come from runtime `isinvertible` values, so the state's
   type is not inferrable from the argument types. An outer state takes it as a
   type parameter and builds it once in `fresh(s, intypes)`; `fresh`, `fresh!`

@@ -100,9 +100,10 @@ end
 # names must be unique across the whole set, but only the *requested* names
 # are checked against :time and the key columns, since hidden dependencies
 # never reach the output. Row terms (`Termed`, or a summarizer's own
-# `rowterms`) are unwrapped here, at any depth, and collected by name. Returns the prototypes as a tuple (so the
-# states are a concrete tuple), the requested output names, in request order,
-# and the row terms as a NamedTuple of functions.
+# `rowterms`) are unwrapped here, at any depth, and collected by name. Returns
+# the prototypes as a tuple (so the states are a concrete tuple), the requested
+# output names, in request order, and the row terms as a NamedTuple of
+# functions.
 function prototypes(
     ss::Vector{Summarizer},
     keycols::Vector{Symbol},

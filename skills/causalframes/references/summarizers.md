@@ -953,8 +953,9 @@ as a type parameter.
   of the rows passed to `update!`. An outer summarizer hoists them by returning
   `barterms` from its `rowterms`, so the summarizing transforms
   evaluate them over each chunk before storing its rows; the window then reads
-  each term as a column, and a term missing from `intypes` is an
-  `ArgumentError`.
+  each term from the reserved column `barterms` names it by, and a term whose
+  column is missing from `intypes` is an `ArgumentError`. A column of the
+  term's own name is never read in its place.
 
 ```julia
 st = CausalFrames.barwindow(Mean(:x), 2, (x = Float64,))
@@ -988,7 +989,8 @@ those columns. It is `nothing`, any column, when one of them may read any
 column, or when `s` reads a row term that is not hoisted: the window evaluates
 the term from the rows it is given, and which columns the term's function
 reads is unknown. A hoisted term is a column of those rows, named in the
-result.
+result by its reserved name (see `barterms`), beside its own name:
+an input column of that name is kept to be reported as a collision.
 
 #### Arguments
 - `s`: the summarizer the window folds, as passed to `barwindow`.
@@ -1005,30 +1007,33 @@ term = Mean(:d => r -> 2r.x)
 
 # output
 
-((:x, :y), nothing, (:d,))
+((:x, :y), nothing, (:d, Symbol("#barterm#d")))
 ```
 
 ---
 
     barterms(s::Summarizer) -> NamedTuple
 
-The row terms a `barwindow` over `s` reads, by name, from `s` and its
+The row terms a `barwindow` over `s` reads, from `s` and its
 dependencies at any depth. A summarizer whose state folds rows through a
 `barwindow` returns them from its own `rowterms` to hoist them: the
 summarizing transforms then evaluate them with their own row terms, and the
-window is built with `hoisted = true`. Two terms of one name must be the same
-function, or it is an `ArgumentError`.
+window is built with `hoisted = true`. Each term is keyed by a reserved column
+name, `#barterm#d` for a term `:d`, so no input column or other term of the
+name stands in for it. Two terms of one name must be the same function, or it
+is an `ArgumentError`.
 
 #### Arguments
 - `s`: the summarizer the window folds, as passed to `barwindow`.
 
 ```julia
 double = r -> 2r.x
-CausalFrames.barterms(Mean(:d => double)) === (; d = double)
+terms = CausalFrames.barterms(Mean(:d => double))
+keys(terms), only(terms) === double
 
 # output
 
-true
+((Symbol("#barterm#d"),), true)
 ```
 
 ---

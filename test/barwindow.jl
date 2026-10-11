@@ -3,7 +3,7 @@ const CF = CausalFrames
 # `s`'s value re-folded from scratch over `rows`, the reference for a window.
 function barrefold(s, rows, intypes)
     protos, requested, terms = CF.prototypes(CF.Summarizer[s], Symbol[])
-    types = CF.barwindowtypes(terms, intypes)
+    types = last(CF.barwindowtypes(terms, intypes))
     states = CF.newstates(protos, types)
     for r in rows
         base = NamedTuple{keys(intypes)}(r)
@@ -194,35 +194,45 @@ end
         @test CF.inputcolumns(LastNMean(:x, 3)) == (:x,)
         # a hoisted term is a stored column
         @test CF.barinputcolumns(Covariance(:x, :d => r -> 2r.x);
-            hoisted = true) == (:d, :x)
+            hoisted = true) == (:d, :x, Symbol("#barterm#d"))
         @test CF.barinputcolumns(RangeTotal(); hoisted = true) === nothing
     end
 
     @testset "hoisted row terms" begin
         double = r -> 2r.x
         @test CF.barterms(Sum(:x)) === (;)
-        @test CF.barterms(Covariance(:x, :d => double)) === (; d = double)
-        @test CF.barterms(RangeTotal()) === (; range = rangeterm)
-        # A hoisted term is read as a column, not evaluated again.
-        st = CF.barwindow(Sum(:d => double), 2, (x = Float64, d = Float64);
-            hoisted = true)
-        foreach(r -> CF.update!(st, r),
-            ((x = 1.0, d = 10.0), (x = 2.0, d = 20.0)))
+        hd = Symbol("#barterm#d")
+        @test CF.barterms(Covariance(:x, :d => double)) ===
+              NamedTuple{(hd,)}((double,))
+        @test CF.barterms(RangeTotal()) ===
+              NamedTuple{(Symbol("#barterm#range"),)}((rangeterm,))
+        # A hoisted term is read as a column of its reserved name, not
+        # evaluated again.
+        types = NamedTuple{(:x, hd)}((Float64, Float64))
+        st = CF.barwindow(Sum(:d => double), 2, types; hoisted = true)
+        foreach(r -> CF.update!(st, NamedTuple{(:x, hd)}(r)),
+            ((1.0, 10.0), (2.0, 20.0)))
         @test CF.value(st) == (d_sum = 30.0,)
-        @test CF.value(CF.widenstate(st, (x = Float64, d = Float64))) ==
-              (d_sum = 30.0,)
+        @test CF.value(CF.widenstate(st, types)) == (d_sum = 30.0,)
         @test_throws ArgumentError(
             "barwindow hoisted row term :d not found in the input; " *
             "return `barterms(s)` from the outer summarizer's `rowterms`",
         ) CF.barwindow(Sum(:d => double), 2, (x = Float64,); hoisted = true)
+        # An input column of the term's own name is reported, not read as it,
+        # hoisted or not: a wrapper that leaves out `rowterms` can't make the
+        # window read the column in the term's place.
+        @test_throws ArgumentError(
+            "barwindow row term :d collides with an input column",
+        ) CF.barwindow(Sum(:d => double), 2, (x = Float64, d = Float64);
+            hoisted = true)
 
         # The transforms evaluate the hoisted terms, keep only them, and agree
         # with an unhoisted window over every column.
         df = DataFrame(time = 1:8, k = repeat(["a", "b"], 4),
             x = Float64.(1:8), u = fill(missing, 8))
         hoisted = LastN(Mean(:d => double), 3)
-        @test CF.rowterms(hoisted) === (; d = double)
-        @test CF.inputcolumns(hoisted) == (:d,)
+        @test CF.rowterms(hoisted) === NamedTuple{(hd,)}((double,))
+        @test CF.inputcolumns(hoisted) == (:d, hd)
         expected = [missing, missing, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0]
         for t in (addsummarycolumns(hoisted),
             addrollingcolumns((w = 10,), hoisted))
@@ -236,7 +246,7 @@ end
                 readtable(df) |> addrollingcolumns((w = 10,), rec)),
         )
         @test !isempty(rec.seen)
-        @test all(==((:time, :d)), rec.seen)
+        @test all(==((:time, hd)), rec.seen)
         @test isequal(out.w_lastn, expected)
         win = DataFrame(
             load(Context(0, 10),
@@ -252,27 +262,27 @@ end
                         readtable(df) |> summarize(hoisted)))),
         ).lastn == 14.0
 
-        # Shared with a top-level term of the same name and function; another
-        # function under the name, or an input column of it, is an error.
-        both = DataFrame(
-            load(Context(0, 10),
-                readtable(df) |>
-                addsummarycolumns([hoisted, Sum(:d => double)])),
-        )
-        @test both.d_sum == cumsum(2.0 .* (1:8))
+        # A top-level term of the name, or an input column of it, is reported;
+        # a wrapper that leaves out `rowterms` is reported, input column or
+        # not, rather than reading the column as the term.
+        collides = ArgumentError("barwindow row term :d collides with an input column")
+        @test_throws collides load(Context(0, 10),
+            readtable(df) |> addsummarycolumns([hoisted, Sum(:d => double)]))
+        withd = DataFrame(time = 1:2, x = [1.0, 2.0], d = [0.0, 0.0])
+        for s in (hoisted, Opaque(hoisted)),
+            t in (addsummarycolumns(s),
+                addrollingcolumns((w = 10,), s))
+
+            @test_throws collides load(Context(0, 10), readtable(withd) |> t)
+        end
         @test_throws ArgumentError(
-            "addsummarycolumns row term :d is defined by more than one " *
-            "function; bind the function once and reuse it",
-        ) addsummarycolumns([hoisted, Sum(:d => r -> 3r.x)])
-        @test_throws ArgumentError(
-            "addsummarycolumns row term :d collides with an input column",
-        ) load(Context(0, 10),
-            readtable(DataFrame(time = 1:2, x = [1.0, 2.0], d = [0.0, 0.0])) |>
-            addsummarycolumns(hoisted))
+            "barwindow hoisted row term :d not found in the input; " *
+            "return `barterms(s)` from the outer summarizer's `rowterms`",
+        ) load(Context(0, 10), readtable(df) |> addsummarycolumns(Opaque(hoisted)))
         # The constructor's terms and the summarizer's own both count.
         protos, _, terms = CF.prototypes(
             CF.Summarizer[CF.Termed(hoisted, (; e = rangeterm))], Symbol[])
-        @test terms === (; e = rangeterm, d = double)
+        @test terms === NamedTuple{(:e, hd)}((rangeterm, double))
     end
 
     @testset "validation" begin

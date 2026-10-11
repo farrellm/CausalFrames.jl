@@ -38,8 +38,9 @@ as a type parameter.
   of the rows passed to `update!`. An outer summarizer hoists them by returning
   [`barterms`](@ref) from its [`rowterms`](@ref), so the summarizing transforms
   evaluate them over each chunk before storing its rows; the window then reads
-  each term as a column, and a term missing from `intypes` is an
-  `ArgumentError`.
+  each term from the reserved column `barterms` names it by, and a term whose
+  column is missing from `intypes` is an `ArgumentError`. A column of the
+  term's own name is never read in its place.
 
 ```jldoctest
 st = CausalFrames.barwindow(Mean(:x), 2, (x = Float64,))
@@ -66,48 +67,60 @@ function barwindow(s::Summarizer, n::Integer, intypes::NamedTuple;
     protos, requested, terms =
         prototypes(Summarizer[s], Symbol[], "barwindow")
     for k in keys(terms)
-        if hoisted
-            haskey(intypes, k) || throw(
+        haskey(intypes, k) && throw(
+            ArgumentError(
+                "barwindow row term $(repr(k)) collides with an input column"),
+        )
+        hoisted && !haskey(intypes, hoistedname(k)) &&
+            throw(
                 ArgumentError(
                     "barwindow hoisted row term $(repr(k)) not found in the input; " *
                     "return `barterms(s)` from the outer summarizer's `rowterms`",
                 ),
             )
-        else
-            haskey(intypes, k) && throw(
-                ArgumentError(
-                    "barwindow row term $(repr(k)) collides with an input column"),
-            )
-        end
     end
-    # A hoisted term is an ordinary column of the rows: nothing to evaluate.
-    return newbarwindow(protos, Val(requested), hoisted ? (;) : terms, Int(n),
-        intypes)
+    return newbarwindow(protos, Val(requested),
+        hoisted ? HoistedTerms{keys(terms)}() : terms, Int(n), intypes)
 end
+
+# The column a hoisted row term is evaluated into: a name of its own, so that
+# neither an input column nor another summarizer's term of the term's name can
+# stand in for it, as one would if a wrapper left out `barterms`.
+hoistedname(k::Symbol) = Symbol("#barterm#", k)
+
+# A window's hoisted row terms, by name: columns of its rows, already
+# evaluated under their `hoistedname`s.
+struct HoistedTerms{K} end
 
 """
     barterms(s::Summarizer) -> NamedTuple
 
-The row terms a [`barwindow`](@ref) over `s` reads, by name, from `s` and its
+The row terms a [`barwindow`](@ref) over `s` reads, from `s` and its
 dependencies at any depth. A summarizer whose state folds rows through a
 `barwindow` returns them from its own [`rowterms`](@ref) to hoist them: the
 summarizing transforms then evaluate them with their own row terms, and the
-window is built with `hoisted = true`. Two terms of one name must be the same
-function, or it is an `ArgumentError`.
+window is built with `hoisted = true`. Each term is keyed by a reserved column
+name, `#barterm#d` for a term `:d`, so no input column or other term of the
+name stands in for it. Two terms of one name must be the same function, or it
+is an `ArgumentError`.
 
 # Arguments
 - `s`: the summarizer the window folds, as passed to `barwindow`.
 
 ```jldoctest
 double = r -> 2r.x
-CausalFrames.barterms(Mean(:d => double)) === (; d = double)
+terms = CausalFrames.barterms(Mean(:d => double))
+keys(terms), only(terms) === double
 
 # output
 
-true
+((Symbol("#barterm#d"),), true)
 ```
 """
-barterms(s::Summarizer) = prototypes(Summarizer[s], Symbol[], "barterms")[3]
+function barterms(s::Summarizer)
+    terms = prototypes(Summarizer[s], Symbol[], "barterms")[3]
+    return NamedTuple{map(hoistedname, keys(terms))}(values(terms))
+end
 
 """
     barinputcolumns(s::Summarizer; hoisted::Bool = false)
@@ -121,7 +134,8 @@ those columns. It is `nothing`, any column, when one of them may read any
 column, or when `s` reads a row term that is not hoisted: the window evaluates
 the term from the rows it is given, and which columns the term's function
 reads is unknown. A hoisted term is a column of those rows, named in the
-result.
+result by its reserved name (see [`barterms`](@ref)), beside its own name:
+an input column of that name is kept to be reported as a collision.
 
 # Arguments
 - `s`: the summarizer the window folds, as passed to `barwindow`.
@@ -138,17 +152,22 @@ term = Mean(:d => r -> 2r.x)
 
 # output
 
-((:x, :y), nothing, (:d,))
+((:x, :y), nothing, (:d, Symbol("#barterm#d")))
 ```
 """
 function barinputcolumns(s::Summarizer; hoisted::Bool = false)
     protos, _, terms = prototypes(Summarizer[s], Symbol[], "barinputcolumns")
     hoisted || isempty(terms) || return nothing
-    return readcolumns(protos)
+    cols = readcolumns(protos)
+    # A term's own name stays, so that a column of the name reaches the window
+    # to be reported, whichever transform runs it.
+    return cols === nothing ? nothing : (cols..., map(hoistedname, keys(terms))...)
 end
 
-# The row types: rows are stored with their row terms evaluated, so a row is
-# downdated with the values it was folded with and no term runs twice.
+# The input row's columns and the stored row's: rows are stored with their row
+# terms evaluated, so a row is downdated with the values it was folded with and
+# no term runs twice. A hoisted term is read under its `hoistedname` and stored
+# under its own; the input columns are stored as they are.
 function barwindowtypes(terms::NamedTuple, intypes::NamedTuple)
     R0 = storerowtype(intypes)
     termtypes = map(keys(terms), values(terms)) do k, f
@@ -159,7 +178,14 @@ function barwindowtypes(terms::NamedTuple, intypes::NamedTuple)
         )
         T
     end
-    return merge(intypes, NamedTuple{keys(terms)}(termtypes))
+    return intypes, merge(intypes, NamedTuple{keys(terms)}(termtypes))
+end
+
+function barwindowtypes(::HoistedTerms{K}, intypes::NamedTuple) where {K}
+    hs = map(hoistedname, K)
+    cols = Tuple(k for k in keys(intypes) if !(k in hs))
+    types = map(k -> intypes[k], (cols..., hs...))
+    return NamedTuple{(cols..., hs...)}(types), NamedTuple{(cols..., K...)}(types)
 end
 
 concreteterm(T) =
@@ -167,9 +193,9 @@ concreteterm(T) =
 
 # Build the state for the realized types; type-unstable, once per state and
 # per widening.
-function newbarwindow(protos::Tuple, outs::Val{O}, terms::NamedTuple, n::Int,
+function newbarwindow(protos::Tuple, outs::Val{O}, terms, n::Int,
     intypes::NamedTuple) where {O}
-    types = barwindowtypes(terms, intypes)
+    rowtypes, types = barwindowtypes(terms, intypes)
     tg = tiering(protos, types)
     # A fieldless dependent takes no tier, so this rejects only a summarizer
     # that would need re-folding: a plain one with state.
@@ -183,16 +209,17 @@ function newbarwindow(protos::Tuple, outs::Val{O}, terms::NamedTuple, n::Int,
     R = storerowtype(types)
     V = missingfields(valuetype(typeof(mergedstates(tg)), outs), outs)
     queue = isempty(tg.tree) ? nothing : BarQueue(tg.tree, n)
-    return BarWindowState{R,storerowtype(intypes),O,V}(n, RowRing{R}(n + 1),
+    return BarWindowState{R,storerowtype(rowtypes),O,V}(n, RowRing{R}(n + 1),
         map(fresh, tg.running), queue, tg.derived, tg.perm, protos, terms)
 end
 
 # R is the stored row type, R0 the input row type, O the output names, V
-# the value type; `running` holds windowed group states, `queue` the other
+# the value type; `terms` the row terms to evaluate, or `HoistedTerms`;
+# `running` holds windowed group states, `queue` the other
 # monoids (`nothing` when there are none), `derived` the fieldless dependents.
 # The ring holds n + 1 rows, so the row leaving is still there to downdate.
 mutable struct BarWindowState{R,R0,O,V,SR<:Tuple,Q,SD<:Tuple,P,PR<:Tuple,
-    TM<:NamedTuple} <: SummarizerState
+    TM} <: SummarizerState
     const n::Int
     const ring::RowRing{R}
     running::SR
@@ -200,7 +227,7 @@ mutable struct BarWindowState{R,R0,O,V,SR<:Tuple,Q,SD<:Tuple,P,PR<:Tuple,
     const derived::SD
     const perm::Val{P}
     const protos::PR   # for widenstate
-    const terms::TM
+    const terms::TM    # a NamedTuple of functions, or HoistedTerms
 end
 
 BarWindowState{R,R0,O,V}(n::Int, ring::RowRing{R}, running::SR, queue::Q,
@@ -318,7 +345,8 @@ function queuefresh!(q::BarQueue)
 end
 
 # The row as stored: the input columns, projected by name and converted to the
-# input types the row terms' types were inferred from, then the row terms.
+# input types the row terms' types were inferred from, then the row terms,
+# evaluated or (hoisted) renamed.
 @inline barrow(st::BarWindowState{R,R0}, row) where {R,R0} =
     termrow(R, projectrow(R0, row), st.terms)
 
@@ -326,6 +354,8 @@ end
     convert(R, base)
 @inline termrow(::Type{R}, base::NamedTuple, terms::NamedTuple) where {R} =
     convert(R, merge(base, map(f -> f(base), terms)))
+@inline termrow(::Type{R}, base::NamedTuple, ::HoistedTerms) where {R} =
+    R(Tuple(base))
 
 # Dispatching on the names keeps the projection inferred without relying on
 # constant folding; a NamedTuple row takes Base's own projection.
