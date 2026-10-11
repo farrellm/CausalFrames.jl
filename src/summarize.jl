@@ -185,8 +185,11 @@ end
 # every column a summarizer reads, or `nothing` (keep all) when one may read
 # any. A stored row carries every kept column, so an unread column costs a copy
 # per row, and an unread `Union{Missing,T}` one boxes every row (issue #98).
-function storedcolumns(protos::Tuple, keycols)
-    cols = Symbol[:time; keycols]
+storedcolumns(protos::Tuple, keycols) = readcolumns(protos, Symbol[:time; keycols])
+
+# `cols` and the union of `protos`' `inputcolumns`, or `nothing` when one may
+# read any column.
+function readcolumns(protos::Tuple, cols::Vector{Symbol} = Symbol[])
     for s in protos
         ins = inputcolumns(s)
         ins === nothing && return nothing

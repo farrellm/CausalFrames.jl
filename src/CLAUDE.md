@@ -406,7 +406,8 @@ design rationale and performance constraints behind each module.
   `update!`/`value`, which those folds call, and inference's recursion limit
   on a repeated caller-to-callee edge would leave the inner fold dispatching
   and allocating per row. Its generated `bar*` folds have edges of their own;
-  `test/jet.jl` guards the embedded path
+  `test/jet.jl` guards the embedded path. `barinputcolumns` is the outer
+  state's `inputcolumns`, sharing `storedcolumns`' union (`readcolumns`)
 - `src/rolling.jl` — `addrollingcolumns`. Summarizing its own input it runs it
   once (`rollinginputs`), teed to both sides, the tee's `keep` dropping the
   lead-in from the output side with `warmup`'s `dropleadin!`: a run per side

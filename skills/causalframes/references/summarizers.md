@@ -882,10 +882,12 @@ summarize, and keep only these columns, the key columns and `:time`, so
 `fresh` is given only their types. Defaults to `nothing`: `s` may read
 any column, and every column is kept. A summarizer whose state reads no row (a
 dependent one, or `Count`) declares `()`. A state folding rows through
-`barwindow` declares what its inner summarizers read, and for an inner
-row term the columns its function reads: only the outer summarizer's row terms
-are evaluated before the rows are stored. Declaring a column it does not read
-only costs speed; leaving out one it reads is an error when it is read.
+`barwindow` declares what its inner summarizers read with
+`barinputcolumns`. That is `nothing` when an inner summarizer reads a
+row term, since only the outer summarizer's row terms are evaluated before the
+rows are stored; such a state may instead declare the columns the term's
+function reads. Declaring a column it does not read only costs speed; leaving
+out one it reads is an error when it is read.
 
 ---
 
@@ -963,6 +965,30 @@ end
 
 Rows leave the window oldest first, so a wrapped `downdate!` sees the
 order it expects. `widenstate` re-types the state and keeps its window.
+
+---
+
+    barinputcolumns(s::Summarizer) -> Union{Nothing, Tuple{Vararg{Symbol}}}
+
+The input columns a `barwindow` over `s` reads: the union of
+`inputcolumns` over `s` and its dependencies, expanded as `barwindow`
+expands them. A summarizer whose state folds rows through a `barwindow`
+returns it from its own `inputcolumns`, so the window transforms keep only
+those columns. It is `nothing`, any column, when one of them may read any
+column, or when `s` reads a row term: the window evaluates the term from the
+rows it is given, and which columns the term's function reads is unknown.
+
+#### Arguments
+- `s`: the summarizer the window folds, as passed to `barwindow`.
+
+```julia
+(CausalFrames.barinputcolumns(Covariance(:x, :y)),
+    CausalFrames.barinputcolumns(Mean(:d => r -> 2r.x)))
+
+# output
+
+((:x, :y), nothing)
+```
 
 ---
 

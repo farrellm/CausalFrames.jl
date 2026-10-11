@@ -64,6 +64,35 @@ function barwindow(s::Summarizer, n::Integer, intypes::NamedTuple)
     return newbarwindow(protos, Val(requested), terms, Int(n), intypes)
 end
 
+"""
+    barinputcolumns(s::Summarizer) -> Union{Nothing, Tuple{Vararg{Symbol}}}
+
+The input columns a [`barwindow`](@ref) over `s` reads: the union of
+[`inputcolumns`](@ref) over `s` and its dependencies, expanded as `barwindow`
+expands them. A summarizer whose state folds rows through a `barwindow`
+returns it from its own `inputcolumns`, so the window transforms keep only
+those columns. It is `nothing`, any column, when one of them may read any
+column, or when `s` reads a row term: the window evaluates the term from the
+rows it is given, and which columns the term's function reads is unknown.
+
+# Arguments
+- `s`: the summarizer the window folds, as passed to `barwindow`.
+
+```jldoctest
+(CausalFrames.barinputcolumns(Covariance(:x, :y)),
+    CausalFrames.barinputcolumns(Mean(:d => r -> 2r.x)))
+
+# output
+
+((:x, :y), nothing)
+```
+"""
+function barinputcolumns(s::Summarizer)
+    protos, _, terms = prototypes(Summarizer[s], Symbol[], "barinputcolumns")
+    isempty(terms) || return nothing
+    return readcolumns(protos)
+end
+
 # The row types: rows are stored with their row terms evaluated, so a row is
 # downdated with the values it was folded with and no term runs twice.
 function barwindowtypes(terms::NamedTuple, intypes::NamedTuple)

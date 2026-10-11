@@ -1801,8 +1801,9 @@ The interface, extended by concrete subtypes (unexported — extend
   transforms fold that summarizer through a segment tree instead.
 
 Beside the interface, `barwindow(s, n, intypes)` builds a state over the last
-`n` rows for a summarizer whose own state needs a trailing window; see "Count
-windows inside a state" below.
+`n` rows for a summarizer whose own state needs a trailing window, and
+`barinputcolumns(s)` gives the columns such a window reads; see "Count windows
+inside a state" below.
 
 Output column names are deterministic, formed by suffixing the column name:
 `Sum(:x)` produces `:x_sum`, `Min(:x)` produces `:x_min`, and `SumPower(:x, 2)`
@@ -2536,6 +2537,13 @@ state holding `s`'s states over the last `n` rows folded into it.
   what had compiled first. It has private generated folds instead
   (`barupdate!`, `barvalues`, …), whose edges never repeat the outer ones.
   `test/jet.jl` checks the embedded path through a fixture summarizer.
+- **Input columns.** An outer summarizer's `inputcolumns` returns
+  `barinputcolumns(s)`: the union of `inputcolumns` over `s`'s expansion, so
+  the window transforms keep only the window's columns. It is `nothing` when
+  one of them is, or when `s` reads a row term: the window evaluates the term
+  from the rows it is handed, after the transform's projection, and which
+  columns the term's function reads is opaque (probing it with a recording row
+  misses branches and type-dependent paths, so that was rejected).
 - **Typing.** The tiers come from runtime `isinvertible` values, so the state's
   type is not inferrable from the argument types. An outer state takes it as a
   type parameter and builds it once in `fresh(s, intypes)`; `fresh`, `fresh!`

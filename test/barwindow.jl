@@ -180,6 +180,20 @@ end
         @test barfoldalloc(states, nt, Val(requested)) == 0
     end
 
+    @testset "barinputcolumns" begin
+        @test CF.barinputcolumns(Sum(:x)) == (:x,)
+        # dependencies expanded, each column once
+        @test CF.barinputcolumns(Std(:x)) == (:x,)
+        @test CF.barinputcolumns(Covariance(:x, :y)) == (:x, :y)
+        @test CF.barinputcolumns(Count()) == ()
+        # a summarizer that may read any column, and an inner row term,
+        # keep every column
+        @test CF.barinputcolumns(Opaque(Sum(:x))) === nothing
+        @test CF.barinputcolumns(Mean(:d => r -> 2r.x)) === nothing
+        @test CF.barinputcolumns(RangeTotal()) === nothing
+        @test CF.inputcolumns(LastNMean(:x, 3)) == (:x,)
+    end
+
     @testset "validation" begin
         @test_throws ArgumentError("barwindow count must be positive, got 0") CF.barwindow(
             Sum(:x), 0, (x = Int,))

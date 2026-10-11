@@ -253,6 +253,8 @@ CausalFrames.fresh(s::LastNMean{C}, intypes::NamedTuple) where {C} =
 CausalFrames.fresh(st::LastNMeanState{C,N}) where {C,N} =
     LastNMeanState{C,N}(CausalFrames.fresh(st.window))
 CausalFrames.update!(st::LastNMeanState, row) = CausalFrames.update!(st.window, row)
+CausalFrames.inputcolumns(::LastNMean{C}) where {C} =
+    CausalFrames.barinputcolumns(Mean(C))
 # The declared field type, not the value's: `missing` until the window fills.
 function CausalFrames.value(st::LastNMeanState{C,N}) where {C,N}
     v = CausalFrames.value(st.window)

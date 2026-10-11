@@ -153,6 +153,13 @@
             readtable(df) |> t([termed, Sum(:r => row -> 2 * row.x)]))
         @test !isempty(termed.seen)
         @test all(==((:time, :r)), termed.seen)
+        # a barwindow-based summarizer declares its window's columns
+        windowed = Recording(LastNMean(:x, 2),
+            CausalFrames.inputcolumns(LastNMean(:x, 2)))
+        out = DataFrame(load(Context(0, 10), readtable(df) |> t([windowed])))
+        @test !isempty(windowed.seen)
+        @test all(==((:time, :x)), windowed.seen)
+        @test isequal(out.b2_x_lastnmean[1:3], [missing, 1.5, 2.5])
         # the output is still every input column plus the summaries
         out = DataFrame(load(Context(0, 10), readtable(df) |> t(Sum(:x))))
         @test names(out) == ["time", "k", "x", "u", "v", "w2_x_sum", "b2_x_sum"]
