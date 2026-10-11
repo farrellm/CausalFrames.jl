@@ -410,11 +410,11 @@ design rationale and performance constraints behind each module.
   lead-in at full input width. `afterleadin`'s `LeadInGate` keeps abstract
   fields on purpose: a wrapper capturing its input's iterator type nests every
   earlier stage's type in a chain's, and `chain8-keyed` then took inference
-  over five minutes to compile, against 8 s erased. `sharedrun = false` keeps the second run over
-  `ctx` when a time look-back widens the context. One kernel,
-  `rollsegment!`, over a
-  `RollTiers` (a shared row buffer with per-window eviction heads, per-window
-  running tables, per-key trees owning their rows, refold templates). Per row:
+  over five minutes to compile, against 8 s erased. `sharedrun = false` keeps
+  the second run over `ctx` when a time look-back widens the context. One
+  kernel, `rollsegment!`, over a `RollTiers` (a shared row buffer with
+  per-window eviction heads, per-window running tables, per-key trees owning
+  their rows, refold templates). Per row:
   admit into every tier, advance each window's head (downdating running
   groups), then emit each window from the tiers' states for the key; a
   `nothing` from any tier is the empty window. The refold tier folds from the

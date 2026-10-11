@@ -388,7 +388,7 @@ if abspath(PROGRAM_FILE) == @__FILE__
     for (path, trial) in BenchmarkTools.leaves(results)
         t = BenchmarkTools.prettytime(time(median(trial)))
         m = BenchmarkTools.prettymemory(memory(trial))
-        println(rpad(join(path, "/"), 28), lpad(t, 12), lpad(m, 12),
+        println(rpad(join(path, "/"), 40), lpad(t, 12), lpad(m, 12),
             lpad(allocs(trial), 12), " allocs")
     end
 end

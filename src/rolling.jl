@@ -160,9 +160,9 @@ function addrollingcolumns(windows, summarizers; key = nothing,
                 prefixednames, terms)
             summarized, augmented, leadin = rollinginputs(p, from, sharedrun,
                 ctx, rollingcontext(ctx, lookbacks))
-            rs = RollingState(summarized, leadin)
+            rs = RollingState(summarized)
             return chunkmap(c -> rollchunk!(rs, cfg, c),
-                afterleadin(rs, cfg, augmented))
+                afterleadin(rs, cfg, augmented, leadin))
         end
     end
 end
@@ -187,8 +187,8 @@ end
 # The augmented chunks, pulled only once the lead-in is admitted: pulling one
 # first would have the tee queue the whole lead-in for the summarized side, at
 # full width, before the windows could drop any of it.
-function afterleadin(rs, cfg, augmented)
-    gate = LeadInGate(rs, cfg, PullCursor(augmented))
+function afterleadin(rs, cfg, augmented, leadin)
+    gate = LeadInGate(rs, cfg, PullCursor(augmented), leadin)
     return ChunkSource(() -> pullafterleadin!(gate))
 end
 addrollingcolumns(p::CausalPipeline, windows, summarizers; kwargs...) =
@@ -244,9 +244,8 @@ mutable struct RollingState
     vals::Any          # per-window value vectors for the chunk in progress
     passthrough::Bool  # the summarized stream produced no chunks at all
     checked::Bool      # augmented-side name/key validation done
-    leadin::Any        # the shared run's output start, until its lead-in is admitted
-    RollingState(schunks, leadin) = new(PullCursor(schunks), nothing, 1,
-        nothing, nothing, nothing, nothing, nothing, false, false, leadin)
+    RollingState(schunks) = new(PullCursor(schunks), nothing, 1,
+        nothing, nothing, nothing, nothing, nothing, false, false)
 end
 
 # The window structures for one tiering (tiers.jl), R being the stored row
@@ -460,10 +459,7 @@ end
 # Admit every summarized row before `start` ahead of the first augmented pull,
 # evicting as it goes, so the windows hold only the rows a row at or after
 # `start` can still see. Type-unstable, once per chunk of the lead-in.
-function admitleadin!(rs::RollingState, cfg::RollingConfig)
-    start = rs.leadin
-    start === nothing && return nothing
-    rs.leadin = nothing
+function admitleadin!(rs::RollingState, cfg::RollingConfig, start)
     rs.snt === nothing && pullsummarized!(rs, cfg)
     while rs.snt !== nothing
         rs.spos, more = leadinsegment!(rs.tiers, rs.snt, rs.spos, start,
@@ -477,14 +473,18 @@ end
 # `afterleadin`'s state. The fields are abstract, a dispatch per chunk, so a
 # stage's iterator type doesn't nest its input's: nested, a chain of eight
 # stages took inference minutes, not seconds, to compile.
-struct LeadInGate
-    rs::RollingState
-    cfg::RollingConfig
-    cursor::PullCursor
+mutable struct LeadInGate
+    const rs::RollingState
+    const cfg::RollingConfig
+    const cursor::PullCursor
+    start::Any  # the shared run's output start, until its lead-in is admitted
 end
 
 function pullafterleadin!(g::LeadInGate)
-    admitleadin!(g.rs, g.cfg)
+    if g.start !== nothing
+        start, g.start = g.start, nothing
+        admitleadin!(g.rs, g.cfg, start)
+    end
     return pull!(g.cursor)
 end
 
