@@ -220,7 +220,9 @@ end
     ys = map(v -> v - 2, lcgsequence(3, nrows, 5))
     ks = map(v -> ("a", "b", "c")[v+1], lcgsequence(4, nrows, 3))
     ranges = [1:100, 101:220, 221:300]
-    frame(x) = DataFrame(time = times, k = ks, x = x, y = ys)
+    # `z` is never summarized: the stored rows project it out
+    zs = [isodd(i) ? missing : Float64(i) for i in 1:nrows]
+    frame(x) = DataFrame(time = times, k = ks, x = x, y = ys, z = zs)
     mkdata(x) = clipped([frame(x)[r, :] for r in ranges])
     intx, floatx = xs, Float64.(xs) ./ 4
     ctx = Context(20, 250)
@@ -250,6 +252,17 @@ end
             windowsagree(windowed(mkdata(x), L, ss; opts...),
                 windowsoracle(frame(x), ticks, L, ss; opts...))
         end
+    end
+
+    @testset "stored rows keep only the columns read" begin
+        declared = Recording(Sum(:x), (:x,))
+        windowed(mkdata(floatx), 11, [declared]; key = :k)
+        @test !isempty(declared.seen)
+        @test all(==((:time, :k, :x)), declared.seen)
+        undeclared = Recording(Sum(:x), nothing)
+        windowed(mkdata(floatx), 11, [undeclared])
+        @test !isempty(undeclared.seen)
+        @test all(==((:time, :k, :x, :y, :z)), undeclared.seen)
     end
 
     @testset "tree and mixed tiers agree with re-fold" begin

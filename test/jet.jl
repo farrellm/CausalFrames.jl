@@ -290,7 +290,7 @@ const JETTIERSETS = (
         tiers = CausalFrames.rolltiers(tg, types, kn, lookbacks, nothing)
         rs = CausalFrames.RollingState(())
         cfg = CausalFrames.RollingConfig((:a, :b), lookbacks, Symbol[], kn,
-            protos, outs, Symbol[], (;))
+            protos, outs, Symbol[], (;), nothing)
         CausalFrames.setvaltype!(rs, cfg, tg)
         wins = map((lb, e, T) -> (lb, e, Vector{T}(undef, 3)), lookbacks,
             rs.emptyrows, rs.valtypes)
@@ -316,7 +316,8 @@ end
             CausalFrames.tosummarizers(ss), kc)
         outs = Val(requested)
         kn = Val(Tuple(kc))
-        cfg = CausalFrames.WindowConfig(kc, kn, 5, protos, outs, grid, ks, (;))
+        cfg = CausalFrames.WindowConfig(kc, kn, 5, protos, outs, grid, ks, (;),
+            nothing)
         st = CausalFrames.WindowState{Int}(
             CausalFrames.IntervalCursor{Int}(clock(5).run(Context(0, 10))))
         CausalFrames.preparewindows!(st, cfg, types)

@@ -286,9 +286,8 @@ SUITE["rolling"]["bars-tree"] = @benchmarkable load(RCTX,
     RSRC |> addrollingcolumns((; b100 = Bars(100)), [Product(:qty)]))
 SUITE["rolling"]["bars-mixed-keyed"] = @benchmarkable load(RCTX,
     RSRC |> addrollingcolumns((; b100 = Bars(100)), MIXED; key = :sym))
-# Forty extra columns the summarizers don't read: every admitted row is still
-# built whole, past the 32 columns where Base's tuple `map` stops unrolling
-# (issue #98).
+# Forty extra columns the summarizers don't read, projected out of the stored
+# rows (issue #98).
 const WIDESRC = let df = DataFrame(load(RCTX, RSRC))
     for j in 1:40
         df[!, "c$j"] = fill(1.0, nrow(df))
@@ -297,6 +296,17 @@ const WIDESRC = let df = DataFrame(load(RCTX, RSRC))
 end
 SUITE["rolling"]["bars-wide-keyed"] = @benchmarkable load(RCTX,
     WIDESRC |> addrollingcolumns((; b14 = Bars(14)), [Sum(:qty)]; key = :sym))
+# The same forty columns admitting `missing`: stored whole, a row of them is
+# boxed, so this measures the projection to the columns the summarizers read.
+const WIDEUNIONSRC = let df = DataFrame(load(RCTX, RSRC))
+    for j in 1:40
+        df[!, "c$j"] = Vector{Union{Missing,Float64}}(fill(1.0, nrow(df)))
+    end
+    readtable(df)
+end
+SUITE["rolling"]["bars-wideunion-keyed"] = @benchmarkable load(RCTX,
+    WIDEUNIONSRC |> addrollingcolumns((; b14 = Bars(14)), [Sum(:qty)];
+        key = :sym))
 # Eight self-summarizing stages chained: each runs its input once, so this
 # should cost about eight single stages, not 2^8 runs of the source (#98).
 const CHAIN8 = foldl(2:9; init = RSRC) do p, n

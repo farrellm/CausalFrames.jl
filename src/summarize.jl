@@ -180,6 +180,27 @@ function terminput(c::DataFrame, terms::NamedTuple, op::String)
     return merge(nt, map(f -> rowvalues(f, nt), terms))
 end
 
+# The columns kept from the summarizers' input by the transforms that store
+# its rows (`addrollingcolumns`, `summarizewindows`): `:time`, the keys and
+# every column a summarizer reads, or `nothing` (keep all) when one may read
+# any. A stored row carries every kept column, so an unread column costs a copy
+# per row, and an unread `Union{Missing,T}` one boxes every row (issue #98).
+function storedcolumns(protos::Tuple, keycols)
+    cols = Symbol[:time; keycols]
+    for s in protos
+        ins = inputcolumns(s)
+        ins === nothing && return nothing
+        union!(cols, ins)
+    end
+    return Tuple(cols)
+end
+
+# The input projected to the stored columns, in the input's order. A missing
+# column is left for `fresh` to report, as it would be without the projection.
+projectinput(nt::NamedTuple, ::Nothing) = nt
+projectinput(nt::NamedTuple, cols::Tuple) =
+    NamedTuple{Tuple(k for k in keys(nt) if k in cols)}(nt)
+
 # A column's element type may differ between chunks, so the state types track
 # the promotion of every input type seen.
 promotetypes(::Nothing, b::NamedTuple) = b

@@ -61,12 +61,13 @@ MLJ operators are the only exceptions, see `ext/CLAUDE.md`), `test/runtests.jl`
 name linking to that header — then the docs build regenerates
 `skills/causalframes/`, which is committed alongside.
 
-A new summarizer instead touches `src/summarizers.jl` (the type, its state, and
+A new summarizer instead touches `src/summarizers.jl` (the type, its state,
 which structured subtype it claims — a performance decision, not a taxonomy
-one), `docs/src/api/summarizers.md` (again its own header),
-`docs/src/api/index.md`, `DESIGN.md`'s "Summarizers" section and export list,
-`test/summarizers.jl`, and `README.md`'s summarizer table, plus the
-regenerated `skills/causalframes/`.
+one — and its `inputcolumns` in the block at the end of the file),
+`docs/src/api/summarizers.md` (again its own header), `docs/src/api/index.md`,
+`DESIGN.md`'s "Summarizers" section and export list, `test/summarizers.jl`,
+and `README.md`'s summarizer table, plus the regenerated
+`skills/causalframes/`.
 
 A new keyword on the file sources (as `closed` and `skipmissing` were) is a
 field of the shared `SourceClip` in `src/operators.jl`, used by

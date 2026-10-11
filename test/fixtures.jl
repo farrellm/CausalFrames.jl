@@ -62,6 +62,22 @@ CausalFrames.fresh(o::Opaque, intypes::NamedTuple) =
 CausalFrames.dependencies(o::Opaque) =
     map(Opaque, CausalFrames.dependencies(o.inner))
 
+# Records the input columns its states are built from, declaring `C` as its
+# input columns (`nothing`, the default, keeps every column), so a test can
+# see what the window transforms' projection keeps.
+struct Recording{S<:Summarizer,C} <: Summarizer
+    inner::S
+    seen::Vector{Any}
+end
+Recording(s::Summarizer, cols) = Recording{typeof(s),cols}(s, Any[])
+
+CausalFrames.emptyvalue(r::Recording) = CausalFrames.emptyvalue(r.inner)
+function CausalFrames.fresh(r::Recording, intypes::NamedTuple)
+    push!(r.seen, keys(intypes))
+    return CausalFrames.fresh(r.inner, intypes)
+end
+CausalFrames.inputcolumns(::Recording{S,C}) where {S,C} = C
+
 # Opaque's monoid counterpart: a group hidden down to a monoid, so it takes the
 # tree tier rather than the running tier, putting a built-in group's `combine!`
 # under a window.
