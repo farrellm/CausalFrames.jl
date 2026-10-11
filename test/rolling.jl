@@ -243,6 +243,14 @@
         taken = onechunk(time = [1], x = [1], w1_x_sum = [9])
         @test_throws ArgumentError load(Context(0, 10),
             taken |> addrollingcolumns((w1 = 1,), Sum(:x)))
+        # a shared run over a widened context checks its augmented side on
+        # the first chunk, before reading the lead-in
+        @test_throws ArgumentError(
+            "addrollingcolumns output column :w1_x_sum collides with an existing column",
+        ) load(Context(0, 10), taken |> addrollingcolumns((w1 = 5,), Sum(:x)))
+        @test_throws ArgumentError(
+            "addrollingcolumns key column :k not found in the augmented input",
+        ) load(Context(0, 10), p |> addrollingcolumns((w1 = 5,), Sum(:x); key = :k))
         # negative look-back is rejected when the pipeline runs
         q = p |> addrollingcolumns((w = -1,), Sum(:x))
         @test_throws ArgumentError load(Context(0, 10), q)

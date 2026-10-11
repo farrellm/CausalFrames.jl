@@ -387,15 +387,21 @@ function suffixtrees(tg::Tiering, ::Type{K}, ::Type{R}, ::Type{T}, suffixes,
 end
 
 # Pull the next summarized chunk (type-unstable, once per chunk), building the
-# tiers on the first and rebuilding them when the promoted schema changes.
-function pullsummarized!(rs::RollingState, cfg::RollingConfig)
+# tiers on the first and rebuilding them when the promoted schema changes. A
+# shared run's first chunk is the augmented input's too, and is pulled before
+# any augmented chunk, so it takes the augmented side's checks.
+function pullsummarized!(rs::RollingState, cfg::RollingConfig,
+    shared::Bool = false)
     chunk = pull!(rs.summarized)
     if chunk === nothing
         rs.snt === nothing && (rs.passthrough = true)
         return nothing
     end
-    rs.stypes === nothing && checkkeycolumns(cfg.keycols, chunk,
-        "addrollingcolumns", "the summarized input")
+    if rs.stypes === nothing
+        shared ? checkaugmented!(rs, cfg, chunk) :
+        checkkeycolumns(cfg.keycols, chunk, "addrollingcolumns",
+            "the summarized input")
+    end
     nt = terminput(chunk, cfg.terms, "addrollingcolumns")
     types = promotetypes(rs.stypes, chunktypes(nt))
     moved = rs.stypes === nothing || types != rs.stypes
@@ -425,18 +431,23 @@ function setvaltype!(rs::RollingState, cfg::RollingConfig, tg::Tiering)
     return nothing
 end
 
-function rollchunk!(rs::RollingState, cfg::RollingConfig, c::DataFrame)
-    if !rs.checked
-        checkkeycolumns(cfg.keycols, c, "addrollingcolumns", "the augmented input")
-        for pn in cfg.prefixednames
-            String(pn) in names(c) && throw(
-                ArgumentError(
-                    "addrollingcolumns output column $(repr(pn)) collides with an existing column",
-                ),
-            )
-        end
-        rs.checked = true
+# The augmented side's key and output-name checks, once per run.
+function checkaugmented!(rs::RollingState, cfg::RollingConfig, c::DataFrame)
+    rs.checked && return nothing
+    checkkeycolumns(cfg.keycols, c, "addrollingcolumns", "the augmented input")
+    for pn in cfg.prefixednames
+        String(pn) in names(c) && throw(
+            ArgumentError(
+                "addrollingcolumns output column $(repr(pn)) collides with an existing column",
+            ),
+        )
     end
+    rs.checked = true
+    return nothing
+end
+
+function rollchunk!(rs::RollingState, cfg::RollingConfig, c::DataFrame)
+    checkaugmented!(rs, cfg, c)
     rs.snt === nothing && !rs.summarized.done && pullsummarized!(rs, cfg)
     rs.passthrough && return assembleempty(cfg, c)
     lnt = Tables.columntable(c)
@@ -459,7 +470,7 @@ end
 # evicting as it goes, so the windows hold only the rows a row at or after
 # `start` can still see. Type-unstable, once per chunk of the lead-in.
 function admitleadin!(rs::RollingState, cfg::RollingConfig, start)
-    rs.snt === nothing && pullsummarized!(rs, cfg)
+    rs.snt === nothing && pullsummarized!(rs, cfg, true)
     while rs.snt !== nothing
         rs.spos, more = leadinsegment!(rs.tiers, rs.snt, rs.spos, start,
             cfg.lookbacks, cfg.keynames)
