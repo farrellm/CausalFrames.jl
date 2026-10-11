@@ -147,7 +147,7 @@
         load(Context(0, 10), readtable(df) |> t([undeclared, Count()]))
         @test !isempty(undeclared.seen)
         @test all(==((:time, :k, :x, :u, :v)), undeclared.seen)
-        # a row term is kept under its name, after the columns it reads
+        # a row term is kept under its name; the columns it reads are not
         termed = Recording(Count(), (:r,))
         load(Context(0, 10),
             readtable(df) |> t([termed, Sum(:r => row -> 2 * row.x)]))

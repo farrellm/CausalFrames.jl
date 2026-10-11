@@ -1762,10 +1762,10 @@ The interface, extended by concrete subtypes (unexported — extend
   column-table rows, which touch only the columns a state reads, so they
   ignore it. A stored row is a NamedTuple of every kept column: an unread
   column costs a copy per row, and an unread `Union{Missing,T}` column makes
-  the row type non-isbits, so every stored row is boxed. That was 12x on one
-  `Bars(14)` stage with a single such column, and 25x with 128 of them; a
-  chain of stages pays it at every stage, since each adds a
-  `Union{Missing,T}` output column (issue #98: 8 chained stages over 131
+  the row type non-isbits, so every stored row is boxed. Projecting them out
+  made one `Bars(14)` stage about 3x faster with a single such column, and
+  over 25x with 128 of them; a chain of stages pays that cost at every
+  stage, since each adds a `Union{Missing,T}` output column (issue #98: 8 chained stages over 131
   columns went from 6.7 s to 0.28 s);
 - `combine!(dest, a, b)` — required of a `MonoidSummarizer`'s states (see
   "Structured subtypes" below): overwrite `dest` with the state that folding

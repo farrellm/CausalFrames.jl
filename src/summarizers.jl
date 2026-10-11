@@ -166,9 +166,11 @@ The input columns, besides `:time`, that `s`'s states read from a row in
 summarize, and keep only these columns, the key columns and `:time`, so
 [`fresh`](@ref) is given only their types. Defaults to `nothing`: `s` may read
 any column, and every column is kept. A summarizer whose state reads no row (a
-dependent one, or [`Count`](@ref)) declares `()`. Declaring a column it does
-not read only costs speed; leaving out one it reads is an error when it is
-read.
+dependent one, or [`Count`](@ref)) declares `()`. A state folding rows through
+[`barwindow`](@ref) declares what its inner summarizers read, and for an inner
+row term the columns its function reads: only the outer summarizer's row terms
+are evaluated before the rows are stored. Declaring a column it does not read
+only costs speed; leaving out one it reads is an error when it is read.
 """
 inputcolumns(::Summarizer) = nothing
 

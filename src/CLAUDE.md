@@ -280,7 +280,7 @@ design rationale and performance constraints behind each module.
   The two transforms that store rows (`addrollingcolumns`,
   `summarizewindows`) then cut that table to `storedcolumns` (`:time`, the
   keys and the summarizers' `inputcolumns`) with `projectinput`, per chunk:
-  an unread `Union{Missing,T}` column would box every stored row
+  an unread `Union{Missing,T}` column would box every stored row.
   Per-run state lives in `SummaryFold`, never in reassigned closure captures
   (those get boxed).
   The per-key states live in a `GroupTable{K,S}` (both parameters concrete),
