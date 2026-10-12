@@ -276,8 +276,12 @@ design rationale and performance constraints behind each module.
   it unwrapped. Every summarizing transform (these three, `intervalize`,
   `addrollingcolumns`, `summarizewindows`) reads its summarizers' input through
   `terminput`: the chunk's column table plus one vector per term (per chunk,
-  behind `rowvalues`' barrier), with input types taken from that table so term
-  types widen like columns. The term vectors must never reach an output.
+  behind `termvalues`' barrier, typed by `promote_op` over the row type and by
+  the values only when inference gives up, so a term's type is the same in
+  every chunk and never abstract when it infers), with input types taken from
+  that table so term types widen like columns. `addcolumns` stays value-typed
+  (`rowvalues`; DESIGN.md says why). The term vectors must never reach an
+  output.
   The two transforms that store rows (`addrollingcolumns`,
   `summarizewindows`) then cut that table to `storedcolumns` (`:time`, the
   keys and the summarizers' `inputcolumns`) with `projectinput`, per chunk:
@@ -402,8 +406,9 @@ design rationale and performance constraints behind each module.
   types inferred from `intypes`), the other monoids sit in `BarQueue`, a
   preallocated two-stack queue (measured 3-13x faster than a segment tree and
   flat in `n`; DESIGN.md has the table), and a plain summarizer is rejected.
-  It must not call the transforms' tuple folds (`updateall!`, `freshall!`,
-  `summaryvalues`, `combinenodes!`): it runs inside an outer state's
+  A stored row is cut to `:time`, the terms and the columns `readcolumns`
+  names, hoisted or not. It must not call the transforms' tuple folds
+  (`updateall!`, `freshall!`, `summaryvalues`, `combinenodes!`): it runs inside an outer state's
   `update!`/`value`, which those folds call, and inference's recursion limit
   on a repeated caller-to-callee edge would leave the inner fold dispatching
   and allocating per row. Its generated `bar*` folds have edges of their own;

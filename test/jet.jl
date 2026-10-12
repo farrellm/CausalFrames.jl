@@ -417,13 +417,15 @@ end
 end
 
 @testset "row term columns" begin
-    # A term column is computed per chunk behind `rowvalues`' barrier, which
+    # A term column is computed per chunk behind `termvalues`' barrier, which
     # must specialize on the term function and the column table.
     nt = (time = [1, 2], high = [5.0, 6.0], low = [4.0, 4.5])
-    JET.@test_opt CausalFrames.rowvalues(rangeterm, nt)
+    JET.@test_opt CausalFrames.termvalues(rangeterm, nt)
+    # a Union-typed term too, whose concreteness check must fold
+    JET.@test_opt CausalFrames.termvalues(r -> r.high > 5 ? r.high : 1, nt)
     protos, requested, terms = CausalFrames.prototypes(
         CausalFrames.tosummarizers([Sum(:range => rangeterm)]), Symbol[])
-    tnt = merge(nt, (; range = CausalFrames.rowvalues(rangeterm, nt)))
+    tnt = merge(nt, (; range = CausalFrames.termvalues(rangeterm, nt)))
     states = CausalFrames.newstates(protos, CausalFrames.chunktypes(tnt))
     JET.@test_opt CausalFrames.foldall!(states, tnt)
 end
@@ -453,7 +455,7 @@ end
         Symbol[])
     outs = Val(requested)
     tnt = (time = [1, 2], x = [1.0, 2.0], high = [3.0, 4.0], low = [1.0, 1.5])
-    tnt = merge(tnt, map(f -> CausalFrames.rowvalues(f, tnt), terms))
+    tnt = merge(tnt, map(f -> CausalFrames.termvalues(f, tnt), terms))
     states = CausalFrames.newstates(protos, CausalFrames.chunktypes(tnt))
     JET.@test_opt CausalFrames.foldall!(states, tnt)
     JET.@test_opt CausalFrames.summaryvalues(states, outs)

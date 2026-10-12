@@ -25,6 +25,21 @@
               (; range = rng)
     end
 
+    @testset "typed by inference, not by the values" begin
+        mixed = r -> r.high > 2 ? r.high : 1
+        # every row takes the first branch, but the column admits both
+        nt = Tables.columntable(chunks[1])
+        @test CausalFrames.terminput(chunks[1], (; m = mixed), "summarize").m isa
+              Vector{Union{Float64,Int64}}
+        @test CausalFrames.termvalues(mixed, nt) == chunks[1].high
+        # so the output type is the same however the chunks fall
+        @test nonmissingtype(eltype(run(src |> summarize(Last(:m => mixed))).m_last)) ==
+              Union{Float64,Int64}
+        # With inference defeated, the values type the column.
+        opaque = r -> Base.inferencebarrier(r.high)
+        @test CausalFrames.termvalues(opaque, nt) isa Vector{Float64}
+    end
+
     @testset "matches addcolumns then the summarizer" begin
         ss(term) = [Sum(term), DotProduct(:v, term), DotProduct(term, :v)]
         for key in (nothing, :k)
