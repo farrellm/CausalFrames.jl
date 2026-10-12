@@ -9,7 +9,8 @@ and takes its element type from the input column.
 A summarizer's input can be a per-row expression instead of a column: every
 summarizer but `FitModel` takes a *row term* `name => f` wherever it takes a
 column name (a [`CausalFrames.ColumnSpec`](@ref)). The term acts as a virtual
-input column `name` holding `f(row)`, so its output is named as a column's
+input column `name` holding `f(row)`, where `row` is a `NamedTuple` of the
+input row's columns, so its output is named as a column's
 would be, and it widens, compensates and counts `missing` as a column does. Its
 element type is inferred from `f` (`Union{Float64, Int64}` for
 `r -> r.x > 2 ? r.x : 1` over a `Float64` column), or taken from its values when

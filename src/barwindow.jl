@@ -217,7 +217,7 @@ end
 
 function barwindowtypes(terms::NamedTuple, intypes::NamedTuple, protos::Tuple)
     R0 = storerowtype(intypes)
-    termtypes = map((k, f) -> checktermtype(k, Base.promote_op(f, R0)), keys(terms),
+    termtypes = map((k, f) -> checktermtype(k, termtype(f, R0)), keys(terms),
         values(terms))
     return intypes,
     merge(storedbase(intypes, protos, ()), NamedTuple{keys(terms)}(termtypes))

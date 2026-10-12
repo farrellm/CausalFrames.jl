@@ -2244,7 +2244,13 @@ to hoist a count window's inner terms (see "Count windows inside a state").
 
 Per chunk, each summarizing transform builds its input with `terminput`: the
 chunk's column table merged with one vector per term, computed behind the
-`termvalues` function barrier. A term's vector is typed by
+`termvalues` function barrier. `f` is called on each row as a `NamedTuple` of
+the input columns (`rowat`, built field by field into the row type), the row
+an unhoisted count window evaluates its terms on, and one helper, `termtype`,
+infers over that row type for both, so a term relying on the row being a
+`NamedTuple` (`Tuple(r)`, `r[1]`, a method taking `::NamedTuple`) types and
+behaves alike hoisted or not (issue #107; it once saw a `Tables.ColumnsRow`
+here). A term's vector is typed by
 `promote_op(f, rowtype)` when that is concrete or a `Union` of concrete types,
 and by its values (the comprehension `addcolumns` uses) only when inference
 gives up (`Any` or an abstract type, as for a closure over an untyped global).

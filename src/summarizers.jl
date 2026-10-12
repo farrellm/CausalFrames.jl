@@ -181,7 +181,8 @@ inputcolumns(::Summarizer) = nothing
 
 An input column as a summarizer constructor takes it: a column name (a
 `Symbol`), or a *row term* `name => f`. A row term is a virtual input column
-`name`, whose value in each row is `f(row)`. The summarizer reads it as it
+`name`, whose value in each row is `f(row)`, `row` being a `NamedTuple` of
+the input row's columns. The summarizer reads it as it
 would a column, so its output is named after `name` (`Sum(:range => f)` gives
 `:range_sum`). The summarizing transforms compute each row term once per row,
 alongside the input, and never add it to their output. See

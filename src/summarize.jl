@@ -187,12 +187,26 @@ end
 # values, so it is the same for every chunk and never abstract when inference
 # succeeds (`r.x > 2 ? r.x : 1` is `Union{Float64,Int64}`, not `Real`). When
 # inference gives up (a closure over an untyped global, say), the values type
-# it, as `addcolumns`' `rowvalues` does.
+# it, as `addcolumns`' `rowvalues` does. The term sees each row as the
+# NamedTuple its type was inferred over, the row a count window evaluates its
+# own terms on, so a term types and behaves alike hoisted or not.
 function termvalues(f::F, nt::NamedTuple) where {F}
-    rows = Tables.rows(nt)
-    T = Base.promote_op(f, eltype(rows))
-    return concreteterm(T) ? T[f(row) for row in rows] : [f(row) for row in rows]
+    R = termrowtype(typeof(nt))
+    T = termtype(f, R)
+    is = eachindex(first(nt))
+    return concreteterm(T) ? T[f(rowat(R, nt, i)) for i in is] :
+           [f(rowat(R, nt, i)) for i in is]
 end
+
+# A term's type over rows of type `R`, the one inference both `termvalues` and
+# an unhoisted count window (over `storerowtype(intypes)`) use.
+termtype(f, ::Type{R}) where {R<:NamedTuple} = Base.promote_op(f, R)
+
+# The row type of a column table. Generated, so it is a constant however wide
+# the table: `storerowtype(chunktypes(nt))`, a tuple `map`, stops inferring at
+# 32 columns, which left every row of a wide chunk dispatching.
+@generated termrowtype(::Type{NamedTuple{N,C}}) where {N,C} =
+    NamedTuple{N,Tuple{map(eltype, fieldtypes(C))...}}
 
 # A type a term may store unboxed: concrete, or a Union of concrete types.
 # Recursing over the Union, not `Base.uniontypes`, lets it fold to a constant.

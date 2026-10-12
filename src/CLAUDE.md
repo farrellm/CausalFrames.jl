@@ -276,7 +276,10 @@ design rationale and performance constraints behind each module.
   it unwrapped. Every summarizing transform (these three, `intervalize`,
   `addrollingcolumns`, `summarizewindows`) reads its summarizers' input through
   `terminput`: the chunk's column table plus one vector per term (per chunk,
-  behind `termvalues`' barrier, typed by `promote_op` over the row type and by
+  behind `termvalues`' barrier, over `NamedTuple` rows built by `rowat`,
+  typed by `termtype` (`promote_op` over that row type, as an unhoisted
+  `barwindow` infers its terms; the row type is generated, `termrowtype`,
+  since a tuple `map` over a wide table stops inferring) and by
   the values only when inference gives up, so a term's type is the same in
   every chunk and never abstract when it infers), with input types taken from
   that table so term types widen like columns. `addcolumns` stays value-typed

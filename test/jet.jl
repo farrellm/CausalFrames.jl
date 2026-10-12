@@ -423,6 +423,13 @@ end
     JET.@test_opt CausalFrames.termvalues(rangeterm, nt)
     # a Union-typed term too, whose concreteness check must fold
     JET.@test_opt CausalFrames.termvalues(r -> r.high > 5 ? r.high : 1, nt)
+    # over rows with `String` and `missing`-admitting columns, past the 32
+    # columns where a tuple `map` stops inferring
+    wide = merge(nt, (k = ["a", "b"],),
+        NamedTuple{Tuple(Symbol.(:c, 1:40))}(
+            ntuple(_ -> Union{Missing,Float64}[1.0, missing], 40)))
+    JET.@test_opt CausalFrames.termvalues(rangeterm, wide)
+    JET.@test_opt CausalFrames.termvalues(r -> r.c40, wide)
     protos, requested, terms = CausalFrames.prototypes(
         CausalFrames.tosummarizers([Sum(:range => rangeterm)]), Symbol[])
     tnt = merge(nt, (; range = CausalFrames.termvalues(rangeterm, nt)))
