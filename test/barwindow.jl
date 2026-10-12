@@ -218,6 +218,10 @@ end
         @test CF.value(CF.widenstate(st, types)) == (d_sum = 30.0,)
         # only the columns the window's summarizers read are stored
         @test fieldnames(eltype(st.ring.rows)) == (:d,)
+        # and `:time`, which `inputcolumns` leaves out but `update!` may read
+        tst = CF.barwindow(Sum(:d => double), 2, merge((time = Int,), types);
+            hoistedby = owner)
+        @test fieldnames(eltype(tst.ring.rows)) == (:time, :d)
         # a widening re-checks the terms against the wider input
         @test_throws ArgumentError(
             "barwindow row term :d collides with an input column",

@@ -203,8 +203,9 @@ end
 # terms evaluated, so a row is downdated with the values it was folded with and
 # no term runs twice. A hoisted term is read under its hoisted name and stored
 # under its own. The input columns are stored as they are, unless the terms are
-# hoisted: then nothing but `protos` reads a row, so only the columns they read
-# are kept.
+# hoisted: then nothing but `protos` reads a row, so only `:time` (which
+# `inputcolumns` leaves out, though `update!` may read it) and the columns they
+# read are kept.
 function barwindowtypes(terms::NamedTuple, intypes::NamedTuple, ::Tuple)
     R0 = storerowtype(intypes)
     termtypes = map(keys(terms), values(terms)) do k, f
@@ -220,7 +221,7 @@ end
 
 function barwindowtypes(::HoistedTerms{K,hs}, intypes::NamedTuple,
     protos::Tuple) where {K,hs}
-    read = readcolumns(protos)
+    read = readcolumns(protos, [:time])
     cols = Tuple(
         k for k in keys(intypes)
               if !(k in hs) && (read === nothing || k in read)
