@@ -107,29 +107,6 @@ end
         # Extra row fields are ignored.
         CF.update!(st, (x = 3, y = "z"))
         @test CF.value(st) == (d_sum = 10.0,)
-        # The term reads the whole row, but only the columns the window's
-        # summarizers read are stored, with `:time` and the terms.
-        @test fieldnames(eltype(st.ring.rows)) == (:d,)
-        tst = CF.barwindow(Covariance(:y, :d => double), 2,
-            (time = Int, x = Float64, y = Float64, z = String))
-        @test fieldnames(eltype(tst.ring.rows)) == (:time, :y, :d)
-        foreach(i -> CF.update!(tst, (time = i, x = i, y = -i, z = "z")), 1:3)
-        @test CF.value(tst) == (y_d_covariance = -1.0,)
-        @test CF.value(
-            CF.widenstate(
-                tst,
-                (time = Int, x = Float64,
-                    y = Union{Missing,Float64}, z = String),
-            ),
-        ) == (y_d_covariance = -1.0,)
-        # all of them when a summarizer may read any column
-        @test fieldnames(
-            eltype(
-                CF.barwindow(RangeTotal(), 2,
-                    (high = Float64, low = Float64, z = String)).ring.rows,
-            ),
-        ) ==
-              (:high, :low, :z, :range)
     end
 
     @testset "fresh and fresh!" begin
@@ -250,20 +227,6 @@ end
         tst = CF.barwindow(Sum(:d => double), 2, merge((time = Int,), types);
             hoistedby = owner)
         @test fieldnames(eltype(tst.ring.rows)) == (:time, :d)
-        # A hoisted term is typed as an unhoisted one is, from inference over
-        # the row (#103), and held to the same concreteness rule.
-        mixed = r -> r.x > 2 ? r.x : 1
-        chunk = DataFrame(x = [3.0, 4.0, 5.0])
-        hoistin = CF.chunktypes(CF.terminput(chunk,
-            NamedTuple{(hd,)}((mixed,)), "summarize"))
-        hst = CF.barwindow(Sum(:d => mixed), 2, hoistin; hoistedby = owner)
-        ust = CF.barwindow(Sum(:d => mixed), 2, (x = Float64,))
-        @test eltype(hst.ring.rows) == eltype(ust.ring.rows) ==
-              @NamedTuple{d::Union{Float64,Int64}}
-        @test_throws ArgumentError(
-            "barwindow row term :d must infer a concrete type, got Real",
-        ) CF.barwindow(Sum(:d => mixed), 2, NamedTuple{(:x, hd)}((Float64, Real));
-            hoistedby = owner)
         # a widening re-checks the terms against the wider input
         @test_throws collides CF.widenstate(st, merge(types, (d = Float64,)))
         @test_throws notfound CF.barwindow(

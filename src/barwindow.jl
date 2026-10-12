@@ -40,8 +40,7 @@ as a type parameter.
   [`barterms`](@ref) from its [`rowterms`](@ref), so the summarizing transforms
   evaluate them over each chunk before storing its rows; the window then reads
   each term from the reserved column `barterms` names it by, and a term whose
-  column is missing from `intypes`, or whose column type is not concrete or a
-  `Union` of concrete types, is an `ArgumentError`. A column of the
+  column is missing from `intypes` is an `ArgumentError`. A column of the
   term's own name is never read in its place. With `nothing`, the window
   evaluates the terms itself.
 
@@ -204,38 +203,34 @@ end
 
 # The input row's columns and the stored row's: rows are stored with their row
 # terms evaluated, so a row is downdated with the values it was folded with and
-# no term runs twice. Once a row's terms are evaluated nothing but `protos`
-# reads it, so besides the terms only `:time` (which `inputcolumns` leaves out,
-# though `update!` may read it) and the columns they read are stored. The two
-# methods differ only in where a term's value comes from: evaluated from the
-# whole input row, or (hoisted) read under its hoisted name and stored under
-# its own.
-function barwindowtypes(terms::NamedTuple, intypes::NamedTuple, protos::Tuple)
+# no term runs twice. A hoisted term is read under its hoisted name and stored
+# under its own. The input columns are stored as they are, unless the terms are
+# hoisted: then nothing but `protos` reads a row, so only `:time` (which
+# `inputcolumns` leaves out, though `update!` may read it) and the columns they
+# read are kept.
+function barwindowtypes(terms::NamedTuple, intypes::NamedTuple, ::Tuple)
     R0 = storerowtype(intypes)
-    termtypes = map((k, f) -> checktermtype(k, Base.promote_op(f, R0)), keys(terms),
-        values(terms))
-    return intypes,
-    merge(storedbase(intypes, protos, ()), NamedTuple{keys(terms)}(termtypes))
+    termtypes = map(keys(terms), values(terms)) do k, f
+        T = Base.promote_op(f, R0)
+        concreteterm(T) || throw(
+            ArgumentError(
+                "barwindow row term $(repr(k)) must infer a concrete type, got $T"),
+        )
+        T
+    end
+    return intypes, merge(intypes, NamedTuple{keys(terms)}(termtypes))
 end
 
 function barwindowtypes(::HoistedTerms{K,hs}, intypes::NamedTuple,
     protos::Tuple) where {K,hs}
-    base = storedbase(intypes, protos, hs)
-    hoisted = map(checktermtype, K, values(NamedTuple{hs}(intypes)))
+    base = projectinput(Base.structdiff(intypes, NamedTuple{hs}),
+        storedcolumns(protos, Symbol[]))
+    hoisted = values(NamedTuple{hs}(intypes))
     return merge(base, NamedTuple{hs}(hoisted)), merge(base, NamedTuple{K}(hoisted))
 end
 
-# A term's type, evaluated or hoisted, so that both are held to one rule: a
-# hoisted term's column is typed by inference too (`termvalues`), falling back
-# to its values' type only when inference gives up.
-checktermtype(k::Symbol, T) =
-    concreteterm(T) ? T :
-    throw(ArgumentError("barwindow row term $(repr(k)) must infer a concrete type, got $T"))
-
-# The stored input columns, those named `hoisted` aside.
-storedbase(intypes::NamedTuple, protos::Tuple, hoisted::Tuple{Vararg{Symbol}}) =
-    projectinput(Base.structdiff(intypes, NamedTuple{hoisted}),
-        storedcolumns(protos, Symbol[]))
+concreteterm(T) =
+    isconcretetype(T) || (T isa Union && all(isconcretetype, Base.uniontypes(T)))
 
 # Build the state for the realized types; type-unstable, once per state and
 # per widening.
@@ -393,15 +388,14 @@ end
 
 # The row as stored: the input columns, projected by name and converted to the
 # input types the row terms' types were inferred from, then the row terms,
-# evaluated over that whole row or (hoisted) renamed, then cut to the stored
-# columns.
+# evaluated or (hoisted) renamed.
 @inline barrow(st::BarWindowState{R,R0}, row) where {R,R0} =
     termrow(R, projectrow(R0, row), st.terms)
 
 @inline termrow(::Type{R}, base::NamedTuple, terms::NamedTuple{()}) where {R} =
-    projectrow(R, base)
+    convert(R, base)
 @inline termrow(::Type{R}, base::NamedTuple, terms::NamedTuple) where {R} =
-    projectrow(R, merge(base, map(f -> f(base), terms)))
+    convert(R, merge(base, map(f -> f(base), terms)))
 @inline termrow(::Type{R}, base::NamedTuple, ::HoistedTerms) where {R} =
     R(Tuple(base))
 
