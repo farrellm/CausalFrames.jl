@@ -886,8 +886,8 @@ dependent one, or `Count`) declares `()`. A state folding rows through
 `barinputcolumns`. An inner row term is evaluated before the rows are
 stored only when the state hoists it (see `rowterms`); otherwise
 `barinputcolumns` is `nothing`, and the state may instead declare the columns
-the term's function reads. Declaring a column it does not read only costs speed; leaving
-out one it reads is an error when it is read.
+the term's function reads. Declaring a column it does not read only costs
+speed; leaving out one it reads is an error when it is read.
 
 ---
 
@@ -924,7 +924,7 @@ then fold that summarizer through a segment tree instead.
 ---
 
     barwindow(s::Summarizer, n::Integer, intypes::NamedTuple;
-              hoisted::Bool = false) -> SummarizerState
+              hoistedby::Union{Nothing, Summarizer} = nothing) -> SummarizerState
 
 A state summarizing only the last `n` rows folded into it, for a summarizer
 whose own state needs a trailing window (a moving average inside a recursive
@@ -949,13 +949,15 @@ as a type parameter.
   of theirs.
 
 #### Keywords
-- `hoisted = false`: whether `s`'s row terms are already evaluated, as columns
-  of the rows passed to `update!`. An outer summarizer hoists them by returning
+- `hoistedby = nothing`: the outer summarizer whose state holds the window,
+  when it hoists `s`'s row terms: they are then already evaluated, as columns
+  of the rows passed to `update!`. It hoists them by returning
   `barterms` from its `rowterms`, so the summarizing transforms
   evaluate them over each chunk before storing its rows; the window then reads
   each term from the reserved column `barterms` names it by, and a term whose
   column is missing from `intypes` is an `ArgumentError`. A column of the
-  term's own name is never read in its place.
+  term's own name is never read in its place. With `nothing`, the window
+  evaluates the terms itself.
 
 ```julia
 st = CausalFrames.barwindow(Mean(:x), 2, (x = Float64,))
@@ -978,7 +980,8 @@ order it expects. `widenstate` re-types the state and keeps its window.
 
 ---
 
-    barinputcolumns(s::Summarizer; hoisted::Bool = false)
+    barinputcolumns(s::Summarizer;
+                    hoistedby::Union{Nothing, Summarizer} = nothing)
         -> Union{Nothing, Tuple{Vararg{Symbol}}}
 
 The input columns a `barwindow` over `s` reads: the union of
@@ -996,44 +999,53 @@ an input column of that name is kept to be reported as a collision.
 - `s`: the summarizer the window folds, as passed to `barwindow`.
 
 #### Keywords
-- `hoisted = false`: whether the outer summarizer hoists `s`'s row terms, as
+- `hoistedby = nothing`: the summarizer hoisting `s`'s row terms, as
   `barwindow`'s keyword of the same name.
 
 ```julia
-term = Mean(:d => r -> 2r.x)
+struct LastCov <: CausalFrames.Summarizer end
+CausalFrames.emptyvalue(::LastCov) = (; lastcov = missing)
+term = Covariance(:x, :d => r -> 2r.x)
 (CausalFrames.barinputcolumns(Covariance(:x, :y)),
     CausalFrames.barinputcolumns(term),
-    CausalFrames.barinputcolumns(term; hoisted = true))
+    CausalFrames.barinputcolumns(term; hoistedby = LastCov()))
 
 # output
 
-((:x, :y), nothing, (:d, Symbol("#barterm#d")))
+((:x, :y), nothing, (:d, :x, Symbol("#barterm#lastcov#d")))
 ```
 
 ---
 
-    barterms(s::Summarizer) -> NamedTuple
+    barterms(s::Summarizer; hoistedby::Summarizer) -> NamedTuple
 
 The row terms a `barwindow` over `s` reads, from `s` and its
-dependencies at any depth. A summarizer whose state folds rows through a
-`barwindow` returns them from its own `rowterms` to hoist them: the
-summarizing transforms then evaluate them with their own row terms, and the
-window is built with `hoisted = true`. Each term is keyed by a reserved column
-name, `#barterm#d` for a term `:d`, so no input column or other term of the
-name stands in for it. Two terms of one name must be the same function, or it
-is an `ArgumentError`.
+dependencies at any depth, for `hoistedby` to hoist. A summarizer whose state
+folds rows through a `barwindow` returns them from its own
+`rowterms`: the summarizing transforms then evaluate them with their
+own row terms, and the window is built with the same `hoistedby`. Each term is
+keyed by a reserved column name scoped by `hoistedby`'s first output column,
+`#barterm#lastn#d` for a term `:d` hoisted by a summarizer producing `:lastn`.
+So no input column of the term's name stands in for it, and two summarizers'
+windows may each have a term of one name.
 
 #### Arguments
 - `s`: the summarizer the window folds, as passed to `barwindow`.
 
+#### Keywords
+- `hoistedby`: the summarizer whose `rowterms` returns the terms, usually the
+  one calling `barterms`. It is required.
+
 ```julia
+struct LastSum <: CausalFrames.Summarizer end
+CausalFrames.emptyvalue(::LastSum) = (; lastsum = missing)
 double = r -> 2r.x
-terms = CausalFrames.barterms(Mean(:d => double))
+terms = CausalFrames.barterms(Sum(:d => double); hoistedby = LastSum())
 keys(terms), only(terms) === double
 
 # output
 
-((Symbol("#barterm#d"),), true)
+((Symbol("#barterm#lastsum#d"),), true)
 ```
 
 ---
@@ -1046,19 +1058,47 @@ the input row; each becomes a column of the rows passed to
 `update!`. Defaults to `(;)`. A summarizer whose state folds rows
 through `barwindow` uses it to hoist its window's row terms out of the
 window, so that its `inputcolumns` can name every column the window
-reads:
+reads. A term follows the rules of Row terms: the same name must
+always be the same function, across every summarizer of a call, and may not
+name an input column.
 
 ```julia
-CausalFrames.rowterms(s::MyIndicator) = CausalFrames.barterms(s.inner)
-CausalFrames.inputcolumns(s::MyIndicator) =
-    CausalFrames.barinputcolumns(s.inner; hoisted = true)
-CausalFrames.fresh(s::MyIndicator, intypes::NamedTuple) =
-    MyIndicatorState(CausalFrames.barwindow(s.inner, s.n, intypes; hoisted = true))
-```
+struct Trailing{S<:Summarizer} <: Summarizer
+    inner::S
+    n::Int
+end
+struct TrailingState{W<:SummarizerState} <: SummarizerState
+    window::W
+end
+CausalFrames.emptyvalue(::Trailing) = (; trailing = missing)
+CausalFrames.rowterms(s::Trailing) = CausalFrames.barterms(s.inner; hoistedby = s)
+CausalFrames.inputcolumns(s::Trailing) =
+    CausalFrames.barinputcolumns(s.inner; hoistedby = s)
+CausalFrames.fresh(s::Trailing, intypes::NamedTuple) =
+    TrailingState(CausalFrames.barwindow(s.inner, s.n, intypes; hoistedby = s))
+CausalFrames.fresh(st::TrailingState) = TrailingState(CausalFrames.fresh(st.window))
+CausalFrames.update!(st::TrailingState, row) = CausalFrames.update!(st.window, row)
+function CausalFrames.value(st::TrailingState)
+    v = CausalFrames.value(st.window)
+    return NamedTuple{(:trailing,),Tuple{fieldtype(typeof(v), 1)}}((v[1],))
+end
 
-A term follows the rules of Row terms: the same name must always be
-the same function, across every summarizer of a call, and may not name an
-input column.
+df = DataFrame(time = 1:4, high = [5.0, 6.0, 8.0, 7.0], low = [4.0, 4.5, 5.0, 6.0])
+p = readtable(df) |>
+    addsummarycolumns(Trailing(Mean(:spread => r -> r.high - r.low), 2))
+DataFrame(load(Context(0, 10), p))
+
+# output
+
+4×4 DataFrame
+ Row │ time   high     low      trailing
+     │ Int64  Float64  Float64  Float64?
+─────┼─────────────────────────────────────
+   1 │     1      5.0      4.0  missing
+   2 │     2      6.0      4.5        1.25
+   3 │     3      8.0      5.0        2.25
+   4 │     4      7.0      6.0        2.0
+```
 
 ---
 
@@ -1098,12 +1138,20 @@ DataFrame(load(Context(0, 10), p))
 
 `s`, carrying the row terms among `specs`, which are the `ColumnSpec`s
 `s` was built from. A constructor taking a column calls it on the summarizer
-built from the specs' names:
-
-```julia
-MySum(column::ColumnSpec) = withterms(MySum{colname(column)}(), column)
-```
+built from the specs' names, as `Sum`'s does:
+`Sum(column::ColumnSpec) = withterms(Sum{colname(column)}(), column)`.
 
 With no row term among `specs` it returns `s` itself. A row term may not be
 named `:time`, and two row terms with the same name must be the same function;
 either is an `ArgumentError` naming `s`'s type.
+
+```julia
+double = r -> 2r.x
+s = CausalFrames.withterms(Sum{:d}(), :d => double)
+(CausalFrames.rowterms(s) === (; d = double),
+    CausalFrames.withterms(Sum{:x}(), :x) === Sum{:x}())
+
+# output
+
+(true, true)
+```

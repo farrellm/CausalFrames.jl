@@ -410,11 +410,13 @@ design rationale and performance constraints behind each module.
   `test/jet.jl` guards the embedded path. `barinputcolumns` is the outer
   state's `inputcolumns`, sharing `storedcolumns`' union (`readcolumns`);
   `barterms` is its `rowterms`, hoisting the window's terms into the
-  transform's `terminput` under reserved `hoistedname`s (`#barterm#d`), after
-  which `hoisted = true` makes the window read them from those columns
-  (`HoistedTerms`) instead of evaluating them. Never key a hoisted term by its
-  own name: a wrapper that drops `rowterms` would then have the window read a
-  real input column of that name as the term, silently
+  transform's `terminput` under reserved `hoistednames`, scoped by the outer
+  summarizer's first output name (`#barterm#lastn#d`) so two windows' terms
+  never share a namespace, after which `hoistedby = outer` makes the window
+  read them from those columns (`HoistedTerms`) instead of evaluating them.
+  Never key a hoisted term by its own name: a wrapper that drops `rowterms`
+  would then have the window read a real input column of that name as the
+  term, silently
 - `src/rolling.jl` — `addrollingcolumns`. Summarizing its own input it runs it
   once (`rollinginputs`), teed to both sides, the tee's `keep` dropping the
   lead-in from the output side with `warmup`'s `dropleadin!`: a run per side

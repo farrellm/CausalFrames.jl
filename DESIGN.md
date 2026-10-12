@@ -1802,9 +1802,10 @@ The interface, extended by concrete subtypes (unexported — extend
 
 Beside the interface, `barwindow(s, n, intypes)` builds a state over the last
 `n` rows for a summarizer whose own state needs a trailing window,
-`barinputcolumns(s)` gives the columns such a window reads, and `barterms(s)`
-its row terms, for the optional `rowterms(s) -> NamedTuple` hook (defaults to
-`(;)`) to hoist; see "Count windows inside a state" below.
+`barinputcolumns(s)` gives the columns such a window reads, and
+`barterms(s; hoistedby)` its row terms, for the optional
+`rowterms(s) -> NamedTuple` hook (defaults to `(;)`) to hoist; see "Count
+windows inside a state" below.
 
 Output column names are deterministic, formed by suffixing the column name:
 `Sum(:x)` produces `:x_sum`, `Min(:x)` produces `:x_min`, and `SumPower(:x, 2)`
@@ -2549,20 +2550,32 @@ state holding `s`'s states over the last `n` rows folded into it.
   projection, and which columns the term's function reads is opaque (probing
   it with a recording row misses branches and type-dependent paths, so that
   was rejected).
-- **Hoisted row terms.** The outer summarizer returns `barterms(s)` (the terms
-  of `s`'s expansion) from its `rowterms`, so `prototypes` collects them with
-  the call's own terms: `terminput` evaluates them per chunk, before the
-  projection, and checks them against input columns and same-named terms as
-  any other. `barterms` keys each term by a reserved name, `#barterm#d` for a
-  term `:d`, which only the transform's evaluation of that term can produce.
-  Built with `hoisted = true`, the window then reads each term from the
-  reserved column of `intypes` (one missing from it is an `ArgumentError`),
-  stores it under its own name and evaluates nothing, and
-  `barinputcolumns(s; hoisted = true)` names the reserved columns. With no
+- **Hoisted row terms.** The outer summarizer `o` returns
+  `barterms(s; hoistedby = o)` (the terms of `s`'s expansion) from its
+  `rowterms`, so `prototypes` collects them with the call's own terms:
+  `terminput` evaluates them per chunk, before the projection, and checks them
+  against input columns and same-named terms as any other. `barterms` keys
+  each term by a reserved name scoped by `o`'s first output column,
+  `#barterm#lastn#d` for a term `:d` of an `o` producing `:lastn`, which only
+  the transform's evaluation of that term can produce. Built with
+  `hoistedby = o`, the window then reads each term from the reserved column of
+  `intypes` (one missing from it is an `ArgumentError`), stores it under its
+  own name and evaluates nothing, and `barinputcolumns(s; hoistedby = o)`
+  names the reserved columns. With no
   term left to read an arbitrary column, the window stores only the columns
   `s`'s expansion reads (all of them when one may read any), so a transform
   that doesn't project its input (`summarize`, say) costs no extra copy.
-  - The flag is explicit rather than inferred from a term's name being in
+  - The scope is the outer summarizer's because output names are unique
+    within a call, so two outer summarizers' windows never share a term
+    namespace. Unscoped, every window's terms joined the call's one
+    namespace, and two windows each reading a term `:d` through a different
+    function (two instances of one indicator over different columns, say)
+    failed as one term defined twice, though neither window could see the
+    other's. A term's function identity was rejected as the scope: a closure
+    capturing different values per instance would then key the term
+    differently, making the transforms' row types, and so their compiled
+    kernels, distinct per instance.
+  - The owner is explicit rather than inferred from a term's name being in
     `intypes`, and the column name is reserved rather than the term's own,
     for one reason: a column named after the term must never stand in for it.
     Under the term's own name, a wrapper forwarding `fresh` but not `rowterms`

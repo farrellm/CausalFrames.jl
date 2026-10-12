@@ -171,8 +171,8 @@ dependent one, or [`Count`](@ref)) declares `()`. A state folding rows through
 [`barinputcolumns`](@ref). An inner row term is evaluated before the rows are
 stored only when the state hoists it (see [`rowterms`](@ref)); otherwise
 `barinputcolumns` is `nothing`, and the state may instead declare the columns
-the term's function reads. Declaring a column it does not read only costs speed; leaving
-out one it reads is an error when it is read.
+the term's function reads. Declaring a column it does not read only costs
+speed; leaving out one it reads is an error when it is read.
 """
 inputcolumns(::Summarizer) = nothing
 
@@ -234,19 +234,47 @@ the input row; each becomes a column of the rows passed to
 [`update!`](@ref). Defaults to `(;)`. A summarizer whose state folds rows
 through [`barwindow`](@ref) uses it to hoist its window's row terms out of the
 window, so that its [`inputcolumns`](@ref) can name every column the window
-reads:
+reads. A term follows the rules of [Row terms](@ref): the same name must
+always be the same function, across every summarizer of a call, and may not
+name an input column.
 
-```julia
-CausalFrames.rowterms(s::MyIndicator) = CausalFrames.barterms(s.inner)
-CausalFrames.inputcolumns(s::MyIndicator) =
-    CausalFrames.barinputcolumns(s.inner; hoisted = true)
-CausalFrames.fresh(s::MyIndicator, intypes::NamedTuple) =
-    MyIndicatorState(CausalFrames.barwindow(s.inner, s.n, intypes; hoisted = true))
+```jldoctest
+struct Trailing{S<:Summarizer} <: Summarizer
+    inner::S
+    n::Int
+end
+struct TrailingState{W<:SummarizerState} <: SummarizerState
+    window::W
+end
+CausalFrames.emptyvalue(::Trailing) = (; trailing = missing)
+CausalFrames.rowterms(s::Trailing) = CausalFrames.barterms(s.inner; hoistedby = s)
+CausalFrames.inputcolumns(s::Trailing) =
+    CausalFrames.barinputcolumns(s.inner; hoistedby = s)
+CausalFrames.fresh(s::Trailing, intypes::NamedTuple) =
+    TrailingState(CausalFrames.barwindow(s.inner, s.n, intypes; hoistedby = s))
+CausalFrames.fresh(st::TrailingState) = TrailingState(CausalFrames.fresh(st.window))
+CausalFrames.update!(st::TrailingState, row) = CausalFrames.update!(st.window, row)
+function CausalFrames.value(st::TrailingState)
+    v = CausalFrames.value(st.window)
+    return NamedTuple{(:trailing,),Tuple{fieldtype(typeof(v), 1)}}((v[1],))
+end
+
+df = DataFrame(time = 1:4, high = [5.0, 6.0, 8.0, 7.0], low = [4.0, 4.5, 5.0, 6.0])
+p = readtable(df) |>
+    addsummarycolumns(Trailing(Mean(:spread => r -> r.high - r.low), 2))
+DataFrame(load(Context(0, 10), p))
+
+# output
+
+4×4 DataFrame
+ Row │ time   high     low      trailing
+     │ Int64  Float64  Float64  Float64?
+─────┼─────────────────────────────────────
+   1 │     1      5.0      4.0  missing
+   2 │     2      6.0      4.5        1.25
+   3 │     3      8.0      5.0        2.25
+   4 │     4      7.0      6.0        2.0
 ```
-
-A term follows the rules of [Row terms](@ref): the same name must always be
-the same function, across every summarizer of a call, and may not name an
-input column.
 """
 rowterms(::Summarizer) = (;)
 rowterms(t::Termed) = t.terms
@@ -276,15 +304,23 @@ termtuple(pairs::Vector{Pair{Symbol,Any}}) =
 
 `s`, carrying the row terms among `specs`, which are the [`ColumnSpec`](@ref)s
 `s` was built from. A constructor taking a column calls it on the summarizer
-built from the specs' names:
-
-```julia
-MySum(column::ColumnSpec) = withterms(MySum{colname(column)}(), column)
-```
+built from the specs' names, as [`Sum`](@ref)'s does:
+`Sum(column::ColumnSpec) = withterms(Sum{colname(column)}(), column)`.
 
 With no row term among `specs` it returns `s` itself. A row term may not be
 named `:time`, and two row terms with the same name must be the same function;
 either is an `ArgumentError` naming `s`'s type.
+
+```jldoctest
+double = r -> 2r.x
+s = CausalFrames.withterms(Sum{:d}(), :d => double)
+(CausalFrames.rowterms(s) === (; d = double),
+    CausalFrames.withterms(Sum{:x}(), :x) === Sum{:x}())
+
+# output
+
+(true, true)
+```
 """
 function withterms(s::Summarizer, specs::ColumnSpec...)
     any(p -> p isa Pair, specs) || return s

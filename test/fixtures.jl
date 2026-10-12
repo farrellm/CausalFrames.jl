@@ -260,24 +260,29 @@ CausalFrames.inputcolumns(::LastNMean{C}) where {C} =
 # LastNMean's counterpart over any inner monoid, row terms included: `inner`'s
 # first value over the last `n` rows, its row terms hoisted out of the window
 # so the transforms evaluate them and the stored rows need only the terms.
-struct LastN{S<:Summarizer} <: Summarizer
+struct LastN{N,S<:Summarizer} <: Summarizer
     inner::S
     n::Int
 end
-struct LastNState{W<:SummarizerState} <: SummarizerState
+# Output `:lastn` unless named, so two can share a call.
+LastN(inner::Summarizer, n::Int) = LastN{:lastn}(inner, n)
+LastN{N}(inner::S, n::Int) where {N,S} = LastN{N,S}(inner, n)
+struct LastNState{N,W<:SummarizerState} <: SummarizerState
     window::W
 end
-CausalFrames.emptyvalue(::LastN) = (; lastn = missing)
-CausalFrames.rowterms(s::LastN) = CausalFrames.barterms(s.inner)
+LastNState{N}(window::W) where {N,W} = LastNState{N,W}(window)
+CausalFrames.emptyvalue(::LastN{N}) where {N} = NamedTuple{(N,)}((missing,))
+CausalFrames.rowterms(s::LastN) = CausalFrames.barterms(s.inner; hoistedby = s)
 CausalFrames.inputcolumns(s::LastN) =
-    CausalFrames.barinputcolumns(s.inner; hoisted = true)
-CausalFrames.fresh(s::LastN, intypes::NamedTuple) =
-    LastNState(CausalFrames.barwindow(s.inner, s.n, intypes; hoisted = true))
-CausalFrames.fresh(st::LastNState) = LastNState(CausalFrames.fresh(st.window))
+    CausalFrames.barinputcolumns(s.inner; hoistedby = s)
+CausalFrames.fresh(s::LastN{N}, intypes::NamedTuple) where {N} =
+    LastNState{N}(CausalFrames.barwindow(s.inner, s.n, intypes; hoistedby = s))
+CausalFrames.fresh(st::LastNState{N}) where {N} =
+    LastNState{N}(CausalFrames.fresh(st.window))
 CausalFrames.update!(st::LastNState, row) = CausalFrames.update!(st.window, row)
-function CausalFrames.value(st::LastNState)
+function CausalFrames.value(st::LastNState{N}) where {N}
     v = CausalFrames.value(st.window)
-    return NamedTuple{(:lastn,),Tuple{fieldtype(typeof(v), 1)}}((v[1],))
+    return NamedTuple{(N,),Tuple{fieldtype(typeof(v), 1)}}((v[1],))
 end
 # The declared field type, not the value's: `missing` until the window fills.
 function CausalFrames.value(st::LastNMeanState{C,N}) where {C,N}

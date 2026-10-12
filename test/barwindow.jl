@@ -193,23 +193,25 @@ end
         @test CF.barinputcolumns(RangeTotal()) === nothing
         @test CF.inputcolumns(LastNMean(:x, 3)) == (:x,)
         # a hoisted term is a stored column
+        owner = LastN(Sum(:x), 3)
         @test CF.barinputcolumns(Covariance(:x, :d => r -> 2r.x);
-            hoisted = true) == (:d, :x, Symbol("#barterm#d"))
-        @test CF.barinputcolumns(RangeTotal(); hoisted = true) === nothing
+            hoistedby = owner) == (:d, :x, Symbol("#barterm#lastn#d"))
+        @test CF.barinputcolumns(RangeTotal(); hoistedby = owner) === nothing
     end
 
     @testset "hoisted row terms" begin
         double = r -> 2r.x
-        @test CF.barterms(Sum(:x)) === (;)
-        hd = Symbol("#barterm#d")
-        @test CF.barterms(Covariance(:x, :d => double)) ===
+        owner = LastN(Sum(:x), 3)
+        @test CF.barterms(Sum(:x); hoistedby = owner) === (;)
+        hd = Symbol("#barterm#lastn#d")
+        @test CF.barterms(Covariance(:x, :d => double); hoistedby = owner) ===
               NamedTuple{(hd,)}((double,))
-        @test CF.barterms(RangeTotal()) ===
-              NamedTuple{(Symbol("#barterm#range"),)}((rangeterm,))
+        @test CF.barterms(RangeTotal(); hoistedby = owner) ===
+              NamedTuple{(Symbol("#barterm#lastn#range"),)}((rangeterm,))
         # A hoisted term is read as a column of its reserved name, not
         # evaluated again.
         types = NamedTuple{(:x, hd)}((Float64, Float64))
-        st = CF.barwindow(Sum(:d => double), 2, types; hoisted = true)
+        st = CF.barwindow(Sum(:d => double), 2, types; hoistedby = owner)
         foreach(r -> CF.update!(st, NamedTuple{(:x, hd)}(r)),
             ((1.0, 10.0), (2.0, 20.0)))
         @test CF.value(st) == (d_sum = 30.0,)
@@ -222,15 +224,15 @@ end
         ) CF.widenstate(st, merge(types, (d = Float64,)))
         @test_throws ArgumentError(
             "barwindow hoisted row term :d not found in the input; " *
-            "return `barterms(s)` from the outer summarizer's `rowterms`",
-        ) CF.barwindow(Sum(:d => double), 2, (x = Float64,); hoisted = true)
+            "return `barterms(s; hoistedby)` from the outer summarizer's `rowterms`",
+        ) CF.barwindow(Sum(:d => double), 2, (x = Float64,); hoistedby = owner)
         # An input column of the term's own name is reported, not read as it,
         # hoisted or not: a wrapper that leaves out `rowterms` can't make the
         # window read the column in the term's place.
         @test_throws ArgumentError(
             "barwindow row term :d collides with an input column",
         ) CF.barwindow(Sum(:d => double), 2, (x = Float64, d = Float64);
-            hoisted = true)
+            hoistedby = owner)
 
         # The transforms evaluate the hoisted terms, keep only them, and agree
         # with an unhoisted window over every column.
@@ -283,8 +285,20 @@ end
         end
         @test_throws ArgumentError(
             "barwindow hoisted row term :d not found in the input; " *
-            "return `barterms(s)` from the outer summarizer's `rowterms`",
+            "return `barterms(s; hoistedby)` from the outer summarizer's `rowterms`",
         ) load(Context(0, 10), readtable(df) |> addsummarycolumns(Opaque(hoisted)))
+        # Two outer summarizers' windows each have a term `:d` of their own.
+        triple = r -> 3r.x
+        out = DataFrame(
+            load(Context(0, 10),
+                readtable(df) |> addrollingcolumns((w = 10,),
+                    [hoisted, LastN{:other}(Mean(:d => triple), 3)])),
+        )
+        @test isequal(out.w_lastn, expected)
+        @test isequal(out.w_other, 1.5 .* expected)
+        @test CF.rowterms(LastN{:other}(Mean(:d => triple), 3)) ===
+              NamedTuple{(Symbol("#barterm#other#d"),)}((triple,))
+
         # The constructor's terms and the summarizer's own both count.
         protos, _, terms = CF.prototypes(
             CF.Summarizer[CF.Termed(hoisted, (; e = rangeterm))], Symbol[])
