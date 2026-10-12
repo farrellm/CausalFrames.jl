@@ -455,8 +455,11 @@ design rationale and performance constraints behind each module.
   never index the value vectors by a runtime window number. A widening with
   Bars windows rebuilds rings and trees from each key's longest live suffix
   (`barsuffixes`). Every admitted row passes through `join.jl`'s `rowat`, which
-  builds it with `ntuple` over `Val`, not `map`: Base's tuple `map` stops
-  unrolling at 32 columns, a 10x cliff on a wide input (issue #98)
+  is generated to write each field straight into the row type: Base's tuple
+  `map` stops unrolling at 32 columns, a 10x cliff on a wide input (issue
+  #98), and a row built as a tuple first is boxed per row when it is passed
+  on (a row term's argument) rather than stored, once a column admits
+  `missing`
 - `src/intervalize.jl` — `intervalize`, the third binary transform: summarize
   over the intervals a `clock` pipeline defines (`[bₖ, bₖ₊₁)`, timestamped at
   `bₖ₊₁`). It is the `summarizecycles` fold, closing on clock boundaries.

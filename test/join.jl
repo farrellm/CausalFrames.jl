@@ -275,6 +275,34 @@
         end
         @test widerowalloc(31) == 0
         @test widerowalloc(40) == 0
+
+        # A row passed on rather than stored, as to a row term, is not boxed
+        # though its columns admit `missing`: built as a tuple, its type
+        # depended on the values. Asserted as a slope, since on Julia 1.10
+        # the call boundary boxes the returned sum once.
+        @noinline firstfield(r) = getfield(r, 1)
+        function passrows(::Type{V}, nt) where {V}
+            s = 0.0
+            for i in eachindex(first(nt))
+                s += firstfield(CausalFrames.rowat(V, nt, i))
+            end
+            return s
+        end
+        function unionrowalloc(k, n)
+            nt = NamedTuple{Tuple(Symbol.(:c, 1:k))}(
+                Tuple(
+                    Vector{Union{Missing,Float64}}(fill(1.0, n)) for _ in 1:k),
+            )
+            V = CausalFrames.storerowtype(map(eltype, nt))
+            passrows(V, nt)
+            return @allocated passrows(V, nt)
+        end
+        @test unionrowalloc(8, 1000) <= unionrowalloc(8, 10)
+        @test unionrowalloc(40, 1000) <= unionrowalloc(40, 10)
+        # each field is converted to a wider store type
+        W = @NamedTuple{a::Float64, b::Union{Missing,Int}}
+        row = CausalFrames.rowat(W, (b = [missing, 2], a = [1, 3]), 2)
+        @test row isa W && row == (a = 3.0, b = 2)
     end
 
     @testset "empty streams" begin
