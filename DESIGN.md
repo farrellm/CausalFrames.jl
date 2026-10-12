@@ -2243,10 +2243,20 @@ its constructor's (the `Termed` carrier's) and under the same rules; it exists
 to hoist a count window's inner terms (see "Count windows inside a state").
 
 Per chunk, each summarizing transform builds its input with `terminput`: the
-chunk's column table merged with one vector per term, computed behind the same
-`rowvalues` barrier `addcolumns` uses. The input types are read from that merged
-table, so a term's element type follows its values chunk by chunk and widens
-through the ordinary `widenstate` path; there is no `promote_op` over `f`.
+chunk's column table merged with one vector per term, computed behind the
+`termvalues` function barrier. A term's vector is typed by
+`promote_op(f, rowtype)` when that is concrete or a `Union` of concrete types,
+and by its values (the comprehension `addcolumns` uses) only when inference
+gives up (`Any` or an abstract type, as for a closure over an untyped global).
+Typed by its values, a term was data-dependent: `r -> r.x > 2 ? r.x : 1` gave
+`Float64` in a chunk where every row took one branch, `Real` (boxing every
+stored row) in a chunk mixing both, and its type could change between chunks,
+causing needless widenings (issue #103). Inferred, it is `Union{Float64,Int64}`
+in every chunk and changes only when an input column's type does. The input
+types are read from the merged table, so a term widens through the ordinary
+`widenstate` path. `addcolumns` stays value-typed: for a NamedTuple-returning
+function, inference can give the concrete `NamedTuple{(:a,),Tuple{Any}}`, an
+`Any` column where the values would narrow.
 Everything downstream — compensation, nonfinite and `missing` counting,
 the running tier's eviction, rolling buffers — sees an ordinary column, and
 `f` runs once per row however many summarizers read the term. The cost is one
@@ -2528,7 +2538,11 @@ state holding `s`'s states over the last `n` rows folded into it.
   `Bars` windows) of `n + 1` rows, so the row leaving is still there to
   downdate after the push. Rows are stored with their row terms evaluated:
   a term's type is inferred from `intypes` (there is no chunk to take it
-  from) and must be concrete or a `Union` of concrete types, and a row is
+  from) and must be concrete or a `Union` of concrete types (a hoisted term's
+  column type too, so a term is accepted hoisted exactly when it is unhoisted,
+  except that a hoisted term inference gives up on is typed by its values and
+  passes if they are concrete: the window sees only its projected row type and
+  cannot re-infer it), and a row is
   downdated with exactly the values it was folded with. Once its terms are
   evaluated only `s`'s expansion reads a row, so a stored row keeps just the
   terms, `:time` (which `inputcolumns` leaves out, though `update!` may read
@@ -2592,7 +2606,7 @@ state holding `s`'s states over the last `n` rows folded into it.
     whichever transform runs. A top-level term of the same name counts as
     such a column, so a hoisted term isn't shared with one.
   - Hoisting doesn't change how often a term runs (once per row either way).
-    It buys the projection, and moves evaluation behind `rowvalues`'
+    It buys the projection, and moves evaluation behind `termvalues`'
     per-chunk barrier.
 - **Typing.** The tiers come from runtime `isinvertible` values, so the state's
   type is not inferrable from the argument types. An outer state takes it as a

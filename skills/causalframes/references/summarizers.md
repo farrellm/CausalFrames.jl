@@ -12,7 +12,10 @@ A summarizer's input can be a per-row expression instead of a column: every
 summarizer but `FitModel` takes a *row term* `name => f` wherever it takes a
 column name (a `CausalFrames.ColumnSpec`). The term acts as a virtual
 input column `name` holding `f(row)`, so its output is named as a column's
-would be, and it widens, compensates and counts `missing` as a column does. The
+would be, and it widens, compensates and counts `missing` as a column does. Its
+element type is inferred from `f` (`Union{Float64, Int64}` for
+`r -> r.x > 2 ? r.x : 1` over a `Float64` column), or taken from its values when
+inference gives up. The
 transform computes each term once per row and never adds it to its output, so
 there's no scratch column to drop afterwards.
 
@@ -955,7 +958,8 @@ as a type parameter.
   `barterms` from its `rowterms`, so the summarizing transforms
   evaluate them over each chunk before storing its rows; the window then reads
   each term from the reserved column `barterms` names it by, and a term whose
-  column is missing from `intypes` is an `ArgumentError`. A column of the
+  column is missing from `intypes`, or whose column type is not concrete or a
+  `Union` of concrete types, is an `ArgumentError`. A column of the
   term's own name is never read in its place. With `nothing`, the window
   evaluates the terms itself.
 

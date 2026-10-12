@@ -276,8 +276,13 @@ design rationale and performance constraints behind each module.
   it unwrapped. Every summarizing transform (these three, `intervalize`,
   `addrollingcolumns`, `summarizewindows`) reads its summarizers' input through
   `terminput`: the chunk's column table plus one vector per term (per chunk,
-  behind `rowvalues`' barrier), with input types taken from that table so term
-  types widen like columns. The term vectors must never reach an output.
+  behind `termvalues`' barrier, typed by `promote_op` over the row type and by
+  the values only when inference gives up, so a term's type is the same in
+  every chunk and never abstract when it infers), with input types taken from
+  that table so term types widen like columns. `addcolumns` keeps the
+  value-typed `rowvalues`: for a NamedTuple-returning function inference can
+  give the concrete `NamedTuple{(:a,),Tuple{Any}}`, an `Any` column where the
+  values would narrow. The term vectors must never reach an output.
   The two transforms that store rows (`addrollingcolumns`,
   `summarizewindows`) then cut that table to `storedcolumns` (`:time`, the
   keys and the summarizers' `inputcolumns`) with `projectinput`, per chunk:
