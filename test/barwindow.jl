@@ -201,6 +201,11 @@ end
 
     @testset "hoisted row terms" begin
         double = r -> 2r.x
+        collides = ArgumentError("barwindow row term :d collides with an input column")
+        notfound = ArgumentError(
+            "barwindow hoisted row term :d not found in the input; " *
+            "return `barterms(s; hoistedby)` from the outer summarizer's `rowterms`",
+        )
         owner = LastN(Sum(:x), 3)
         @test CF.barterms(Sum(:x); hoistedby = owner) === (;)
         hd = Symbol("#barterm#lastn#d")
@@ -223,19 +228,17 @@ end
             hoistedby = owner)
         @test fieldnames(eltype(tst.ring.rows)) == (:time, :d)
         # a widening re-checks the terms against the wider input
-        @test_throws ArgumentError(
-            "barwindow row term :d collides with an input column",
-        ) CF.widenstate(st, merge(types, (d = Float64,)))
-        @test_throws ArgumentError(
-            "barwindow hoisted row term :d not found in the input; " *
-            "return `barterms(s; hoistedby)` from the outer summarizer's `rowterms`",
-        ) CF.barwindow(Sum(:d => double), 2, (x = Float64,); hoistedby = owner)
+        @test_throws collides CF.widenstate(st, merge(types, (d = Float64,)))
+        @test_throws notfound CF.barwindow(
+            Sum(:d => double),
+            2,
+            (x = Float64,);
+            hoistedby = owner,
+        )
         # An input column of the term's own name is reported, not read as it,
         # hoisted or not: a wrapper that leaves out `rowterms` can't make the
         # window read the column in the term's place.
-        @test_throws ArgumentError(
-            "barwindow row term :d collides with an input column",
-        ) CF.barwindow(Sum(:d => double), 2, (x = Float64, d = Float64);
+        @test_throws collides CF.barwindow(Sum(:d => double), 2, (x = Float64, d = Float64);
             hoistedby = owner)
 
         # The transforms evaluate the hoisted terms, keep only them, and agree
@@ -277,7 +280,6 @@ end
         # A top-level term of the name, or an input column of it, is reported;
         # a wrapper that leaves out `rowterms` is reported, input column or
         # not, rather than reading the column as the term.
-        collides = ArgumentError("barwindow row term :d collides with an input column")
         @test_throws collides load(Context(0, 10),
             readtable(df) |> addsummarycolumns([hoisted, Sum(:d => double)]))
         withd = DataFrame(time = 1:2, x = [1.0, 2.0], d = [0.0, 0.0])
@@ -287,10 +289,10 @@ end
 
             @test_throws collides load(Context(0, 10), readtable(withd) |> t)
         end
-        @test_throws ArgumentError(
-            "barwindow hoisted row term :d not found in the input; " *
-            "return `barterms(s; hoistedby)` from the outer summarizer's `rowterms`",
-        ) load(Context(0, 10), readtable(df) |> addsummarycolumns(Opaque(hoisted)))
+        @test_throws notfound load(
+            Context(0, 10),
+            readtable(df) |> addsummarycolumns(Opaque(hoisted)),
+        )
         # Two outer summarizers' windows each have a term `:d` of their own.
         triple = r -> 3r.x
         out = DataFrame(

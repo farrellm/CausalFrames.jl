@@ -118,14 +118,11 @@ function prototypes(
     used = Set{Symbol}()
     terms = Pair{Symbol,Any}[]
     function expand(t::Summarizer)
-        for (n, f) in pairs(rowterms(t))
-            addterm!(terms, n, f, op)
-        end
         s = unterm(t)
-        if t isa Termed  # a summarizer's own hook, under its constructor's terms
-            for (n, f) in pairs(rowterms(s))
-                addterm!(terms, n, f, op)
-            end
+        # the constructor's terms, then the summarizer's own hook (the same
+        # terms again when `t` is unwrapped, which `addterm!` skips)
+        for x in (t, s), (n, f) in pairs(rowterms(x))
+            addterm!(terms, n, f, op)
         end
         outnames = keys(emptyvalue(s))
         outnames in seen && return

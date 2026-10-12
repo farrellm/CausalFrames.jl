@@ -76,6 +76,13 @@ windowterms(terms::NamedTuple, ::Nothing) = terms
 windowterms(terms::NamedTuple, owner::Summarizer) =
     HoistedTerms{keys(terms),hoistednames(owner, keys(terms))}()
 
+# A window's hoisted row terms, by name: columns of its rows, already
+# evaluated under the names H.
+struct HoistedTerms{K,H} end
+
+termnames(terms::NamedTuple) = keys(terms)
+termnames(::HoistedTerms{K}) where {K} = K
+
 # The row terms against the input types, at construction and on every
 # widening (a later chunk may add a column of a term's name).
 function checkbarterms(terms, intypes::NamedTuple)
@@ -85,16 +92,19 @@ function checkbarterms(terms, intypes::NamedTuple)
                 "barwindow row term $(repr(k)) collides with an input column"),
         )
     end
-    if terms isa HoistedTerms
-        for (k, h) in zip(termnames(terms), hoistednames(terms))
-            haskey(intypes, h) || throw(
-                ArgumentError(
-                    "barwindow hoisted row term $(repr(k)) not found in the input; " *
-                    "return `barterms(s; hoistedby)` from the outer summarizer's " *
-                    "`rowterms`",
-                ),
-            )
-        end
+    return checkhoisted(terms, intypes)
+end
+
+checkhoisted(::NamedTuple, ::NamedTuple) = nothing
+function checkhoisted(::HoistedTerms{K,H}, intypes::NamedTuple) where {K,H}
+    for (k, h) in zip(K, H)
+        haskey(intypes, h) || throw(
+            ArgumentError(
+                "barwindow hoisted row term $(repr(k)) not found in the input; " *
+                "return `barterms(s; hoistedby)` from the outer summarizer's " *
+                "`rowterms`",
+            ),
+        )
     end
     return nothing
 end
@@ -106,14 +116,6 @@ end
 # never share a term namespace: `#barterm#lastn#d` for `:lastn`'s term `:d`.
 hoistednames(owner::Summarizer, ks::Tuple{Vararg{Symbol}}) =
     map(k -> Symbol("#barterm#", first(keys(emptyvalue(owner))), "#", k), ks)
-
-# A window's hoisted row terms, by name: columns of its rows, already
-# evaluated under the names H.
-struct HoistedTerms{K,H} end
-
-termnames(terms::NamedTuple) = keys(terms)
-termnames(::HoistedTerms{K}) where {K} = K
-hoistednames(::HoistedTerms{K,H}) where {K,H} = H
 
 """
     barterms(s::Summarizer; hoistedby::Summarizer) -> NamedTuple
@@ -221,13 +223,10 @@ end
 
 function barwindowtypes(::HoistedTerms{K,hs}, intypes::NamedTuple,
     protos::Tuple) where {K,hs}
-    read = readcolumns(protos, [:time])
-    cols = Tuple(
-        k for k in keys(intypes)
-              if !(k in hs) && (read === nothing || k in read)
-    )
-    types = map(k -> intypes[k], (cols..., hs...))
-    return NamedTuple{(cols..., hs...)}(types), NamedTuple{(cols..., K...)}(types)
+    base = projectinput(Base.structdiff(intypes, NamedTuple{hs}),
+        storedcolumns(protos, Symbol[]))
+    hoisted = values(NamedTuple{hs}(intypes))
+    return merge(base, NamedTuple{hs}(hoisted)), merge(base, NamedTuple{K}(hoisted))
 end
 
 concreteterm(T) =

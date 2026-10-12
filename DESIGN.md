@@ -2561,12 +2561,11 @@ state holding `s`'s states over the last `n` rows folded into it.
   `hoistedby = o`, the window then reads each term from the reserved column of
   `intypes` (one missing from it is an `ArgumentError`), stores it under its
   own name and evaluates nothing, and `barinputcolumns(s; hoistedby = o)`
-  names the reserved columns. With no
-  term left to read an arbitrary column, the window stores only `:time` and
-  the columns `s`'s expansion reads (all of them when one may read any;
-  `:time` because `inputcolumns` leaves it out, though `update!` may read
-  it), so a transform
-  that doesn't project its input (`summarize`, say) costs no extra copy.
+  names the reserved columns. With no term left to read an arbitrary column,
+  the window stores only `:time` and the columns `s`'s expansion reads (all
+  of them when one may read any; `:time` because `inputcolumns` leaves it
+  out, though `update!` may read it), so a transform that doesn't project its
+  input (`summarize`, say) costs no extra copy.
   - The scope is the outer summarizer's because output names are unique
     within a call, so two outer summarizers' windows never share a term
     namespace. Unscoped, every window's terms joined the call's one
