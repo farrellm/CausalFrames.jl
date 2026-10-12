@@ -3,7 +3,7 @@ const CF = CausalFrames
 # `s`'s value re-folded from scratch over `rows`, the reference for a window.
 function barrefold(s, rows, intypes)
     protos, requested, terms = CF.prototypes(CF.Summarizer[s], Symbol[])
-    types = CF.barwindowtypes(terms, intypes)
+    types = last(CF.barwindowtypes(terms, intypes, protos))
     states = CF.newstates(protos, types)
     for r in rows
         base = NamedTuple{keys(intypes)}(r)
@@ -178,6 +178,137 @@ end
         states = CF.newstates(protos, (time = Int, x = Float64))
         nt = (time = collect(1:200), x = [sin(0.37 * i) for i in 1:200])
         @test barfoldalloc(states, nt, Val(requested)) == 0
+    end
+
+    @testset "barinputcolumns" begin
+        @test CF.barinputcolumns(Sum(:x)) == (:x,)
+        # dependencies expanded, each column once
+        @test CF.barinputcolumns(Std(:x)) == (:x,)
+        @test CF.barinputcolumns(Covariance(:x, :y)) == (:x, :y)
+        @test CF.barinputcolumns(Count()) == ()
+        # a summarizer that may read any column, and an inner row term,
+        # keep every column
+        @test CF.barinputcolumns(Opaque(Sum(:x))) === nothing
+        @test CF.barinputcolumns(Mean(:d => r -> 2r.x)) === nothing
+        @test CF.barinputcolumns(RangeTotal()) === nothing
+        @test CF.inputcolumns(LastNMean(:x, 3)) == (:x,)
+        # a hoisted term is a stored column
+        owner = LastN(Sum(:x), 3)
+        @test CF.barinputcolumns(Covariance(:x, :d => r -> 2r.x);
+            hoistedby = owner) == (:d, :x, Symbol("#barterm#lastn#d"))
+        @test CF.barinputcolumns(RangeTotal(); hoistedby = owner) === nothing
+    end
+
+    @testset "hoisted row terms" begin
+        double = r -> 2r.x
+        collides = ArgumentError("barwindow row term :d collides with an input column")
+        notfound = ArgumentError(
+            "barwindow hoisted row term :d not found in the input; " *
+            "return `barterms(s; hoistedby)` from the outer summarizer's `rowterms`",
+        )
+        owner = LastN(Sum(:x), 3)
+        @test CF.barterms(Sum(:x); hoistedby = owner) === (;)
+        hd = Symbol("#barterm#lastn#d")
+        @test CF.barterms(Covariance(:x, :d => double); hoistedby = owner) ===
+              NamedTuple{(hd,)}((double,))
+        @test CF.barterms(RangeTotal(); hoistedby = owner) ===
+              NamedTuple{(Symbol("#barterm#lastn#range"),)}((rangeterm,))
+        # A hoisted term is read as a column of its reserved name, not
+        # evaluated again.
+        types = NamedTuple{(:x, hd)}((Float64, Float64))
+        st = CF.barwindow(Sum(:d => double), 2, types; hoistedby = owner)
+        foreach(r -> CF.update!(st, NamedTuple{(:x, hd)}(r)),
+            ((1.0, 10.0), (2.0, 20.0)))
+        @test CF.value(st) == (d_sum = 30.0,)
+        @test CF.value(CF.widenstate(st, types)) == (d_sum = 30.0,)
+        # only the columns the window's summarizers read are stored
+        @test fieldnames(eltype(st.ring.rows)) == (:d,)
+        # and `:time`, which `inputcolumns` leaves out but `update!` may read
+        tst = CF.barwindow(Sum(:d => double), 2, merge((time = Int,), types);
+            hoistedby = owner)
+        @test fieldnames(eltype(tst.ring.rows)) == (:time, :d)
+        # a widening re-checks the terms against the wider input
+        @test_throws collides CF.widenstate(st, merge(types, (d = Float64,)))
+        @test_throws notfound CF.barwindow(
+            Sum(:d => double),
+            2,
+            (x = Float64,);
+            hoistedby = owner,
+        )
+        # An input column of the term's own name is reported, not read as it,
+        # hoisted or not: a wrapper that leaves out `rowterms` can't make the
+        # window read the column in the term's place.
+        @test_throws collides CF.barwindow(Sum(:d => double), 2, (x = Float64, d = Float64);
+            hoistedby = owner)
+
+        # The transforms evaluate the hoisted terms, keep only them, and agree
+        # with an unhoisted window over every column.
+        df = DataFrame(time = 1:8, k = repeat(["a", "b"], 4),
+            x = Float64.(1:8), u = fill(missing, 8))
+        hoisted = LastN(Mean(:d => double), 3)
+        @test CF.rowterms(hoisted) === NamedTuple{(hd,)}((double,))
+        @test CF.inputcolumns(hoisted) == (:d, hd)
+        expected = [missing, missing, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0]
+        for t in (addsummarycolumns(hoisted),
+            addrollingcolumns((w = 10,), hoisted))
+            out = DataFrame(load(Context(0, 10), readtable(df) |> t))
+            @test isequal(out[!, end], expected)
+            @test !("d" in names(out))
+        end
+        rec = Recording(hoisted, CF.inputcolumns(hoisted))
+        out = DataFrame(
+            load(Context(0, 10),
+                readtable(df) |> addrollingcolumns((w = 10,), rec)),
+        )
+        @test !isempty(rec.seen)
+        @test all(==((:time, hd)), rec.seen)
+        @test isequal(out.w_lastn, expected)
+        win = DataFrame(
+            load(Context(0, 10),
+                readtable(df) |>
+                summarizewindows(clock(1), 10, [hoisted, LastNMean(:x, 3)])),
+        )
+        @test count(!ismissing, win.lastn) >= 3
+        @test isequal(win.lastn, 2 .* win.x_lastnmean)
+        @test only(
+            eachrow(
+                DataFrame(
+                    load(Context(0, 10),
+                        readtable(df) |> summarize(hoisted)))),
+        ).lastn == 14.0
+
+        # A top-level term of the name, or an input column of it, is reported;
+        # a wrapper that leaves out `rowterms` is reported, input column or
+        # not, rather than reading the column as the term.
+        @test_throws collides load(Context(0, 10),
+            readtable(df) |> addsummarycolumns([hoisted, Sum(:d => double)]))
+        withd = DataFrame(time = 1:2, x = [1.0, 2.0], d = [0.0, 0.0])
+        for s in (hoisted, Opaque(hoisted)),
+            t in (addsummarycolumns(s),
+                addrollingcolumns((w = 10,), s))
+
+            @test_throws collides load(Context(0, 10), readtable(withd) |> t)
+        end
+        @test_throws notfound load(
+            Context(0, 10),
+            readtable(df) |> addsummarycolumns(Opaque(hoisted)),
+        )
+        # Two outer summarizers' windows each have a term `:d` of their own.
+        triple = r -> 3r.x
+        out = DataFrame(
+            load(Context(0, 10),
+                readtable(df) |> addrollingcolumns((w = 10,),
+                    [hoisted, LastN{:other}(Mean(:d => triple), 3)])),
+        )
+        @test isequal(out.w_lastn, expected)
+        @test isequal(out.w_other, 1.5 .* expected)
+        @test CF.rowterms(LastN{:other}(Mean(:d => triple), 3)) ===
+              NamedTuple{(Symbol("#barterm#other#d"),)}((triple,))
+
+        # The constructor's terms and the summarizer's own both count.
+        protos, _, terms = CF.prototypes(
+            CF.Summarizer[CF.Termed(hoisted, (; e = rangeterm))], Symbol[])
+        @test terms === NamedTuple{(:e, hd)}((rangeterm, double))
     end
 
     @testset "validation" begin

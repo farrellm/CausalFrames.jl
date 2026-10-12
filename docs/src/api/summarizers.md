@@ -219,6 +219,9 @@ CausalFrames.combine!
 CausalFrames.downdate!
 CausalFrames.isinvertible
 CausalFrames.barwindow
+CausalFrames.barinputcolumns
+CausalFrames.barterms
+CausalFrames.rowterms
 CausalFrames.ColumnSpec
 CausalFrames.withterms
 ```

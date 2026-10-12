@@ -257,7 +257,8 @@ design rationale and performance constraints behind each module.
     carrier only when a spec is a pair. Every constructor takes one
     `ColumnSpec` per column argument (never a method per Symbol/Pair
     combination). `prototypes` strips the carrier, so states, tiers and
-    kernels never see it; don't add behaviour to `Termed` beyond `emptyvalue`
+    kernels never see it; don't add behaviour to `Termed` beyond `emptyvalue`.
+    A custom summarizer's `rowterms` hook is collected beside the carrier's
   - `FitModel` (MLJ) is the one summarizer whose value is an object: its state
     buffers the folded rows in concretely typed vectors and fits at `value`
     time through the `fitmodel` hook (src/models.jl), building
@@ -406,7 +407,16 @@ design rationale and performance constraints behind each module.
   `update!`/`value`, which those folds call, and inference's recursion limit
   on a repeated caller-to-callee edge would leave the inner fold dispatching
   and allocating per row. Its generated `bar*` folds have edges of their own;
-  `test/jet.jl` guards the embedded path
+  `test/jet.jl` guards the embedded path. `barinputcolumns` is the outer
+  state's `inputcolumns`, sharing `storedcolumns`' union (`readcolumns`);
+  `barterms` is its `rowterms`, hoisting the window's terms into the
+  transform's `terminput` under reserved `hoistednames`, scoped by the outer
+  summarizer's first output name (`#barterm#lastn#d`) so two windows' terms
+  never share a namespace, after which `hoistedby = outer` makes the window
+  read them from those columns (`HoistedTerms`) instead of evaluating them.
+  Never key a hoisted term by its own name: a wrapper that drops `rowterms`
+  would then have the window read a real input column of that name as the
+  term, silently
 - `src/rolling.jl` — `addrollingcolumns`. Summarizing its own input it runs it
   once (`rollinginputs`), teed to both sides, the tee's `keep` dropping the
   lead-in from the output side with `warmup`'s `dropleadin!`: a run per side

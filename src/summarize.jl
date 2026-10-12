@@ -99,10 +99,11 @@ end
 # (post-order depth-first), so every state precedes its dependents. Output
 # names must be unique across the whole set, but only the *requested* names
 # are checked against :time and the key columns, since hidden dependencies
-# never reach the output. Row terms (`Termed`) are unwrapped here, at any
-# depth, and collected by name. Returns the prototypes as a tuple (so the
-# states are a concrete tuple), the requested output names, in request order,
-# and the row terms as a NamedTuple of functions.
+# never reach the output. Row terms (`Termed`, or a summarizer's own
+# `rowterms`) are unwrapped here, at any depth, and collected by name. Returns
+# the prototypes as a tuple (so the states are a concrete tuple), the requested
+# output names, in request order, and the row terms as a NamedTuple of
+# functions.
 function prototypes(
     ss::Vector{Summarizer},
     keycols::Vector{Symbol},
@@ -117,10 +118,12 @@ function prototypes(
     used = Set{Symbol}()
     terms = Pair{Symbol,Any}[]
     function expand(t::Summarizer)
-        for (n, f) in pairs(rowterms(t))
+        s = unterm(t)
+        # the constructor's terms, then the summarizer's own hook (the same
+        # terms again when `t` is unwrapped, which `addterm!` skips)
+        for x in (t, s), (n, f) in pairs(rowterms(x))
             addterm!(terms, n, f, op)
         end
-        s = unterm(t)
         outnames = keys(emptyvalue(s))
         outnames in seen && return
         outnames in visiting && throw(
@@ -185,8 +188,11 @@ end
 # every column a summarizer reads, or `nothing` (keep all) when one may read
 # any. A stored row carries every kept column, so an unread column costs a copy
 # per row, and an unread `Union{Missing,T}` one boxes every row (issue #98).
-function storedcolumns(protos::Tuple, keycols)
-    cols = Symbol[:time; keycols]
+storedcolumns(protos::Tuple, keycols) = readcolumns(protos, Symbol[:time; keycols])
+
+# `cols` and the union of `protos`' `inputcolumns`, or `nothing` when one may
+# read any column.
+function readcolumns(protos::Tuple, cols::Vector{Symbol} = Symbol[])
     for s in protos
         ins = inputcolumns(s)
         ins === nothing && return nothing
