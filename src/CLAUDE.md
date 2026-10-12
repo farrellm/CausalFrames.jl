@@ -399,7 +399,8 @@ design rationale and performance constraints behind each module.
   extension API for recursive states needing their own trailing n rows). It
   reuses `prototypes` and `tiering`: groups slide windowed states over a
   `RowRing` of `n + 1` stored rows (row terms evaluated on admission, their
-  types inferred from `intypes`), the other monoids sit in `BarQueue`, a
+  types inferred from `intypes`; the row then cut to `:time`, the terms and the
+  columns `readcolumns` names, hoisted or not), the other monoids sit in `BarQueue`, a
   preallocated two-stack queue (measured 3-13x faster than a segment tree and
   flat in `n`; DESIGN.md has the table), and a plain summarizer is rejected.
   It must not call the transforms' tuple folds (`updateall!`, `freshall!`,
