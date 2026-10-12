@@ -2558,7 +2558,10 @@ state holding `s`'s states over the last `n` rows folded into it.
   Built with `hoisted = true`, the window then reads each term from the
   reserved column of `intypes` (one missing from it is an `ArgumentError`),
   stores it under its own name and evaluates nothing, and
-  `barinputcolumns(s; hoisted = true)` names the reserved columns.
+  `barinputcolumns(s; hoisted = true)` names the reserved columns. With no
+  term left to read an arbitrary column, the window stores only the columns
+  `s`'s expansion reads (all of them when one may read any), so a transform
+  that doesn't project its input (`summarize`, say) costs no extra copy.
   - The flag is explicit rather than inferred from a term's name being in
     `intypes`, and the column name is reserved rather than the term's own,
     for one reason: a column named after the term must never stand in for it.
@@ -2567,7 +2570,8 @@ state holding `s`'s states over the last `n` rows folded into it.
     column of that name. With the reserved name, the same wrapper fails with
     the "not found" error.
   - An input column of the term's own name is an `ArgumentError`, hoisted or
-    not, as in an unhoisted window. `barinputcolumns` keeps the term's own
+    not, as in an unhoisted window, and is checked again on every widening
+    (a later chunk may add one). `barinputcolumns` keeps the term's own
     name so the projection passes such a column through to be reported,
     whichever transform runs. A top-level term of the same name counts as
     such a column, so a hoisted term isn't shared with one.

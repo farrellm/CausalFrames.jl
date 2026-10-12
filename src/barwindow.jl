@@ -66,12 +66,19 @@ function barwindow(s::Summarizer, n::Integer, intypes::NamedTuple;
     n >= 1 || throw(ArgumentError("barwindow count must be positive, got $n"))
     protos, requested, terms =
         prototypes(Summarizer[s], Symbol[], "barwindow")
-    for k in keys(terms)
+    return newbarwindow(protos, Val(requested),
+        hoisted ? HoistedTerms{keys(terms)}() : terms, Int(n), intypes)
+end
+
+# The row terms against the input types, at construction and on every
+# widening (a later chunk may add a column of a term's name).
+function checkbarterms(terms, intypes::NamedTuple)
+    for k in termnames(terms)
         haskey(intypes, k) && throw(
             ArgumentError(
                 "barwindow row term $(repr(k)) collides with an input column"),
         )
-        hoisted && !haskey(intypes, hoistedname(k)) &&
+        terms isa HoistedTerms && !haskey(intypes, hoistedname(k)) &&
             throw(
                 ArgumentError(
                     "barwindow hoisted row term $(repr(k)) not found in the input; " *
@@ -79,8 +86,7 @@ function barwindow(s::Summarizer, n::Integer, intypes::NamedTuple;
                 ),
             )
     end
-    return newbarwindow(protos, Val(requested),
-        hoisted ? HoistedTerms{keys(terms)}() : terms, Int(n), intypes)
+    return nothing
 end
 
 # The column a hoisted row term is evaluated into: a name of its own, so that
@@ -91,6 +97,9 @@ hoistedname(k::Symbol) = Symbol("#barterm#", k)
 # A window's hoisted row terms, by name: columns of its rows, already
 # evaluated under their `hoistedname`s.
 struct HoistedTerms{K} end
+
+termnames(terms::NamedTuple) = keys(terms)
+termnames(::HoistedTerms{K}) where {K} = K
 
 """
     barterms(s::Summarizer) -> NamedTuple
@@ -167,8 +176,10 @@ end
 # The input row's columns and the stored row's: rows are stored with their row
 # terms evaluated, so a row is downdated with the values it was folded with and
 # no term runs twice. A hoisted term is read under its `hoistedname` and stored
-# under its own; the input columns are stored as they are.
-function barwindowtypes(terms::NamedTuple, intypes::NamedTuple)
+# under its own. The input columns are stored as they are, unless the terms are
+# hoisted: then nothing but `protos` reads a row, so only the columns they read
+# are kept.
+function barwindowtypes(terms::NamedTuple, intypes::NamedTuple, ::Tuple)
     R0 = storerowtype(intypes)
     termtypes = map(keys(terms), values(terms)) do k, f
         T = Base.promote_op(f, R0)
@@ -181,9 +192,14 @@ function barwindowtypes(terms::NamedTuple, intypes::NamedTuple)
     return intypes, merge(intypes, NamedTuple{keys(terms)}(termtypes))
 end
 
-function barwindowtypes(::HoistedTerms{K}, intypes::NamedTuple) where {K}
+function barwindowtypes(::HoistedTerms{K}, intypes::NamedTuple,
+    protos::Tuple) where {K}
     hs = map(hoistedname, K)
-    cols = Tuple(k for k in keys(intypes) if !(k in hs))
+    read = readcolumns(protos)
+    cols = Tuple(
+        k for k in keys(intypes)
+              if !(k in hs) && (read === nothing || k in read)
+    )
     types = map(k -> intypes[k], (cols..., hs...))
     return NamedTuple{(cols..., hs...)}(types), NamedTuple{(cols..., K...)}(types)
 end
@@ -195,7 +211,8 @@ concreteterm(T) =
 # per widening.
 function newbarwindow(protos::Tuple, outs::Val{O}, terms, n::Int,
     intypes::NamedTuple) where {O}
-    rowtypes, types = barwindowtypes(terms, intypes)
+    checkbarterms(terms, intypes)
+    rowtypes, types = barwindowtypes(terms, intypes, protos)
     tg = tiering(protos, types)
     # A fieldless dependent takes no tier, so this rejects only a summarizer
     # that would need re-folding: a plain one with state.

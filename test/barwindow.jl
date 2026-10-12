@@ -3,7 +3,7 @@ const CF = CausalFrames
 # `s`'s value re-folded from scratch over `rows`, the reference for a window.
 function barrefold(s, rows, intypes)
     protos, requested, terms = CF.prototypes(CF.Summarizer[s], Symbol[])
-    types = last(CF.barwindowtypes(terms, intypes))
+    types = last(CF.barwindowtypes(terms, intypes, protos))
     states = CF.newstates(protos, types)
     for r in rows
         base = NamedTuple{keys(intypes)}(r)
@@ -214,6 +214,12 @@ end
             ((1.0, 10.0), (2.0, 20.0)))
         @test CF.value(st) == (d_sum = 30.0,)
         @test CF.value(CF.widenstate(st, types)) == (d_sum = 30.0,)
+        # only the columns the window's summarizers read are stored
+        @test fieldnames(eltype(st.ring.rows)) == (:d,)
+        # a widening re-checks the terms against the wider input
+        @test_throws ArgumentError(
+            "barwindow row term :d collides with an input column",
+        ) CF.widenstate(st, merge(types, (d = Float64,)))
         @test_throws ArgumentError(
             "barwindow hoisted row term :d not found in the input; " *
             "return `barterms(s)` from the outer summarizer's `rowterms`",
