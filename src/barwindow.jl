@@ -40,8 +40,9 @@ as a type parameter.
   [`barterms`](@ref) from its [`rowterms`](@ref), so the summarizing transforms
   evaluate them over each chunk before storing its rows; the window then reads
   each term from the reserved column `barterms` names it by, and a term whose
-  column is missing from `intypes` is an `ArgumentError`. The transforms hold
-  a hoisted term to the same typing rule as an unhoisted one. A column of the
+  column is missing from `intypes`, or whose column type is not concrete or a
+  `Union` of concrete types, is an `ArgumentError`. The transforms hold a
+  hoisted term to the same typing rule as an unhoisted one. A column of the
   term's own name is never read in its place. With `nothing`, the window
   evaluates the terms itself.
 
@@ -246,13 +247,16 @@ end
 function barwindowtypes(::HoistedTerms{K,hs}, intypes::NamedTuple,
     protos::Tuple) where {K,hs}
     base = storedbase(intypes, protos, hs)
-    hoisted = values(NamedTuple{hs}(intypes))
+    # `termvalues` typed each chunk's column concretely (`BarTerm`), but a
+    # widening promotes them across chunks (`Int` and `String` give `Any`),
+    # and a caller may pass the column types itself: hold them to the rule too.
+    hoisted = map(checktermtype, K, values(NamedTuple{hs}(intypes)))
     return merge(base, NamedTuple{hs}(hoisted)), merge(base, NamedTuple{K}(hoisted))
 end
 
 # A term's inferred type, which must be storable unboxed: checked here for an
 # evaluated term and by `termvalues` for a hoisted one (`BarTerm`), so both are
-# held to one rule over one row type.
+# held to one rule over one row type, and here again for a hoisted column.
 checktermtype(k::Symbol, T) =
     concreteterm(T) ? T :
     throw(ArgumentError("barwindow row term $(repr(k)) must infer a concrete type, got $T"))

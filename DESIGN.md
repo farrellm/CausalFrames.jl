@@ -2250,7 +2250,10 @@ an unhoisted count window evaluates its terms on, and one helper, `termtype`,
 infers over that row type for both, so a term relying on the row being a
 `NamedTuple` (`Tuple(r)`, `r[1]`, a method taking `::NamedTuple`) types and
 behaves alike hoisted or not (issue #107; it once saw a `Tables.ColumnsRow`
-here). A term's vector is typed by
+here). Only the field set can still differ: an unhoisted window's row also
+carries the call's other top-level terms (they are in its `intypes`), a
+hoisted term's only the input columns, so `Tuple(r)` or `keys(r)` differs
+when a call has other terms. A term's vector is typed by
 `promote_op(f, rowtype)` when that is concrete or a `Union` of concrete types,
 and by its values (the comprehension `addcolumns` uses) only when inference
 gives up (`Any` or an abstract type, as for a closure over an untyped global).

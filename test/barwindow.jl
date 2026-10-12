@@ -260,6 +260,10 @@ end
         noinfer = ArgumentError(
             "barwindow row term :d must infer a concrete type, got Any")
         @test_throws noinfer CF.barwindow(Sum(:d => opaque), 2, (x = Float64,))
+        # a hoisted column a widening (or a caller) types abstractly too
+        @test_throws ArgumentError(
+            "barwindow row term :d must infer a concrete type, got Any",
+        ) CF.widenstate(hst, merge(hoistin, NamedTuple{(hd,)}((Any,))))
         for xs in ([3.0, 4.0, 5.0], [1.0, 4.0, 5.0])
             p = readtable(DataFrame(time = 1:3, x = xs))
             @test_throws noinfer load(Context(0, 10),

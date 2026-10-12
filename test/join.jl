@@ -279,7 +279,8 @@
         # A row passed on rather than stored, as to a row term, is not boxed
         # though its columns admit `missing`: built as a tuple, its type
         # depended on the values. Asserted as a slope, since on Julia 1.10
-        # the call boundary boxes the returned sum once.
+        # the call boundary boxes the returned sum once. When 1.10 support is
+        # dropped, assert `unionrowalloc(k, 1000) == 0` instead.
         @noinline firstfield(r) = getfield(r, 1)
         function passrows(::Type{V}, nt) where {V}
             s = 0.0

@@ -204,9 +204,13 @@ termtype(f, ::Type{R}) where {R<:NamedTuple} = Base.promote_op(f, R)
 
 # The row type of a column table. Generated, so it is a constant however wide
 # the table: `storerowtype(chunktypes(nt))`, a tuple `map`, stops inferring at
-# 32 columns, which left every row of a wide chunk dispatching.
-@generated termrowtype(::Type{NamedTuple{N,C}}) where {N,C} =
-    NamedTuple{N,Tuple{map(eltype, fieldtypes(C))...}}
+# 32 columns, which left every row of a wide chunk dispatching. The `eltype`
+# calls are emitted, not made by the generator, which would see only the
+# methods defined before it (a column type's own `eltype` could be newer).
+@generated function termrowtype(::Type{NamedTuple{N,C}}) where {N,C}
+    eltypes = [:(eltype($(fieldtype(C, j)))) for j in 1:fieldcount(C)]
+    return :(NamedTuple{N,Tuple{$(eltypes...)}})
+end
 
 # A type a term may store unboxed: concrete, or a Union of concrete types.
 # Recursing over the Union, not `Base.uniontypes`, lets it fold to a constant.

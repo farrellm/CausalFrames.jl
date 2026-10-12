@@ -959,8 +959,9 @@ as a type parameter.
   `barterms` from its `rowterms`, so the summarizing transforms
   evaluate them over each chunk before storing its rows; the window then reads
   each term from the reserved column `barterms` names it by, and a term whose
-  column is missing from `intypes` is an `ArgumentError`. The transforms hold
-  a hoisted term to the same typing rule as an unhoisted one. A column of the
+  column is missing from `intypes`, or whose column type is not concrete or a
+  `Union` of concrete types, is an `ArgumentError`. The transforms hold a
+  hoisted term to the same typing rule as an unhoisted one. A column of the
   term's own name is never read in its place. With `nothing`, the window
   evaluates the terms itself.
 
