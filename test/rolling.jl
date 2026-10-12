@@ -718,6 +718,21 @@ end
             return @allocations load(Context(0, n + 1), p |> t)
         end
         @test wideallocs(8000) - wideallocs(2000) < 200
+
+        # Nor does an input column admitting `missing`, though no summarizer
+        # reads it. With it and a compensated float sum, the compiler declined
+        # to inline the per-row key's construction, whose closure then
+        # allocated (10 per row over these two windows).
+        function unionallocs(n)
+            src = DataFrame(time = 1:n, k = repeat(["a", "b"], n ÷ 2),
+                x = Float64.(mod.(1:n, 7)),
+                u = Vector{Union{Missing,Float64}}(fill(1.0, n)))
+            p = CausalPipeline(ctx -> [src])
+            t = addrollingcolumns((w5 = 5, b5 = Bars(5)), Sum(:x); key = :k)
+            load(Context(0, n + 1), p |> t)
+            return @allocations load(Context(0, n + 1), p |> t)
+        end
+        @test unionallocs(8000) - unionallocs(2000) < 200
     end
 
     @testset "fast paths over dates and mixed periods" begin

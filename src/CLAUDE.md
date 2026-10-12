@@ -463,7 +463,10 @@ design rationale and performance constraints behind each module.
   `map` stops unrolling at 32 columns, a 10x cliff on a wide input (issue
   #98), and a row built as a tuple first is boxed per row when it is passed
   on (a row term's argument) rather than stored, once a column admits
-  `missing`
+  `missing`. Each emitted row's key comes from `keyat`, likewise generated
+  rather than a `map` over a closure: the kernel grows past the compiler's
+  inlining budget (a `missing`-admitting input column and a compensated float
+  sum suffice), and an un-inlined closure allocated per row
 - `src/intervalize.jl` — `intervalize`, the third binary transform: summarize
   over the intervals a `clock` pipeline defines (`[bₖ, bₖ₊₁)`, timestamped at
   `bₖ₊₁`). It is the `summarizecycles` fold, closing on clock boundaries.

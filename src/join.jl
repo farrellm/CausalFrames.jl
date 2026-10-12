@@ -274,8 +274,14 @@ end
     end
     return Expr(:block, Expr(:meta, :inline), Expr(:new, V, vals...))
 end
-@inline keyat(nt::NamedTuple, i::Int, ::Val{KN}) where {KN} =
-    NamedTuple{KN}(map(c -> @inbounds(getproperty(nt, c)[i]), KN))
+# Row `i`'s key. Generated, so the key is built from its fields directly: as
+# a `map` over a capturing closure, it allocated the closure, the boxed index
+# and the key per row wherever the compiler declined to inline it, as in
+# keyed `addrollingcolumns` once an input column admitted `missing`.
+@generated function keyat(nt::NamedTuple, i::Int, ::Val{KN}) where {KN}
+    vals = map(c -> :(@inbounds getfield(nt, $(QuoteNode(c)))[i]), KN)
+    return Expr(:block, Expr(:meta, :inline), :(NamedTuple{KN}(($(vals...),))))
+end
 
 # --- output assembly -------------------------------------------------------
 
