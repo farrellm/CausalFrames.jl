@@ -203,12 +203,13 @@ end
 
 # The input row's columns and the stored row's: rows are stored with their row
 # terms evaluated, so a row is downdated with the values it was folded with and
-# no term runs twice. A hoisted term is read under its hoisted name and stored
-# under its own. The input columns are stored as they are, unless the terms are
-# hoisted: then nothing but `protos` reads a row, so only `:time` (which
-# `inputcolumns` leaves out, though `update!` may read it) and the columns they
-# read are kept.
-function barwindowtypes(terms::NamedTuple, intypes::NamedTuple, ::Tuple)
+# no term runs twice. Once a row's terms are evaluated nothing but `protos`
+# reads it, so besides the terms only `:time` (which `inputcolumns` leaves out,
+# though `update!` may read it) and the columns they read are stored. The two
+# methods differ only in where a term's value comes from: evaluated from the
+# whole input row, or (hoisted) read under its hoisted name and stored under
+# its own.
+function barwindowtypes(terms::NamedTuple, intypes::NamedTuple, protos::Tuple)
     R0 = storerowtype(intypes)
     termtypes = map(keys(terms), values(terms)) do k, f
         T = Base.promote_op(f, R0)
@@ -218,16 +219,21 @@ function barwindowtypes(terms::NamedTuple, intypes::NamedTuple, ::Tuple)
         )
         T
     end
-    return intypes, merge(intypes, NamedTuple{keys(terms)}(termtypes))
+    return intypes,
+    merge(storedbase(intypes, protos, ()), NamedTuple{keys(terms)}(termtypes))
 end
 
 function barwindowtypes(::HoistedTerms{K,hs}, intypes::NamedTuple,
     protos::Tuple) where {K,hs}
-    base = projectinput(Base.structdiff(intypes, NamedTuple{hs}),
-        storedcolumns(protos, Symbol[]))
+    base = storedbase(intypes, protos, hs)
     hoisted = values(NamedTuple{hs}(intypes))
     return merge(base, NamedTuple{hs}(hoisted)), merge(base, NamedTuple{K}(hoisted))
 end
+
+# The stored input columns, those named `hoisted` aside.
+storedbase(intypes::NamedTuple, protos::Tuple, hoisted::Tuple{Vararg{Symbol}}) =
+    projectinput(Base.structdiff(intypes, NamedTuple{hoisted}),
+        storedcolumns(protos, Symbol[]))
 
 concreteterm(T) =
     isconcretetype(T) || (T isa Union && all(isconcretetype, Base.uniontypes(T)))
@@ -388,14 +394,15 @@ end
 
 # The row as stored: the input columns, projected by name and converted to the
 # input types the row terms' types were inferred from, then the row terms,
-# evaluated or (hoisted) renamed.
+# evaluated over that whole row or (hoisted) renamed, then cut to the stored
+# columns.
 @inline barrow(st::BarWindowState{R,R0}, row) where {R,R0} =
     termrow(R, projectrow(R0, row), st.terms)
 
 @inline termrow(::Type{R}, base::NamedTuple, terms::NamedTuple{()}) where {R} =
-    convert(R, base)
+    projectrow(R, base)
 @inline termrow(::Type{R}, base::NamedTuple, terms::NamedTuple) where {R} =
-    convert(R, merge(base, map(f -> f(base), terms)))
+    projectrow(R, merge(base, map(f -> f(base), terms)))
 @inline termrow(::Type{R}, base::NamedTuple, ::HoistedTerms) where {R} =
     R(Tuple(base))
 

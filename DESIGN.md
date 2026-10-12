@@ -2529,7 +2529,13 @@ state holding `s`'s states over the last `n` rows folded into it.
   downdate after the push. Rows are stored with their row terms evaluated:
   a term's type is inferred from `intypes` (there is no chunk to take it
   from) and must be concrete or a `Union` of concrete types, and a row is
-  downdated with exactly the values it was folded with.
+  downdated with exactly the values it was folded with. Once its terms are
+  evaluated only `s`'s expansion reads a row, so a stored row keeps just the
+  terms, `:time` (which `inputcolumns` leaves out, though `update!` may read
+  it) and the columns the expansion reads (all of them when one may read any),
+  hoisted terms or not: a term is evaluated from the whole input row before
+  the row is cut. An unread `Union{Missing,T}` column would box every stored
+  row, as in the transforms' row buffers.
 - **Value.** Every output is `missing` until `n` rows have arrived, the
   `Bars(n)` partial-window rule; the value type is the summary type promoted
   field-wise with an all-`missing` row (`missingfields`), the empty values'
@@ -2561,11 +2567,7 @@ state holding `s`'s states over the last `n` rows folded into it.
   `hoistedby = o`, the window then reads each term from the reserved column of
   `intypes` (one missing from it is an `ArgumentError`), stores it under its
   own name and evaluates nothing, and `barinputcolumns(s; hoistedby = o)`
-  names the reserved columns. With no term left to read an arbitrary column,
-  the window stores only `:time` and the columns `s`'s expansion reads (all
-  of them when one may read any; `:time` because `inputcolumns` leaves it
-  out, though `update!` may read it), so a transform that doesn't project its
-  input (`summarize`, say) costs no extra copy.
+  names the reserved columns.
   - The scope is the outer summarizer's because output names are unique
     within a call, so two outer summarizers' windows never share a term
     namespace. Unscoped, every window's terms joined the call's one
