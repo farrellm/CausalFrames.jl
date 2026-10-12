@@ -196,7 +196,7 @@ function barinputcolumns(s::Summarizer;
     hoistedby === nothing && return nothing
     # A term's own name stays, so that a column of the name reaches the window
     # to be reported, whichever transform runs it.
-    return (cols..., hoistednames(hoistedby, keys(terms))...)
+    return Tuple(union(cols, keys(terms), hoistednames(hoistedby, keys(terms))))
 end
 
 # The input row's columns and the stored row's: rows are stored with their row
