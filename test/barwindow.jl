@@ -250,6 +250,20 @@ end
         tst = CF.barwindow(Sum(:d => double), 2, merge((time = Int,), types);
             hoistedby = owner)
         @test fieldnames(eltype(tst.ring.rows)) == (:time, :d)
+        # A hoisted term is typed as an unhoisted one is, from inference over
+        # the row (#103), and held to the same concreteness rule.
+        mixed = r -> r.x > 2 ? r.x : 1
+        chunk = DataFrame(x = [3.0, 4.0, 5.0])
+        hoistin = CF.chunktypes(CF.terminput(chunk,
+            NamedTuple{(hd,)}((mixed,)), "summarize"))
+        hst = CF.barwindow(Sum(:d => mixed), 2, hoistin; hoistedby = owner)
+        ust = CF.barwindow(Sum(:d => mixed), 2, (x = Float64,))
+        @test eltype(hst.ring.rows) == eltype(ust.ring.rows) ==
+              @NamedTuple{d::Union{Float64,Int64}}
+        @test_throws ArgumentError(
+            "barwindow row term :d must infer a concrete type, got Real",
+        ) CF.barwindow(Sum(:d => mixed), 2, NamedTuple{(:x, hd)}((Float64, Real));
+            hoistedby = owner)
         # a widening re-checks the terms against the wider input
         @test_throws collides CF.widenstate(st, merge(types, (d = Float64,)))
         @test_throws notfound CF.barwindow(

@@ -40,7 +40,8 @@ as a type parameter.
   [`barterms`](@ref) from its [`rowterms`](@ref), so the summarizing transforms
   evaluate them over each chunk before storing its rows; the window then reads
   each term from the reserved column `barterms` names it by, and a term whose
-  column is missing from `intypes` is an `ArgumentError`. A column of the
+  column is missing from `intypes`, or whose column type is not concrete or a
+  `Union` of concrete types, is an `ArgumentError`. A column of the
   term's own name is never read in its place. With `nothing`, the window
   evaluates the terms itself.
 
@@ -211,14 +212,8 @@ end
 # its own.
 function barwindowtypes(terms::NamedTuple, intypes::NamedTuple, protos::Tuple)
     R0 = storerowtype(intypes)
-    termtypes = map(keys(terms), values(terms)) do k, f
-        T = Base.promote_op(f, R0)
-        concreteterm(T) || throw(
-            ArgumentError(
-                "barwindow row term $(repr(k)) must infer a concrete type, got $T"),
-        )
-        T
-    end
+    termtypes = map((k, f) -> checktermtype(k, Base.promote_op(f, R0)), keys(terms),
+        values(terms))
     return intypes,
     merge(storedbase(intypes, protos, ()), NamedTuple{keys(terms)}(termtypes))
 end
@@ -226,17 +221,21 @@ end
 function barwindowtypes(::HoistedTerms{K,hs}, intypes::NamedTuple,
     protos::Tuple) where {K,hs}
     base = storedbase(intypes, protos, hs)
-    hoisted = values(NamedTuple{hs}(intypes))
+    hoisted = map(checktermtype, K, values(NamedTuple{hs}(intypes)))
     return merge(base, NamedTuple{hs}(hoisted)), merge(base, NamedTuple{K}(hoisted))
 end
+
+# A term's type, evaluated or hoisted, so that both are held to one rule: a
+# hoisted term's column is typed by inference too (`termvalues`), falling back
+# to its values' type only when inference gives up.
+checktermtype(k::Symbol, T) =
+    concreteterm(T) ? T :
+    throw(ArgumentError("barwindow row term $(repr(k)) must infer a concrete type, got $T"))
 
 # The stored input columns, those named `hoisted` aside.
 storedbase(intypes::NamedTuple, protos::Tuple, hoisted::Tuple{Vararg{Symbol}}) =
     projectinput(Base.structdiff(intypes, NamedTuple{hoisted}),
         storedcolumns(protos, Symbol[]))
-
-concreteterm(T) =
-    isconcretetype(T) || (T isa Union && all(isconcretetype, Base.uniontypes(T)))
 
 # Build the state for the realized types; type-unstable, once per state and
 # per widening.
