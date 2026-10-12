@@ -170,7 +170,7 @@ chunktypes(c::DataFrame) =
 chunktypes(nt::NamedTuple) = map(eltype, nt)
 
 # The summarizers' input for one chunk: its column table plus a column per row
-# term, each computed behind `rowvalues`' function barrier. Only the
+# term, each computed behind `termvalues`' function barrier. Only the
 # summarizers read it, so term columns never reach a transform's output.
 function terminput(c::DataFrame, terms::NamedTuple, op::String)
     nt = Tables.columntable(c)
@@ -180,8 +180,23 @@ function terminput(c::DataFrame, terms::NamedTuple, op::String)
             ArgumentError("$op row term $(repr(n)) collides with an input column"),
         )
     end
-    return merge(nt, map(f -> rowvalues(f, nt), terms))
+    return merge(nt, map(f -> termvalues(f, nt), terms))
 end
+
+# A term's column, typed by inference over the row type rather than by the
+# values, so it is the same for every chunk and never abstract when inference
+# succeeds (`r.x > 2 ? r.x : 1` is `Union{Float64,Int64}`, not `Real`). When
+# inference gives up (a closure over an untyped global, say), the values type
+# it, as `addcolumns`' `rowvalues` does.
+function termvalues(f, nt::NamedTuple)
+    rows = Tables.rows(nt)
+    T = Base.promote_op(f, eltype(rows))
+    return concreteterm(T) ? T[f(row) for row in rows] : rowvalues(f, nt)
+end
+
+# A type a term may store unboxed: concrete, or a Union of concrete types.
+concreteterm(T) =
+    isconcretetype(T) || (T isa Union && all(isconcretetype, Base.uniontypes(T)))
 
 # The columns kept from the summarizers' input by the transforms that store
 # its rows (`addrollingcolumns`, `summarizewindows`): `:time`, the keys and
