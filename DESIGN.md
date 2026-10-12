@@ -2538,12 +2538,12 @@ state holding `s`'s states over the last `n` rows folded into it.
   `Bars` windows) of `n + 1` rows, so the row leaving is still there to
   downdate after the push. Rows are stored with their row terms evaluated:
   a term's type is inferred from `intypes` (there is no chunk to take it
-  from) and must be concrete or a `Union` of concrete types (a hoisted term's
-  column type too, so a term is accepted hoisted exactly when it is unhoisted,
-  except that a hoisted term inference gives up on is typed by its values and
-  passes if they are concrete: the window sees only its projected row type and
-  cannot re-infer it), and a row is
-  downdated with exactly the values it was folded with. Once its terms are
+  from) and must be concrete or a `Union` of concrete types, and a row is
+  downdated with exactly the values it was folded with. A hoisted term's
+  column type is held to the same rule. `termvalues` inferred it as the window
+  would have, unless inference gave up and its values typed it; the window,
+  seeing only its projected row type, cannot re-infer it, so such a term
+  passes while its values' type is concrete. Once its terms are
   evaluated only `s`'s expansion reads a row, so a stored row keeps just the
   terms, `:time` (which `inputcolumns` leaves out, though `update!` may read
   it) and the columns the expansion reads (all of them when one may read any),

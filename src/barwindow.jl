@@ -209,7 +209,12 @@ end
 # though `update!` may read it) and the columns they read are stored. The two
 # methods differ only in where a term's value comes from: evaluated from the
 # whole input row, or (hoisted) read under its hoisted name and stored under
-# its own.
+# its own. With no terms, the row is cut on input.
+function barwindowtypes(::NamedTuple{()}, intypes::NamedTuple, protos::Tuple)
+    base = storedbase(intypes, protos, ())
+    return base, base
+end
+
 function barwindowtypes(terms::NamedTuple, intypes::NamedTuple, protos::Tuple)
     R0 = storerowtype(intypes)
     termtypes = map((k, f) -> checktermtype(k, Base.promote_op(f, R0)), keys(terms),
@@ -398,8 +403,6 @@ end
 @inline barrow(st::BarWindowState{R,R0}, row) where {R,R0} =
     termrow(R, projectrow(R0, row), st.terms)
 
-@inline termrow(::Type{R}, base::NamedTuple, terms::NamedTuple{()}) where {R} =
-    projectrow(R, base)
 @inline termrow(::Type{R}, base::NamedTuple, terms::NamedTuple) where {R} =
     projectrow(R, merge(base, map(f -> f(base), terms)))
 @inline termrow(::Type{R}, base::NamedTuple, ::HoistedTerms) where {R} =

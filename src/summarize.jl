@@ -188,15 +188,16 @@ end
 # succeeds (`r.x > 2 ? r.x : 1` is `Union{Float64,Int64}`, not `Real`). When
 # inference gives up (a closure over an untyped global, say), the values type
 # it, as `addcolumns`' `rowvalues` does.
-function termvalues(f, nt::NamedTuple)
+function termvalues(f::F, nt::NamedTuple) where {F}
     rows = Tables.rows(nt)
     T = Base.promote_op(f, eltype(rows))
-    return concreteterm(T) ? T[f(row) for row in rows] : rowvalues(f, nt)
+    return concreteterm(T) ? T[f(row) for row in rows] : [f(row) for row in rows]
 end
 
 # A type a term may store unboxed: concrete, or a Union of concrete types.
-concreteterm(T) =
-    isconcretetype(T) || (T isa Union && all(isconcretetype, Base.uniontypes(T)))
+# Recursing over the Union, not `Base.uniontypes`, lets it fold to a constant.
+concreteterm(T::Union) = concreteterm(T.a) && concreteterm(T.b)
+concreteterm(T) = isconcretetype(T)
 
 # The columns kept from the summarizers' input by the transforms that store
 # its rows (`addrollingcolumns`, `summarizewindows`): `:time`, the keys and

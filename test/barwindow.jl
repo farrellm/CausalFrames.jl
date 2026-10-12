@@ -110,26 +110,16 @@ end
         # The term reads the whole row, but only the columns the window's
         # summarizers read are stored, with `:time` and the terms.
         @test fieldnames(eltype(st.ring.rows)) == (:d,)
-        tst = CF.barwindow(Covariance(:y, :d => double), 2,
-            (time = Int, x = Float64, y = Float64, z = String))
+        wide = (time = Int, x = Float64, y = Float64, z = String)
+        tst = CF.barwindow(Covariance(:y, :d => double), 2, wide)
         @test fieldnames(eltype(tst.ring.rows)) == (:time, :y, :d)
         foreach(i -> CF.update!(tst, (time = i, x = i, y = -i, z = "z")), 1:3)
         @test CF.value(tst) == (y_d_covariance = -1.0,)
-        @test CF.value(
-            CF.widenstate(
-                tst,
-                (time = Int, x = Float64,
-                    y = Union{Missing,Float64}, z = String),
-            ),
-        ) == (y_d_covariance = -1.0,)
+        wider = merge(wide, (y = Union{Missing,Float64},))
+        @test CF.value(CF.widenstate(tst, wider)) == (y_d_covariance = -1.0,)
         # all of them when a summarizer may read any column
-        @test fieldnames(
-            eltype(
-                CF.barwindow(RangeTotal(), 2,
-                    (high = Float64, low = Float64, z = String)).ring.rows,
-            ),
-        ) ==
-              (:high, :low, :z, :range)
+        rst = CF.barwindow(RangeTotal(), 2, (high = Float64, low = Float64, z = String))
+        @test fieldnames(eltype(rst.ring.rows)) == (:high, :low, :z, :range)
     end
 
     @testset "fresh and fresh!" begin
