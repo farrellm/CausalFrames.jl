@@ -223,9 +223,10 @@ end
         @test CF.barterms(Sum(:x); hoistedby = owner) === (;)
         hd = Symbol("#barterm#lastn#d")
         @test CF.barterms(Covariance(:x, :d => double); hoistedby = owner) ===
-              NamedTuple{(hd,)}((double,))
+              NamedTuple{(hd,)}((CF.BarTerm{:d}(double),))
         @test CF.barterms(RangeTotal(); hoistedby = owner) ===
-              NamedTuple{(Symbol("#barterm#lastn#range"),)}((rangeterm,))
+              NamedTuple{(Symbol("#barterm#lastn#range"),)}((
+            CF.BarTerm{:range}(rangeterm),))
         # A hoisted term is read as a column of its reserved name, not
         # evaluated again.
         types = NamedTuple{(:x, hd)}((Float64, Float64))
@@ -244,16 +245,31 @@ end
         # the row (#103), and held to the same concreteness rule.
         mixed = r -> r.x > 2 ? r.x : 1
         chunk = DataFrame(x = [3.0, 4.0, 5.0])
-        hoistin = CF.chunktypes(CF.terminput(chunk,
-            NamedTuple{(hd,)}((mixed,)), "summarize"))
+        hoistin = CF.chunktypes(
+            CF.terminput(chunk,
+                NamedTuple{(hd,)}((CF.BarTerm{:d}(mixed),)), "summarize"),
+        )
         hst = CF.barwindow(Sum(:d => mixed), 2, hoistin; hoistedby = owner)
         ust = CF.barwindow(Sum(:d => mixed), 2, (x = Float64,))
         @test eltype(hst.ring.rows) == eltype(ust.ring.rows) ==
               @NamedTuple{d::Union{Float64,Int64}}
-        @test_throws ArgumentError(
-            "barwindow row term :d must infer a concrete type, got Real",
-        ) CF.barwindow(Sum(:d => mixed), 2, NamedTuple{(:x, hd)}((Float64, Real));
-            hoistedby = owner)
+        # A term inference gives up on is rejected on the first chunk,
+        # whatever the data, as unhoisted it is at construction (#108); typed
+        # by its values, it passed until a chunk mixed its branches.
+        opaque = r -> Base.inferencebarrier(r.x > 2 ? r.x : 1)
+        noinfer = ArgumentError(
+            "barwindow row term :d must infer a concrete type, got Any")
+        @test_throws noinfer CF.barwindow(Sum(:d => opaque), 2, (x = Float64,))
+        for xs in ([3.0, 4.0, 5.0], [1.0, 4.0, 5.0])
+            p = readtable(DataFrame(time = 1:3, x = xs))
+            @test_throws noinfer load(Context(0, 10),
+                p |> addsummarycolumns(LastN(Sum(:d => opaque), 2)))
+            # a top-level term still falls back to its values
+            @test eltype(
+                DataFrame(load(Context(0, 10),
+                    p |> addsummarycolumns(Sum(:d => opaque)))).d_sum,
+            ) <: Real
+        end
         # a widening re-checks the terms against the wider input
         @test_throws collides CF.widenstate(st, merge(types, (d = Float64,)))
         @test_throws notfound CF.barwindow(
@@ -273,7 +289,7 @@ end
         df = DataFrame(time = 1:8, k = repeat(["a", "b"], 4),
             x = Float64.(1:8), u = fill(missing, 8))
         hoisted = LastN(Mean(:d => double), 3)
-        @test CF.rowterms(hoisted) === NamedTuple{(hd,)}((double,))
+        @test CF.rowterms(hoisted) === NamedTuple{(hd,)}((CF.BarTerm{:d}(double),))
         @test CF.inputcolumns(hoisted) == (:d, hd)
         expected = [missing, missing, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0]
         for t in (addsummarycolumns(hoisted),
@@ -330,12 +346,12 @@ end
         @test isequal(out.w_lastn, expected)
         @test isequal(out.w_other, 1.5 .* expected)
         @test CF.rowterms(LastN{:other}(Mean(:d => triple), 3)) ===
-              NamedTuple{(Symbol("#barterm#other#d"),)}((triple,))
+              NamedTuple{(Symbol("#barterm#other#d"),)}((CF.BarTerm{:d}(triple),))
 
         # The constructor's terms and the summarizer's own both count.
         protos, _, terms = CF.prototypes(
             CF.Summarizer[CF.Termed(hoisted, (; e = rangeterm))], Symbol[])
-        @test terms === NamedTuple{(:e, hd)}((rangeterm, double))
+        @test terms === NamedTuple{(:e, hd)}((rangeterm, CF.BarTerm{:d}(double)))
     end
 
     @testset "validation" begin

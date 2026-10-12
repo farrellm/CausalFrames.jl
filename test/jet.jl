@@ -430,6 +430,8 @@ end
             ntuple(_ -> Union{Missing,Float64}[1.0, missing], 40)))
     JET.@test_opt CausalFrames.termvalues(rangeterm, wide)
     JET.@test_opt CausalFrames.termvalues(r -> r.c40, wide)
+    # a hoisted count-window term, whose type check must fold
+    JET.@test_opt CausalFrames.termvalues(CausalFrames.BarTerm{:range}(rangeterm), wide)
     protos, requested, terms = CausalFrames.prototypes(
         CausalFrames.tosummarizers([Sum(:range => rangeterm)]), Symbol[])
     tnt = merge(nt, (; range = CausalFrames.termvalues(rangeterm, nt)))

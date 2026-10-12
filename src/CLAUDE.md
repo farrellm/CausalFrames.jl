@@ -417,8 +417,9 @@ design rationale and performance constraints behind each module.
   and allocating per row. Its generated `bar*` folds have edges of their own;
   `test/jet.jl` guards the embedded path. `barinputcolumns` is the outer
   state's `inputcolumns`, sharing `storedcolumns`' union (`readcolumns`);
-  `barterms` is its `rowterms`, hoisting the window's terms into the
-  transform's `terminput` under reserved `hoistednames`, scoped by the outer
+  `barterms` is its `rowterms`, hoisting the window's terms (wrapped in
+  `BarTerm`, which `termvalues` holds to the window's typing rule up front)
+  into the transform's `terminput` under reserved `hoistednames`, scoped by the outer
   summarizer's first output name (`#barterm#lastn#d`) so two windows' terms
   never share a namespace, after which `hoistedby = outer` makes the window
   read them from those columns (`HoistedTerms`) instead of evaluating them.

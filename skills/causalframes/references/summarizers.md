@@ -959,8 +959,8 @@ as a type parameter.
   `barterms` from its `rowterms`, so the summarizing transforms
   evaluate them over each chunk before storing its rows; the window then reads
   each term from the reserved column `barterms` names it by, and a term whose
-  column is missing from `intypes`, or whose column type is not concrete or a
-  `Union` of concrete types, is an `ArgumentError`. A column of the
+  column is missing from `intypes` is an `ArgumentError`. The transforms hold
+  a hoisted term to the same typing rule as an unhoisted one. A column of the
   term's own name is never read in its place. With `nothing`, the window
   evaluates the terms itself.
 
@@ -1032,7 +1032,10 @@ own row terms, and the window is built with the same `hoistedby`. Each term is
 keyed by a reserved column name scoped by `hoistedby`'s first output column,
 `#barterm#lastn#d` for a term `:d` hoisted by a summarizer producing `:lastn`.
 So no input column of the term's name stands in for it, and two summarizers'
-windows may each have a term of one name.
+windows may each have a term of one name. Each function comes wrapped, so the
+transforms hold the term to the window's typing rule: one whose type doesn't
+infer as concrete, or a `Union` of concrete types, is an `ArgumentError` on
+the first chunk, as it would be unhoisted.
 
 #### Arguments
 - `s`: the summarizer the window folds, as passed to `barwindow`.
@@ -1046,7 +1049,7 @@ struct LastSum <: CausalFrames.Summarizer end
 CausalFrames.emptyvalue(::LastSum) = (; lastsum = missing)
 double = r -> 2r.x
 terms = CausalFrames.barterms(Sum(:d => double); hoistedby = LastSum())
-keys(terms), only(terms) === double
+keys(terms), only(terms).f === double
 
 # output
 

@@ -40,8 +40,8 @@ as a type parameter.
   [`barterms`](@ref) from its [`rowterms`](@ref), so the summarizing transforms
   evaluate them over each chunk before storing its rows; the window then reads
   each term from the reserved column `barterms` names it by, and a term whose
-  column is missing from `intypes`, or whose column type is not concrete or a
-  `Union` of concrete types, is an `ArgumentError`. A column of the
+  column is missing from `intypes` is an `ArgumentError`. The transforms hold
+  a hoisted term to the same typing rule as an unhoisted one. A column of the
   term's own name is never read in its place. With `nothing`, the window
   evaluates the terms itself.
 
@@ -129,7 +129,10 @@ own row terms, and the window is built with the same `hoistedby`. Each term is
 keyed by a reserved column name scoped by `hoistedby`'s first output column,
 `#barterm#lastn#d` for a term `:d` hoisted by a summarizer producing `:lastn`.
 So no input column of the term's name stands in for it, and two summarizers'
-windows may each have a term of one name.
+windows may each have a term of one name. Each function comes wrapped, so the
+transforms hold the term to the window's typing rule: one whose type doesn't
+infer as concrete, or a `Union` of concrete types, is an `ArgumentError` on
+the first chunk, as it would be unhoisted.
 
 # Arguments
 - `s`: the summarizer the window folds, as passed to `barwindow`.
@@ -143,7 +146,7 @@ struct LastSum <: CausalFrames.Summarizer end
 CausalFrames.emptyvalue(::LastSum) = (; lastsum = missing)
 double = r -> 2r.x
 terms = CausalFrames.barterms(Sum(:d => double); hoistedby = LastSum())
-keys(terms), only(terms) === double
+keys(terms), only(terms).f === double
 
 # output
 
@@ -152,7 +155,24 @@ keys(terms), only(terms) === double
 """
 function barterms(s::Summarizer; hoistedby::Summarizer)
     terms = prototypes(Summarizer[s], Symbol[], "barterms")[3]
-    return NamedTuple{hoistednames(hoistedby, keys(terms))}(values(terms))
+    return NamedTuple{hoistednames(hoistedby, keys(terms))}(
+        map((k, f) -> BarTerm{k}(f), keys(terms), values(terms)))
+end
+
+# A hoisted row term as `barterms` hands it to the transforms: the window's
+# function `f`, under the term's own name `K`. Marked so that `termvalues`
+# holds it to the window's rule where `f` is known, rejecting a term that
+# doesn't infer on the first chunk, as an unhoisted window does at
+# construction, instead of typing it by its values.
+struct BarTerm{K,F}
+    f::F
+end
+BarTerm{K}(f::F) where {K,F} = BarTerm{K,F}(f)
+(t::BarTerm)(row) = t.f(row)
+
+function termvalues(t::BarTerm{K}, nt::NamedTuple) where {K}
+    checktermtype(K, termtype(t.f, termrowtype(typeof(nt))))
+    return termvalues(t.f, nt)
 end
 
 """
@@ -226,13 +246,13 @@ end
 function barwindowtypes(::HoistedTerms{K,hs}, intypes::NamedTuple,
     protos::Tuple) where {K,hs}
     base = storedbase(intypes, protos, hs)
-    hoisted = map(checktermtype, K, values(NamedTuple{hs}(intypes)))
+    hoisted = values(NamedTuple{hs}(intypes))
     return merge(base, NamedTuple{hs}(hoisted)), merge(base, NamedTuple{K}(hoisted))
 end
 
-# A term's type, evaluated or hoisted, so that both are held to one rule: a
-# hoisted term's column is typed by inference too (`termvalues`), falling back
-# to its values' type only when inference gives up.
+# A term's inferred type, which must be storable unboxed: checked here for an
+# evaluated term and by `termvalues` for a hoisted one (`BarTerm`), so both are
+# held to one rule over one row type.
 checktermtype(k::Symbol, T) =
     concreteterm(T) ? T :
     throw(ArgumentError("barwindow row term $(repr(k)) must infer a concrete type, got $T"))
