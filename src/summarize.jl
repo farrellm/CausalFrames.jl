@@ -191,12 +191,7 @@ end
 function termvalues(f, nt::NamedTuple)
     rows = Tables.rows(nt)
     T = Base.promote_op(f, eltype(rows))
-    concreteterm(T) || return rowvalues(f, nt)
-    vals = Vector{T}(undef, length(rows))
-    for (i, row) in enumerate(rows)
-        @inbounds vals[i] = f(row)
-    end
-    return vals
+    return concreteterm(T) ? T[f(row) for row in rows] : rowvalues(f, nt)
 end
 
 # A type a term may store unboxed: concrete, or a Union of concrete types.
