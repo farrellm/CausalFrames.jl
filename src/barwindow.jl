@@ -164,7 +164,8 @@ end
 # function `f`, under the term's own name `K`. Marked so that `termvalues`
 # holds it to the window's rule where `f` is known, rejecting a term that
 # doesn't infer on the first chunk, as an unhoisted window does at
-# construction, instead of typing it by its values.
+# construction, instead of typing it by its values. Callable, so a window that
+# isn't hoisted can evaluate it as its own term.
 struct BarTerm{K,F}
     f::F
 end

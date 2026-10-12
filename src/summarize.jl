@@ -193,18 +193,16 @@ end
 function termvalues(f::F, nt::NamedTuple) where {F}
     R = termrowtype(typeof(nt))
     T = termtype(f, R)
-    is = eachindex(first(nt))
-    return concreteterm(T) ? T[f(rowat(R, nt, i)) for i in is] :
-           [f(rowat(R, nt, i)) for i in is]
+    vals = (f(rowat(R, nt, i)) for i in eachindex(first(nt)))
+    return concreteterm(T) ? collect(T, vals) : collect(vals)
 end
 
 # A term's type over rows of type `R`, the one inference both `termvalues` and
 # an unhoisted count window (over `storerowtype(intypes)`) use.
 termtype(f, ::Type{R}) where {R<:NamedTuple} = Base.promote_op(f, R)
 
-# The row type of a column table. Generated, so it is a constant however wide
-# the table: `storerowtype(chunktypes(nt))`, a tuple `map`, stops inferring at
-# 32 columns, which left every row of a wide chunk dispatching. The `eltype`
+# The row type of a column table, generated so it stays a constant past the
+# 32 columns where `storerowtype(chunktypes(nt))` stops inferring. The `eltype`
 # calls are emitted, not made by the generator, which would see only the
 # methods defined before it (a column type's own `eltype` could be newer).
 @generated function termrowtype(::Type{NamedTuple{N,C}}) where {N,C}

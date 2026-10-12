@@ -264,13 +264,9 @@ function joinsegment!(matches::Vector{V}, found::Vector{Bool},
     return (i, rpos, false)
 end
 
-# Row `i` of a column table as a `V`, field by field. Generated, so the row is
-# written straight into `V`'s fields. Built as a tuple first, a
-# `Union{Missing,T}` column's value took its concrete type in the tuple, whose
-# type then depended on the values: stored at once the row stayed unboxed, but
-# passed on (a row term's argument) it was boxed per row, at any width. A tuple
-# `map` would also stop unrolling at 32 columns (issue #98). Each field is
-# converted, a no-op unless `V` is wider than its column (a widened store).
+# Row `i` of a column table as a `V`, each field converted (a no-op unless `V`
+# is wider than its column) and written straight into `V`, so a passed-on row
+# isn't boxed and a wide one still unrolls (see src/CLAUDE.md, #98).
 @generated function rowat(::Type{V}, nt::NamedTuple, i::Int) where {V}
     vals = map(1:fieldcount(V)) do j
         col = QuoteNode(fieldname(V, j))
