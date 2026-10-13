@@ -122,7 +122,7 @@ end
 # first row, so a returned row other than `i` is a duplicate.
 function buildlookup(cols::NamedTuple, keynames::Val{KN}, ::Val{VN},
     keycols::Vector{Symbol}, mode, leftprefix, rightnames) where {KN,VN}
-    K = NamedTuple{KN,Tuple{map(k -> eltype(getproperty(cols, k)), KN)...}}
+    K = storekeytype(map(eltype, cols), keynames)
     n = length(getproperty(cols, first(KN)))
     index = Dict{K,Int}()
     sizehint!(index, n)
