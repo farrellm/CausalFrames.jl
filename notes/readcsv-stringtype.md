@@ -14,7 +14,7 @@ Everything below was verified against CSV 0.10.16.
 
 ## What `readcsv` does today
 
-`src/operators.jl` pins the string representation in two places:
+`src/csv.jl` pins the string representation in two places:
 
 - `typesfunction` returns `String` for every column the user's `types` argument
   does not name — this is what guarantees "types are **not** inferred".

@@ -70,7 +70,7 @@ and `README.md`'s summarizer table, plus the regenerated
 `skills/causalframes/`.
 
 A new keyword on the file sources (as `closed` and `skipmissing` were) is a
-field of the shared `SourceClip` in `src/operators.jl`, used by
+field of the shared `SourceClip` in `src/sourceclip.jl`, used by
 `clipchunk!`/`gatherchunk!`: add it there and to the `SourceClip(ctx, …)` call
 in each `read*` source that takes it (`readcsv`, `readparquet`, `readjls`),
 plus `readtable` wherever the option applies. The `parquetproducer` hook takes

@@ -863,7 +863,7 @@ time outside `[start, stop]`, the upstream pipeline is run over an
 
 - `lag(offset)` (`t -> t + offset`) runs upstream over `[start - offset,
   stop - offset)` and adds `offset`. Output at `t` depends only on input at
-  `t - offset <= t`, so it is **causal**, lives in `src/operators.jl`, and is
+  `t - offset <= t`, so it is **causal**, lives in `src/retime.jl`, and is
   exported. `lagcontext` mirrors the shared `widenstart`.
 - `lead(offset)` (`t -> t - offset`) runs upstream over `[start + offset,
   stop + offset)` and subtracts `offset`. Output at `t` depends on input at
@@ -876,7 +876,7 @@ and `Dates` types do), reject a negative `offset` when the pipeline runs (the
 guard `widenstart`/`futurecontext` use, since a negative shift would flip the
 causality contract), and treat `offset == 0` as the identity. The shared
 `shiftchunk!`/`shifttime` (broadcast add behind a function barrier) lives in
-`src/operators.jl` and is imported into the submodule; `lead` shifts by
+`src/retime.jl` and is imported into the submodule; `lead` shifts by
 `-offset`.
 
 ## Warm-up
@@ -956,7 +956,7 @@ no `skipmissing`, since dropping rows is `filterrows`'s job.
 
 It ships as a causal/acausal pair, the same split as `lag`/`lead`:
 
-- `settime` (`src/operators.jl`, exported) requires every row's new time to be
+- `settime` (`src/retime.jl`, exported) requires every row's new time to be
   at least its old one, so a row may only move later. Output at `t` then depends
   only on input at some `t' <= t`: **causal**.
 - `CausalFrames.Acausal.settime` drops that requirement, so rows may move
@@ -2750,7 +2750,13 @@ the second.
 | `src/frame.jl` | `CausalFrame{T}`, invariants, Tables.jl interface |
 | `src/chunks.jl` | internal chunk-iterator machinery (`ChunkSource`, `chunkmap`, `PullCursor`, `teesides`) |
 | `src/pipeline.jl` | `CausalPipeline{F}`, `load`, `stream`, `scan` |
-| `src/operators.jl` | sources (including the n-ary `concatenate`), the CSV sink, row-wise transforms, the causal time shift (`lag`) with the shared `shiftchunk!`, the context-widening `warmup` with the shared `dropleadin!`, the column projections and `reordercolumns` over one shared selector vocabulary, the truncating `head` with its `HeadProducer`, and the causal retiming (`settime`) with the shared `settimechunk!` |
+| `src/sources.jl` | the stateless sources: `emptyframe`, the n-ary `concatenate`, `clock` |
+| `src/sourceclip.jl` | `SourceClip` and `clipchunk!`/`gatherchunk!`, the clip every file source shares (rename, `:time` resolution, order checks, window clip) |
+| `src/sinks.jl` | `ChunkSink`, the background writer every file sink shares, and `sinktransform` |
+| `src/csv.jl` | the CSV pair (`readcsv`, `writecsv`) |
+| `src/rowwise.jl` | the row-wise transforms (`filterrows`, `addcolumns`) |
+| `src/retime.jl` | the causal time shift (`lag`) with the shared `shiftchunk!`, the context-widening `warmup` with the shared `dropleadin!`, the truncating `head` with its `HeadProducer`, and the causal retiming (`settime`) with the shared `settimechunk!` |
+| `src/columns.jl` | the column projections and `reordercolumns` over one shared selector vocabulary |
 | `src/merge.jl` | the n-ary time-interleaving source (`Base.merge`) and its per-pipeline cursors |
 | `src/parquet.jl` | the parquet operators, their docstrings, and backend selection |
 | `ext/CausalFramesDuckDBExt.jl` | the DuckDB backend: the preferred reader, the fallback writer |

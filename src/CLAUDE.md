@@ -32,10 +32,15 @@ design rationale and performance constraints behind each module.
   operation that materializes the whole window), `stream` (one frame per
   chunk) and `scan` (drains for side effects such as `writecsv`, with `load`'s
   guards but no frame)
-- `src/operators.jl` — sources return a `CausalPipeline`; transforms are
-  curried (`filterrows(pred)` returns `CausalPipeline -> CausalPipeline`) so
-  both chain with `|>`. Row functions run over concretely typed column-table
-  rows behind a per-chunk function barrier, never `DataFrameRow`s.
+- the basic operators, one file per job: `src/sources.jl` (`emptyframe`,
+  `concatenate`, `clock`), `src/sourceclip.jl` (the file sources' shared
+  clip), `src/sinks.jl` (the file sinks' shared writer), `src/csv.jl`,
+  `src/rowwise.jl` (`filterrows`, `addcolumns`), `src/retime.jl` (`lag`,
+  `warmup`, `head`, `settime`) and `src/columns.jl`. Sources return a
+  `CausalPipeline`; transforms are curried (`filterrows(pred)` returns
+  `CausalPipeline -> CausalPipeline`) so both chain with `|>`. Row functions
+  run over concretely typed column-table rows behind a per-chunk function
+  barrier, never `DataFrameRow`s.
   - shared with the parquet and JLS operators: `SourceClip` (a file source's
     clip options, window, carried `prevtime` and `done` flag), `clipchunk!`
     (rename, resolve `:time`, missing times via `table.jl`'s `presentrows`,
@@ -95,7 +100,7 @@ design rationale and performance constraints behind each module.
   the choice, which is how the tests cover all four combinations in one
   process; working on parquet means loading `DuckDB`/`Parquet2` in the session
   first. `sort = true` (here and on `readcsv`) cannot stream, so it reads via
-  `gatherchunk!`/`sortgathered` in `operators.jl` (scan every chunk for
+  `gatherchunk!`/`sortgathered` in `sourceclip.jl` (scan every chunk for
   in-window rows, stable-sort once, emit one chunk), except that DuckDB sorts
   in SQL, tie-broken by its virtual `file_row_number` since its `ORDER BY` is
   unstable (see DESIGN.md's "Sorting a file source")
