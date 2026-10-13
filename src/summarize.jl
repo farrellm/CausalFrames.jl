@@ -193,8 +193,12 @@ end
 function termvalues(f::F, nt::NamedTuple) where {F}
     R = termrowtype(typeof(nt))
     T = termtype(f, R)
-    vals = (f(rowat(R, nt, i)) for i in eachindex(first(nt)))
-    return concreteterm(T) ? collect(T, vals) : collect(vals)
+    # Comprehensions, not `collect(T, generator)`: on 1.10 the generator's
+    # closure holds `R` as a bare `DataType` and every row dispatches. When
+    # 1.10 support is dropped, recheck whether one generator suffices.
+    is = eachindex(first(nt))
+    return concreteterm(T) ? T[f(rowat(R, nt, i)) for i in is] :
+           [f(rowat(R, nt, i)) for i in is]
 end
 
 # A term's type over rows of type `R`, the one inference both `termvalues` and
