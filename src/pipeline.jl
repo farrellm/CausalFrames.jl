@@ -85,16 +85,16 @@ scan(ctx::Context) = (p::CausalPipeline) -> scan(ctx, p)
 # so the public constructor's O(n) scans are skipped. Returns the chunk's last
 # time, to be passed back as `prev`.
 function checkchunk(ctx::Context, c::DataFrame, prev)
-    prev === nothing || prev <= first(c.time) ||
-        throw(
-            ArgumentError(
-                "chunk times must be non-decreasing across chunk boundaries"),
-        )
+    prev === nothing || prev <= first(c.time) || throw(unorderedchunks())
     first(c.time) >= ctx.start && last(c.time) <= ctx.stop ||
-        throw(ArgumentError(
-            "chunk times must lie in [$(ctx.start), $(ctx.stop)]"))
+        throw(outsidewindow(ctx))
     return last(c.time)
 end
+
+outsidewindow(ctx::Context) =
+    ArgumentError("chunk times must lie in [$(ctx.start), $(ctx.stop)]")
+unorderedchunks() =
+    ArgumentError("chunk times must be non-decreasing across chunk boundaries")
 
 """
     stream(ctx::Context, p::CausalPipeline) -> iterator of CausalFrames
@@ -138,20 +138,15 @@ function emitframe(fs::FrameStream{T}, chunk, substart, ustate) where {T}
     # The O(1) guards of `checkchunk`: window bounds here, cross-chunk order at
     # the lookahead below. substart is the chunk's first time, except for the
     # first chunk, where it is ctx.start.
-    first(chunk.time) >= substart || throw(ArgumentError(
-        "chunk times must lie in [$(fs.ctx.start), $(fs.ctx.stop)]"))
+    first(chunk.time) >= substart || throw(outsidewindow(fs.ctx))
     next = iterate(fs.chunks, ustate)
     if next === nothing
-        last(chunk.time) <= fs.ctx.stop || throw(
-            ArgumentError(
-                "chunk times must lie in [$(fs.ctx.start), $(fs.ctx.stop)]"),
-        )
+        last(chunk.time) <= fs.ctx.stop || throw(outsidewindow(fs.ctx))
         return (trustedframe(Context{T}(substart, fs.ctx.stop), chunk), nothing)
     end
     nextchunk, nustate = next
     b = first(nextchunk.time)
-    last(chunk.time) <= b || throw(ArgumentError(
-        "chunk times must be non-decreasing across chunk boundaries"))
+    last(chunk.time) <= b || throw(unorderedchunks())
     return (trustedframe(Context{T}(substart, b), chunk), (nextchunk, b, nustate))
 end
 

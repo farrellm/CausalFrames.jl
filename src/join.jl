@@ -303,11 +303,7 @@ end
 function checknames(cfg::JoinConfig, c::DataFrame, rvaluenames)
     seen = Set{Symbol}()
     function check(n)
-        n in seen && throw(
-            ArgumentError(
-                "$(cfg.op) output column $(repr(n)) appears more than once; use `leftprefix`/`rightprefix` to disambiguate",
-            ),
-        )
+        n in seen && throw(duplicateoutput(cfg.op, n))
         push!(seen, n)
         return nothing
     end
@@ -323,6 +319,11 @@ function checknames(cfg::JoinConfig, c::DataFrame, rvaluenames)
     cfg.righttime === nothing || check(cfg.righttime)
     return nothing
 end
+
+# The joins' error for an output column named twice.
+duplicateoutput(op::String, n::Symbol) = ArgumentError("$op output column \
+    $(repr(n)) appears more than once; use `leftprefix`/`rightprefix` to \
+    disambiguate")
 
 function assemble(cfg::JoinConfig, js::JoinState, c::DataFrame)
     rdf = DataFrame()

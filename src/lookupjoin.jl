@@ -73,12 +73,7 @@ function lookupjoin(table; key = nothing, unmatched::Symbol = :missing,
     valuenames = Tuple(n for n in colnames if !(n in keycols))
     rightnames = Symbol[prefixed(rp, n) for n in valuenames]
     for n in rightnames
-        (n === :time || n in keycols) && throw(
-            ArgumentError(
-                "lookupjoin output column $(repr(n)) appears more than once; use \
-                `leftprefix`/`rightprefix` to disambiguate",
-            ),
-        )
+        (n === :time || n in keycols) && throw(duplicateoutput("lookupjoin", n))
     end
     cfg = buildlookup(cols, Val(Tuple(keycols)), Val(valuenames), keycols, mode,
         lp, rightnames)
@@ -152,12 +147,8 @@ function checklookupnames(cfg::LookupJoin, c::DataFrame)
     for n in propertynames(c)
         (n === :time || n in cfg.keycols) && continue
         m = prefixed(cfg.leftprefix, n)
-        (m === :time || m in cfg.keycols || m in cfg.rightnames) && throw(
-            ArgumentError(
-                "lookupjoin output column $(repr(m)) appears more than once; use \
-                `leftprefix`/`rightprefix` to disambiguate",
-            ),
-        )
+        (m === :time || m in cfg.keycols || m in cfg.rightnames) &&
+            throw(duplicateoutput("lookupjoin", m))
     end
     return nothing
 end

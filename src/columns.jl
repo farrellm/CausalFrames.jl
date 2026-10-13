@@ -131,10 +131,7 @@ end
 # column survives.
 function keptcolumns(selectors::Tuple, cols::Vector{String}, selecting::Bool,
     opname::String)
-    foreachliteral(selectors) do n
-        n in cols || throw(
-            ArgumentError("$opname: no column named $(repr(Symbol(n)))"))
-    end
+    checkliterals(selectors, cols, opname)
     keep = Symbol[]
     for n in cols
         (n == "time" || matchescolumn(selectors, n) == selecting) &&
@@ -146,10 +143,7 @@ end
 # The column order to impose, or `nothing` when the chunk already has it.
 # `placed` tracks columns by position, avoiding hashing.
 function orderedcolumns(selectors::Tuple, cols::Vector{String})
-    foreachliteral(selectors) do n
-        n in cols || throw(
-            ArgumentError("reordercolumns: no column named $(repr(Symbol(n)))"))
-    end
+    checkliterals(selectors, cols, "reordercolumns")
     order = Symbol[:time]
     placed = falses(length(cols))
     for (i, n) in pairs(cols)
@@ -194,22 +188,7 @@ function matchescolumn(selectors, name::AbstractString)
     return any(s -> matchescolumn(s, name), selectors)
 end
 
-# Walk the name leaves of a selector spec, ignoring regex and predicate ones.
-foreachliteral(f, s::Symbol) = (f(String(s)); nothing)
-foreachliteral(f, s::AbstractString) = (f(String(s)); nothing)
-foreachliteral(::Any, ::Regex) = nothing
-foreachliteral(::Any, ::Function) = nothing
-foreachliteral(::Any, x::ScalarSelector) = selectorerror(x)
-function foreachliteral(f, selectors)
-    checkselector(selectors)
-    for s in selectors
-        foreachliteral(f, s)
-    end
-    return nothing
-end
-
-# Walk every leaf of a selector spec in order, including the regex and
-# predicate leaves `foreachliteral` skips.
+# Walk every leaf of a selector spec in order.
 foreachselector(f, s::Symbol) = (f(s); nothing)
 foreachselector(f, s::AbstractString) = (f(s); nothing)
 foreachselector(f, r::Regex) = (f(r); nothing)
@@ -222,6 +201,19 @@ function foreachselector(f, selectors)
     end
     return nothing
 end
+
+# Walk the name leaves of a selector spec, as Strings, skipping the regex and
+# predicate leaves.
+foreachliteral(f, selectors) =
+    foreachselector(s -> s isa Union{Symbol,AbstractString} && f(String(s)),
+        selectors)
+
+# Every name leaf of a selector spec must name one of `cols`.
+checkliterals(selectors, cols::Vector{String}, opname::String) =
+    foreachliteral(selectors) do n
+        n in cols ||
+            throw(ArgumentError("$opname: no column named $(repr(Symbol(n)))"))
+    end
 
 # Eager validation: at least one selector, every leaf usable, and, for
 # dropcolumns, no literal `:time`.

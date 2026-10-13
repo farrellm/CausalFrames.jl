@@ -116,10 +116,7 @@ function resolvefill!(st::ForwardFillState, c::DataFrame)
     cols = names(c)
     st.lastnames == cols && return nothing
     checkkeycolumns(st.keycols, c, "forwardfill")
-    foreachliteral(st.selectors) do n
-        n in cols ||
-            throw(ArgumentError("forwardfill: no column named $(repr(Symbol(n)))"))
-    end
+    checkliterals(st.selectors, cols, "forwardfill")
     fills = Symbol[]
     for n in cols
         (n == "time" || Symbol(n) in st.keycols) && continue

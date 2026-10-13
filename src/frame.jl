@@ -32,6 +32,7 @@ struct CausalFrame{T}
     function CausalFrame{T}(ctx::Context{T}, chunks::Vector{DataFrame}) where {T}
         kept = DataFrame[c for c in chunks if nrow(c) > 0]
         schema = isempty(kept) ? String[] : names(first(kept))
+        prev = nothing
         for c in kept
             "time" in names(c) ||
                 throw(ArgumentError("every chunk must have a :time column"))
@@ -44,13 +45,7 @@ struct CausalFrame{T}
                 throw(ArgumentError("chunk :time column is not non-decreasing"))
             names(c) == schema ||
                 throw(ArgumentError("all chunks must share the same schema"))
-            first(c.time) >= ctx.start && last(c.time) <= ctx.stop ||
-                throw(ArgumentError(
-                    "chunk times must lie in [$(ctx.start), $(ctx.stop)]"))
-        end
-        for i in 2:length(kept)
-            last(kept[i-1].time) <= first(kept[i].time) ||
-                throw(ArgumentError("chunks must be non-decreasing across boundaries"))
+            prev = checkchunk(ctx, c, prev)
         end
         return new{T}(ctx, kept)
     end

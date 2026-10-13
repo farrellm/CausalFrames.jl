@@ -451,7 +451,6 @@ end
 # kernels' function barrier. Each transform uses the fields it needs.
 mutable struct SummaryFold
     types::Union{Nothing,NamedTuple}  # promotion of every input schema seen
-    widened::Bool          # whether the last chunk moved that promotion
     stateprotos::Any       # state tuple serving as the template for fresh copies
     states::Any            # keyless transforms: the running state tuple
     groups::Any            # keyed transforms: a GroupTable or DenseGroups
@@ -461,8 +460,7 @@ mutable struct SummaryFold
     const op::String       # the transform, for messages
 end
 SummaryFold(terms::NamedTuple, op::String) =
-    SummaryFold(nothing, false, nothing, nothing, nothing, nothing, false,
-        terms, op)
+    SummaryFold(nothing, nothing, nothing, nothing, nothing, false, terms, op)
 
 # Per-chunk setup: promote the schema, then build the states on the first
 # chunk or widen them when the promotion changes. A declared `keyset` uses
@@ -472,7 +470,7 @@ function preparechunk!(fold::SummaryFold, protos::Tuple, keyed::Bool,
     keynames::Val, c::DataFrame; keyset::Union{Nothing,KeySet} = nothing)
     nt = terminput(c, fold.terms, fold.op)
     types = promotetypes(fold.types, chunktypes(nt))
-    fold.widened = fold.types !== nothing && types != fold.types
+    widened = fold.types !== nothing && types != fold.types
     fold.types = types
     if fold.stateprotos === nothing
         fold.stateprotos = newstates(protos, types)
@@ -483,7 +481,7 @@ function preparechunk!(fold::SummaryFold, protos::Tuple, keyed::Bool,
         else
             fold.states = map(fresh, fold.stateprotos)
         end
-    elseif fold.widened
+    elseif widened
         fold.stateprotos = widenstates(fold.stateprotos, types)
         if keyset !== nothing
             fold.groups = widendense(fold.groups, fold.stateprotos, types)
