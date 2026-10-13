@@ -34,6 +34,27 @@
         @test df.x == [5.0, 6.0, 4.0]
     end
 
+    @testset "keys order field by field, missing last" begin
+        # `keyisless` must agree with `isless` on the keys' value tuples,
+        # which the sorts in `closecycle!` and `sortedgroups` rely on.
+        df2 = DataFrame(time = fill(1, 6),
+            a = Union{Missing,String}["b", missing, "a", "b", missing, "a"],
+            b = Union{Missing,Int}[2, 1, missing, missing, missing, 1],
+            x = 1.0:6.0)
+        p2 = readtable(df2)
+        want = sort!(collect(zip(df2.a, df2.b)); lt = isless)
+        for t in (summarize(Sum(:x); key = [:a, :b]),
+            summarizecycles(Sum(:x); key = [:a, :b]))
+            out = DataFrame(load(Context(1, 2), p2 |> t))
+            @test isequal(collect(zip(out.a, out.b)), want)
+        end
+        ks = [(a = missing, b = 1), (a = "a", b = missing), (a = "a", b = 1),
+            (a = missing, b = missing), (a = "b", b = 2)]
+        for x in ks, y in ks
+            @test CausalFrames.keyisless(x, y) == isless(values(x), values(y))
+        end
+    end
+
     @testset "a key column widening across chunks" begin
         # The first chunk's key column is `String`, the second's admits
         # `missing`: the group table re-keys to the wider type.

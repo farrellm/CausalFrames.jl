@@ -337,9 +337,11 @@ end
 # tuple of a key with a `missing`-admitting field isn't inferred, so a sort
 # would dispatch every comparison.
 @generated function keyisless(a::NamedTuple{KN}, b::NamedTuple{KN}) where {KN}
-    ex = false
-    for c in reverse(KN)
-        x, y = :(getfield(a, $(QuoteNode(c)))), :(getfield(b, $(QuoteNode(c))))
+    field(t, c) = :(getfield($t, $(QuoteNode(c))))
+    isempty(KN) && return false
+    ex = :(isless($(field(:a, last(KN))), $(field(:b, last(KN)))))
+    for c in reverse(KN[1:(end-1)])
+        x, y = field(:a, c), field(:b, c)
         ex = :(isless($x, $y) || (isequal($x, $y) && $ex))
     end
     return Expr(:block, Expr(:meta, :inline), ex)

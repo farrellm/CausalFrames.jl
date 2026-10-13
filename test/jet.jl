@@ -21,6 +21,17 @@ using JET
     groups = CausalFrames.newgroups(states, intypes, keynames)
     JET.@test_opt CausalFrames.foldgroups!(groups, states, nt, keynames)
 
+    # Keys over `missing`-admitting columns: built in the table's key type and
+    # ordered by `keyisless`, neither dispatching (issue #114).
+    unames = Val((:k, :j))
+    untypes = (time = Int, k = Union{Missing,String}, j = Union{Missing,Int},
+        x = Float64)
+    unt = (time = [1, 1, 2], k = Union{Missing,String}["a", missing, "a"],
+        j = Union{Missing,Int}[1, 2, missing], x = [1.0, 2.0, 3.0])
+    ugroups = CausalFrames.newgroups(states, untypes, unames)
+    JET.@test_opt CausalFrames.foldgroups!(ugroups, states, unt, unames)
+    JET.@test_opt CausalFrames.sortedgroups(ugroups)
+
     JET.@test_opt CausalFrames.foldcycles!(states, nt, nothing, outs)
     JET.@test_opt CausalFrames.freshall!(states)
     JET.@test_opt CausalFrames.foldrunning!(states, nt, 3, outs)
