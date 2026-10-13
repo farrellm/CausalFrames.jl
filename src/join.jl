@@ -275,8 +275,7 @@ end
     return Expr(:block, Expr(:meta, :inline), Expr(:new, V, vals...))
 end
 
-# Row `i`'s key, generated like `rowat` so no closure is built per row where
-# the call isn't inlined (see src/CLAUDE.md, `rolling.jl`).
+# Row `i`'s key, generated like `rowat` so no closure is built per row.
 @generated function keyat(nt::NamedTuple, i::Int, ::Val{KN}) where {KN}
     vals = map(c -> :(@inbounds getfield(nt, $(QuoteNode(c)))[i]), KN)
     return Expr(:block, Expr(:meta, :inline), :(NamedTuple{KN}(($(vals...),))))
