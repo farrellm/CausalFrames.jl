@@ -47,12 +47,10 @@ function sortcycles(by; rev::Bool = false)
     spec = sortspec(by)
     # A concrete ordering, not a runtime Bool, so the sort specializes.
     order = rev ? Base.Order.Reverse : Base.Order.Forward
-    return function (p::CausalPipeline)
-        return CausalPipeline() do ctx::Context
-            st = CycleSortState()
-            return chunkmap(c -> sortcyclechunk!(st, spec, order, c), p.run(ctx);
-                flush = () -> flushcycle!(st, spec, order))
-        end
+    return pipetransform() do p, ctx
+        st = CycleSortState()
+        return chunkmap(c -> sortcyclechunk!(st, spec, order, c), p.run(ctx);
+            flush = () -> flushcycle!(st, spec, order))
     end
 end
 sortcycles(p::CausalPipeline, by; kwargs...) = sortcycles(by; kwargs...)(p)

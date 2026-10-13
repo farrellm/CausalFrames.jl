@@ -46,31 +46,29 @@ function intervalize(clk::CausalPipeline, summarizers; key = nothing,
     keynames = Val(Tuple(keycols))
     outs = Val(requested)
     keyed = !isempty(keycols)
-    return function (p::CausalPipeline)
-        return CausalPipeline() do ctx::Context
-            T = timetype(ctx)
-            st = IntervalizeState{T}(IntervalCursor{T}(clk.run(ctx)), T[], 2,
-                SummaryFold(terms, "intervalize"), false, false)
-            step = function (c)
-                if ks !== nothing
-                    intervalstepdense!(st, protos, ks, keycols, keynames, outs,
-                        closelast, c)
-                elseif keyed
-                    intervalstepgrouped!(st, protos, keycols, keynames, outs,
-                        closelast, c)
-                else
-                    intervalstep!(st, protos, keynames, outs, closelast, c)
-                end
+    return pipetransform() do p, ctx
+        T = timetype(ctx)
+        st = IntervalizeState{T}(IntervalCursor{T}(clk.run(ctx)), T[], 2,
+            SummaryFold(terms, "intervalize"), false, false)
+        step = function (c)
+            if ks !== nothing
+                intervalstepdense!(st, protos, ks, keycols, keynames, outs,
+                    closelast, c)
+            elseif keyed
+                intervalstepgrouped!(st, protos, keycols, keynames, outs,
+                    closelast, c)
+            else
+                intervalstep!(st, protos, keynames, outs, closelast, c)
             end
-            flush =
-                ks !== nothing ?
-                (() -> intervalflushdense!(st, protos, ks, ctx.stop, closelast,
-                    outs)) :
-                keyed ?
-                (() -> intervalflushgrouped!(st, ctx.stop, closelast, outs)) :
-                (() -> intervalflush!(st, protos, ctx.stop, closelast, outs))
-            return chunkmap(step, p.run(ctx); flush = flush)
         end
+        flush =
+            ks !== nothing ?
+            (() -> intervalflushdense!(st, protos, ks, ctx.stop, closelast,
+                outs)) :
+            keyed ?
+            (() -> intervalflushgrouped!(st, ctx.stop, closelast, outs)) :
+            (() -> intervalflush!(st, protos, ctx.stop, closelast, outs))
+        return chunkmap(step, p.run(ctx); flush = flush)
     end
 end
 intervalize(p::CausalPipeline, clk::CausalPipeline, summarizers; kwargs...) =

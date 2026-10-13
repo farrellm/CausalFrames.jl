@@ -636,32 +636,30 @@ function summarize(summarizers; key = nothing)
     keynames = Val(Tuple(keycols))
     outs = Val(requested)
     keyed = !isempty(keycols)
-    return function (p::CausalPipeline)
-        return CausalPipeline() do ctx::Context
-            fold = SummaryFold(terms, "summarize")
-            step = function (c)
-                fold.types === nothing && checkkeycolumns(keycols, c, "summarize")
-                nt = preparechunk!(fold, protos, keyed, keynames, c)
-                keyed ? foldgroups!(fold.groups, fold.stateprotos, nt, keynames) :
-                foldall!(fold.states, nt)
-                return nothing
-            end
-            flush = function ()
-                if !keyed
-                    vals =
-                        fold.states === nothing ? emptyvalues(protos, outs) :
-                        summaryvalues(fold.states, outs)
-                    return DataFrame([merge((; time = ctx.stop), vals)])
-                end
-                fold.groups === nothing && return nothing
-                rows = [
-                    summaryrow(ctx.stop, k, gs, outs)
-                    for (k, gs) in sortedgroups(fold.groups)
-                ]
-                return isempty(rows) ? nothing : DataFrame(rows)
-            end
-            return chunkmap(step, p.run(ctx); flush = flush)
+    return pipetransform() do p, ctx
+        fold = SummaryFold(terms, "summarize")
+        step = function (c)
+            fold.types === nothing && checkkeycolumns(keycols, c, "summarize")
+            nt = preparechunk!(fold, protos, keyed, keynames, c)
+            keyed ? foldgroups!(fold.groups, fold.stateprotos, nt, keynames) :
+            foldall!(fold.states, nt)
+            return nothing
         end
+        flush = function ()
+            if !keyed
+                vals =
+                    fold.states === nothing ? emptyvalues(protos, outs) :
+                    summaryvalues(fold.states, outs)
+                return DataFrame([merge((; time = ctx.stop), vals)])
+            end
+            fold.groups === nothing && return nothing
+            rows = [
+                summaryrow(ctx.stop, k, gs, outs)
+                for (k, gs) in sortedgroups(fold.groups)
+            ]
+            return isempty(rows) ? nothing : DataFrame(rows)
+        end
+        return chunkmap(step, p.run(ctx); flush = flush)
     end
 end
 summarize(p::CausalPipeline, summarizers; kwargs...) =
@@ -696,52 +694,50 @@ function summarizecycles(summarizers; key = nothing, keyset = nothing)
     keynames = Val(Tuple(keycols))
     outs = Val(requested)
     keyed = !isempty(keycols)
-    return function (p::CausalPipeline)
-        return CausalPipeline() do ctx::Context
-            fold = SummaryFold(terms, "summarizecycles")
-            step = function (c)
-                fold.types === nothing &&
-                    checkkeycolumns(keycols, c, "summarizecycles")
-                nt = preparechunk!(fold, protos, keyed, keynames, c; keyset = ks)
-                rows = if ks !== nothing
-                    RT, emptyrow = densetypes(eltype(nt.time), fold.stateprotos,
-                        protos, ks, outs)
-                    rs = RT[]
-                    fold.cycletime = foldcyclesdense!(rs, fold.groups, ks, nt,
-                        fold.cycletime, keynames, outs, emptyrow)
-                    rs
-                elseif keyed
-                    rs, fold.cycletime = foldcyclesgrouped!(
-                        fold.groups, fold.stateprotos, nt, fold.cycletime,
-                        keynames, outs)
-                    rs
-                else
-                    rs, fold.states, fold.cycletime = foldcycles!(
-                        fold.states, nt, fold.cycletime, outs)
-                    rs
-                end
-                return isempty(rows) ? nothing : DataFrame(rows)
+    return pipetransform() do p, ctx
+        fold = SummaryFold(terms, "summarizecycles")
+        step = function (c)
+            fold.types === nothing &&
+                checkkeycolumns(keycols, c, "summarizecycles")
+            nt = preparechunk!(fold, protos, keyed, keynames, c; keyset = ks)
+            rows = if ks !== nothing
+                RT, emptyrow = densetypes(eltype(nt.time), fold.stateprotos,
+                    protos, ks, outs)
+                rs = RT[]
+                fold.cycletime = foldcyclesdense!(rs, fold.groups, ks, nt,
+                    fold.cycletime, keynames, outs, emptyrow)
+                rs
+            elseif keyed
+                rs, fold.cycletime = foldcyclesgrouped!(
+                    fold.groups, fold.stateprotos, nt, fold.cycletime,
+                    keynames, outs)
+                rs
+            else
+                rs, fold.states, fold.cycletime = foldcycles!(
+                    fold.states, nt, fold.cycletime, outs)
+                rs
             end
-            flush = function ()
-                fold.cycletime === nothing && return nothing
-                if ks !== nothing
-                    RT, emptyrow = densetypes(typeof(fold.cycletime),
-                        fold.stateprotos, protos, ks, outs)
-                    drows = closedense!(RT[], fold.groups, ks, fold.cycletime,
-                        outs, emptyrow)
-                    return isempty(drows) ? nothing : DataFrame(drows)
-                end
-                rows =
-                    keyed ?
-                    closecycle!(
-                        rowtype(typeof(fold.cycletime), keytype(fold.groups),
-                            valtype(fold.groups), outs)[], fold.groups,
-                        fold.cycletime, outs) :
-                    [summaryrow(fold.cycletime, fold.states, outs)]
-                return isempty(rows) ? nothing : DataFrame(rows)
-            end
-            return chunkmap(step, p.run(ctx); flush = flush)
+            return isempty(rows) ? nothing : DataFrame(rows)
         end
+        flush = function ()
+            fold.cycletime === nothing && return nothing
+            if ks !== nothing
+                RT, emptyrow = densetypes(typeof(fold.cycletime),
+                    fold.stateprotos, protos, ks, outs)
+                drows = closedense!(RT[], fold.groups, ks, fold.cycletime,
+                    outs, emptyrow)
+                return isempty(drows) ? nothing : DataFrame(drows)
+            end
+            rows =
+                keyed ?
+                closecycle!(
+                    rowtype(typeof(fold.cycletime), keytype(fold.groups),
+                        valtype(fold.groups), outs)[], fold.groups,
+                    fold.cycletime, outs) :
+                [summaryrow(fold.cycletime, fold.states, outs)]
+            return isempty(rows) ? nothing : DataFrame(rows)
+        end
+        return chunkmap(step, p.run(ctx); flush = flush)
     end
 end
 summarizecycles(p::CausalPipeline, summarizers; kwargs...) =
@@ -770,31 +766,29 @@ function addsummarycolumns(summarizers; key = nothing)
     keynames = Val(Tuple(keycols))
     outs = Val(requested)
     keyed = !isempty(keycols)
-    return function (p::CausalPipeline)
-        return CausalPipeline() do ctx::Context
-            fold = SummaryFold(terms, "addsummarycolumns")
-            step = function (c)
-                if !fold.checked   # needs the schema: first chunk only
-                    checkkeycolumns(keycols, c, "addsummarycolumns")
-                    for n in requested   # hidden dependencies are never added
-                        String(n) in names(c) && throw(
-                            ArgumentError(
-                                "addsummarycolumns output column $(repr(n)) collides with an existing column",
-                            ),
-                        )
-                    end
-                    fold.checked = true
+    return pipetransform() do p, ctx
+        fold = SummaryFold(terms, "addsummarycolumns")
+        step = function (c)
+            if !fold.checked   # needs the schema: first chunk only
+                checkkeycolumns(keycols, c, "addsummarycolumns")
+                for n in requested   # hidden dependencies are never added
+                    String(n) in names(c) && throw(
+                        ArgumentError(
+                            "addsummarycolumns output column $(repr(n)) collides with an existing column",
+                        ),
+                    )
                 end
-                nt = preparechunk!(fold, protos, keyed, keynames, c)
-                vals =
-                    keyed ?
-                    foldrunninggrouped!(fold.groups, fold.stateprotos,
-                        nt, nrow(c), keynames, outs) :
-                    foldrunning!(fold.states, nt, nrow(c), outs)
-                return hcat(c, DataFrame(vals); copycols = false)
+                fold.checked = true
             end
-            return chunkmap(step, p.run(ctx))
+            nt = preparechunk!(fold, protos, keyed, keynames, c)
+            vals =
+                keyed ?
+                foldrunninggrouped!(fold.groups, fold.stateprotos,
+                    nt, nrow(c), keynames, outs) :
+                foldrunning!(fold.states, nt, nrow(c), outs)
+            return hcat(c, DataFrame(vals); copycols = false)
         end
+        return chunkmap(step, p.run(ctx))
     end
 end
 addsummarycolumns(p::CausalPipeline, summarizers; kwargs...) =

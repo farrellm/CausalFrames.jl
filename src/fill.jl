@@ -58,18 +58,16 @@ function forwardfill(selectors...; key = nothing, tolerance = nothing)
     checkselectors(selectors, "forwardfill", false)
     keycols = keycolumns(key, "forwardfill")
     keynames = Val(Tuple(keycols))
-    return function (p::CausalPipeline)
-        return CausalPipeline() do ctx::Context
-            st = ForwardFillState(keycols, selectors)
-            # With `tolerance` the input runs over a widened context: rows
-            # before `ctx.start` fill the cells and are then dropped.
-            drop = LeadInDrop(ctx.start)
-            step = c -> dropleadin!(drop, fillchunk!(st, keynames, tolerance, c))
-            return chunkmap(
-                step,
-                p.run(widenstart(ctx, tolerance, "forwardfill tolerance")),
-            )
-        end
+    return pipetransform() do p, ctx
+        st = ForwardFillState(keycols, selectors)
+        # With `tolerance` the input runs over a widened context: rows
+        # before `ctx.start` fill the cells and are then dropped.
+        drop = LeadInDrop(ctx.start)
+        step = c -> dropleadin!(drop, fillchunk!(st, keynames, tolerance, c))
+        return chunkmap(
+            step,
+            p.run(widenstart(ctx, tolerance, "forwardfill tolerance")),
+        )
     end
 end
 forwardfill(p::CausalPipeline, selectors...; kwargs...) =
@@ -300,10 +298,8 @@ function fillmissing(specs...)
         throw(ArgumentError("fillmissing column names must be unique"))
     :time in fillnames &&
         throw(ArgumentError("fillmissing may not fill the time column"))
-    return function (p::CausalPipeline)
-        return CausalPipeline() do ctx::Context
-            return chunkmap(c -> fillmissingchunk!(c, fillnames, vals), p.run(ctx))
-        end
+    return pipetransform() do p, ctx
+        return chunkmap(c -> fillmissingchunk!(c, fillnames, vals), p.run(ctx))
     end
 end
 fillmissing(p::CausalPipeline, specs...) = fillmissing(specs...)(p)

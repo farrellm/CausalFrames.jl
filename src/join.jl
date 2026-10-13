@@ -53,14 +53,12 @@ function asofjoin(right::CausalPipeline; key = nothing, tolerance = nothing,
         )
     lp = normprefix(leftprefix)
     rp = normprefix(rightprefix)
-    return function (left::CausalPipeline)
-        return CausalPipeline() do ctx::Context
-            cfg = JoinConfig(keycols, Val(Tuple(keycols)), tolerance,
-                strict ? (<) : (<=), Backward(), lp, rp, righttime, "asofjoin")
-            js = JoinState(right.run(widenstart(ctx, tolerance,
-                "asofjoin tolerance")))
-            return chunkmap(c -> joinchunk!(js, cfg, c), left.run(ctx))
-        end
+    return pipetransform() do left, ctx
+        cfg = JoinConfig(keycols, Val(Tuple(keycols)), tolerance,
+            strict ? (<) : (<=), Backward(), lp, rp, righttime, "asofjoin")
+        js = JoinState(right.run(widenstart(ctx, tolerance,
+            "asofjoin tolerance")))
+        return chunkmap(c -> joinchunk!(js, cfg, c), left.run(ctx))
     end
 end
 asofjoin(left::CausalPipeline, right::CausalPipeline; kwargs...) =

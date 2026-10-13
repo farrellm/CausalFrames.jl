@@ -154,17 +154,15 @@ function addrollingcolumns(windows, summarizers; key = nothing,
         push!(prefixednames, pn)
     end
     stored = storedcolumns(protos, keycols)
-    return function (p::CausalPipeline)
-        return CausalPipeline() do ctx::Context
-            cfg = RollingConfig(windownames, lookbacks, keycols,
-                Val(Tuple(keycols)), protos, Val(requested),
-                prefixednames, terms, stored)
-            summarized, augmented, leadin = rollinginputs(p, from, sharedrun,
-                ctx, rollingcontext(ctx, lookbacks))
-            rs = RollingState(summarized)
-            return chunkmap(c -> rollchunk!(rs, cfg, c),
-                afterleadin(rs, cfg, augmented, leadin))
-        end
+    return pipetransform() do p, ctx
+        cfg = RollingConfig(windownames, lookbacks, keycols,
+            Val(Tuple(keycols)), protos, Val(requested),
+            prefixednames, terms, stored)
+        summarized, augmented, leadin = rollinginputs(p, from, sharedrun,
+            ctx, rollingcontext(ctx, lookbacks))
+        rs = RollingState(summarized)
+        return chunkmap(c -> rollchunk!(rs, cfg, c),
+            afterleadin(rs, cfg, augmented, leadin))
     end
 end
 

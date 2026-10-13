@@ -10,14 +10,12 @@ checkqueue(queue::Integer, op::String) =
 # then), and joining its writer once upstream is exhausted. `SinkGuard` joins it
 # too when the run fails instead.
 function sinktransform(makesink)
-    return function (p::CausalPipeline)
-        return CausalPipeline() do ctx::Context
-            sink = makesink()
-            return SinkGuard(
-                chunkmap(c -> sinkchunk(sink, c), p.run(ctx);
-                    flush = () -> finishwrite(sink)),
-                sink)
-        end
+    return pipetransform() do p, ctx
+        sink = makesink()
+        return SinkGuard(
+            chunkmap(c -> sinkchunk(sink, c), p.run(ctx);
+                flush = () -> finishwrite(sink)),
+            sink)
     end
 end
 

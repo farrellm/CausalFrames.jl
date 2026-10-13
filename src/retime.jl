@@ -18,10 +18,8 @@ fills the whole window.
   [`Acausal.lead`](@ref CausalFrames.Acausal.lead).
 """
 function lag(offset)
-    return function (p::CausalPipeline)
-        return CausalPipeline() do ctx::Context
-            return chunkmap(c -> shiftchunk!(c, offset), p.run(lagcontext(ctx, offset)))
-        end
+    return pipetransform() do p, ctx
+        return chunkmap(c -> shiftchunk!(c, offset), p.run(lagcontext(ctx, offset)))
     end
 end
 lag(p::CausalPipeline, offset) = lag(offset)(p)
@@ -145,10 +143,8 @@ which `head` prevents.
 function head(n::Integer)
     n >= 0 || throw(ArgumentError("head n must be non-negative, got $n"))
     limit = Int(n)
-    return function (p::CausalPipeline)
-        return CausalPipeline() do ctx::Context
-            return ChunkSource(HeadProducer(p.run(ctx), limit))
-        end
+    return pipetransform() do p, ctx
+        return ChunkSource(HeadProducer(p.run(ctx), limit))
     end
 end
 head(p::CausalPipeline, n::Integer) = head(n)(p)
@@ -212,14 +208,12 @@ no values, but still drops rows at `stop`.
 """
 function settime(spec)
     checktimespec(spec, "settime")
-    return function (p::CausalPipeline)
-        return CausalPipeline() do ctx::Context
-            st = SetTimeState{timetype(ctx)}()
-            return chunkmap(
-                c -> settimechunk!(st, spec, c, ctx.start, ctx.stop, true, "settime"),
-                p.run(ctx),
-            )
-        end
+    return pipetransform() do p, ctx
+        st = SetTimeState{timetype(ctx)}()
+        return chunkmap(
+            c -> settimechunk!(st, spec, c, ctx.start, ctx.stop, true, "settime"),
+            p.run(ctx),
+        )
     end
 end
 settime(p::CausalPipeline, spec) = settime(spec)(p)

@@ -39,16 +39,14 @@ A chunk whose column names differ from the first chunk's is an
 function lastrow(; key = nothing)
     keycols = keycolumns(key, "lastrow")
     keynames = Val(Tuple(keycols))
-    return function (p::CausalPipeline)
-        return CausalPipeline() do ctx::Context
-            st = LastRowState(keycols)
-            step = function (c)
-                lastrowchunk!(st, keynames, c)
-                return nothing
-            end
-            return chunkmap(step, p.run(ctx);
-                flush = () -> flushlastrow(st, keynames, ctx.stop))
+    return pipetransform() do p, ctx
+        st = LastRowState(keycols)
+        step = function (c)
+            lastrowchunk!(st, keynames, c)
+            return nothing
         end
+        return chunkmap(step, p.run(ctx);
+            flush = () -> flushlastrow(st, keynames, ctx.stop))
     end
 end
 lastrow(p::CausalPipeline; kwargs...) = lastrow(; kwargs...)(p)

@@ -33,6 +33,11 @@ struct CausalPipeline{F}
     run::F
 end
 
+# A transform's shell: `run(p, ctx)` builds the chunk iterator of the pipeline
+# `p` transformed, over `ctx`. Written as a do block, so a transform reads
+# `pipetransform() do p, ctx … end`.
+pipetransform(run) = (p::CausalPipeline) -> CausalPipeline(ctx::Context -> run(p, ctx))
+
 """
     load(ctx::Context, p::CausalPipeline) -> CausalFrame
     load(ctx::Context) -> (CausalPipeline -> CausalFrame)

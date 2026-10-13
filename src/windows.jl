@@ -63,14 +63,12 @@ function summarizewindows(clk::CausalPipeline, lookback, summarizers;
     cfg = WindowConfig(keycols, Val(Tuple(keycols)), lookback, protos,
         Val(requested), Val(isempty(keycols)), ks, terms,
         storedcolumns(protos, keycols))
-    return function (p::CausalPipeline)
-        return CausalPipeline() do ctx::Context
-            T = timetype(ctx)
-            st = WindowState{T}(IntervalCursor{T}(clk.run(ctx)))
-            return chunkmap(c -> windowstep!(st, cfg, c),
-                p.run(widenstart(ctx, lookback, "summarizewindows lookback"));
-                flush = () -> windowflush!(st, cfg))
-        end
+    return pipetransform() do p, ctx
+        T = timetype(ctx)
+        st = WindowState{T}(IntervalCursor{T}(clk.run(ctx)))
+        return chunkmap(c -> windowstep!(st, cfg, c),
+            p.run(widenstart(ctx, lookback, "summarizewindows lookback"));
+            flush = () -> windowflush!(st, cfg))
     end
 end
 summarizewindows(p::CausalPipeline, clk::CausalPipeline, lookback, summarizers;

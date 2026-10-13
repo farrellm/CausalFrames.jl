@@ -6,7 +6,7 @@
 # and context widening inverted.
 module Acausal
 
-using ..CausalFrames: CausalPipeline, Context, chunkmap, shiftchunk!,
+using ..CausalFrames: CausalPipeline, Context, pipetransform, chunkmap, shiftchunk!,
     settimechunk!, SetTimeState, checktimespec, timetype, keycolumns,
     normprefix, rowat, keyat, JoinConfig, JoinState, joinchunk!
 import ..CausalFrames: newstore, widenstore, segment!
@@ -66,13 +66,11 @@ function futurejoin(right::CausalPipeline; key = nothing, tolerance = nothing,
         )
     lp = normprefix(leftprefix)
     rp = normprefix(rightprefix)
-    return function (left::CausalPipeline)
-        return CausalPipeline() do ctx::Context
-            cfg = JoinConfig(keycols, Val(Tuple(keycols)), tolerance,
-                strict ? (>) : (>=), Forward(), lp, rp, righttime, "futurejoin")
-            js = JoinState(right.run(futurecontext(ctx, tolerance)))
-            return chunkmap(c -> joinchunk!(js, cfg, c), left.run(ctx))
-        end
+    return pipetransform() do left, ctx
+        cfg = JoinConfig(keycols, Val(Tuple(keycols)), tolerance,
+            strict ? (>) : (>=), Forward(), lp, rp, righttime, "futurejoin")
+        js = JoinState(right.run(futurecontext(ctx, tolerance)))
+        return chunkmap(c -> joinchunk!(js, cfg, c), left.run(ctx))
     end
 end
 futurejoin(left::CausalPipeline, right::CausalPipeline; kwargs...) =
@@ -198,10 +196,8 @@ Available after `using CausalFrames.Acausal`.
   identity.
 """
 function lead(offset)
-    return function (p::CausalPipeline)
-        return CausalPipeline() do ctx::Context
-            return chunkmap(c -> shiftchunk!(c, -offset), p.run(leadcontext(ctx, offset)))
-        end
+    return pipetransform() do p, ctx
+        return chunkmap(c -> shiftchunk!(c, -offset), p.run(leadcontext(ctx, offset)))
     end
 end
 lead(p::CausalPipeline, offset) = lead(offset)(p)
@@ -239,15 +235,13 @@ The input is not widened, so a row at or after `stop` is never seen, even if
 """
 function settime(spec)
     checktimespec(spec, "Acausal.settime")
-    return function (p::CausalPipeline)
-        return CausalPipeline() do ctx::Context
-            st = SetTimeState{timetype(ctx)}()
-            return chunkmap(
-                c -> settimechunk!(st, spec, c, ctx.start, ctx.stop, false,
-                    "Acausal.settime"),
-                p.run(ctx),
-            )
-        end
+    return pipetransform() do p, ctx
+        st = SetTimeState{timetype(ctx)}()
+        return chunkmap(
+            c -> settimechunk!(st, spec, c, ctx.start, ctx.stop, false,
+                "Acausal.settime"),
+            p.run(ctx),
+        )
     end
 end
 settime(p::CausalPipeline, spec) = settime(spec)(p)

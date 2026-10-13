@@ -105,15 +105,13 @@ function applymodels(models::CausalPipeline; column::Symbol = :model,
     # selector doesn't fail on an absent column, so a missing model column is
     # reported by predictchunk! under this operator's name.
     right = models |> selectcolumns(n -> Symbol(n) === column || Symbol(n) in keycols)
-    return function (p::CausalPipeline)
-        return CausalPipeline() do ctx::Context
-            cfg = JoinConfig(keycols, Val(Tuple(keycols)), tolerance,
-                strict ? (<) : (<=), Backward(), nothing, nothing, nothing,
-                "applymodels")
-            js = JoinState(right.run(widenstart(ctx, tolerance, "applymodels tolerance")))
-            return chunkmap(c -> predictchunk!(js, cfg, column, name, operation, c),
-                p.run(ctx))
-        end
+    return pipetransform() do p, ctx
+        cfg = JoinConfig(keycols, Val(Tuple(keycols)), tolerance,
+            strict ? (<) : (<=), Backward(), nothing, nothing, nothing,
+            "applymodels")
+        js = JoinState(right.run(widenstart(ctx, tolerance, "applymodels tolerance")))
+        return chunkmap(c -> predictchunk!(js, cfg, column, name, operation, c),
+            p.run(ctx))
     end
 end
 applymodels(p::CausalPipeline, models::CausalPipeline; kwargs...) =
@@ -270,10 +268,8 @@ function modelreports(; column::Symbol = :model, name::Symbol = :report)
         throw(ArgumentError("modelreports column may not be :time"))
     name === :time &&
         throw(ArgumentError("modelreports output column may not be named :time"))
-    return function (p::CausalPipeline)
-        return CausalPipeline() do ctx::Context
-            return chunkmap(c -> reportchunk!(c, column, name), p.run(ctx))
-        end
+    return pipetransform() do p, ctx
+        return chunkmap(c -> reportchunk!(c, column, name), p.run(ctx))
     end
 end
 modelreports(p::CausalPipeline; kwargs...) = modelreports(; kwargs...)(p)

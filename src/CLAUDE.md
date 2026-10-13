@@ -38,7 +38,8 @@ design rationale and performance constraints behind each module.
   `src/rowwise.jl` (`filterrows`, `addcolumns`), `src/retime.jl` (`lag`,
   `warmup`, `head`, `settime`) and `src/columns.jl`. Sources return a
   `CausalPipeline`; transforms are curried (`filterrows(pred)` returns
-  `CausalPipeline -> CausalPipeline`) so both chain with `|>`. Row functions
+  `CausalPipeline -> CausalPipeline`, built by `pipeline.jl`'s
+  `pipetransform() do p, ctx … end`) so both chain with `|>`. Row functions
   run over concretely typed column-table rows behind a per-chunk function
   barrier, never `DataFrameRow`s.
   - shared with the parquet and JLS operators: `SourceClip` (a file source's

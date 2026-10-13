@@ -82,10 +82,8 @@ function lookupjoin(table; key = nothing, unmatched::Symbol = :missing,
     end
     cfg = buildlookup(cols, Val(Tuple(keycols)), Val(valuenames), keycols, mode,
         lp, rightnames)
-    return function (p::CausalPipeline)
-        return CausalPipeline() do ctx::Context
-            return chunkmap(c -> lookupchunk(cfg, c), p.run(ctx))
-        end
+    return pipetransform() do p, ctx
+        return chunkmap(c -> lookupchunk(cfg, c), p.run(ctx))
     end
 end
 lookupjoin(p::CausalPipeline, table; kwargs...) = lookupjoin(table; kwargs...)(p)
