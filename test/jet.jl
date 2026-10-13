@@ -29,8 +29,13 @@ using JET
     unt = (time = [1, 1, 2], k = Union{Missing,String}["a", missing, "a"],
         j = Union{Missing,Int}[1, 2, missing], x = [1.0, 2.0, 3.0])
     ugroups = CausalFrames.newgroups(states, untypes, unames)
-    JET.@test_opt CausalFrames.foldgroups!(ugroups, states, unt, unames)
     JET.@test_opt CausalFrames.sortedgroups(ugroups)
+    # On Julia 1.10, Base's NamedTuple `hash` dispatches from two `Union`
+    # fields (issue #116), so the fold is checked over one key column there.
+    # When 1.10 support is dropped, check both columns on every version.
+    fnames = VERSION < v"1.11" ? Val((:k,)) : unames
+    fgroups = CausalFrames.newgroups(states, untypes, fnames)
+    JET.@test_opt CausalFrames.foldgroups!(fgroups, states, unt, fnames)
 
     JET.@test_opt CausalFrames.foldcycles!(states, nt, nothing, outs)
     JET.@test_opt CausalFrames.freshall!(states)
