@@ -254,6 +254,13 @@ end
         Val((:sym,)))
     JET.@test_opt CausalFrames.gathermissing(["x"], [1, 0])
     JET.@test_opt CausalFrames.gathermissing([1.0], [1, 0])
+
+    # the index build over a table past 32 columns, where a tuple `map` over
+    # every column stops inferring and each insert would dispatch
+    wide = (; sym = ["a", "b"], (Symbol(:v, j) => [1.0, 2.0] for j in 1:39)...)
+    vn = Tuple(Symbol(:v, j) for j in 1:39)
+    JET.@test_opt CausalFrames.buildlookup(wide, Val((:sym,)), Val(vn), [:sym],
+        CausalFrames.MissingOnUnmatched(), nothing, collect(vn))
 end
 
 @testset "lastrow kernel" begin
