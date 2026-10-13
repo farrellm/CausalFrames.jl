@@ -80,7 +80,7 @@ mutable struct CSVProducer{T}
     const types::Any    # CSV.Chunks `types` argument, or nothing
     const delim::Any    # CSV.Chunks `delim` argument, or nothing
     const sort::Bool
-    chunks::Any         # PullCursor over the file chunks, created on first pull
+    chunks::Any         # PullCursor over the file's DataFrames, created on first pull
 end
 CSVProducer(clip::SourceClip{T}, chunkbytes::Int, types, delim,
     sort::Bool) where {T} =
@@ -120,27 +120,17 @@ end
 
 tochunk(filechunk) = filechunk isa DataFrame ? filechunk : DataFrame(filechunk)
 
-function (p::CSVProducer{T})() where {T}
+function (p::CSVProducer)()
     clip = p.clip
     clip.done && return nothing
-    if p.sort
-        clip.done = true
-        kept = DataFrame[]
-        for filechunk in csvchunks(clip.path, p.chunkbytes, p.types, p.delim)
-            gatherchunk!(kept, clip, tochunk(filechunk))
-        end
-        return sortgathered(kept, T)
-    end
-    p.chunks === nothing &&
-        (p.chunks = PullCursor(csvchunks(clip.path, p.chunkbytes, p.types, p.delim)))
-    while !clip.done
-        filechunk = pull!(p.chunks)
-        filechunk === nothing && break
-        out = clipchunk!(clip, tochunk(filechunk))
-        out === nothing || return out
-    end
-    clip.done = true
-    return nothing
+    p.chunks === nothing && (
+        p.chunks = PullCursor(
+            Iterators.map(tochunk,
+                csvchunks(clip.path, p.chunkbytes, p.types, p.delim)),
+        )
+    )
+    p.sort && return gathersorted!(clip, p.chunks)
+    return nextclipped!(clip, p.chunks)
 end
 
 """

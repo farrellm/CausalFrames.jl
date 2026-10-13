@@ -56,6 +56,30 @@ function clipchunk!(clip::SourceClip{T}, df::DataFrame) where {T}
     return clipped
 end
 
+# The next non-empty clipped chunk pulled from `chunks`, a cursor over the
+# source's freshly read DataFrames; the clip is done once they run out.
+function nextclipped!(clip::SourceClip, chunks::PullCursor)
+    while !clip.done
+        df = pull!(chunks)
+        df === nothing && break
+        out = clipchunk!(clip, df)
+        out === nothing || return out
+    end
+    clip.done = true
+    return nothing
+end
+
+# A `sort = true` read, which cannot stream: every chunk `chunks` yields is
+# scanned for in-window rows, which are sorted once into a single chunk.
+function gathersorted!(clip::SourceClip{T}, chunks::PullCursor) where {T}
+    clip.done = true
+    kept = DataFrame[]
+    while (df = pull!(chunks)) !== nothing
+        gatherchunk!(kept, clip, df)
+    end
+    return sortgathered(kept, T)
+end
+
 # `clipchunk!`'s counterpart for a source asked to `sort`: the same rename and
 # time resolution, but with no order check, binary search or early stop. The
 # in-window rows, found by a scan, are pushed onto `kept` to be sorted once the
@@ -87,11 +111,16 @@ windowrows(times::AbstractVector, closed::Bool, start, stop) =
 # order, with `:time` converted to the context's time type; nothing if empty.
 function sortgathered(kept::Vector{DataFrame}, ::Type{T}) where {T}
     isempty(kept) && return nothing
-    df = length(kept) == 1 ? only(kept) : reduce(vcat, kept)
+    df = vcatowned(kept)
     issorted(df.time) || (df = df[stableperm(df.time), :])
     df[!, :time] = convert(Vector{T}, df.time)
     return df
 end
+
+# Owned pieces as one owned DataFrame. A lone piece is returned as is, where
+# `reduce(vcat, …)` would copy it.
+vcatowned(pieces::Vector{DataFrame}) =
+    length(pieces) == 1 ? only(pieces) : reduce(vcat, pieces)
 
 # The subject of every data error a source raises: "CSV file x.csv", or a bare
 # "table" for readtable, which has no path. Built only on the error path.
@@ -127,37 +156,70 @@ end
 # Rename columns before the time column is resolved. A map renames only the
 # columns it names; a function is applied to every column name.
 renamecolumns!(::DataFrame, ::Nothing) = nothing
-renamecolumns!(df::DataFrame, f) = (rename!(f, df); nothing)
-# A map may be keyed by String or Symbol names, so both are looked up.
-function renamecolumns!(df::DataFrame, m::AbstractDict)
-    pairs = Pair{String,Symbol}[]
-    for n in names(df)
-        s = Symbol(n)
-        haskey(m, n) ? push!(pairs, n => Symbol(m[n])) :
-        haskey(m, s) && push!(pairs, n => Symbol(m[s]))
-    end
-    isempty(pairs) || rename!(df, pairs)
-    return nothing
+renamecolumns!(df::DataFrame, rename) = (rename!(n -> renamedto(n, rename), df); nothing)
+
+# A column's name after `rename`. A map may be keyed by String or Symbol names,
+# so both are looked up.
+renamedto(n::String, ::Nothing) = n
+renamedto(n::String, f) = String(f(n))
+function renamedto(n::String, m::AbstractDict)
+    haskey(m, n) && return String(m[n])
+    haskey(m, Symbol(n)) && return String(m[Symbol(n)])
+    return n
 end
 
 # Materialize `:time`, from a column or a function, and reject it if textual.
-# `columnindex`, unlike `names(df)`, allocates nothing.
 function resolvetime!(df::DataFrame, time, path::String, what::String)
     if time isa Function
-        df[!, :time] = maptime(time, Tables.columntable(df))
+        df[!, :time] =
+            checktimes(maptime(time, Tables.columntable(df)), true, what, path)
     else
-        if time isa Symbol && time !== :time
-            columnindex(df, time) > 0 ||
-                throw(ArgumentError("$what $path has no column $(repr(time))"))
-            columnindex(df, :time) > 0 &&
-                throw(ArgumentError(timeclash(what, path, time)))
-            rename!(df, time => :time)
-        end
-        columnindex(df, :time) > 0 || throw(
-            ArgumentError("$what $path has no time column; choose one with `time`"))
+        name = timecolumn(df, time, what, path)
+        name === :time || rename!(df, name => :time)
+        checktimes(df.time, false, what, path)
     end
-    istextual(df.time) &&
-        throw(ArgumentError(textualtime(what, path, time isa Function)))
+    return nothing
+end
+
+# The raw time values, and the column they came from (`nothing` for a `time`
+# function, whose values become a `:time` column), refused if textual. `cols`
+# is a DataFrame or a Tables.jl column table.
+sourcetimes(cols, time::Function, what::String, path::String) =
+    (checktimes(maptime(time, Tables.columntable(cols)), true, what, path), nothing)
+function sourcetimes(cols, time::Union{Nothing,Symbol}, what::String, path::String)
+    name = timecolumn(cols, time, what, path)
+    return (checktimes(Tables.getcolumn(cols, name), false, what, path), name)
+end
+
+# The column holding the times, which must exist and, unless it is `:time`
+# itself, must not clash with a `:time` column.
+function timecolumn(cols, time::Union{Nothing,Symbol}, what::String, path::String)
+    name = something(time, :time)
+    hascolumn(cols, name) || throw(
+        ArgumentError(
+            time === nothing ?
+            "$(sourcename(what, path)) has no time column; choose one with `time`" :
+            "$(sourcename(what, path)) has no column $(repr(name))"),
+    )
+    name === :time || !hascolumn(cols, :time) ||
+        throw(ArgumentError(timeclash(what, path, name)))
+    return name
+end
+
+# A DataFrame's `columnindex`, unlike its names, allocates nothing.
+hascolumn(df::AbstractDataFrame, name::Symbol) = columnindex(df, name) > 0
+hascolumn(cols, name::Symbol) = name in Tables.columnnames(cols)
+
+checktimes(v::AbstractVector, fromfunction::Bool, what::String, path::String) =
+    istextual(v) ? throw(ArgumentError(textualtime(what, path, fromfunction))) : v
+
+# Make `times`, as `sourcetimes` found them, the frame's `:time` column.
+function applytime!(df::DataFrame, times::AbstractVector, source)
+    if source === nothing
+        df[!, :time] = times
+    elseif source !== :time
+        rename!(df, source => :time)
+    end
     return nothing
 end
 

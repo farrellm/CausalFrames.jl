@@ -105,7 +105,7 @@ function sortcyclechunk!(st::CycleSortState, spec, order, c::DataFrame)
         hi = searchsortedlast(times, opentime)
         cycle =
             hi == 0 ?
-            (length(pending) == 1 ? only(pending) : reduce(vcat, pending)) :
+            vcatowned(pending) :
             reduce(vcat, [pending; view(c, 1:hi, :)])
         empty!(pending)
         closed = sortedview(cycle, 1:nrow(cycle), spec, order)
@@ -124,7 +124,7 @@ materialize(a::SubDataFrame, b::SubDataFrame) = vcat(a, b)
 # order goes out without a further copy.
 function flushcycle!(st::CycleSortState, spec, order)
     isempty(st.pending) && return nothing
-    cycle = length(st.pending) == 1 ? only(st.pending) : reduce(vcat, st.pending)
+    cycle = vcatowned(st.pending)
     empty!(st.pending)
     perm = sortedperm(cycle, 1:nrow(cycle), spec, order)
     return isempty(perm) ? cycle : cycle[perm, :]

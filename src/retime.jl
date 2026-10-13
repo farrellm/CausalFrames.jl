@@ -25,14 +25,10 @@ end
 lag(p::CausalPipeline, offset) = lag(offset)(p)
 
 # The input window: the whole window slid back by `offset`, so the shift lands
-# the output in [start, stop). A negative offset (acausal) is rejected by the
-# same subtraction probe as `widenstart`.
-function lagcontext(ctx::Context, offset)
-    start = ctx.start - offset
-    start <= ctx.start ||
-        throw(ArgumentError("lag offset must be non-negative, got $offset"))
-    return Context(start, ctx.stop - offset)
-end
+# the output in [start, stop). A negative offset (acausal) is rejected by
+# `widenstart`'s probe.
+lagcontext(ctx::Context, offset) =
+    Context(widenstart(ctx, offset, "lag offset").start, ctx.stop - offset)
 
 # Shift the owned chunk's time column by a constant, keeping its order and
 # position. Shared with `Acausal.lead`, which passes a negative `delta`.
@@ -250,7 +246,7 @@ end
 function settimechunk!(st::SetTimeState{T}, spec, c::DataFrame, start::T, stop::T,
     causal::Bool, opname::String) where {T}
     old = c.time
-    new = converttimes(T, newtimes(spec, c, opname), opname)
+    new = converttimes(T, newtimes(spec, c, opname))
     causal && checkforward(old, new, opname)
     issorted(new) ||
         throw(ArgumentError("$opname produced a time column that is not non-decreasing"))
@@ -260,8 +256,7 @@ function settimechunk!(st::SetTimeState{T}, spec, c::DataFrame, start::T, stop::
                 across chunk boundaries"),
         )
     st.prevtime = last(new)          # pre-clip, as clipchunk! carries it
-    lo = searchsortedfirst(new, start)
-    hi = searchsortedfirst(new, stop) - 1
+    lo, hi = windowbounds(new, false, start, stop)
     settimecolumn!(c, spec, new)
     # The chunk is owned, so keeping every row needs no copy.
     return lo == 1 && hi == nrow(c) ? c : c[lo:hi, :]
@@ -291,7 +286,7 @@ function checktimevalues(v::AbstractVector, opname::String)
 end
 
 # The new column takes the context's time type, as every source's does.
-function converttimes(::Type{T}, times::AbstractVector, opname::String) where {T}
+function converttimes(::Type{T}, times::AbstractVector) where {T}
     eltype(times) <: T && return times
     return convert(Vector{T}, times)
 end

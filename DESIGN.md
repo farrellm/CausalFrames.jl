@@ -307,8 +307,10 @@ so it is the transform `sortcycles` (see "Sorting within a cycle").
 ## Resolving the time column
 
 The three sources that resolve their own times — `readcsv`, `readparquet` and
-`readtable` over a table or `DataFrame` — share one set of rules, whether the
-work is done by `resolvetime!` (file chunks) or `tabletimes` (tables):
+`readtable` over a table or `DataFrame` — share one set of rules and one
+implementation: `timecolumn` finds the time column and `checktimes` rejects
+textual times, under both `resolvetime!` (file chunks, resolved in place) and
+`sourcetimes` (tables, whose times are copied out):
 
 - `time` is `nothing`, a `Symbol` or a function, checked when the operator is
   called (`checksourcetimespec`). The chunk path acts only on a `Symbol` or a
@@ -395,7 +397,7 @@ and differ in *when* the per-table work runs and in what is copied.
 
 - **Any Tables.jl table.** Each run walks `Tables.partitions(table)` through a
   `CSVProducer`-shaped `TableProducer`, one chunk per partition. Per partition,
-  `tabletimes` resolves the time — `time` works as for `readcsv`: `:time`, a
+  `sourcetimes` resolves the time — `time` works as for `readcsv`: `:time`, a
   column renamed where it stands, or a per-row function behind `maptime` — and
   `tablerows`, the function barrier typed on the time vector and the context's
   time type, checks the order (within the partition and against the previous
