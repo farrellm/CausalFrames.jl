@@ -704,20 +704,24 @@ end
                   200
         end
 
-        # A summarized input wider than 32 columns, where Base's tuple `map`
-        # stops unrolling, still admits rows without allocating (issue #98).
-        function wideallocs(n)
+        # Extra input columns no summarizer reads don't make rows allocate:
+        # over 32 of them, where Base's tuple `map` stops unrolling (issue #98),
+        # or one admitting `missing` beside a compensated float sum (`keyat`,
+        # see src/CLAUDE.md).
+        function extraallocs(extra!, n)
             src = DataFrame(time = 1:n, k = repeat(["a", "b"], n ÷ 2),
-                x = mod.(1:n, 7))
-            for j in 1:40
-                src[!, "c$j"] = fill(1.0, n)
-            end
+                x = Float64.(mod.(1:n, 7)))
+            extra!(src, n)
             p = CausalPipeline(ctx -> [src])
             t = addrollingcolumns((w5 = 5, b5 = Bars(5)), Sum(:x); key = :k)
             load(Context(0, n + 1), p |> t)
             return @allocations load(Context(0, n + 1), p |> t)
         end
-        @test wideallocs(8000) - wideallocs(2000) < 200
+        addwide!(src, n) = foreach(j -> src[!, "c$j"] = fill(1.0, n), 1:40)
+        addunion!(src, n) = src[!, :u] = Vector{Union{Missing,Float64}}(fill(1.0, n))
+        for extra! in (addwide!, addunion!)
+            @test extraallocs(extra!, 8000) - extraallocs(extra!, 2000) < 200
+        end
     end
 
     @testset "fast paths over dates and mixed periods" begin

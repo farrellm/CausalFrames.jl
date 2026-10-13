@@ -274,8 +274,12 @@ end
     end
     return Expr(:block, Expr(:meta, :inline), Expr(:new, V, vals...))
 end
-@inline keyat(nt::NamedTuple, i::Int, ::Val{KN}) where {KN} =
-    NamedTuple{KN}(map(c -> @inbounds(getproperty(nt, c)[i]), KN))
+
+# Row `i`'s key, generated like `rowat` so no closure is built per row.
+@generated function keyat(nt::NamedTuple, i::Int, ::Val{KN}) where {KN}
+    vals = map(c -> :(@inbounds getfield(nt, $(QuoteNode(c)))[i]), KN)
+    return Expr(:block, Expr(:meta, :inline), :(NamedTuple{KN}(($(vals...),))))
+end
 
 # --- output assembly -------------------------------------------------------
 
