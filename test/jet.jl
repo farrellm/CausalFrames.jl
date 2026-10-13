@@ -18,8 +18,23 @@ using JET
     JET.@test_opt CausalFrames.summaryvalues(states, outs)
 
     keynames = Val((:k,))
-    groups = CausalFrames.newgroups(states, nt, keynames)
+    groups = CausalFrames.newgroups(states, intypes, keynames)
     JET.@test_opt CausalFrames.foldgroups!(groups, states, nt, keynames)
+
+    # Keys over `missing`-admitting columns: built in the table's key type and
+    # ordered by `keyisless`, neither dispatching (issue #114).
+    unames = Val((:k, :j))
+    unt = (time = [1, 1, 2], k = Union{Missing,String}["a", missing, "a"],
+        j = Union{Missing,Int}[1, 2, missing], x = [1.0, 2.0, 3.0])
+    untypes = map(eltype, unt)
+    ugroups = CausalFrames.newgroups(states, untypes, unames)
+    JET.@test_opt CausalFrames.sortedgroups(ugroups)
+    # On Julia 1.10, Base's NamedTuple `hash` dispatches from two `Union`
+    # fields (issue #116), so the fold is checked over one key column there.
+    # When 1.10 support is dropped, check both columns on every version.
+    fnames = VERSION < v"1.11" ? Val((:k,)) : unames
+    fgroups = CausalFrames.newgroups(states, untypes, fnames)
+    JET.@test_opt CausalFrames.foldgroups!(fgroups, states, unt, fnames)
 
     JET.@test_opt CausalFrames.foldcycles!(states, nt, nothing, outs)
     JET.@test_opt CausalFrames.freshall!(states)
@@ -192,7 +207,7 @@ end
         2, false, 10, true, outs)
 
     keynames = Val((:k,))
-    groups = CausalFrames.newgroups(states, nt, keynames)
+    groups = CausalFrames.newgroups(states, intypes, keynames)
     JET.@test_opt CausalFrames.foldintervalsgrouped!(groups, states, nt, bounds,
         2, keynames, true, outs)
     RT = CausalFrames.rowtype(Int, keytype(groups), valtype(groups), outs)
@@ -239,6 +254,13 @@ end
         Val((:sym,)))
     JET.@test_opt CausalFrames.gathermissing(["x"], [1, 0])
     JET.@test_opt CausalFrames.gathermissing([1.0], [1, 0])
+
+    # the index build over a table past 32 columns, where a tuple `map` over
+    # every column stops inferring and each insert would dispatch
+    wide = (; sym = ["a", "b"], (Symbol(:v, j) => [1.0, 2.0] for j in 1:39)...)
+    vn = Tuple(Symbol(:v, j) for j in 1:39)
+    JET.@test_opt CausalFrames.buildlookup(wide, Val((:sym,)), Val(vn), [:sym],
+        CausalFrames.MissingOnUnmatched(), nothing, collect(vn))
 end
 
 @testset "lastrow kernel" begin

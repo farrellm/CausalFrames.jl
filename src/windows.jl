@@ -416,7 +416,7 @@ end
     emptyrow, grid::Val, ::Nothing)
     empty!(scratch)
     append!(scratch, groups)
-    sort!(scratch; by = groupkey)
+    sort!(scratch; lt = groupisless)
     return emitwindow!(rows, τ, scratch, prevkeys, tiers, outs, emptyrow, grid)
 end
 @inline emitgroups!(rows::Vector, τ, groups::AbstractDict, scratch,
@@ -443,7 +443,7 @@ end
 # Emit one tick. Keyless (grid): one row, the summary or the empty values.
 # Keyed: the present keys in key order, merged with an empty row for each key
 # present at the previous tick and absent now; the present keys then become
-# `prevkeys`. Both lists are sorted by `groupkey`, so one merge walk suffices.
+# `prevkeys`. Both lists are sorted by `keyisless`, so one merge walk suffices.
 function emitwindow!(rows::Vector{RT}, τ, present::Vector{<:Pair},
     prevkeys::Vector{K}, tiers::WindowTiers, outs::Val, emptyrow,
     ::Val{G}) where {RT,K,G}
@@ -462,7 +462,7 @@ function emitwindow!(rows::Vector{RT}, τ, present::Vector{<:Pair},
     j = 1
     np = length(prevkeys)
     for (k, g) in present
-        while j <= np && isless(values(@inbounds(prevkeys[j])), values(k))
+        while j <= np && keyisless(@inbounds(prevkeys[j]), k)
             push!(rows, convert(RT, gridrow(τ, @inbounds(prevkeys[j]), emptyrow)))
             j += 1
         end

@@ -2158,6 +2158,20 @@ concrete, the key names carried in a `Val`) and specialize, so the per-row
 work compiles to direct field access with no dispatch or boxing. Folding a
 million rows allocates on the order of kilobytes.
 
+Keys are typed by their columns, not by their values. Every keyed store — a
+`GroupTable`, a join's or `lastrow`'s `SlotStore`, a rolling or window
+transform's groups — is keyed by `storekeytype` of the promoted schema, and
+each row's key is built straight into its columns' types (`keyat` over a
+column table, `keyvalues` over a row). A key column typed
+`Union{Missing,String}` thus gives keys of that field type whether a row holds
+a string or `missing`: a key typed from its values would be narrower than the
+store's, and converting it on every lookup allocates per row (issue #114).
+For the same reason keys are ordered by `keyisless`, which compares field by
+field, rather than through the tuple of their values, which is not inferred
+for a `Union` field. One cost remains, in Base: hashing a `NamedTuple` of four
+or more fields, one admitting `missing`, allocates per lookup — from two
+fields on Julia 1.10 (issue #116).
+
 One consequence worth knowing: more than about 32 summarizers in a single
 call — counting hidden dependencies after expansion — exceeds Julia's tuple
 inference limits, and the fold degrades to dynamic dispatch. It stays
