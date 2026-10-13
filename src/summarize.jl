@@ -258,8 +258,8 @@ widenstates(states::Tuple, intypes::NamedTuple) =
 
 # The per-key state tuples of the keyed transforms, plus two buffers that make
 # closing the table allocation-free. Both type parameters are concrete (the key
-# type from the promoted schema, the state type from the prototypes), so the kernels
-# specialize on them. Only the cycle-closing transforms (`summarizecycles`,
+# type from the promoted schema, the state type from the prototypes), so the
+# kernels specialize on them. Only the cycle-closing transforms (`summarizecycles`,
 # `intervalize`) close tables and use the buffers.
 mutable struct GroupTable{K,S<:Tuple}
     table::Dict{K,S}
@@ -316,18 +316,14 @@ emptyvalues(protos::Tuple, ::Val{R}) where {R} =
 @inline summaryrow(t, k::NamedTuple, states::Tuple, r::Val) =
     merge((; time = t), k, summaryvalues(states, r))
 
-# A row's declared field type: a `Tables.rows` row's is its column's eltype.
-# Defined before `keyvalues`, whose generator calls it.
-rowfieldtype(::Type{R}, c::Symbol) where {R<:NamedTuple} = fieldtype(R, c)
-rowfieldtype(::Type{Tables.ColumnsRow{T}}, c::Symbol) where {T} =
-    eltype(fieldtype(T, c))
-
 # The key names ride in a Val so the key's NamedTuple type is known statically.
 # The key is typed by the row's declared field types, as the group table's is,
-# not by the values' runtime types: those differ once a key column admits
-# `missing`, and converting each key on lookup allocates per row.
-@generated function keyvalues(row, ::Val{KN}) where {KN}
-    K = NamedTuple{KN,Tuple{(rowfieldtype(row, c) for c in KN)...}}
+# not by its values' runtime types, which are narrower once a key column admits
+# `missing` (issue #114). Base's selection keeps a NamedTuple row's field types;
+# a `Tables.rows` row's are its columns' eltypes.
+@inline keyvalues(row::NamedTuple, ::Val{KN}) where {KN} = NamedTuple{KN}(row)
+@generated function keyvalues(row::Tables.ColumnsRow{T}, ::Val{KN}) where {T,KN}
+    K = NamedTuple{KN,Tuple{(eltype(fieldtype(T, c)) for c in KN)...}}
     vals = map(c -> :(Tables.getcolumn(row, $(QuoteNode(c)))), KN)
     return Expr(:block, Expr(:meta, :inline), Expr(:new, K, vals...))
 end

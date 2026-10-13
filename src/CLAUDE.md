@@ -469,9 +469,7 @@ design rationale and performance constraints behind each module.
   builds no closure: the kernel can outgrow the compiler's inlining budget (a
   `missing`-admitting input column and a compensated float sum suffice), and a
   closure that isn't inlined allocates per row. `keyat` (and `keyvalues`, its
-  row form) type the key by its columns, not its values: a key built from a
-  `missing`-admitting column's values is narrower than the store's key type,
-  and the conversion on lookup allocates per row (issue #114)
+  row form) type the key by its columns, not its values (DESIGN.md, issue #114)
 - `src/intervalize.jl` — `intervalize`, the third binary transform: summarize
   over the intervals a `clock` pipeline defines (`[bₖ, bₖ₊₁)`, timestamped at
   `bₖ₊₁`). It is the `summarizecycles` fold, closing on clock boundaries.

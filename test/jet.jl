@@ -24,10 +24,9 @@ using JET
     # Keys over `missing`-admitting columns: built in the table's key type and
     # ordered by `keyisless`, neither dispatching (issue #114).
     unames = Val((:k, :j))
-    untypes = (time = Int, k = Union{Missing,String}, j = Union{Missing,Int},
-        x = Float64)
     unt = (time = [1, 1, 2], k = Union{Missing,String}["a", missing, "a"],
         j = Union{Missing,Int}[1, 2, missing], x = [1.0, 2.0, 3.0])
+    untypes = map(eltype, unt)
     ugroups = CausalFrames.newgroups(states, untypes, unames)
     JET.@test_opt CausalFrames.sortedgroups(ugroups)
     # On Julia 1.10, Base's NamedTuple `hash` dispatches from two `Union`

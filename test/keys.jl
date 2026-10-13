@@ -21,8 +21,7 @@
         @test df.x_sum == kdf.x
 
         # (the one closed interval is [1, 4), timestamped 4)
-        df = DataFrame(load(Context(1, 7),
-            intervalize(kp, clock(3), Sum(:x); key = :k)))
+        df = loadk(intervalize(clock(3), Sum(:x); key = :k))
         @test isequal(df.k, ["a", "b", missing])
         @test df.x_sum == [1.0, 3.0, 2.0]
 
@@ -42,7 +41,7 @@
             b = Union{Missing,Int}[2, 1, missing, missing, missing, 1],
             x = 1.0:6.0)
         p2 = readtable(df2)
-        want = sort!(collect(zip(df2.a, df2.b)); lt = isless)
+        want = sort!(collect(zip(df2.a, df2.b)))
         for t in (summarize(Sum(:x); key = [:a, :b]),
             summarizecycles(Sum(:x); key = [:a, :b]))
             out = DataFrame(load(Context(1, 2), p2 |> t))
@@ -89,9 +88,9 @@
         function keyallocs(t, keys, n)
             src = keyed!(DataFrame(time = 1:n, x = Float64.(mod.(1:n, 7))), keys)
             p = CausalPipeline(ctx -> [src])
-            load(Context(0, n + 1), p |> t(keys, src))
             return @allocations load(Context(0, n + 1), p |> t(keys, src))
         end
+        # `s`, the source, is for `asofjoin`'s right side
         ops = [
             (k, s) -> lastrow(; key = k),
             (k, s) -> forwardfill(:x; key = k),
@@ -110,6 +109,7 @@
         # set on every version.
         keysets = VERSION < v"1.11" ? ([:k1],) : ([:k1], [:k1, :k2], [:k1, :k2, :k3])
         for t in ops, keys in keysets
+            keyallocs(t, keys, 10) # compile
             @test keyallocs(t, keys, 8000) - keyallocs(t, keys, 2000) < 200
         end
     end
