@@ -274,10 +274,9 @@ end
     end
     return Expr(:block, Expr(:meta, :inline), Expr(:new, V, vals...))
 end
-# Row `i`'s key. Generated, so the key is built from its fields directly: as
-# a `map` over a capturing closure, it allocated the closure, the boxed index
-# and the key per row wherever the compiler declined to inline it, as in
-# keyed `addrollingcolumns` once an input column admitted `missing`.
+
+# Row `i`'s key, generated like `rowat` so no closure is built per row where
+# the call isn't inlined (see src/CLAUDE.md, `rolling.jl`).
 @generated function keyat(nt::NamedTuple, i::Int, ::Val{KN}) where {KN}
     vals = map(c -> :(@inbounds getfield(nt, $(QuoteNode(c)))[i]), KN)
     return Expr(:block, Expr(:meta, :inline), :(NamedTuple{KN}(($(vals...),))))
