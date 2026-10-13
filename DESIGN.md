@@ -2421,7 +2421,7 @@ are the same number, so folding both would be duplicated per-row work; but
 silently renaming the caller's column would be surprising, so
 `DotProduct(:y, :x)` still produces `:y_x_dotproduct`. The canonical order is
 the `isless`-sorted one, and `canonicaldot`/`canonicaldotname` in
-`src/summarizers.jl` are the shared implementation.
+`src/summarizers/sums.jl` are the shared implementation.
 
 That splits into two cases, and a new symmetric summarizer should follow
 whichever fits:
@@ -2763,7 +2763,7 @@ the second.
 | `ext/CausalFramesParquet2Ext.jl` | the Parquet2 backend: the preferred writer, the fallback reader |
 | `src/jls.jl` | the `Serialization`-backed persistence pair (`writejls`, `readjls`) |
 | `src/table.jl` | the in-memory source (`readtable`): the generic Tables.jl path, the eagerly resolved DataFrame path, and the frame path |
-| `src/summarizers.jl` | `Summarizer`/`SummarizerState` interface and the concrete summarizers |
+| `src/summarizers.jl` | the include list for `src/summarizers/`: the `Summarizer`/`SummarizerState` interface (`interface.jl`), the compensated float arithmetic (`compensated.jl`), one file per summarizer family (`sums.jl`, `comoment.jl`, `agesum.jl`, `moments.jl`, `regression.jl`, `orderstats.jl`, `windowvalues.jl`, `extremes.jl`, `fitmodel.jl`), the derived states' no-op folds (`derived.jl`) and every built-in's `inputcolumns` (`inputcolumns.jl`) |
 | `src/summarize.jl` | folding kernels and the summarization transforms |
 | `src/join.jl` | the as-of join transform (`asofjoin`) and the join engine it shares with `applymodels` and `futurejoin` |
 | `src/lookupjoin.jl` | the key-only join against a timeless table (`lookupjoin`) |

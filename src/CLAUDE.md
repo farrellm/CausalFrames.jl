@@ -122,13 +122,14 @@ design rationale and performance constraints behind each module.
   indexes over the frame's vectors (sound by the `writecsv` hand-off argument).
   The frame-context check and the automatic `closed` rule live there too; see
   DESIGN.md's "Tables as sources"
-- `src/summarizers.jl` — `Summarizer` (immutable config, output column name in
+- `src/summarizers.jl` (the include list for `src/summarizers/`, one file per
+  family, the interface in `interface.jl`) — `Summarizer` (immutable config, output column name in
   a type parameter) and `SummarizerState` (running state, typed from the input
   schema), plus their unexported interface: `emptyvalue`, `fresh`, `fresh!`,
   `freshwindowed`, `update!`, `value`, `widenstate`, `dependencies`,
   `inputcolumns`, `combine!`, `downdate!`, `isinvertible`. Within that:
   - `inputcolumns` (the columns a state reads, `nothing` for any) is declared
-    for every built-in in one block at the end of the file, a dependent one
+    for every built-in in one file, `summarizers/inputcolumns.jl`, a dependent one
     as `()`; a test checks that no built-in falls back to `nothing`, which
     would silently keep every column in the window transforms' stored rows
   - `fresh!` zeroes a state in place and returns it (default `fresh(st)`, so

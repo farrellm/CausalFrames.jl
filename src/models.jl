@@ -2,7 +2,7 @@
 # fitting, prediction and fitresult persistence go through five hooks, with
 # fallbacks here and MLJModelInterface methods in
 # ext/CausalFramesMLJModelInterfaceExt.jl, so a user who never loads MLJ pays
-# nothing. `FitModel` and `FittedModel` are in summarizers.jl; the operators
+# nothing. `FitModel` and `FittedModel` are in summarizers/fitmodel.jl; the operators
 # over fitted models are here.
 
 const MLJHINT = "model fitting needs MLJModelInterface: `using MLJ`, or any \

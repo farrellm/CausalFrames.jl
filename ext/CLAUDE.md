@@ -120,7 +120,7 @@ error — a wrong answer is unacceptable, a slower one is fine:
 `CausalFramesMLJModelInterfaceExt.jl` is the only code naming
 MLJModelInterface. `src/models.jl` holds the operators (`applymodels`,
 `addpredictions`, `modelreports`), their docstrings and the hook fallbacks, and
-`src/summarizers.jl` holds `FitModel` and `FittedModel`. The trigger is
+`src/summarizers/fitmodel.jl` holds `FitModel` and `FittedModel`. The trigger is
 MLJModelInterface — not MLJ or MLJBase — because every model package depends on
 it, so loading any model loads the extension.
 

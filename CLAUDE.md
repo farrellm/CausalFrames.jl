@@ -61,9 +61,10 @@ MLJ operators are the only exceptions, see `ext/CLAUDE.md`), `test/runtests.jl`
 name linking to that header — then the docs build regenerates
 `skills/causalframes/`, which is committed alongside.
 
-A new summarizer instead touches `src/summarizers.jl` (the type, its state,
-which structured subtype it claims — a performance decision, not a taxonomy
-one — and its `inputcolumns` in the block at the end of the file),
+A new summarizer instead touches its family's file under `src/summarizers/`
+(the type, its state, which structured subtype it claims — a performance
+decision, not a taxonomy one; a new family gets its own file, included from
+`src/summarizers.jl`), its `inputcolumns` in `src/summarizers/inputcolumns.jl`,
 `docs/src/api/summarizers.md` (again its own header), `docs/src/api/index.md`,
 `DESIGN.md`'s "Summarizers" section and export list, `test/summarizers.jl`,
 and `README.md`'s summarizer table, plus the regenerated
@@ -89,7 +90,7 @@ or summarizer, prose headers for everything else.
 
 Docstrings of public operators and summarizers follow one reference layout
 (`forwardfill` in `src/fill.jl`, `readtable` in `src/table.jl` and `Variance` in
-`src/summarizers.jl` are models):
+`src/summarizers/moments.jl` are models):
 
 - The signature block lists every positional and keyword argument with its
   default, and the return type. A transform shows both forms,
