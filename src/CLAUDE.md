@@ -276,7 +276,10 @@ design rationale and performance constraints behind each module.
   it unwrapped. Every summarizing transform (these three, `intervalize`,
   `addrollingcolumns`, `summarizewindows`) reads its summarizers' input through
   `terminput`: the chunk's column table plus one vector per term (per chunk,
-  behind `termvalues`' barrier, typed by `promote_op` over the row type and by
+  behind `termvalues`' barrier, over `NamedTuple` rows built by `rowat`,
+  typed by `termtype` (`promote_op` over that row type, as an unhoisted
+  `barwindow` infers its terms; the row type is generated, `termrowtype`,
+  since a tuple `map` over a wide table stops inferring) and by
   the values only when inference gives up, so a term's type is the same in
   every chunk and never abstract when it infers), with input types taken from
   that table so term types widen like columns. `addcolumns` stays value-typed
@@ -414,8 +417,9 @@ design rationale and performance constraints behind each module.
   and allocating per row. Its generated `bar*` folds have edges of their own;
   `test/jet.jl` guards the embedded path. `barinputcolumns` is the outer
   state's `inputcolumns`, sharing `storedcolumns`' union (`readcolumns`);
-  `barterms` is its `rowterms`, hoisting the window's terms into the
-  transform's `terminput` under reserved `hoistednames`, scoped by the outer
+  `barterms` is its `rowterms`, hoisting the window's terms (wrapped in
+  `BarTerm`, which `termvalues` holds to the window's typing rule up front)
+  into the transform's `terminput` under reserved `hoistednames`, scoped by the outer
   summarizer's first output name (`#barterm#lastn#d`) so two windows' terms
   never share a namespace, after which `hoistedby = outer` makes the window
   read them from those columns (`HoistedTerms`) instead of evaluating them.
@@ -455,8 +459,11 @@ design rationale and performance constraints behind each module.
   never index the value vectors by a runtime window number. A widening with
   Bars windows rebuilds rings and trees from each key's longest live suffix
   (`barsuffixes`). Every admitted row passes through `join.jl`'s `rowat`, which
-  builds it with `ntuple` over `Val`, not `map`: Base's tuple `map` stops
-  unrolling at 32 columns, a 10x cliff on a wide input (issue #98)
+  is generated to write each field straight into the row type: Base's tuple
+  `map` stops unrolling at 32 columns, a 10x cliff on a wide input (issue
+  #98), and a row built as a tuple first is boxed per row when it is passed
+  on (a row term's argument) rather than stored, once a column admits
+  `missing`
 - `src/intervalize.jl` — `intervalize`, the third binary transform: summarize
   over the intervals a `clock` pipeline defines (`[bₖ, bₖ₊₁)`, timestamped at
   `bₖ₊₁`). It is the `summarizecycles` fold, closing on clock boundaries.

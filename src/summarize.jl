@@ -187,11 +187,31 @@ end
 # values, so it is the same for every chunk and never abstract when inference
 # succeeds (`r.x > 2 ? r.x : 1` is `Union{Float64,Int64}`, not `Real`). When
 # inference gives up (a closure over an untyped global, say), the values type
-# it, as `addcolumns`' `rowvalues` does.
+# it, as `addcolumns`' `rowvalues` does. The term sees each row as the
+# NamedTuple its type was inferred over, the row a count window evaluates its
+# own terms on, so a term types and behaves alike hoisted or not.
 function termvalues(f::F, nt::NamedTuple) where {F}
-    rows = Tables.rows(nt)
-    T = Base.promote_op(f, eltype(rows))
-    return concreteterm(T) ? T[f(row) for row in rows] : [f(row) for row in rows]
+    R = termrowtype(typeof(nt))
+    T = termtype(f, R)
+    # Comprehensions, not `collect(T, generator)`: on 1.10 the generator's
+    # closure holds `R` as a bare `DataType` and every row dispatches. When
+    # 1.10 support is dropped, recheck whether one generator suffices.
+    is = eachindex(first(nt))
+    return concreteterm(T) ? T[f(rowat(R, nt, i)) for i in is] :
+           [f(rowat(R, nt, i)) for i in is]
+end
+
+# A term's type over rows of type `R`, the one inference both `termvalues` and
+# an unhoisted count window (over `storerowtype(intypes)`) use.
+termtype(f, ::Type{R}) where {R<:NamedTuple} = Base.promote_op(f, R)
+
+# The row type of a column table, generated so it stays a constant past the
+# 32 columns where `storerowtype(chunktypes(nt))` stops inferring. The `eltype`
+# calls are emitted, not made by the generator, which would see only the
+# methods defined before it (a column type's own `eltype` could be newer).
+@generated function termrowtype(::Type{NamedTuple{N,C}}) where {N,C}
+    eltypes = [:(eltype($(fieldtype(C, j)))) for j in 1:fieldcount(C)]
+    return :(NamedTuple{N,Tuple{$(eltypes...)}})
 end
 
 # A type a term may store unboxed: concrete, or a Union of concrete types.

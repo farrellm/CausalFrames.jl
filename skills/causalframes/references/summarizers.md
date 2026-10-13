@@ -11,7 +11,8 @@ and takes its element type from the input column.
 A summarizer's input can be a per-row expression instead of a column: every
 summarizer but `FitModel` takes a *row term* `name => f` wherever it takes a
 column name (a `CausalFrames.ColumnSpec`). The term acts as a virtual
-input column `name` holding `f(row)`, so its output is named as a column's
+input column `name` holding `f(row)`, where `row` is a `NamedTuple` of the
+input row's columns, so its output is named as a column's
 would be, and it widens, compensates and counts `missing` as a column does. Its
 element type is inferred from `f` (`Union{Float64, Int64}` for
 `r -> r.x > 2 ? r.x : 1` over a `Float64` column), or taken from its values when
@@ -959,7 +960,8 @@ as a type parameter.
   evaluate them over each chunk before storing its rows; the window then reads
   each term from the reserved column `barterms` names it by, and a term whose
   column is missing from `intypes`, or whose column type is not concrete or a
-  `Union` of concrete types, is an `ArgumentError`. A column of the
+  `Union` of concrete types, is an `ArgumentError`. The transforms hold a
+  hoisted term to the same typing rule as an unhoisted one. A column of the
   term's own name is never read in its place. With `nothing`, the window
   evaluates the terms itself.
 
@@ -1031,7 +1033,10 @@ own row terms, and the window is built with the same `hoistedby`. Each term is
 keyed by a reserved column name scoped by `hoistedby`'s first output column,
 `#barterm#lastn#d` for a term `:d` hoisted by a summarizer producing `:lastn`.
 So no input column of the term's name stands in for it, and two summarizers'
-windows may each have a term of one name.
+windows may each have a term of one name. Each function comes wrapped, so the
+transforms hold the term to the window's typing rule: one whose type doesn't
+infer as concrete, or a `Union` of concrete types, is an `ArgumentError` on
+the first chunk, as it would be unhoisted.
 
 #### Arguments
 - `s`: the summarizer the window folds, as passed to `barwindow`.
@@ -1045,7 +1050,7 @@ struct LastSum <: CausalFrames.Summarizer end
 CausalFrames.emptyvalue(::LastSum) = (; lastsum = missing)
 double = r -> 2r.x
 terms = CausalFrames.barterms(Sum(:d => double); hoistedby = LastSum())
-keys(terms), only(terms) === double
+keys(terms), only(terms).f === double
 
 # output
 
@@ -1110,7 +1115,8 @@ DataFrame(load(Context(0, 10), p))
 
 An input column as a summarizer constructor takes it: a column name (a
 `Symbol`), or a *row term* `name => f`. A row term is a virtual input column
-`name`, whose value in each row is `f(row)`. The summarizer reads it as it
+`name`, whose value in each row is `f(row)`, `row` being a `NamedTuple` of
+the input row's columns. The summarizer reads it as it
 would a column, so its output is named after `name` (`Sum(:range => f)` gives
 `:range_sum`). The summarizing transforms compute each row term once per row,
 alongside the input, and never add it to their output. See

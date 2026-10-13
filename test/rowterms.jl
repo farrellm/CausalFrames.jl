@@ -40,6 +40,41 @@
         @test CausalFrames.termvalues(opaque, nt) isa Vector{Float64}
     end
 
+    @testset "a term sees the row a count window does" begin
+        # A NamedTuple of the input columns, so a term relying on that types
+        # and evaluates alike here and in an unhoisted window (#107).
+        CF = CausalFrames
+        nt = Tables.columntable(chunks[1])
+        types = CF.chunktypes(nt)
+        third(r) = Tuple(r)[3]
+        ntonly(r::NamedTuple) = r.high
+        for f in (third, ntonly, r -> r isa NamedTuple ? 1 : 0.0)
+            vals = CF.termvalues(f, nt)
+            @test vals == [f(NamedTuple(r)) for r in Tables.rows(nt)]
+            window = CF.barwindow(Sum(:t => f), 2, types)
+            @test eltype(vals) == fieldtype(eltype(window.ring.rows), :t)
+        end
+        @test run(src |> summarize(Sum(:h => ntonly))).h_sum == [44.5]
+    end
+
+    @testset "term rows are not boxed" begin
+        # Wide, `missing`-admitting and `String` columns, past the 32 columns
+        # where a tuple `map` stops unrolling: only the output vector is
+        # allocated, whether or not the term is inlined.
+        n = 1000
+        nt = merge((time = collect(1:n), qty = fill(1.0, n), k = fill("a", n)),
+            NamedTuple{Tuple(Symbol.(:c, 1:40))}(
+                ntuple(_ -> Vector{Union{Missing,Float64}}(fill(1.0, n)), 40)))
+        @noinline outlined(r) = 2r.qty
+        function termallocs(f, nt)
+            CausalFrames.termvalues(f, nt)
+            return @allocated CausalFrames.termvalues(f, nt)
+        end
+        for f in (r -> 2r.qty, outlined, r -> r.c40)
+            @test termallocs(f, nt) <= 16n + 256
+        end
+    end
+
     @testset "matches addcolumns then the summarizer" begin
         ss(term) = [Sum(term), DotProduct(:v, term), DotProduct(term, :v)]
         for key in (nothing, :k)

@@ -181,6 +181,10 @@ SUITE["summarize"]["running"] = @benchmarkable load(CTX,
     SRC |> addsummarycolumns([Sum(:qty), Last(:qty)]))
 SUITE["summarize"]["countdistinct"] = @benchmarkable load(CTX,
     SRC |> summarize(CountDistinct(:qty); key = :sym))
+# A row term, evaluated per chunk over every input row, `String` key included.
+const QTERM = r -> 2r.qty
+SUITE["summarize"]["term-keyed"] = @benchmarkable load(CTX,
+    SRC |> summarize([Sum(:q2 => QTERM)]; key = :sym))
 
 # intervalize over the same source and summarizers as the summarize group, so
 # the two are directly comparable: the difference is the per-interval state
@@ -306,6 +310,14 @@ const WIDEUNIONSRC = let df = DataFrame(load(RCTX, RSRC))
 end
 SUITE["rolling"]["bars-wideunion-keyed"] = @benchmarkable load(RCTX,
     WIDEUNIONSRC |> addrollingcolumns((; b14 = Bars(14)), [Sum(:qty)];
+        key = :sym))
+# The same two inputs read through a row term: a term's row spans every input
+# column, so these measure what building it costs on a wide input.
+SUITE["rolling"]["bars-wide-term-keyed"] = @benchmarkable load(RCTX,
+    WIDESRC |> addrollingcolumns((; b14 = Bars(14)), [Sum(:q2 => QTERM)];
+        key = :sym))
+SUITE["rolling"]["bars-wideunion-term-keyed"] = @benchmarkable load(RCTX,
+    WIDEUNIONSRC |> addrollingcolumns((; b14 = Bars(14)), [Sum(:q2 => QTERM)];
         key = :sym))
 # Eight self-summarizing stages chained: each runs its input once, so this
 # should cost about eight single stages, not 2^8 runs of the source (#98).

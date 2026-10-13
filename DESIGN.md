@@ -2244,7 +2244,16 @@ to hoist a count window's inner terms (see "Count windows inside a state").
 
 Per chunk, each summarizing transform builds its input with `terminput`: the
 chunk's column table merged with one vector per term, computed behind the
-`termvalues` function barrier. A term's vector is typed by
+`termvalues` function barrier. `f` is called on each row as a `NamedTuple` of
+the input columns (`rowat`, built field by field into the row type), the row
+an unhoisted count window evaluates its terms on, and one helper, `termtype`,
+infers over that row type for both, so a term relying on the row being a
+`NamedTuple` (`Tuple(r)`, `r[1]`, a method taking `::NamedTuple`) types and
+behaves alike hoisted or not (issue #107; it once saw a `Tables.ColumnsRow`
+here). Only the field set can still differ: an unhoisted window's row also
+carries the call's other top-level terms (they are in its `intypes`), a
+hoisted term's only the input columns, so `Tuple(r)` or `keys(r)` differs
+when a call has other terms. A term's vector is typed by
 `promote_op(f, rowtype)` when that is concrete or a `Union` of concrete types,
 and by its values (the comprehension `addcolumns` uses) only when inference
 gives up (`Any` or an abstract type, as for a closure over an untyped global).
@@ -2539,11 +2548,16 @@ state holding `s`'s states over the last `n` rows folded into it.
   downdate after the push. Rows are stored with their row terms evaluated:
   a term's type is inferred from `intypes` (there is no chunk to take it
   from) and must be concrete or a `Union` of concrete types, and a row is
-  downdated with exactly the values it was folded with. A hoisted term's
-  column type is held to the same rule. `termvalues` inferred it as the window
-  would have, unless inference gave up and its values typed it; the window,
-  seeing only its projected row type, cannot re-infer it, so such a term
-  passes while its values' type is concrete. Once its terms are
+  downdated with exactly the values it was folded with. A hoisted term is
+  held to the same rule over the same row type, but where its function is
+  known: `barterms` wraps it in a `BarTerm`, and `termvalues` checks a
+  `BarTerm`'s inferred type before evaluating it, so a term that doesn't infer
+  is an `ArgumentError` on the first chunk whatever the data, never typed by
+  its values (issue #108). Typed by its values, it passed while one chunk's
+  rows took one branch and failed on the first chunk mixing them, far into a
+  run, with a message blaming inference; the window, seeing only its
+  projected row type, cannot re-infer it. Top-level terms keep the fallback
+  to their values. Once its terms are
   evaluated only `s`'s expansion reads a row, so a stored row keeps just the
   terms, `:time` (which `inputcolumns` leaves out, though `update!` may read
   it) and the columns the expansion reads (all of them when one may read any),
@@ -2571,8 +2585,9 @@ state holding `s`'s states over the last `n` rows folded into it.
   it with a recording row misses branches and type-dependent paths, so that
   was rejected).
 - **Hoisted row terms.** The outer summarizer `o` returns
-  `barterms(s; hoistedby = o)` (the terms of `s`'s expansion) from its
-  `rowterms`, so `prototypes` collects them with the call's own terms:
+  `barterms(s; hoistedby = o)` (the terms of `s`'s expansion, each wrapped
+  in a `BarTerm` marker) from its `rowterms`, so `prototypes` collects them
+  with the call's own terms:
   `terminput` evaluates them per chunk, before the projection, and checks them
   against input columns and same-named terms as any other. `barterms` keys
   each term by a reserved name scoped by `o`'s first output column,

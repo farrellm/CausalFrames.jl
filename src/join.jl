@@ -264,14 +264,16 @@ function joinsegment!(matches::Vector{V}, found::Vector{Bool},
     return (i, rpos, false)
 end
 
-# `convert(V, …)` keeps the insert type-stable when a column's eltype is
-# abstract (e.g. Union{Missing,Int}); a bare map would give the values'
-# narrower types. The row is built by `ntuple` over `Val`, which unrolls at any
-# width, not by `map`, whose tuple method falls back to an allocating loop
-# from 32 columns on (issue #98).
-@inline rowat(::Type{V}, nt::NamedTuple{N}, i::Int) where {V,N} =
-    convert(V, NamedTuple{N}(ntuple(j -> @inbounds(getfield(nt, j)[i]),
-        Val(length(N)))))
+# Row `i` of a column table as a `V`, each field converted (a no-op unless `V`
+# is wider than its column) and written straight into `V`, so a passed-on row
+# isn't boxed and a wide one still unrolls (see src/CLAUDE.md, #98).
+@generated function rowat(::Type{V}, nt::NamedTuple, i::Int) where {V}
+    vals = map(1:fieldcount(V)) do j
+        col = QuoteNode(fieldname(V, j))
+        :(convert($(fieldtype(V, j)), @inbounds getfield(nt, $col)[i]))
+    end
+    return Expr(:block, Expr(:meta, :inline), Expr(:new, V, vals...))
+end
 @inline keyat(nt::NamedTuple, i::Int, ::Val{KN}) where {KN} =
     NamedTuple{KN}(map(c -> @inbounds(getproperty(nt, c)[i]), KN))
 
