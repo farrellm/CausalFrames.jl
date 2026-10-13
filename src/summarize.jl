@@ -610,6 +610,28 @@ end
 
 # --- summarization transforms ----------------------------------------------
 
+# The setup every summarizing transform shares: the validated key columns and
+# declared `keyset` (a `KeySet`, or `nothing`), the expanded summarizers with
+# their requested output names and row terms, and the names as the kernels'
+# `Val`s.
+function summaryspec(summarizers, key, op::String; keyset = nothing)
+    keycols = keycolumns(key, op)
+    protos, requested, terms = prototypes(tosummarizers(summarizers), keycols, op)
+    return (; keycols, protos, requested, terms,
+        ks = tokeyset(keyset, keycols, op), keynames = Val(Tuple(keycols)),
+        outs = Val(requested), keyed = !isempty(keycols))
+end
+
+# A chunk of output rows, or nothing when there are none.
+rowsframe(rows::AbstractVector) = isempty(rows) ? nothing : DataFrame(rows)
+
+# The grid of empty values for no data: a row per time per key, `keys` being
+# `((;),)` when keyless.
+function emptygrid(times, keys, e::NamedTuple)
+    RT = gridrowtype(eltype(times), eltype(keys), typeof(e))
+    return rowsframe(RT[convert(RT, gridrow(t, k, e)) for t in times for k in keys])
+end
+
 """
     summarize(summarizers; key = nothing) -> (CausalPipeline -> CausalPipeline)
     summarize(p::CausalPipeline, summarizers; key = nothing) -> CausalPipeline
@@ -628,12 +650,8 @@ A transform summarizing the whole window, emitted at `stop`, with columns
   and nothing for an empty input.
 """
 function summarize(summarizers; key = nothing)
-    keycols = keycolumns(key, "summarize")
-    protos, requested, terms =
-        prototypes(tosummarizers(summarizers), keycols, "summarize")
-    keynames = Val(Tuple(keycols))
-    outs = Val(requested)
-    keyed = !isempty(keycols)
+    (; keycols, protos, terms, keynames, outs, keyed) =
+        summaryspec(summarizers, key, "summarize")
     return pipetransform() do p, ctx
         fold = SummaryFold(terms, "summarize")
         step = function (c)
@@ -655,7 +673,7 @@ function summarize(summarizers; key = nothing)
                 summaryrow(ctx.stop, k, gs, outs)
                 for (k, gs) in sortedgroups(fold.groups)
             ]
-            return isempty(rows) ? nothing : DataFrame(rows)
+            return rowsframe(rows)
         end
         return chunkmap(step, p.run(ctx); flush = flush)
     end
@@ -685,13 +703,8 @@ then the summaries; the input columns are dropped.
   without rows.
 """
 function summarizecycles(summarizers; key = nothing, keyset = nothing)
-    keycols = keycolumns(key, "summarizecycles")
-    protos, requested, terms =
-        prototypes(tosummarizers(summarizers), keycols, "summarizecycles")
-    ks = tokeyset(keyset, keycols, "summarizecycles")
-    keynames = Val(Tuple(keycols))
-    outs = Val(requested)
-    keyed = !isempty(keycols)
+    (; keycols, protos, terms, ks, keynames, outs, keyed) =
+        summaryspec(summarizers, key, "summarizecycles"; keyset)
     return pipetransform() do p, ctx
         fold = SummaryFold(terms, "summarizecycles")
         step = function (c)
@@ -715,7 +728,7 @@ function summarizecycles(summarizers; key = nothing, keyset = nothing)
                     fold.states, nt, fold.cycletime, outs)
                 rs
             end
-            return isempty(rows) ? nothing : DataFrame(rows)
+            return rowsframe(rows)
         end
         flush = function ()
             fold.cycletime === nothing && return nothing
@@ -724,7 +737,7 @@ function summarizecycles(summarizers; key = nothing, keyset = nothing)
                     fold.stateprotos, protos, ks, outs)
                 drows = closedense!(RT[], fold.groups, ks, fold.cycletime,
                     outs, emptyrow)
-                return isempty(drows) ? nothing : DataFrame(drows)
+                return rowsframe(drows)
             end
             rows =
                 keyed ?
@@ -733,7 +746,7 @@ function summarizecycles(summarizers; key = nothing, keyset = nothing)
                         valtype(fold.groups), outs)[], fold.groups,
                     fold.cycletime, outs) :
                 [summaryrow(fold.cycletime, fold.states, outs)]
-            return isempty(rows) ? nothing : DataFrame(rows)
+            return rowsframe(rows)
         end
         return chunkmap(step, p.run(ctx); flush = flush)
     end
@@ -758,12 +771,8 @@ so far, itself included.
   [`Count`](@ref) numbers the rows of each key.
 """
 function addsummarycolumns(summarizers; key = nothing)
-    keycols = keycolumns(key, "addsummarycolumns")
-    protos, requested, terms =
-        prototypes(tosummarizers(summarizers), keycols, "addsummarycolumns")
-    keynames = Val(Tuple(keycols))
-    outs = Val(requested)
-    keyed = !isempty(keycols)
+    (; keycols, protos, requested, terms, keynames, outs, keyed) =
+        summaryspec(summarizers, key, "addsummarycolumns")
     return pipetransform() do p, ctx
         fold = SummaryFold(terms, "addsummarycolumns")
         step = function (c)

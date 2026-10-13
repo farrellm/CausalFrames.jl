@@ -56,13 +56,10 @@ function summarizewindows(clk::CausalPipeline, lookback, summarizers;
             "`Bars` look-backs are for `addrollingcolumns`",
         ),
     )
-    keycols = keycolumns(key, "summarizewindows")
-    protos, requested, terms =
-        prototypes(tosummarizers(summarizers), keycols, "summarizewindows")
-    ks = tokeyset(keyset, keycols, "summarizewindows")
-    cfg = WindowConfig(keycols, Val(Tuple(keycols)), lookback, protos,
-        Val(requested), Val(isempty(keycols)), ks, terms,
-        storedcolumns(protos, keycols))
+    (; keycols, protos, terms, ks, keynames, outs, keyed) =
+        summaryspec(summarizers, key, "summarizewindows"; keyset)
+    cfg = WindowConfig(keycols, keynames, lookback, protos, outs, Val(!keyed), ks,
+        terms, storedcolumns(protos, keycols))
     return pipetransform() do p, ctx
         T = timetype(ctx)
         st = WindowState{T}(IntervalCursor{T}(clk.run(ctx)))
@@ -195,7 +192,7 @@ function windowstep!(st::WindowState{T}, cfg::WindowConfig,
         cfg.ks)
     deleteat!(st.ticks, 1:closed)
     exhausted(st.cur) && isempty(st.ticks) && releasewindows!(st)
-    return isempty(rows) ? nothing : DataFrame(rows)
+    return rowsframe(rows)
 end
 
 # Dead rows before the head are dropped once they dominate the buffer:
@@ -222,18 +219,6 @@ function releasewindows!(st::WindowState)
     return nothing
 end
 
-# The no-data grid: one empty row per tick when keyless, one per tick per
-# declared key when dense.
-function emptywindowgrid(ticks::Vector{T}, ::Nothing, e) where {T}
-    RT = gridrowtype(T, typeof((;)), typeof(e))
-    return DataFrame(RT[convert(RT, gridrow(t, (;), e)) for t in ticks])
-end
-function emptywindowgrid(ticks::Vector{T}, ks::KeySet{K}, e) where {T,K}
-    RT = gridrowtype(T, K, typeof(e))
-    rows = RT[convert(RT, gridrow(t, k, e)) for t in ticks for k in ks.keys]
-    return isempty(rows) ? nothing : DataFrame(rows)
-end
-
 function windowflush!(st::WindowState{T}, cfg::WindowConfig) where {T}
     pullpast!(st.ticks, st.cur, nothing)
     isempty(st.ticks) && return nothing
@@ -241,7 +226,7 @@ function windowflush!(st::WindowState{T}, cfg::WindowConfig) where {T}
         # No data ever arrived: empty rows when keyless or dense, nothing when
         # sparse.
         (cfg.grid isa Val{true} || cfg.ks !== nothing) || return nothing
-        return emptywindowgrid(st.ticks, cfg.ks,
+        return emptygrid(st.ticks, cfg.ks === nothing ? ((;),) : cfg.ks.keys,
             emptyvalues(cfg.protos, cfg.outs))
     end
     RT, emptyrow = windowtypes(st, cfg)
@@ -249,7 +234,7 @@ function windowflush!(st::WindowState{T}, cfg::WindowConfig) where {T}
     st.head = flushwindows!(rows, st.tiers, st.head, st.ticks, st.prevkeys,
         cfg.lookback, cfg.keynames, cfg.outs, emptyrow, cfg.grid, cfg.ks)
     empty!(st.ticks)
-    return isempty(rows) ? nothing : DataFrame(rows)
+    return rowsframe(rows)
 end
 
 # --- kernels ---------------------------------------------------------------

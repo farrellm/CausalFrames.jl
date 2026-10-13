@@ -39,13 +39,8 @@ Empty values widen the output types (`Mean` gives `Union{Missing, Float64}`).
 """
 function intervalize(clk::CausalPipeline, summarizers; key = nothing,
     keyset = nothing, closelast::Bool = false)
-    keycols = keycolumns(key, "intervalize")
-    protos, requested, terms =
-        prototypes(tosummarizers(summarizers), keycols, "intervalize")
-    ks = tokeyset(keyset, keycols, "intervalize")
-    keynames = Val(Tuple(keycols))
-    outs = Val(requested)
-    keyed = !isempty(keycols)
+    (; keycols, protos, terms, ks, keynames, outs, keyed) =
+        summaryspec(summarizers, key, "intervalize"; keyset)
     return pipetransform() do p, ctx
         T = timetype(ctx)
         st = IntervalizeState{T}(IntervalCursor{T}(clk.run(ctx)), T[], 2,
@@ -135,19 +130,17 @@ function trimbounds!(st::IntervalizeState)
     return nothing
 end
 
-# The keyless grid's row type: `:time` prepended to the value type, which
-# `promotedvaluetype` has already promoted over summary and empty values.
-_intervalrow(t, v) = merge((; time = t), v)
-intervalrowtype(::Type{T}, ::Type{V}) where {T,V} =
-    Base.promote_op(_intervalrow, T, V)
-
 # One keyless grid row, as RT: the interval's summary if it folded a row, else
 # the empty values.
 @inline function closeintervalrow(::Type{RT}, t, states::Tuple, folded::Bool,
     emptyrow, r::Val) where {RT}
-    folded && return convert(RT, merge((; time = t), summaryvalues(states, r)))
-    return convert(RT, merge((; time = t), emptyrow))
+    return convert(RT, gridrow(t, (;), folded ? summaryvalues(states, r) : emptyrow))
 end
+
+# The no-data grid's times: the end of every complete interval, then `stop`
+# under closelast.
+gridtimes(bounds::Vector, stop, closelast::Bool) =
+    closelast ? [bounds[2:end]; stop] : bounds[2:end]
 
 # --- keyless (grid) path ---------------------------------------------------
 
@@ -159,7 +152,7 @@ function intervalstep!(st::IntervalizeState, protos::Tuple, keynames::Val,
         foldintervals!(st.fold.states, protos, nt,
             st.bounds, st.bi, st.folded, closelast, outs)
     trimbounds!(st)
-    return isempty(rows) ? nothing : DataFrame(rows)
+    return rowsframe(rows)
 end
 
 # Close every interval a row crosses (an empty row for each interval with no
@@ -171,7 +164,7 @@ function foldintervals!(states::S, protos::P, nt::NamedTuple,
     r::Val) where {S<:Tuple,P<:Tuple,T}
     V = promotedvaluetype(S, protos, r)
     emptyrow = convert(V, emptyvalues(protos, r))
-    RT = intervalrowtype(T, V)
+    RT = gridrowtype(T, typeof((;)), V)
     rows = RT[]
     nb = length(bounds)
     nb == 0 && return rows, states, bi, folded    # empty clock: drop every row
@@ -204,10 +197,11 @@ function intervalflush!(st::IntervalizeState{T}, protos::Tuple, stop::T,
     # No data ever arrived, so no states exist: the grid is all empty values,
     # typed from the summarizers alone.
     st.fold.stateprotos === nothing &&
-        return flushemptygrid!(st, protos, stop, closelast, outs)
+        return emptygrid(gridtimes(st.bounds, stop, closelast), ((;),),
+            emptyvalues(protos, outs))
     rows = flushintervals!(st.fold.states, protos,
         st.bounds, st.bi, st.folded, stop, closelast, outs)
-    return isempty(rows) ? nothing : DataFrame(rows)
+    return rowsframe(rows)
 end
 
 # Drain the remaining grid: the current interval, every later complete one
@@ -217,7 +211,7 @@ function flushintervals!(states::S, protos::P, bounds::Vector{T},
     r::Val) where {S<:Tuple,P<:Tuple,T}
     V = promotedvaluetype(S, protos, r)
     emptyrow = convert(V, emptyvalues(protos, r))
-    RT = intervalrowtype(T, V)
+    RT = gridrowtype(T, typeof((;)), V)
     rows = RT[]
     nb = length(bounds)
     while bi <= nb
@@ -234,20 +228,6 @@ function flushintervals!(states::S, protos::P, bounds::Vector{T},
     return rows
 end
 
-# The no-data grid: an empty row per complete interval `[bounds[k-1], bounds[k])`
-# and, when closelast, the trailing partial, typed from the summarizers alone.
-function flushemptygrid!(st::IntervalizeState{T}, protos::Tuple, stop::T,
-    closelast::Bool, r::Val) where {T}
-    e = emptyvalues(protos, r)
-    RT = intervalrowtype(T, typeof(e))
-    rows = RT[]
-    for k in 2:length(st.bounds)
-        push!(rows, convert(RT, merge((; time = @inbounds(st.bounds[k])), e)))
-    end
-    closelast && !isempty(st.bounds) &&
-        push!(rows, convert(RT, merge((; time = stop), e)))
-    return isempty(rows) ? nothing : DataFrame(rows)
-end
 
 # --- keyed (sparse) path ---------------------------------------------------
 
@@ -263,7 +243,7 @@ function intervalstepgrouped!(st::IntervalizeState, protos::Tuple,
     rows, st.bi = foldintervalsgrouped!(st.fold.groups, st.fold.stateprotos, nt,
         st.bounds, st.bi, keynames, closelast, outs)
     trimbounds!(st)
-    return isempty(rows) ? nothing : DataFrame(rows)
+    return rowsframe(rows)
 end
 
 # The keyed analogue: closing an interval emits a row per present key, sorted,
@@ -296,7 +276,7 @@ function intervalflushgrouped!(st::IntervalizeState{T}, stop::T, closelast::Bool
     RT = rowtype(T, keytype(st.fold.groups), valtype(st.fold.groups), outs)
     rows = flushintervalsgrouped!(st.fold.groups, st.bounds, st.bi, RT, stop,
         closelast, outs)
-    return isempty(rows) ? nothing : DataFrame(rows)
+    return rowsframe(rows)
 end
 
 # The current interval closes at its end, emitting its present keys; if data
@@ -329,7 +309,7 @@ function intervalstepdense!(st::IntervalizeState{T}, protos::Tuple, ks::KeySet,
     st.bi = foldintervalsdense!(rows, st.fold.groups, ks, nt, st.bounds, st.bi,
         keynames, closelast, outs, emptyrow)
     trimbounds!(st)
-    return isempty(rows) ? nothing : DataFrame(rows)
+    return rowsframe(rows)
 end
 
 # The grid fold over declared-key slots: every crossed boundary closes all of
@@ -358,11 +338,12 @@ function intervalflushdense!(st::IntervalizeState{T}, protos::Tuple,
     pullpast!(st.bounds, st.cur, nothing)
     isempty(st.bounds) && return nothing
     st.fold.stateprotos === nothing &&
-        return flushemptygrid!(st, protos, ks, stop, closelast, outs)
+        return emptygrid(gridtimes(st.bounds, stop, closelast), ks.keys,
+            emptyvalues(protos, outs))
     RT, emptyrow = densetypes(T, st.fold.stateprotos, protos, ks, outs)
     rows = flushintervalsdense!(RT[], st.fold.groups, ks, st.bounds, st.bi,
         stop, closelast, outs, emptyrow)
-    return isempty(rows) ? nothing : DataFrame(rows)
+    return rowsframe(rows)
 end
 
 # `flushintervals!` over the slots.
@@ -376,22 +357,4 @@ function flushintervalsdense!(rows::Vector{RT}, dg::DenseGroups, ks::KeySet,
     end
     closelast && closedense!(rows, dg, ks, stop, r, emptyrow)
     return rows
-end
-
-# The no-data dense grid: an empty row per complete interval per declared key
-# and, when closelast, the trailing partial.
-function flushemptygrid!(st::IntervalizeState{T}, protos::Tuple,
-    ks::KeySet{K}, stop::T, closelast::Bool, r::Val) where {T,K}
-    e = emptyvalues(protos, r)
-    RT = gridrowtype(T, K, typeof(e))
-    rows = RT[]
-    for i in 2:length(st.bounds), k in ks.keys
-        push!(rows, convert(RT, gridrow(@inbounds(st.bounds[i]), k, e)))
-    end
-    if closelast
-        for k in ks.keys
-            push!(rows, convert(RT, gridrow(stop, k, e)))
-        end
-    end
-    return isempty(rows) ? nothing : DataFrame(rows)
 end
