@@ -12,9 +12,8 @@ struct CoMoment{A,B} <: GroupSummarizer end
 
 comomentname(a, b) = Symbol(a, :_, b, :_comoment)
 canonicalcomoment(a::Symbol, b::Symbol) =
-    isless(b, a) ? CoMoment{b,a}() : CoMoment{a,b}()
-canonicalcomomentname(a::Symbol, b::Symbol) =
-    isless(b, a) ? comomentname(b, a) : comomentname(a, b)
+    ((x, y) = canonicalpair(a, b); CoMoment{x,y}())
+canonicalcomomentname(a::Symbol, b::Symbol) = comomentname(canonicalpair(a, b)...)
 
 emptyvalue(::CoMoment{A,B}) where {A,B} = NamedTuple{(comomentname(A, B),)}((0,))
 fresh(s::CoMoment{A,B}, intypes::NamedTuple) where {A,B} =
@@ -53,11 +52,13 @@ function comomentfresh(s::CoMoment{A,B}, ::Type{T}) where {A,B,T}
     N = comomentname(A, B)
     T === Missing && return MissingState{N,CoMoment{A,B}}(s, 0)
     M = Missing <: T
-    Tn = M ? nonmissingtype(T) : T
-    S = accstorage(Tn)
-    return CoMomentState{N,A,B,Tn,M,S}(0, 0, convert(Tn, 0), convert(Tn, 0),
-        acczero(S), acczero(S), acczero(S), 0, 0)
+    Tn = nonmissingtype(T)
+    return CoMomentState{N,A,B,Tn,M,accstorage(Tn)}()
 end
+
+CoMomentState{N,A,B,T,M,S}() where {N,A,B,T,M,S} =
+    CoMomentState{N,A,B,T,M,S}(0, 0, convert(T, 0), convert(T, 0), acczero(S),
+        acczero(S), acczero(S), 0, 0)
 
 # The co-moment from the shifted sums, with one rounding: the numerator is
 # exact for integers (and for floats whose products are), so states holding
@@ -85,9 +86,8 @@ comomenttype(::Type{T}) where {T} = Base.promote_op(comomentof, Int, T, T, T)
 end
 
 
-fresh(st::CoMomentState{N,A,B,T,M,S}) where {N,A,B,T,M,S} =
-    CoMomentState{N,A,B,T,M,S}(0, 0, convert(T, 0), convert(T, 0),
-        acczero(S), acczero(S), acczero(S), 0, 0)
+fresh(::CoMomentState{N,A,B,T,M,S}) where {N,A,B,T,M,S} =
+    CoMomentState{N,A,B,T,M,S}()
 @inline function fresh!(st::CoMomentState{N,A,B,T,M,S}) where {N,A,B,T,M,S}
     st.n = 0
     st.age = 0

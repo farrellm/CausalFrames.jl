@@ -286,7 +286,7 @@ fresh(::Median{C}, ::NamedTuple) where {C} =
 @inline function quantilevalue(::Val{NS}, st::SortedState{C,N,T,M}, ::Val{PS},
     ::Val{I}) where {NS,C,N,T,M,PS,I}
     V0 = I === :linear ? Base.promote_op(linearquantile, Vector{T}, Float64) : T
-    V = M ? Union{Missing,V0} : V0
+    V = maybemissing(V0, M)
     K = length(PS)
     M && st.missings > 0 &&
         return NamedTuple{NS,NTuple{K,V}}(ntuple(_ -> missing, Val(K)))
@@ -395,7 +395,7 @@ fresh(::PercentRank{C}, ::NamedTuple) where {C} =
 
 @inline function percentrank(::Val{N}, st::SortedState{C,S,T,M},
     newest) where {N,C,S,T,M}
-    V = M ? Union{Missing,Float64} : Float64
+    V = maybemissing(Float64, M)
     M && st.missings > 0 && return NamedTuple{(N,),Tuple{V}}((missing,))
     st.nans > 0 && return NamedTuple{(N,),Tuple{V}}((NaN,))
     # newest is present here, but the compiler can't know it; the test splits

@@ -75,14 +75,16 @@ function agesumfresh(::Val{N}, ::Val{C}, ::Type{A}) where {N,C,A}
     A === Missing &&
         return MissingState{N,AgeWeightedSum{C}}(AgeWeightedSum{C}(), 0)
     M = Missing <: A
-    An = M ? nonmissingtype(A) : A
-    compensable(An) && return CompensatedAgeSumState{N,C,An,M}(0, compzero(An),
-        compzero(An), Int8(0), 0)
-    return AgeSumState{N,C,An,M}(0, convert(An, 0), convert(An, 0), 0)
+    An = nonmissingtype(A)
+    compensable(An) && return CompensatedAgeSumState{N,C,An,M}()
+    return AgeSumState{N,C,An,M}()
 end
 
-fresh(::AgeSumState{N,C,A,M}) where {N,C,A,M} =
+AgeSumState{N,C,A,M}() where {N,C,A,M} =
     AgeSumState{N,C,A,M}(0, convert(A, 0), convert(A, 0), 0)
+CompensatedAgeSumState{N,C,A,M}() where {N,C,A,M} =
+    CompensatedAgeSumState{N,C,A,M}(0, compzero(A), compzero(A), Int8(0), 0)
+fresh(::S) where {S<:Union{AgeSumState,CompensatedAgeSumState}} = S()
 @inline function fresh!(st::AgeSumState{N,C,A}) where {N,C,A}
     st.n = 0
     st.s1 = convert(A, 0)
@@ -121,12 +123,6 @@ end
 value(st::AgeSumState{N,C,A,M}) where {N,C,A,M} =
     NamedTuple{(N,),Tuple{maybemissing(A, M)}}((
         M && st.missings > 0 ? missing : st.s2,))
-function widenstate(st::AgeSumState{N,C,A,M}, intypes::NamedTuple) where {N,C,A,M}
-    w = agesumfresh(Val(N), Val(C), sumtype(intypes[C]))
-    typeof(w) === typeof(st) && return st
-    return agesumfrom(w, st.n, st.s1, st.s2, st.missings)
-end
-
 # Carry a plain state's numbers into a wider fresh one. A plain state tracks no
 # nonfinite counts, so its totals enter a compensated one as finite terms.
 function agesumfrom(w::AgeSumState{N,C,A,M}, n, s1, s2, missings) where {N,C,A,M}
@@ -134,16 +130,13 @@ function agesumfrom(w::AgeSumState{N,C,A,M}, n, s1, s2, missings) where {N,C,A,M
 end
 function agesumfrom(w::CompensatedAgeSumState{N,C,A,M}, n, s1, s2,
     missings) where {N,C,A,M}
-    return CompensatedAgeSumState{N,C,A,M}(n, compadd(compzero(A), convert(A, s1)),
-        compadd(compzero(A), convert(A, s2)), Int8(0), missings)
+    return CompensatedAgeSumState{N,C,A,M}(n, widenacc(Compensated{A}, s1),
+        widenacc(Compensated{A}, s2), Int8(0), missings)
 end
 
 @inline agesumclass(x::AbstractFloat) =
     isfinite(x) ? Int8(0) : isnan(x) ? Int8(1) : x > 0 ? Int8(2) : Int8(3)
 
-
-fresh(::CompensatedAgeSumState{N,C,A,M}) where {N,C,A,M} =
-    CompensatedAgeSumState{N,C,A,M}(0, compzero(A), compzero(A), Int8(0), 0)
 @inline function fresh!(st::CompensatedAgeSumState{N,C,A}) where {N,C,A}
     st.n = 0
     st.s1 = compzero(A)
@@ -205,12 +198,13 @@ end
 value(st::CompensatedAgeSumState{N,C,A,M}) where {N,C,A,M} =
     NamedTuple{(N,),Tuple{maybemissing(A, M)}}((
         M && st.missings > 0 ? missing : agesumvalue(st),))
-function widenstate(st::CompensatedAgeSumState{N,C,A,M},
-    intypes::NamedTuple) where {N,C,A,M}
+function widenstate(st::Union{AgeSumState{N,C},CompensatedAgeSumState{N,C}},
+    intypes::NamedTuple) where {N,C}
     w = agesumfresh(Val(N), Val(C), sumtype(intypes[C]))
     typeof(w) === typeof(st) && return st
     return agesumwiden(w, st)
 end
+agesumwiden(w, st::AgeSumState) = agesumfrom(w, st.n, st.s1, st.s2, st.missings)
 function agesumwiden(w::CompensatedAgeSumState{N,C,A2,M2},
     st::CompensatedAgeSumState) where {N,C,A2,M2}
     return CompensatedAgeSumState{N,C,A2,M2}(st.n, widencomp(A2, st.s1),

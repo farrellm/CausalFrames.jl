@@ -99,13 +99,13 @@ fresh(st::FitModelState{N,P,Y,M,C,V}) where {N,P,Y,M,C,V} =
     FitModelState{N,P,Y,M,C,V}(st.model, st.verbosity,
         map(v -> similar(v, 0), st.cols), similar(st.y, 0))
 @inline function fresh!(st::FitModelState)
-    map(empty!, values(st.cols))
+    foreach(empty!, values(st.cols))
     empty!(st.y)
     return st
 end
-# `P` is a type parameter, so the map unrolls into one typed push per column.
+# `P` is a type parameter, so this unrolls into one typed push per column.
 @inline function update!(st::FitModelState{N,P,Y}, row) where {N,P,Y}
-    map(push!, values(st.cols), map(p -> getproperty(row, p), P))
+    foreach(push!, values(st.cols), map(p -> getproperty(row, p), P))
     push!(st.y, getproperty(row, Y))
     return nothing
 end

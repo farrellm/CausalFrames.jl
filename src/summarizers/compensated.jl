@@ -30,31 +30,25 @@ compzero(::Type{A}) where {A<:AbstractFloat} =
 end
 
 @inline function compadd(a::Compensated{A}, x::A) where {A}
-    if isfinite(x)
-        t, c = neumaier(a.total, a.comp, x)
-        return Compensated{A}(t, c, a.nans, a.posinf, a.neginf)
-    elseif isnan(x)
-        return Compensated{A}(a.total, a.comp, a.nans + 1, a.posinf, a.neginf)
-    elseif x > zero(A)
-        return Compensated{A}(a.total, a.comp, a.nans, a.posinf + 1, a.neginf)
-    else
-        return Compensated{A}(a.total, a.comp, a.nans, a.posinf, a.neginf + 1)
-    end
+    isfinite(x) || return compcount(a, x, 1)
+    t, c = neumaier(a.total, a.comp, x)
+    return Compensated{A}(t, c, a.nans, a.posinf, a.neginf)
 end
 
 # Inverse of compadd over the identically computed term, so the counts always
 # balance; negating a finite float is exact.
 @inline function compsub(a::Compensated{A}, x::A) where {A}
-    if isfinite(x)
-        t, c = neumaier(a.total, a.comp, -x)
-        return Compensated{A}(t, c, a.nans, a.posinf, a.neginf)
-    elseif isnan(x)
-        return Compensated{A}(a.total, a.comp, a.nans - 1, a.posinf, a.neginf)
-    elseif x > zero(A)
-        return Compensated{A}(a.total, a.comp, a.nans, a.posinf - 1, a.neginf)
-    else
-        return Compensated{A}(a.total, a.comp, a.nans, a.posinf, a.neginf - 1)
-    end
+    isfinite(x) || return compcount(a, x, -1)
+    t, c = neumaier(a.total, a.comp, -x)
+    return Compensated{A}(t, c, a.nans, a.posinf, a.neginf)
+end
+
+# Count the nonfinite term `x` in (`d = 1`) or out (`d = -1`).
+@inline function compcount(a::Compensated{A}, x::A, d::Int) where {A}
+    isnan(x) && return Compensated{A}(a.total, a.comp, a.nans + d, a.posinf, a.neginf)
+    x > zero(A) &&
+        return Compensated{A}(a.total, a.comp, a.nans, a.posinf + d, a.neginf)
+    return Compensated{A}(a.total, a.comp, a.nans, a.posinf, a.neginf + d)
 end
 
 @inline function compmerge(a::Compensated{A}, b::Compensated{A}) where {A}

@@ -185,7 +185,7 @@ fresh(::MeanAbsDev{C}, ::NamedTuple) where {C} =
 @inline function meanabsdev(::Val{N}, st::WindowValuesState{C,S,T,M}, mean,
     ::Type{A}) where {N,C,S,T,M,A}
     V0 = absdevtype(T, nonmissingtype(A))
-    V = M ? Union{Missing,V0} : V0
+    V = maybemissing(V0, M)
     M && st.missings > 0 && return NamedTuple{(N,),Tuple{V}}((missing,))
     st.nans > 0 && return NamedTuple{(N,),Tuple{V}}((nanof(V0),))
     # mean is present here, but the compiler can't know it; the test splits

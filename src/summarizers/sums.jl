@@ -33,8 +33,8 @@ struct PairProductTerm{A,B} end
 
 # Whether this row's term is `missing` (for a pair, either operand). Only
 # reached with the sum state's flag M set.
-@inline termmissing(::ColumnTerm{C}, row) where {C} = ismissing(getproperty(row, C))
-@inline termmissing(::PowerTerm{C}, row) where {C} = ismissing(getproperty(row, C))
+@inline termmissing(::Union{ColumnTerm{C},PowerTerm{C}}, row) where {C} =
+    ismissing(getproperty(row, C))
 @inline termmissing(::PairProductTerm{Ca,Cb}, row) where {Ca,Cb} =
     ismissing(getproperty(row, Ca)) || ismissing(getproperty(row, Cb))
 
@@ -68,13 +68,14 @@ end
 function accumfresh(term, N::Symbol, ::Type{A}) where {A}
     A === Missing && return MissingState{N,typeof(term)}(term, 0)
     M = Missing <: A
-    An = M ? nonmissingtype(A) : A
+    An = nonmissingtype(A)
     S = accstorage(An)
     return AccumState{N,An,typeof(term),M,S}(term, acczero(S), 0)
 end
 
-fresh(st::AccumState{N,A,T,M,S}) where {N,A,T,M,S} =
-    AccumState{N,A,T,M,S}(st.term, acczero(S), 0)
+AccumState{N,A,T,M,S}(term::T) where {N,A,T,M,S} =
+    AccumState{N,A,T,M,S}(term, acczero(S), 0)
+fresh(st::AccumState{N,A,T,M,S}) where {N,A,T,M,S} = AccumState{N,A,T,M,S}(st.term)
 @inline function fresh!(st::AccumState{N,A,T,M,S}) where {N,A,T,M,S}
     st.acc = acczero(S)
     st.missings = 0
@@ -429,10 +430,9 @@ dotname(a, b) = Symbol(a, :_, b, :_dotproduct)
 # Σab and Σba are the same number, so every summarizer needing one asks for it
 # in sorted argument order and they share the accumulator (DESIGN.md,
 # "Symmetric summarizers").
-canonicaldot(a::Symbol, b::Symbol) =
-    isless(b, a) ? DotProduct(b, a) : DotProduct(a, b)
-canonicaldotname(a::Symbol, b::Symbol) =
-    isless(b, a) ? dotname(b, a) : dotname(a, b)
+canonicalpair(a::Symbol, b::Symbol) = isless(b, a) ? (b, a) : (a, b)
+canonicaldot(a::Symbol, b::Symbol) = DotProduct(canonicalpair(a, b)...)
+canonicaldotname(a::Symbol, b::Symbol) = dotname(canonicalpair(a, b)...)
 
 emptyvalue(::DotProduct{A,B}) where {A,B} = NamedTuple{(dotname(A, B),)}((0,))
 # Reversed arguments name the canonical accumulator as their one dependency and

@@ -97,20 +97,20 @@ LinearRegression(predictor::Union{ColumnSpec,AbstractString},
 # predictor-response cross products; I the intercept flag.
 struct LinearRegressionState{NN,SN,AN,SP,SY,QY,GN,DN,I} <: SummarizerState end
 
-_regname(::Nothing, base::Symbol) = base
-_regname(prefix::Symbol, base::Symbol) = Symbol(prefix, :_, base)
+regname(::Nothing, base::Symbol) = base
+regname(prefix::Symbol, base::Symbol) = Symbol(prefix, :_, base)
 
 # The output names in emission order: the row count, `r2`, `stderr`, the
 # intercept's pair if any, then a (beta, tstat) pair per predictor.
 function regnames(P::Tuple, name, intercept::Bool)
-    ns = Symbol[_regname(name, :n), _regname(name, :r2), _regname(name, :stderr)]
+    ns = Symbol[regname(name, :n), regname(name, :r2), regname(name, :stderr)]
     if intercept
-        push!(ns, _regname(name, :intercept_beta))
-        push!(ns, _regname(name, :intercept_tstat))
+        push!(ns, regname(name, :intercept_beta))
+        push!(ns, regname(name, :intercept_tstat))
     end
     for p in P
-        push!(ns, _regname(name, Symbol(p, :_beta)))
-        push!(ns, _regname(name, Symbol(p, :_tstat)))
+        push!(ns, regname(name, Symbol(p, :_beta)))
+        push!(ns, regname(name, Symbol(p, :_tstat)))
     end
     return Tuple(ns)
 end
@@ -184,35 +184,35 @@ end
 # promotion is generated, so it is a constant however many fields there are: a
 # recursive one stops folding once the fields mix `Union{Missing,Float64}`
 # co-moments with `Union{Missing,Int}` sums (a K >= 2 fit over integers).
-@generated _promotefields(::Type{T}) where {T<:Tuple} =
+@generated promotefieldtypes(::Type{T}) where {T<:Tuple} =
     promote_type(fieldtypes(T)...)
 
-_tofloat(x) = float(x)
-_tofloat(::Missing) = missing
+tofloat(x) = float(x)
+tofloat(::Missing) = missing
 
-@inline function _regtype(::Type{T}) where {T<:Tuple}
-    A = _promotefields(T)
+@inline function regtype(::Type{T}) where {T<:Tuple}
+    A = promotefieldtypes(T)
     Q = Base.promote_op(-, A, Base.promote_op(/, Base.promote_op(*, A, A), Int))
-    return Base.promote_op(_tofloat, Base.promote_op(/, Q, Q))
+    return Base.promote_op(tofloat, Base.promote_op(/, Q, Q))
 end
 
-@inline _anymissing(::Tuple{}) = false
-@inline _anymissing(t::Tuple) = ismissing(first(t)) || _anymissing(Base.tail(t))
+@inline anymissing(::Tuple{}) = false
+@inline anymissing(t::Tuple) = ismissing(first(t)) || anymissing(Base.tail(t))
 
 # Narrow a dependency value to the compute type. The caller has already
 # returned if anything was missing, but the explicit `ismissing` split keeps
 # `convert` static; `convert` alone goes dynamic over tuples of two or more
 # Union-typed values (the K >= 2 cross products).
-@inline _conv(::Type{Vc}, x) where {Vc} = ismissing(x) ? zero(Vc) : convert(Vc, x)
-@inline _convall(::Type{Vc}, ::Tuple{}) where {Vc} = ()
-@inline _convall(::Type{Vc}, t::Tuple) where {Vc} =
-    (_conv(Vc, first(t)), _convall(Vc, Base.tail(t))...)
+@inline convdep(::Type{Vc}, x) where {Vc} = ismissing(x) ? zero(Vc) : convert(Vc, x)
+@inline convall(::Type{Vc}, ::Tuple{}) where {Vc} = ()
+@inline convall(::Type{Vc}, t::Tuple) where {Vc} =
+    (convdep(Vc, first(t)), convall(Vc, Base.tail(t))...)
 
 # A dependency read back as a scalar. The empty name tuple is the
 # no-intercept case, whose value is never used.
-@inline _regscalar(::Type{Vc}, ::NamedTuple, ::Val{()}) where {Vc} = zero(Vc)
-@inline _regscalar(::Type{Vc}, vals::NamedTuple, ::Val{NS}) where {Vc,NS} =
-    _conv(Vc, only(depvalues(vals, Val(NS))))
+@inline regscalar(::Type{Vc}, ::NamedTuple, ::Val{()}) where {Vc} = zero(Vc)
+@inline regscalar(::Type{Vc}, vals::NamedTuple, ::Val{NS}) where {Vc,NS} =
+    convdep(Vc, only(depvalues(vals, Val(NS))))
 
 # Simple regression in closed form, on scalars with no workspace: the common
 # case, run per row under addsummarycolumns and addrollingcolumns. Every
@@ -295,18 +295,18 @@ end
 
 @inline function value(::LinearRegressionState{NN,SN,AN,SP,SY,QY,GN,DN,I},
     vals::NamedTuple) where {NN,SN,AN,SP,SY,QY,GN,DN,I}
-    V = _regtype(deptypes(typeof(vals), Val(AN)))
+    V = regtype(deptypes(typeof(vals), Val(AN)))
     M = length(SN)
     nrow = NamedTuple{(NN,),Tuple{Int}}((vals.count,))
-    if Missing <: V && _anymissing(depvalues(vals, Val(AN)))
+    if Missing <: V && anymissing(depvalues(vals, Val(AN)))
         return merge(nrow,
             NamedTuple{SN,NTuple{M,V}}(ntuple(_ -> missing, Val(M))))
     end
     Vc = nonmissingtype(V)
     stats = regstats(Vc, Val(I), Val(M), convert(Vc, vals.count),
-        _convall(Vc, depvalues(vals, Val(GN))),
-        _convall(Vc, depvalues(vals, Val(DN))),
-        _convall(Vc, depvalues(vals, Val(SP))),
-        _regscalar(Vc, vals, Val(SY)), _regscalar(Vc, vals, Val(QY)))
+        convall(Vc, depvalues(vals, Val(GN))),
+        convall(Vc, depvalues(vals, Val(DN))),
+        convall(Vc, depvalues(vals, Val(SP))),
+        regscalar(Vc, vals, Val(SY)), regscalar(Vc, vals, Val(QY)))
     return merge(nrow, NamedTuple{SN,NTuple{M,V}}(stats))
 end

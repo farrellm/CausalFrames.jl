@@ -26,8 +26,7 @@ struct CountRatioState{N,D} <: SummarizerState end
 
 # The value type comes from the dependencies' declared field types, not
 # `typeof` of the quotient, so a missing sum keeps the Union{Missing,...} eltype.
-# `promote_op` is behind a function of the types, as `_covtype` is: written
-# inline here, Julia 1.10 cannot fold it to a constant for a Missing-admitting
+# `promote_op` is behind a function of the types: written inline here, Julia 1.10 cannot fold it to a constant for a Missing-admitting
 # sum, and the whole summary row's type widens.
 ratiotype(::Type{A}, ::Type{B}) where {A,B} = Base.promote_op(/, A, B)
 @inline function value(::CountRatioState{N,D}, vals::NamedTuple) where {N,D}
@@ -112,8 +111,8 @@ Std(column::ColumnSpec; corrected::Bool = true) =
 
 struct StdState{C,N,V} <: SummarizerState end
 
-_stdsqrt(::Missing) = missing
-_stdsqrt(v) = sqrt(max(v, zero(v)))
+stdsqrt(::Missing) = missing
+stdsqrt(v) = sqrt(max(v, zero(v)))
 
 dependencies(s::Std{C}) where {C} = (Variance(C; corrected = s.corrected),)
 emptyvalue(::Std{C}) where {C} = NamedTuple{(Symbol(C, :_std),)}((missing,))
@@ -121,7 +120,7 @@ fresh(::Std{C}, ::NamedTuple) where {C} =
     StdState{C,Symbol(C, :_std),Symbol(C, :_variance)}()
 @inline function value(::StdState{C,N,V}, vals::NamedTuple) where {C,N,V}
     T = Base.promote_op(sqrt, fieldtype(typeof(vals), V))
-    return NamedTuple{(N,),Tuple{T}}((_stdsqrt(vals[V]),))
+    return NamedTuple{(N,),Tuple{T}}((stdsqrt(vals[V]),))
 end
 
 """
@@ -181,8 +180,8 @@ Correlation(a::ColumnSpec, b::ColumnSpec) =
 
 struct CorrelationState{A,B,N,CV,SA,SB} <: SummarizerState end
 
-_clampcor(::Missing) = missing
-_clampcor(x) = clamp(x, -one(x), one(x))
+clampcor(::Missing) = missing
+clampcor(x) = clamp(x, -one(x), one(x))
 
 corname(a, b) = Symbol(a, :_, b, :_correlation)
 dependencies(::Correlation{A,B}) where {A,B} =
@@ -198,5 +197,5 @@ fresh(::Correlation{A,B}, ::NamedTuple) where {A,B} =
     Saf = fieldtype(typeof(vals), SA)
     Sbf = fieldtype(typeof(vals), SB)
     V = Base.promote_op(/, Cvf, Base.promote_op(*, Saf, Sbf))
-    return NamedTuple{(N,),Tuple{V}}((_clampcor(vals[CV] / (vals[SA] * vals[SB])),))
+    return NamedTuple{(N,),Tuple{V}}((clampcor(vals[CV] / (vals[SA] * vals[SB])),))
 end

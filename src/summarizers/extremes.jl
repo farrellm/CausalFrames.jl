@@ -29,19 +29,10 @@ end
 # precede `b`'s, which makes keepfirst/keeplast correct.
 function combine!(dest::TrackState{C,N,T,F}, a::TrackState{C,N,T,F},
     b::TrackState{C,N,T,F}) where {C,N,T,F}
-    if a.seen && b.seen
-        v = F.instance(a.val, b.val)
-        dest.val = v
-        dest.seen = true
-    elseif a.seen
-        dest.val = a.val
-        dest.seen = true
-    elseif b.seen
-        dest.val = b.val
-        dest.seen = true
-    else
-        dest.seen = false
+    if a.seen || b.seen
+        dest.val = !b.seen ? a.val : !a.seen ? b.val : F.instance(a.val, b.val)
     end
+    dest.seen = a.seen || b.seen
     return nothing
 end
 value(st::TrackState{C,N,T}) where {C,N,T} = NamedTuple{(N,),Tuple{T}}((st.val,))
