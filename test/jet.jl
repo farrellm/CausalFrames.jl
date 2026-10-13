@@ -18,7 +18,7 @@ using JET
     JET.@test_opt CausalFrames.summaryvalues(states, outs)
 
     keynames = Val((:k,))
-    groups = CausalFrames.newgroups(states, nt, keynames)
+    groups = CausalFrames.newgroups(states, intypes, keynames)
     JET.@test_opt CausalFrames.foldgroups!(groups, states, nt, keynames)
 
     JET.@test_opt CausalFrames.foldcycles!(states, nt, nothing, outs)
@@ -192,7 +192,7 @@ end
         2, false, 10, true, outs)
 
     keynames = Val((:k,))
-    groups = CausalFrames.newgroups(states, nt, keynames)
+    groups = CausalFrames.newgroups(states, intypes, keynames)
     JET.@test_opt CausalFrames.foldintervalsgrouped!(groups, states, nt, bounds,
         2, keynames, true, outs)
     RT = CausalFrames.rowtype(Int, keytype(groups), valtype(groups), outs)

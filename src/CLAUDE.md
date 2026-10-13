@@ -291,7 +291,9 @@ design rationale and performance constraints behind each module.
   an unread `Union{Missing,T}` column would box every stored row.
   Per-run state lives in `SummaryFold`, never in reassigned closure captures
   (those get boxed).
-  The per-key states live in a `GroupTable{K,S}` (both parameters concrete),
+  The per-key states live in a `GroupTable{K,S}` (both parameters concrete,
+  `K` the promoted schema's `storekeytype`, re-keyed by `widengroups` when a
+  key column widens),
   which also holds the reused emission buffer and the pool of retired state
   tuples that `closecycle!` retires into and `groupstates!` zeroes back out
   of: the keyed cycle fold closes a table per timestamp, and rebuilding it per
@@ -466,7 +468,10 @@ design rationale and performance constraints behind each module.
   `missing`. Each emitted row's key comes from `keyat`, generated too so it
   builds no closure: the kernel can outgrow the compiler's inlining budget (a
   `missing`-admitting input column and a compensated float sum suffice), and a
-  closure that isn't inlined allocates per row
+  closure that isn't inlined allocates per row. `keyat` (and `keyvalues`, its
+  row form) type the key by its columns, not its values: a key built from a
+  `missing`-admitting column's values is narrower than the store's key type,
+  and the conversion on lookup allocates per row (issue #114)
 - `src/intervalize.jl` — `intervalize`, the third binary transform: summarize
   over the intervals a `clock` pipeline defines (`[bₖ, bₖ₊₁)`, timestamped at
   `bₖ₊₁`). It is the `summarizecycles` fold, closing on clock boundaries.

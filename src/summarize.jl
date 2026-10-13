@@ -258,7 +258,7 @@ widenstates(states::Tuple, intypes::NamedTuple) =
 
 # The per-key state tuples of the keyed transforms, plus two buffers that make
 # closing the table allocation-free. Both type parameters are concrete (the key
-# type from the first row, the state type from the prototypes), so the kernels
+# type from the promoted schema, the state type from the prototypes), so the kernels
 # specialize on them. Only the cycle-closing transforms (`summarizecycles`,
 # `intervalize`) close tables and use the buffers.
 mutable struct GroupTable{K,S<:Tuple}
@@ -274,19 +274,21 @@ Base.keytype(::GroupTable{K}) where {K} = K
 Base.valtype(::GroupTable{K,S}) where {K,S} = S
 
 # `stateprotos` must already be widened: it fixes the new table's value type,
-# which an empty table couldn't. The pool is dropped, since retired tuples have
-# the old type.
-function widengroups(gt::GroupTable{K}, stateprotos::S,
-    intypes::NamedTuple) where {K,S}
-    widened = GroupTable{K,S}()
+# which an empty table couldn't. The keys widen with the schema too (a key
+# column may come to admit `missing`). The pool is dropped, since retired
+# tuples have the old type.
+function widengroups(gt::GroupTable, stateprotos::S, intypes::NamedTuple,
+    keynames::Val) where {S}
+    widened = newgroups(stateprotos, intypes, keynames)
     for (k, gs) in gt.table
         widened.table[k] = widenstates(gs, intypes)
     end
     return widened
 end
 
-newgroups(stateprotos::S, nt::NamedTuple, keynames::Val) where {S} =
-    GroupTable{typeof(keyvalues(first(Tables.rows(nt)), keynames)),S}()
+# Keyed by the key columns' promoted types, which every row's key converts to.
+newgroups(stateprotos::S, types::NamedTuple, keynames::Val) where {S} =
+    GroupTable{storekeytype(types, keynames),S}()
 
 # This key's state tuple, recycling a retired one if available. Zeroing on the
 # way *out* costs only for tuples actually reused. The key is unconstrained so
@@ -314,17 +316,39 @@ emptyvalues(protos::Tuple, ::Val{R}) where {R} =
 @inline summaryrow(t, k::NamedTuple, states::Tuple, r::Val) =
     merge((; time = t), k, summaryvalues(states, r))
 
-# The key names ride in a Val so the key's NamedTuple type is known statically.
-@inline keyvalues(row, ::Val{KN}) where {KN} =
-    NamedTuple{KN}(map(c -> getproperty(row, c), KN))
+# A row's declared field type: a `Tables.rows` row's is its column's eltype.
+# Defined before `keyvalues`, whose generator calls it.
+rowfieldtype(::Type{R}, c::Symbol) where {R<:NamedTuple} = fieldtype(R, c)
+rowfieldtype(::Type{Tables.ColumnsRow{T}}, c::Symbol) where {T} =
+    eltype(fieldtype(T, c))
 
-# Groups are emitted in key order: the key's values as a tuple, compared
-# lexicographically.
-@inline groupkey(kv::Pair) = values(first(kv))
+# The key names ride in a Val so the key's NamedTuple type is known statically.
+# The key is typed by the row's declared field types, as the group table's is,
+# not by the values' runtime types: those differ once a key column admits
+# `missing`, and converting each key on lookup allocates per row.
+@generated function keyvalues(row, ::Val{KN}) where {KN}
+    K = NamedTuple{KN,Tuple{(rowfieldtype(row, c) for c in KN)...}}
+    vals = map(c -> :(Tables.getcolumn(row, $(QuoteNode(c)))), KN)
+    return Expr(:block, Expr(:meta, :inline), Expr(:new, K, vals...))
+end
+
+# Groups are emitted in key order: the key's values compared lexicographically,
+# as tuples are. Generated field by field rather than through `values`, whose
+# tuple of a key with a `missing`-admitting field isn't inferred, so a sort
+# would dispatch every comparison.
+@generated function keyisless(a::NamedTuple{KN}, b::NamedTuple{KN}) where {KN}
+    ex = false
+    for c in reverse(KN)
+        x, y = :(getfield(a, $(QuoteNode(c)))), :(getfield(b, $(QuoteNode(c))))
+        ex = :(isless($x, $y) || (isequal($x, $y) && $ex))
+    end
+    return Expr(:block, Expr(:meta, :inline), ex)
+end
+@inline groupisless(a::Pair, b::Pair) = keyisless(first(a), first(b))
 
 # For the once-per-run drains (`summarize`'s and `lastrow`'s flush); the
 # per-cycle drain reuses `closecycle!`'s buffer. `lastrow` passes a bare Dict.
-sortedgroups(d::AbstractDict) = sort!(collect(d); by = groupkey)
+sortedgroups(d::AbstractDict) = sort!(collect(d); lt = groupisless)
 sortedgroups(gt::GroupTable) = sortedgroups(gt.table)
 
 # The row types the kernels emit, by inference: calling `value` on an unfolded
@@ -457,7 +481,7 @@ function preparechunk!(fold::SummaryFold, protos::Tuple, keyed::Bool,
         if keyset !== nothing
             fold.groups = densegroups(fold.stateprotos, length(keyset.keys))
         elseif keyed
-            fold.groups = newgroups(fold.stateprotos, nt, keynames)
+            fold.groups = newgroups(fold.stateprotos, types, keynames)
         else
             fold.states = map(fresh, fold.stateprotos)
         end
@@ -466,7 +490,8 @@ function preparechunk!(fold::SummaryFold, protos::Tuple, keyed::Bool,
         if keyset !== nothing
             fold.groups = widendense(fold.groups, fold.stateprotos, types)
         elseif keyed
-            fold.groups = widengroups(fold.groups, fold.stateprotos, types)
+            fold.groups = widengroups(fold.groups, fold.stateprotos, types,
+                keynames)
         else
             fold.states = widenstates(fold.states, types)
         end
@@ -538,7 +563,7 @@ function closecycle!(rows, gt::GroupTable, t, r::Val)
     scratch = gt.scratch
     empty!(scratch)
     append!(scratch, gt.table)
-    sort!(scratch; by = groupkey)
+    sort!(scratch; lt = groupisless)
     for (k, states) in scratch
         push!(rows, summaryrow(t, k, states, r))
         push!(gt.pool, states)

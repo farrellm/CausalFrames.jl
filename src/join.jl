@@ -275,10 +275,12 @@ end
     return Expr(:block, Expr(:meta, :inline), Expr(:new, V, vals...))
 end
 
-# Row `i`'s key, generated like `rowat` so no closure is built per row.
+# Row `i`'s key, typed by its columns, so a key column admitting `missing`
+# gives the store's key type rather than a per-row narrower one.
 @generated function keyat(nt::NamedTuple, i::Int, ::Val{KN}) where {KN}
+    K = NamedTuple{KN,Tuple{(eltype(fieldtype(nt, c)) for c in KN)...}}
     vals = map(c -> :(@inbounds getfield(nt, $(QuoteNode(c)))[i]), KN)
-    return Expr(:block, Expr(:meta, :inline), :(NamedTuple{KN}(($(vals...),))))
+    return Expr(:block, Expr(:meta, :inline), Expr(:new, K, vals...))
 end
 
 # --- output assembly -------------------------------------------------------
