@@ -46,7 +46,7 @@ function lastrow(; key = nothing)
             return nothing
         end
         return chunkmap(step, p.run(ctx);
-            flush = () -> flushlastrow(st, keynames, ctx.stop))
+            flush = () -> lastrowflush!(st, keynames, ctx.stop))
     end
 end
 lastrow(p::CausalPipeline; kwargs...) = lastrow(; kwargs...)(p)
@@ -112,7 +112,7 @@ function lastsegment!(index::Dict{K,Int}, slots::Vector{V}, nt::NamedTuple,
     return nothing
 end
 
-function flushlastrow(st::LastRowState, ::Val{KN}, stop) where {KN}
+function lastrowflush!(st::LastRowState, ::Val{KN}, stop) where {KN}
     if isempty(KN)
         st.row === nothing && return nothing
         return DataFrame([retime(st.row, stop)])

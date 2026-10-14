@@ -32,7 +32,7 @@ end
 
 # The stateful producer behind readparquet's ChunkSource. The untyped fields
 # are per-chunk setup; per-row work is `clipchunk!`'s.
-mutable struct ParquetProducer{T}
+mutable struct QueryProducer{T}
     const clip::SourceClip{T}
     const sort::Bool
     gather::Bool        # sort in Julia, the query being unable to
@@ -42,9 +42,9 @@ end
 
 CausalFrames.parquetproducer(::Val{:duckdb}, clip::SourceClip{T},
     sort::Bool) where {T} =
-    ParquetProducer{T}(clip, sort, false, nothing, nothing)
+    QueryProducer{T}(clip, sort, false, nothing, nothing)
 
-function (p::ParquetProducer)()
+function (p::QueryProducer)()
     clip = p.clip
     clip.done && return nothing
     p.parts === nothing && startquery!(p)
@@ -61,7 +61,7 @@ end
 # column (not in `*`), unless a file column of that name (case-insensitively)
 # shadows it. Without a nameable time column or a usable tiebreak, the rows are
 # sorted in Julia.
-function startquery!(p::ParquetProducer)
+function startquery!(p::QueryProducer)
     clip = p.clip
     p.con = connection()
     filenames = columnnames(p.con, clip.path)

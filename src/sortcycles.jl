@@ -50,7 +50,7 @@ function sortcycles(by; rev::Bool = false)
     return pipetransform() do p, ctx
         st = CycleSortState()
         return chunkmap(c -> sortcyclechunk!(st, spec, order, c), p.run(ctx);
-            flush = () -> flushcycle!(st, spec, order))
+            flush = () -> sortcycleflush!(st, spec, order))
     end
 end
 sortcycles(p::CausalPipeline, by; kwargs...) = sortcycles(by; kwargs...)(p)
@@ -122,7 +122,7 @@ materialize(a::SubDataFrame, b::SubDataFrame) = vcat(a, b)
 
 # Called once upstream is exhausted: the open cycle is complete. One already in
 # order goes out without a further copy.
-function flushcycle!(st::CycleSortState, spec, order)
+function sortcycleflush!(st::CycleSortState, spec, order)
     isempty(st.pending) && return nothing
     cycle = vcatowned(st.pending)
     empty!(st.pending)

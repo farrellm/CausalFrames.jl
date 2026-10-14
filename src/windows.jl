@@ -63,7 +63,7 @@ function summarizewindows(clk::CausalPipeline, lookback, summarizers;
     return pipetransform() do p, ctx
         T = timetype(ctx)
         st = WindowState{T}(IntervalCursor{T}(clk.run(ctx)))
-        return chunkmap(c -> windowstep!(st, cfg, c),
+        return chunkmap(c -> windowchunk!(st, cfg, c),
             p.run(widenstart(ctx, lookback, "summarizewindows lookback"));
             flush = () -> windowflush!(st, cfg))
     end
@@ -164,7 +164,7 @@ function windowtypes(st::WindowState{T}, cfg::WindowConfig) where {T}
     return RT, convert(V, emptyvalues(cfg.protos, cfg.outs))
 end
 
-function windowstep!(st::WindowState{T}, cfg::WindowConfig,
+function windowchunk!(st::WindowState{T}, cfg::WindowConfig,
     c::DataFrame) where {T}
     if !st.checked
         checkkeycolumns(cfg.keycols, c, "summarizewindows")

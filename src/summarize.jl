@@ -311,10 +311,10 @@ newgroups(stateprotos::S, types::NamedTuple, keynames::Val) where {S} =
 emptyvalues(protos::Tuple, ::Val{R}) where {R} =
     NamedTuple{R}(merge(map(emptyvalue, protos)...))
 
-@inline summaryrow(t, states::Tuple, r::Val) =
-    merge((; time = t), summaryvalues(states, r))
-@inline summaryrow(t, k::NamedTuple, states::Tuple, r::Val) =
-    merge((; time = t), k, summaryvalues(states, r))
+@inline summaryrow(t, states::Tuple, outs::Val) =
+    merge((; time = t), summaryvalues(states, outs))
+@inline summaryrow(t, k::NamedTuple, states::Tuple, outs::Val) =
+    merge((; time = t), k, summaryvalues(states, outs))
 
 # The key names ride in a Val so the key's NamedTuple type is known statically.
 # The key is typed by the row's declared field types, as the group table's is,
@@ -428,14 +428,14 @@ end
 # Emit one row per declared key at `t` (the summary for a slot that folded
 # rows, else the empty values), zeroing the folded slots once their values are
 # copied out. Allocates only the rows it pushes.
-function closedense!(rows::Vector{RT}, dg::DenseGroups, ks::KeySet, t, r::Val,
+function closedense!(rows::Vector{RT}, dg::DenseGroups, ks::KeySet, t, outs::Val,
     emptyrow) where {RT}
     states, folded = dg.states, dg.folded
     for i in eachindex(ks.keys, states, folded)
         k = @inbounds ks.keys[i]
         if @inbounds folded[i]
             gs = @inbounds states[i]
-            push!(rows, convert(RT, gridrow(t, k, summaryvalues(gs, r))))
+            push!(rows, convert(RT, gridrow(t, k, summaryvalues(gs, outs))))
             @inbounds states[i] = freshall!(gs)
             @inbounds folded[i] = false
         else
@@ -519,15 +519,15 @@ end
 # A cycle closes when a later time arrives, so the open cycle carries across
 # chunks and the last is closed by flush.
 function foldcycles!(states::S, nt::NamedTuple, cycletime,
-    r::Val) where {S<:Tuple}
-    rows = rowtype(eltype(nt.time), S, r)[]
+    outs::Val) where {S<:Tuple}
+    rows = rowtype(eltype(nt.time), S, outs)[]
     for row in Tables.rows(nt)
         t = row.time
         if cycletime === nothing || t != cycletime
             # summaryrow copied the values out, so the states are zeroed and
             # reused.
             cycletime === nothing ||
-                push!(rows, summaryrow(something(cycletime), states, r))
+                push!(rows, summaryrow(something(cycletime), states, outs))
             cycletime = t
             states = freshall!(states)
         end
@@ -537,13 +537,13 @@ function foldcycles!(states::S, nt::NamedTuple, cycletime,
 end
 
 function foldcyclesgrouped!(gt::GroupTable{K,S}, stateprotos::S, nt::NamedTuple,
-    cycletime, ::Val{KN}, r::Val) where {K,S,KN}
-    rows = rowtype(eltype(nt.time), K, S, r)[]
+    cycletime, ::Val{KN}, outs::Val) where {K,S,KN}
+    rows = rowtype(eltype(nt.time), K, S, outs)[]
     for row in Tables.rows(nt)
         t = row.time
         if cycletime === nothing || t != cycletime
             cycletime === nothing ||
-                closecycle!(rows, gt, something(cycletime), r)
+                closecycle!(rows, gt, something(cycletime), outs)
             cycletime = t
         end
         states = groupstates!(gt, keyvalues(row, Val(KN)), stateprotos)
@@ -555,13 +555,13 @@ end
 # Emit one row per present key, in key order, then retire the state tuples to
 # the pool (`groupstates!` zeroes them on reuse) and clear the table. Allocates
 # only the rows it pushes.
-function closecycle!(rows, gt::GroupTable, t, r::Val)
+function closecycle!(rows, gt::GroupTable, t, outs::Val)
     scratch = gt.scratch
     empty!(scratch)
     append!(scratch, gt.table)
     sort!(scratch; lt = groupisless)
     for (k, states) in scratch
-        push!(rows, summaryrow(t, k, states, r))
+        push!(rows, summaryrow(t, k, states, outs))
         push!(gt.pool, states)
     end
     empty!(gt.table)
@@ -572,12 +572,12 @@ end
 # cycle closes with one row per declared key. Pushes into the caller's `rows`
 # and returns the open cycle's time.
 function foldcyclesdense!(rows::Vector{RT}, dg::DenseGroups, ks::KeySet,
-    nt::NamedTuple, cycletime, keynames::Val, r::Val, emptyrow) where {RT}
+    nt::NamedTuple, cycletime, keynames::Val, outs::Val, emptyrow) where {RT}
     for row in Tables.rows(nt)
         t = row.time
         if cycletime === nothing || t != cycletime
             cycletime === nothing ||
-                closedense!(rows, dg, ks, something(cycletime), r, emptyrow)
+                closedense!(rows, dg, ks, something(cycletime), outs, emptyrow)
             cycletime = t
         end
         densefold!(dg, ks, row, keynames)
@@ -586,24 +586,24 @@ function foldcyclesdense!(rows::Vector{RT}, dg::DenseGroups, ks::KeySet,
 end
 
 function foldrunning!(states::S, nt::NamedTuple, n::Int,
-    r::Val) where {S<:Tuple}
-    vals = Vector{valuetype(S, r)}(undef, n)
+    outs::Val) where {S<:Tuple}
+    vals = Vector{valuetype(S, outs)}(undef, n)
     i = 0
     for row in Tables.rows(nt)
         updateall!(states, row)
-        vals[i+=1] = summaryvalues(states, r)
+        vals[i+=1] = summaryvalues(states, outs)
     end
     return vals
 end
 
 function foldrunninggrouped!(gt::GroupTable{K,S}, stateprotos::S, nt::NamedTuple,
-    n::Int, ::Val{KN}, r::Val) where {K,S,KN}
-    vals = Vector{valuetype(S, r)}(undef, n)
+    n::Int, ::Val{KN}, outs::Val) where {K,S,KN}
+    vals = Vector{valuetype(S, outs)}(undef, n)
     i = 0
     for row in Tables.rows(nt)
         states = groupstates!(gt, keyvalues(row, Val(KN)), stateprotos)
         updateall!(states, row)
-        vals[i+=1] = summaryvalues(states, r)
+        vals[i+=1] = summaryvalues(states, outs)
     end
     return vals
 end

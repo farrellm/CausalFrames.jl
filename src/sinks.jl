@@ -14,7 +14,7 @@ function sinktransform(makesink)
         sink = makesink()
         return SinkGuard(
             chunkmap(c -> sinkchunk(sink, c), p.run(ctx);
-                flush = () -> finishwrite(sink)),
+                flush = () -> finishwrite!(sink)),
             sink)
     end
 end
@@ -75,7 +75,7 @@ end
 
 # Called once, when upstream is exhausted: close the queue and join the writer,
 # so the file is complete and closed by the time the stream ends.
-function finishwrite(sink::ChunkSink)
+function finishwrite!(sink::ChunkSink)
     close(sink.chan)
     wait(sink.task)
     return nothing
