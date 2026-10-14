@@ -105,11 +105,12 @@ function applymodels(models::CausalPipeline; column::Symbol = :model,
     # selector doesn't fail on an absent column, so a missing model column is
     # reported by predictchunk! under this operator's name.
     right = models |> selectcolumns(n -> Symbol(n) === column || Symbol(n) in keycols)
+    cfg = JoinConfig(keycols, Val(Tuple(keycols)), tolerance,
+        joincmp(Backward(), strict), Backward(), nothing, nothing, nothing,
+        "applymodels")
     return pipetransform() do p, ctx
-        cfg = JoinConfig(keycols, Val(Tuple(keycols)), tolerance,
-            strict ? (<) : (<=), Backward(), nothing, nothing, nothing,
-            "applymodels")
-        js = JoinState(right.run(widenstart(ctx, tolerance, "applymodels tolerance")))
+        js = JoinState(right.run(rightcontext(Backward(), ctx, tolerance,
+            "applymodels")))
         return chunkmap(c -> predictchunk!(js, cfg, column, name, operation, c),
             p.run(ctx))
     end

@@ -161,7 +161,7 @@ end
 widencells(::Type{NamedTuple{FN,TT}}, old::NamedTuple{FN}) where {FN,TT} =
     NamedTuple{FN,TT}(ntuple(i -> widencell(fieldtype(TT, i), old[i]), Val(length(FN))))
 
-function widenstore(::Type{Dict{K,NT}}, old::AbstractDict) where {K,NT}
+function widencellstore(::Type{Dict{K,NT}}, old::AbstractDict) where {K,NT}
     new = Dict{K,NT}()
     sizehint!(new, length(old))
     for (k, v) in old
@@ -189,8 +189,9 @@ function fillprepared!(st::ForwardFillState, ::Val{KN}, ::Val{FN}, tolerance,
         fillkeyless!(nt.time, groups, values(cells::NT), tolerance)
     else
         D = Dict{storekeytype(types, Val(KN)),NT}
-        store = st.cells === nothing ? D() :
-                widened ? widenstore(D, st.cells) : st.cells
+        store =
+            st.cells === nothing ? D() :
+            widened ? widencellstore(D, st.cells) : st.cells
         st.cells = store
         fillkeyed!(nt.time, groups, nt, Val(KN), store, tolerance)
     end
