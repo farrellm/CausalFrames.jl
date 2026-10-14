@@ -494,12 +494,17 @@ end
 SummaryFold(keycols::Vector{Symbol}, terms::NamedTuple, op::String) =
     SummaryFold(nothing, nothing, nothing, nothing, keycols, terms, op)
 
-# Per-chunk setup: check the key columns against the first chunk, promote the
-# schema, then build the states and groups on the first chunk, by `grouping`
-# (`summaryspec`'s), or widen them when the promotion changes. Returns the
-# column table, with the row terms' columns.
-function preparechunk!(fold::SummaryFold, protos::Tuple, grouping, c::DataFrame)
-    fold.types === nothing && checkkeycolumns(fold.keycols, c, fold.op)
+# Per-chunk setup: check the key columns, then that the output columns
+# `newcols` are new, against the first chunk, promote the schema, then build
+# the states and groups on the first chunk, by `grouping` (`summaryspec`'s), or
+# widen them when the promotion changes. Returns the column table, with the row
+# terms' columns.
+function preparechunk!(fold::SummaryFold, protos::Tuple, grouping, c::DataFrame,
+    newcols = ())
+    if fold.types === nothing
+        checkkeycolumns(fold.keycols, c, fold.op)
+        checknewcolumns(c, newcols, fold.op)
+    end
     nt = terminput(c, fold.terms, fold.op)
     types = promotetypes(fold.types, chunktypes(nt))
     if fold.types === nothing
@@ -786,10 +791,8 @@ function addsummarycolumns(summarizers; key = nothing)
     return pipetransform() do p, ctx
         fold = SummaryFold(keycols, terms, "addsummarycolumns")
         step = function (c)
-            unchecked = fold.types === nothing   # needs the schema: first chunk
-            nt = preparechunk!(fold, protos, grouping, c)
             # hidden dependencies are never added
-            unchecked && checknewcolumns(c, requested, "addsummarycolumns")
+            nt = preparechunk!(fold, protos, grouping, c, requested)
             vals = foldrunning!(fold.groups, fold.stateprotos, nt, nrow(c),
                 grouping, outs)
             return hcat(c, DataFrame(vals); copycols = false)
