@@ -483,11 +483,13 @@ design rationale and performance constraints behind each module.
   over the intervals a `clock` pipeline defines (`[bₖ, bₖ₊₁)`, timestamped at
   `bₖ₊₁`). It is the `summarizecycles` fold, closing on clock boundaries.
   Keyless output is a regular grid (empty intervals get `emptyvalue`s, output
-  types promoted via the shared `promotedvaluetype`); keyed output is sparse
-  (present keys only, via `closecycle!`). The `chunkmap` over the data stream
-  pulls clock boundaries into a concrete `Vector{T}` per chunk (the pull is
-  the only dynamism; the per-row kernel stays dispatch-free), reusing
-  `SummaryFold` whole; `closelast` closes the trailing partial at `stop`
+  types promoted via the shared `promotedvaluetype`), run as the declared-key
+  path over `nokeyset`, the one empty key, whose lookups compile away; keyed
+  output is sparse (present keys only, via `closecycle!`). The `chunkmap` over
+  the data stream pulls clock boundaries into a concrete `Vector{T}` per chunk
+  (the pull is the only dynamism; the per-row kernel stays dispatch-free),
+  reusing `SummaryFold` whole; `closelast` closes the trailing partial at
+  `stop`
 - `src/windows.jl` — `summarizewindows`, the clock-sampled trailing window
   (`[τ - lookback, τ)` at each tick): `intervalize`'s driver (`chunks.jl`'s `IntervalCursor`
   and `pullpast!`, a concrete tick vector per chunk) over `addrollingcolumns`'
@@ -504,9 +506,11 @@ design rationale and performance constraints behind each module.
   a per-key as-of consumer (`applymodels`) from using a stale summary. A
   declared `keyset` rides in `WindowConfig`'s type (`Nothing` otherwise) and
   replaces the sort and vanish merge with `emitdense!`, a lookup per declared
-  key per tick. The declaration is checked where the primary tier makes a
-  group or tree (a key's first row); a refold primary groups only at ticks, so
-  it checks on admission instead
+  key per tick; keyless output is `emitdense!` over `nokeyset`, as in
+  `intervalize`, and `admissionkeys` skips its admission check. The
+  declaration is checked where the primary tier makes a group or tree (a key's
+  first row); a refold primary groups only at ticks, so it checks on admission
+  instead
 - `src/models.jl` — the MLJ operators (`applymodels`, `addpredictions`,
   `modelreports`) and the five hooks the extension implements (`ismodel`,
   `fitmodel`, `predictmodel`, `savefitresult`, `restorefitresult`). It names no

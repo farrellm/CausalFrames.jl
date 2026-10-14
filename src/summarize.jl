@@ -40,11 +40,12 @@ end
 # at construction as NamedTuples over the key columns, so the declaration, not
 # the data, fixes the output key type. A data key of another `isequal` type (an
 # `Int` against a declared `Float64`) is looked up without conversion. `op`
-# names the transform in errors.
-struct KeySet{K<:NamedTuple}
-    keys::Vector{K}
-    index::Dict{K,Int}
-    op::String
+# names the transform in errors. Mutable, so the per-chunk dynamic calls that
+# take it pass a reference instead of boxing a copy.
+mutable struct KeySet{K<:NamedTuple}
+    const keys::Vector{K}
+    const index::Dict{K,Int}
+    const op::String
 end
 
 tokeyset(::Nothing, keycols::Vector{Symbol}, op::String) = nothing
@@ -79,20 +80,30 @@ function keysettuple(v, KN::Tuple{Vararg{Symbol}}, op::String)
     )
 end
 
+# A keyless grid (`intervalize`, `summarizewindows`) is the dense output over
+# one declared key, the empty one, so it shares the declared-key paths. Every
+# row has that key, so its lookups compile away.
+const NoKey = NamedTuple{(),Tuple{}}
+nokeyset(op::String) = KeySet{NoKey}([(;)], Dict((;) => 1), op)
+
 # The declared slot of a row's key, or an error for a key outside the set.
 @inline function keyindex(ks::KeySet, k)
     i = get(ks.index, k, 0)
     i == 0 && throwundeclared(ks, k)
     return i
 end
+@inline keyindex(::KeySet{NoKey}, ::NoKey) = 1
 @noinline throwundeclared(ks::KeySet, k) =
     throw(ArgumentError("$(ks.op) key $k is not in the declared keyset"))
 
 # Membership only, for the window kernels, whose groups are not slot-indexed.
-# The `Nothing` method (no declared keys) compiles away.
+# The keyset to check on admission is `nothing` when no check is needed, so the
+# check compiles away.
 @inline checkdeclared(::Nothing, row, keynames::Val) = nothing
 @inline checkdeclared(ks::KeySet, row, keynames::Val) =
     (keyindex(ks, keyvalues(row, keynames)); nothing)
+admissionkeys(ks::Union{Nothing,KeySet}) = ks
+admissionkeys(::KeySet{NoKey}) = nothing
 
 # Expand the requested summarizers into the full set to fold: dependencies
 # recursively, deduplicated by output-name tuple and ordered topologically
@@ -613,13 +624,16 @@ end
 # The setup every summarizing transform shares: the validated key columns and
 # declared `keyset` (a `KeySet`, or `nothing`), the expanded summarizers with
 # their requested output names and row terms, and the names as the kernels'
-# `Val`s.
-function summaryspec(summarizers, key, op::String; keyset = nothing)
+# `Val`s. A `grid` transform's keyless output is dense over `nokeyset`.
+function summaryspec(summarizers, key, op::String; keyset = nothing,
+    grid::Bool = false)
     keycols = keycolumns(key, op)
     protos, requested, terms = prototypes(tosummarizers(summarizers), keycols, op)
-    return (; keycols, protos, requested, terms,
-        ks = tokeyset(keyset, keycols, op), keynames = Val(Tuple(keycols)),
-        outs = Val(requested), keyed = !isempty(keycols))
+    keyed = !isempty(keycols)
+    ks = tokeyset(keyset, keycols, op)   # a keyless `keyset` is an error
+    grid && !keyed && (ks = nokeyset(op))
+    return (; keycols, protos, requested, terms, ks,
+        keynames = Val(Tuple(keycols)), outs = Val(requested), keyed)
 end
 
 # A chunk of output rows, or nothing when there are none.

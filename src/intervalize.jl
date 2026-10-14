@@ -1,8 +1,9 @@
 # The interval-summarization transform. The data stream `p` drives a chunkmap
 # and pulls the clock's boundaries on demand, as asofjoin pulls its right
 # stream. It is the summarizecycles fold, closing when a clock boundary is
-# crossed rather than when the timestamp changes. The keyless and declared-key
-# paths also emit a row for every empty interval, making a regular grid.
+# crossed rather than when the timestamp changes. The declared-key path, which
+# keyless output takes over the one empty key, also emits a row for every
+# empty interval, making a regular grid.
 # Type-unstable setup (pulling clock chunks, building or widening states) runs
 # once per chunk; the folding kernels take a concretely typed boundary vector.
 
@@ -39,30 +40,22 @@ Empty values widen the output types (`Mean` gives `Union{Missing, Float64}`).
 """
 function intervalize(clk::CausalPipeline, summarizers; key = nothing,
     keyset = nothing, closelast::Bool = false)
-    (; keycols, protos, terms, ks, keynames, outs, keyed) =
-        summaryspec(summarizers, key, "intervalize"; keyset)
+    (; keycols, protos, terms, ks, keynames, outs) =
+        summaryspec(summarizers, key, "intervalize"; keyset, grid = true)
     return pipetransform() do p, ctx
         T = timetype(ctx)
         st = IntervalizeState{T}(IntervalCursor{T}(clk.run(ctx)), T[], 2,
-            SummaryFold(terms, "intervalize"), false, false)
-        step = function (c)
-            if ks !== nothing
-                intervalchunkdense!(st, protos, ks, keycols, keynames, outs,
-                    closelast, c)
-            elseif keyed
-                intervalchunkgrouped!(st, protos, keycols, keynames, outs,
-                    closelast, c)
-            else
-                intervalchunk!(st, protos, keynames, outs, closelast, c)
-            end
-        end
+            SummaryFold(terms, "intervalize"), false)
+        step =
+            ks === nothing ?
+            (c -> intervalchunkgrouped!(st, protos, keycols, keynames, outs,
+                closelast, c)) :
+            (c -> intervalchunkdense!(st, protos, ks, keycols, keynames, outs,
+                closelast, c))
         flush =
-            ks !== nothing ?
-            (() -> intervalflushdense!(st, protos, ks, ctx.stop, closelast,
-                outs)) :
-            keyed ?
+            ks === nothing ?
             (() -> intervalflushgrouped!(st, ctx.stop, closelast, outs)) :
-            (() -> intervalflush!(st, protos, ctx.stop, closelast, outs))
+            (() -> intervalflushdense!(st, protos, ks, ctx.stop, closelast, outs))
         return chunkmap(step, p.run(ctx); flush = flush)
     end
 end
@@ -78,8 +71,7 @@ mutable struct IntervalizeState{T}
     bounds::Vector{T}
     bi::Int          # index of the current interval's end in `bounds`
     fold::SummaryFold
-    folded::Bool     # keyless: the current interval has folded a row
-    checked::Bool    # keyed: key columns validated against the input schema
+    checked::Bool    # key columns validated against the input schema
 end
 
 # Drop boundaries before the current interval's begin, keeping the buffer
@@ -91,104 +83,10 @@ function trimbounds!(st::IntervalizeState)
     return nothing
 end
 
-# One keyless grid row, as RT: the interval's summary if it folded a row, else
-# the empty values.
-@inline function closeintervalrow(::Type{RT}, t, states::Tuple, folded::Bool,
-    emptyrow, outs::Val) where {RT}
-    return convert(RT, gridrow(t, (;), folded ? summaryvalues(states, outs) : emptyrow))
-end
-
 # The no-data grid's times: the end of every complete interval, then `stop`
 # under closelast.
 gridtimes(bounds::Vector, stop, closelast::Bool) =
     closelast ? [bounds[2:end]; stop] : bounds[2:end]
-
-# --- keyless (grid) path ---------------------------------------------------
-
-function intervalchunk!(st::IntervalizeState, protos::Tuple, keynames::Val,
-    outs::Val, closelast::Bool, c::DataFrame)
-    nt = preparechunk!(st.fold, protos, false, keynames, c)
-    pullpast!(st.bounds, st.cur, last(nt.time))
-    rows, st.fold.states, st.bi, st.folded =
-        foldintervals!(st.fold.states, protos, nt,
-            st.bounds, st.bi, st.folded, closelast, outs)
-    trimbounds!(st)
-    return rowsframe(rows)
-end
-
-# Close every interval a row crosses (an empty row for each interval with no
-# data), then fold the row into the current interval. `bi > length(bounds)` is
-# the trailing region after the last boundary, whose rows are folded only
-# under closelast. Returns the closed rows and the carried state.
-function foldintervals!(states::S, protos::P, nt::NamedTuple,
-    bounds::Vector{T}, bi::Int, folded::Bool, closelast::Bool,
-    outs::Val) where {S<:Tuple,P<:Tuple,T}
-    V = promotedvaluetype(S, protos, outs)
-    emptyrow = convert(V, emptyvalues(protos, outs))
-    RT = gridrowtype(T, typeof((;)), V)
-    rows = RT[]
-    nb = length(bounds)
-    nb == 0 && return rows, states, bi, folded    # empty clock: drop every row
-    for row in Tables.rows(nt)
-        t = row.time
-        t < @inbounds(bounds[1]) && continue        # before the first interval
-        while bi <= nb && t >= @inbounds(bounds[bi])
-            push!(
-                rows,
-                closeintervalrow(RT, @inbounds(bounds[bi]), states,
-                    folded, emptyrow, outs),
-            )
-            # closeintervalrow copied the values out, so the states are zeroed
-            # and reused.
-            states = freshall!(states)
-            folded = false
-            bi += 1
-        end
-        (bi > nb && !closelast) && continue          # discarded trailing row
-        updateall!(states, row)
-        folded = true
-    end
-    return rows, states, bi, folded
-end
-
-function intervalflush!(st::IntervalizeState{T}, protos::Tuple, stop::T,
-    closelast::Bool, outs::Val) where {T}
-    pullpast!(st.bounds, st.cur, nothing)
-    isempty(st.bounds) && return nothing           # empty clock
-    # No data ever arrived, so no states exist: the grid is all empty values,
-    # typed from the summarizers alone.
-    st.fold.stateprotos === nothing &&
-        return emptygrid(gridtimes(st.bounds, stop, closelast), ((;),),
-            emptyvalues(protos, outs))
-    rows = flushintervals!(st.fold.states, protos,
-        st.bounds, st.bi, st.folded, stop, closelast, outs)
-    return rowsframe(rows)
-end
-
-# Drain the remaining grid: the current interval, every later complete one
-# (empty), then the trailing partial at stop when closelast.
-function flushintervals!(states::S, protos::P, bounds::Vector{T},
-    bi::Int, folded::Bool, stop::T, closelast::Bool,
-    outs::Val) where {S<:Tuple,P<:Tuple,T}
-    V = promotedvaluetype(S, protos, outs)
-    emptyrow = convert(V, emptyvalues(protos, outs))
-    RT = gridrowtype(T, typeof((;)), V)
-    rows = RT[]
-    nb = length(bounds)
-    while bi <= nb
-        push!(
-            rows,
-            closeintervalrow(RT, @inbounds(bounds[bi]), states, folded,
-                emptyrow, outs),
-        )
-        states = freshall!(states)
-        folded = false
-        bi += 1
-    end
-    closelast && push!(rows, closeintervalrow(RT, stop, states, folded, emptyrow, outs))
-    return rows
-end
-
 
 # --- keyed (sparse) path ---------------------------------------------------
 
@@ -254,7 +152,7 @@ function flushintervalsgrouped!(groups::GroupTable{K,S}, bounds::Vector{T},
     return rows
 end
 
-# --- declared-key (dense) path ---------------------------------------------
+# --- declared-key (dense) path, keyless included --------------------------
 
 function intervalchunkdense!(st::IntervalizeState{T}, protos::Tuple, ks::KeySet,
     keycols::Vector{Symbol}, keynames::Val, outs::Val, closelast::Bool,
@@ -307,7 +205,8 @@ function intervalflushdense!(st::IntervalizeState{T}, protos::Tuple,
     return rowsframe(rows)
 end
 
-# `flushintervals!` over the slots.
+# Drain the remaining grid: the current interval, every later complete one
+# (empty), then the trailing partial at stop when closelast.
 function flushintervalsdense!(rows::Vector{RT}, dg::DenseGroups, ks::KeySet,
     bounds::Vector{T}, bi::Int, stop::T, closelast::Bool, outs::Val,
     emptyrow) where {RT,T}

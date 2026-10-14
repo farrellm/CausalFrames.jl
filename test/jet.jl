@@ -201,10 +201,14 @@ end
     nt = (time = [1, 3, 6], k = [1, 2, 1], x = [1.0, 2.0, 3.0])
     bounds = [0, 5, 10]
 
-    JET.@test_opt CausalFrames.foldintervals!(states, protos, nt,
-        bounds, 2, false, true, outs)
-    JET.@test_opt CausalFrames.flushintervals!(states, protos, bounds,
-        2, false, 10, true, outs)
+    # the keyless grid: the dense kernels over the empty key
+    nks = CausalFrames.nokeyset("intervalize")
+    ndg = CausalFrames.densegroups(states, 1)
+    NRT, nemptyrow = CausalFrames.densetypes(Int, states, protos, nks, outs)
+    JET.@test_opt CausalFrames.foldintervalsdense!(NRT[], ndg, nks, nt, bounds,
+        2, Val(()), true, outs, nemptyrow)
+    JET.@test_opt CausalFrames.flushintervalsdense!(NRT[], ndg, nks, bounds, 2,
+        10, true, outs, nemptyrow)
 
     keynames = Val((:k,))
     groups = CausalFrames.newgroups(states, intypes, keynames)
@@ -331,23 +335,22 @@ end
     ticks = [0, 5, 10]
     declared = CausalFrames.tokeyset(["b", "a"], [:k], "summarizewindows")
     for ss in JETTIERSETS,
-        (kc, grid, ks) in (([:k], Val(false), nothing),
-            (Symbol[], Val(true), nothing), ([:k], Val(false), declared))
+        (kc, ks) in (([:k], nothing),
+            (Symbol[], CausalFrames.nokeyset("summarizewindows")), ([:k], declared))
 
         protos, requested = CausalFrames.prototypes(
             CausalFrames.tosummarizers(ss), kc)
         outs = Val(requested)
         kn = Val(Tuple(kc))
-        cfg = CausalFrames.WindowConfig(kc, kn, 5, protos, outs, grid, ks, (;),
-            nothing)
+        cfg = CausalFrames.WindowConfig(kc, kn, 5, protos, outs, ks, (;), nothing)
         st = CausalFrames.WindowState{Int}(
             CausalFrames.IntervalCursor{Int}(clock(5).run(Context(0, 10))))
         CausalFrames.preparewindows!(st, cfg, types)
         RT, emptyrow = CausalFrames.windowtypes(st, cfg)
         JET.@test_opt CausalFrames.windowrows!(RT[], st.tiers, 1, nt, ticks,
-            st.prevkeys, 5, kn, outs, emptyrow, grid, ks)
+            st.prevkeys, 5, kn, outs, emptyrow, ks)
         JET.@test_opt CausalFrames.flushwindows!(RT[], st.tiers, 1, ticks,
-            st.prevkeys, 5, kn, outs, emptyrow, grid, ks)
+            st.prevkeys, 5, kn, outs, emptyrow, ks)
     end
 end
 

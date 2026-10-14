@@ -1396,7 +1396,10 @@ declaration that takes one upstream pipeline per key, `merge`d back together.
   complete interval (and the `closelast` partial), or tick. A key with no rows
   gets the summarizers' empty values, so element types widen through
   `promotedvaluetype` exactly as on the keyless grid: dense keyed output is
-  that grid once per key. Declared order rather than key order leaves the order
+  that grid once per key. Conversely, the keyless grid of `intervalize` and
+  `summarizewindows` *is* dense output, over one declared key, the empty
+  `(;)` (`nokeyset`), so the two share their kernels; that key's lookups
+  compile away. Declared order rather than key order leaves the order
   to the caller and skips a per-close sort; a sorted declaration reproduces the
   sparse order.
 - **The declaration fixes the key type.** The key columns take their element
@@ -2190,9 +2193,9 @@ once per chunk. States are small mutable structs, so building one per cycle or
 per row is a heap allocation per summarizer on the hottest paths there are:
 `summarizecycles` closes a cycle per timestamp, `intervalize` an interval per
 boundary, and `addrollingcolumns` queries a window per row per window. `fresh!`
-is what makes that free, and the five places that use it are `foldcycles!`,
-`foldintervals!`/`flushintervals!`, `closedense!` (the declared-key cycle and
-interval close, which zeroes only the slots that folded rows), the segment tree,
+is what makes that free, and the four places that use it are `foldcycles!`,
+`closedense!` (the declared-key cycle and interval close, the keyless interval
+grid's too, which zeroes only the slots that folded rows), the segment tree,
 and the re-fold window kernel.
 
 Three structures own reusable scratch rather than allocating it per use:
