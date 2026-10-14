@@ -153,11 +153,10 @@ function addrollingcolumns(windows, summarizers; key = nothing,
         )
         push!(prefixednames, pn)
     end
-    stored = storedcolumns(protos, keycols)
+    cfg = RollingConfig(windownames, lookbacks, keycols, Val(Tuple(keycols)),
+        protos, Val(requested), prefixednames, terms,
+        storedcolumns(protos, keycols))
     return pipetransform() do p, ctx
-        cfg = RollingConfig(windownames, lookbacks, keycols,
-            Val(Tuple(keycols)), protos, Val(requested),
-            prefixednames, terms, stored)
         summarized, augmented, leadin = rollinginputs(p, from, sharedrun,
             ctx, rollingcontext(ctx, lookbacks))
         rs = RollingState(summarized)
@@ -257,18 +256,14 @@ end
 # from which the running tier downdates and the refold tier folds. Trees own
 # their rows, so a call with only tree and derived states keeps no buffer and
 # no rings (`nothing`), nor does a call without time windows keep a buffer.
-struct RollTiers{R,B,RG,G,TR,SR<:Tuple,ST<:Tuple,SF<:Tuple,SD<:Tuple,P}
+struct RollTiers{R,B,RG,G,TR,TG<:Tiering}
     buffer::B              # Vector{R}, or nothing
     winheads::Vector{Int}  # per window, the first buffered row inside it
     rings::RG              # Dict{K,RowRing{R}}, or nothing
     barcap::Int            # the rings' capacity
     running::G             # NTuple{W,RunningTable{K,SR}}, or nothing
     trees::TR              # Dict{K,SegTree{ST,R,T}}, or nothing
-    runprotos::SR
-    treeprotos::ST
-    refoldprotos::SF
-    derived::SD
-    perm::Val{P}
+    tg::TG                 # the partition of the states into tiers
 end
 
 # Build the tiers for the realized types, from scratch or, after a widening,
@@ -307,15 +302,12 @@ function rolltiers(tg::Tiering, types::NamedTuple, keynames::Val,
         suffixes === nothing ?
         rebuildtrees(tg, K, R, types.time, old, oldhead, keynames) :
         suffixtrees(tg, K, R, types.time, suffixes, keynames)
-    return RollTiers{R}(buffer, winheads, rings, barcap, running, trees,
-        tg.running, tg.tree, tg.refold, tg.derived, tg.perm)
+    return RollTiers{R}(buffer, winheads, rings, barcap, running, trees, tg)
 end
 
 RollTiers{R}(buffer::B, winheads::Vector{Int}, rings::RG, barcap::Int,
-    running::G, trees::TR, runprotos::SR, treeprotos::ST, refoldprotos::SF,
-    derived::SD, perm::Val{P}) where {R,B,RG,G,TR,SR,ST,SF,SD,P} =
-    RollTiers{R,B,RG,G,TR,SR,ST,SF,SD,P}(buffer, winheads, rings, barcap,
-        running, trees, runprotos, treeprotos, refoldprotos, derived, perm)
+    running::G, trees::TR, tg::TG) where {R,B,RG,G,TR,TG} =
+    RollTiers{R,B,RG,G,TR,TG}(buffer, winheads, rings, barcap, running, trees, tg)
 
 # A window's running table, replayed from the rows the window holds: a time
 # window's from the buffer (from its head), a Bars window's from each key's
@@ -324,7 +316,7 @@ replaywindow!(rt::RunningTable, lb, buffer, head::Int, rings, stateprotos,
     keynames::Val) = replayrunning!(rt, buffer, head, stateprotos, keynames)
 function replaywindow!(rt::RunningTable, lb::Bars, buffer, head::Int,
     rings::AbstractDict, stateprotos, keynames::Val)
-    for (_, ring) in rings, j in min(ringlength(ring), lb.n):-1:1
+    for (_, ring) in rings, j in min(length(ring), lb.n):-1:1
         row = ringback(ring, j)
         admitgroup!(rt, stateprotos, keyvalues(row, keynames), row)
     end
@@ -344,7 +336,7 @@ function barsuffixes(::Type{K}, ::Type{R}, old, head::Int,
     end
     if old.rings !== nothing
         for (k, ring) in old.rings
-            offer!(k, R[ringback(ring, j) for j in ringlength(ring):-1:1])
+            offer!(k, R[ringback(ring, j) for j in length(ring):-1:1])
         end
     end
     if old.trees !== nothing
@@ -505,12 +497,9 @@ newvals(::Type{V}, emptyrow, n::Int) where {V} =
 # A row is dead once every window's head has passed it. Dead rows are dropped
 # only once they dominate the buffer: amortized O(1) per row.
 @inline compactbuffer!(::Nothing, winheads::Vector{Int}) = nothing
-@inline function compactbuffer!(buffer::Vector{R}, winheads::Vector{Int}) where {R}
-    dead = minimum(winheads) - 1
-    if dead >= 64 && 2 * dead >= length(buffer)
-        deleteat!(buffer, 1:dead)
-        winheads .-= dead
-    end
+@inline function compactbuffer!(buffer::Vector, winheads::Vector{Int})
+    dropped = compactdead!(buffer, minimum(winheads) - 1)
+    dropped > 0 && (winheads .-= dropped)
     return nothing
 end
 
@@ -537,7 +526,7 @@ function rollsegment!(wins::Tuple, tiers::RollTiers{R}, lnt::NamedTuple, i::Int,
     # One refold state tuple for the segment, zeroed between windows after
     # `summaryvalues` copies the result out, so re-folding allocates per
     # segment, not per row.
-    scratch = map(fresh, tiers.refoldprotos)
+    scratch = map(fresh, tiers.tg.refold)
     while i <= n
         t = @inbounds lnt.time[i]
         while spos <= slen && @inbounds(snt.time[spos]) <= t
@@ -591,8 +580,8 @@ end
     lookbacks::Tuple)
     pushrow!(tiers.buffer, row)
     k = keyvalues(row, keynames)
-    admitrunning!(tiers.running, tiers.runprotos, k, row)
-    admittree!(tiers.trees, tiers.treeprotos, k, row)
+    admitrunning!(tiers.running, tiers.tg.running, k, row)
+    admittree!(tiers.trees, tiers.tg.tree, k, row)
     admitbars!(tiers.rings, tiers.running, tiers.barcap, k, row, lookbacks)
     return k
 end
@@ -613,7 +602,7 @@ end
     evictbars!(running, ring, k, w + 1, rest...)
 @inline function evictbars!(running, ring::RowRing, k, w::Int, lb::Bars,
     rest...)
-    ringlength(ring) > lb.n &&
+    length(ring) > lb.n &&
         evictbarrow!(running, w, k, ringback(ring, lb.n + 1))
     return evictbars!(running, ring, k, w + 1, rest...)
 end
@@ -716,7 +705,7 @@ end
 @inline function refoldstates(scratch::Tuple{Any,Vararg}, tiers::RollTiers,
     w::Int, k, keynames::Val, lb::Bars)
     ring = get(tiers.rings, k, nothing)
-    (ring === nothing || ringlength(ring) < lb.n) && return (nothing, scratch)
+    (ring === nothing || length(ring) < lb.n) && return (nothing, scratch)
     states = freshall!(scratch)
     for j in (lb.n):-1:1
         updateall!(states, ringback(ring, j))
@@ -752,7 +741,7 @@ end
         @inbounds v[i] = emptyrow
     else
         @inbounds v[i] = summaryvalues(
-            mergestates(tiers.perm, (rs, ts, fs, tiers.derived)), outs)
+            mergestates(tiers.tg.perm, (rs, ts, fs, tiers.tg.derived)), outs)
     end
     return emitroll!(i, t, k, tiers, tr, scratch, keynames, outs,
         min(minlo, lo), w + 1, rest...)

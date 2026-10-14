@@ -12,7 +12,7 @@ end
 
 RowRing{R}(capacity::Int) where {R} = RowRing{R}(Vector{R}(undef, capacity), 1, 0)
 
-ringlength(r::RowRing) = r.len
+Base.length(r::RowRing) = r.len
 
 # Append `row`, overwriting the oldest row when the ring is full.
 @inline function ringpush!(r::RowRing{R}, row) where {R}
@@ -28,11 +28,11 @@ ringlength(r::RowRing) = r.len
     return nothing
 end
 
-# The j-th newest row (j = 1 is the newest); the caller checks j <= ringlength.
+# The j-th newest row (j = 1 is the newest); the caller checks j <= length(r).
 @inline function ringback(r::RowRing, j::Int)
     i = r.first + r.len - j
     cap = length(r.rows)
     return @inbounds r.rows[i > cap ? i - cap : i]
 end
 
-emptyring!(r::RowRing) = (r.first = 1; r.len = 0; r)
+Base.empty!(r::RowRing) = (r.first = 1; r.len = 0; r)

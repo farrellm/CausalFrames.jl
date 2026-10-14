@@ -127,3 +127,42 @@ function teepull!(tee::ChunkTee, side::Int)
         k === nothing || return k
     end
 end
+
+# The clock cursor: one boundary time at a time over clk.run(ctx), pulling
+# clock chunks lazily. The type-unstable pull is confined here; reading
+# boundaries from the concrete `times` is typed. Clock order is trusted to the
+# chunk protocol.
+mutable struct IntervalCursor{T}
+    const chunks::PullCursor
+    times::Vector{T}
+    pos::Int
+end
+IntervalCursor{T}(chunks) where {T} = IntervalCursor{T}(PullCursor(chunks), T[], 1)
+
+function nextboundary!(cur::IntervalCursor{T}) where {T}
+    while cur.pos > length(cur.times)
+        chunk = pull!(cur.chunks)
+        chunk === nothing && return nothing
+        cur.times = convert(Vector{T}, chunk.time)
+        cur.pos = 1
+    end
+    b = @inbounds cur.times[cur.pos]
+    cur.pos += 1
+    return b
+end
+
+# Every boundary has been handed out and the clock is exhausted.
+exhausted(cur::IntervalCursor) = cur.chunks.done && cur.pos > length(cur.times)
+
+# Pull boundaries onto `buf` until its last one is strictly past `tmax` (so
+# every boundary a row up to `tmax` needs is known) or the clock is exhausted;
+# `tmax = nothing` drains the clock. Shared by intervalize's boundaries and summarizewindows' ticks.
+# Type-unstable, once per chunk.
+function pullpast!(buf::Vector{T}, cur::IntervalCursor{T}, tmax) where {T}
+    while tmax === nothing || isempty(buf) || @inbounds(buf[end]) <= tmax
+        b = nextboundary!(cur)
+        b === nothing && return nothing
+        push!(buf, b)
+    end
+    return nothing
+end

@@ -107,24 +107,18 @@ end
 # its window has rows (the running table deletes a group with its last row, an
 # emptied tree is dropped, the refold table is filled at the tick from the live
 # rows), so the first tier present, the primary, gives the keys to emit.
-struct WindowTiers{R,B,G,TR,GT,SR<:Tuple,ST<:Tuple,SF<:Tuple,SD<:Tuple,P,SC}
+struct WindowTiers{R,B,G,TR,GT,TG<:Tiering,SC}
     buffer::B        # Vector{R}, or nothing
     running::G       # RunningTable{K,SR}, or nothing
     trees::TR        # Dict{K,SegTree{ST,R,T}}, or nothing
     refold::GT       # GroupTable{K,SF}, or nothing
-    runprotos::SR
-    treeprotos::ST
-    refoldprotos::SF
-    derived::SD
-    perm::Val{P}
+    tg::TG           # the partition of the states into tiers
     scratch::SC      # Vector{Pair{K,V}} over the primary's dict: the sort buffer
 end
 
-WindowTiers{R}(buffer::B, running::G, trees::TR, refold::GT, runprotos::SR,
-    treeprotos::ST, refoldprotos::SF, derived::SD, perm::Val{P},
-    scratch::SC) where {R,B,G,TR,GT,SR,ST,SF,SD,P,SC} =
-    WindowTiers{R,B,G,TR,GT,SR,ST,SF,SD,P,SC}(buffer, running, trees, refold,
-        runprotos, treeprotos, refoldprotos, derived, perm, scratch)
+WindowTiers{R}(buffer::B, running::G, trees::TR, refold::GT, tg::TG,
+    scratch::SC) where {R,B,G,TR,GT,TG,SC} =
+    WindowTiers{R,B,G,TR,GT,TG,SC}(buffer, running, trees, refold, tg, scratch)
 
 @inline primarygroups(t::WindowTiers) = primarygroups(t.running, t.trees, t.refold)
 @inline primarygroups(rt::RunningTable, trees, refold) = rt.groups
@@ -153,8 +147,7 @@ function preparewindows!(st::WindowState, cfg::WindowConfig, types::NamedTuple)
     refold = isempty(tg.refold) ? nothing : GroupTable{K,typeof(tg.refold)}()
     buffer === nothing && (st.head = 1)
     groups = primarygroups(running, trees, refold)
-    st.tiers = WindowTiers{R}(buffer, running, trees, refold, tg.running,
-        tg.tree, tg.refold, tg.derived, tg.perm,
+    st.tiers = WindowTiers{R}(buffer, running, trees, refold, tg,
         Pair{K,valtype(groups)}[])
     st.valtype = tieredvaluetype(tg, cfg.protos, cfg.outs)
     return nothing
@@ -199,14 +192,7 @@ end
 # amortized O(1) per row. Called at each tick, so the buffer stays near the
 # window's size.
 compacthead!(::Nothing, head::Int) = head
-function compacthead!(buffer::Vector, head::Int)
-    dead = head - 1
-    if dead >= 64 && 2 * dead >= length(buffer)
-        deleteat!(buffer, 1:dead)
-        return 1
-    end
-    return head
-end
+compacthead!(buffer::Vector, head::Int) = head - compactdead!(buffer, head - 1)
 
 # After the last tick nothing more is emitted, so the live rows (the buffer,
 # groups and trees) are released rather than held to the end of the stream.
@@ -281,8 +267,8 @@ end
     ks::Union{Nothing,KeySet})
     pushrow!(tiers.buffer, row)
     k = keyvalues(row, keynames)
-    admitwinrunning!(tiers.running, tiers.runprotos, k, row, ks, keynames)
-    admitwintree!(tiers.trees, tiers.treeprotos, k, row,
+    admitwinrunning!(tiers.running, tiers.tg.running, k, row, ks, keynames)
+    admitwintree!(tiers.trees, tiers.tg.tree, k, row,
         tiers.running === nothing ? ks : nothing, keynames)
     tiers.running === nothing && tiers.trees === nothing &&
         checkdeclared(ks, row, keynames)
@@ -316,7 +302,7 @@ end
     head = evictwindow!(tiers.buffer, head, τ, lookback, tiers.running, keynames)
     head = compacthead!(tiers.buffer, head)
     closetrees!(tiers.trees, τ, lookback)
-    foldrefold!(tiers.refold, tiers.buffer, head, tiers.refoldprotos, keynames)
+    foldrefold!(tiers.refold, tiers.buffer, head, tiers.tg.refold, keynames)
     emitgroups!(rows, τ, primarygroups(tiers), tiers.scratch, prevkeys, tiers,
         outs, emptyrow, grid, ks)
     retirerefold!(tiers.refold)
@@ -387,9 +373,9 @@ end
 @inline tierstates(gt::GroupTable, k, g) = gt.table[k]
 
 @inline tiervalues(tiers::WindowTiers, k, g, outs::Val) = summaryvalues(
-    mergestates(tiers.perm,
+    mergestates(tiers.tg.perm,
         (tierstates(tiers.running, k, g), tierstates(tiers.trees, k, g),
-            tierstates(tiers.refold, k, g), tiers.derived)), outs)
+            tierstates(tiers.refold, k, g), tiers.tg.derived)), outs)
 
 # Emit one tick from the primary tier's groups: without a declared keyset, the
 # present keys sorted into the reused scratch, then `emitwindow!`; with one,

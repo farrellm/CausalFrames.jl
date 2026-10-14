@@ -487,7 +487,7 @@ design rationale and performance constraints behind each module.
   the only dynamism; the per-row kernel stays dispatch-free), reusing
   `SummaryFold` whole; `closelast` closes the trailing partial at `stop`
 - `src/windows.jl` — `summarizewindows`, the clock-sampled trailing window
-  (`[τ - lookback, τ)` at each tick): `intervalize`'s driver (`IntervalCursor`
+  (`[τ - lookback, τ)` at each tick): `intervalize`'s driver (`chunks.jl`'s `IntervalCursor`
   and `pullpast!`, a concrete tick vector per chunk) over `addrollingcolumns`'
   row buffer, eviction head and tiers. One admission kernel (`windowrows!`)
   and one tick close (`closewindow!`): evict (downdating the running table),

@@ -1303,7 +1303,7 @@ motivating case (see "Model fitting (MLJ)").
 
 The mechanism is `intervalize`'s driver over `addrollingcolumns`' bookkeeping.
 A `chunkmap` over the data stream pulls ticks on demand through
-`intervalize.jl`'s `IntervalCursor`. Before each chunk it fills a concrete
+`chunks.jl`'s `IntervalCursor`. Before each chunk it fills a concrete
 `Vector{T}` of pending ticks up to just past the chunk's last time (the
 cursor's `pullpast!`, which `intervalize` fills its boundaries with too), so the
 per-row kernel never touches the clock. For each row at time `s`, every pending
@@ -2750,7 +2750,7 @@ the second.
 | `src/CausalFrames.jl` | module, includes, exports |
 | `src/context.jl` | `Context{T}`, and `widenstart`, the input context of every operator that reads before `start` |
 | `src/frame.jl` | `CausalFrame{T}`, invariants, Tables.jl interface |
-| `src/chunks.jl` | internal chunk-iterator machinery (`ChunkSource`, `chunkmap`, `PullCursor`, `teesides`) |
+| `src/chunks.jl` | internal chunk-iterator machinery (`ChunkSource`, `chunkmap`, `PullCursor`, `teesides`) and the clock cursor (`IntervalCursor`, `pullpast!`) that `intervalize` and `summarizewindows` pull boundaries with |
 | `src/pipeline.jl` | `CausalPipeline{F}`, `load`, `stream`, `scan` |
 | `src/sources.jl` | the stateless sources: `emptyframe`, the n-ary `concatenate`, `clock` |
 | `src/sourceclip.jl` | `SourceClip` and `clipchunk!`/`gatherchunk!`, the clip every file source shares (rename, `:time` resolution, order checks, window clip) |
