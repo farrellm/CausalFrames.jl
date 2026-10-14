@@ -103,9 +103,11 @@ fresh(st::FitModelState{N,P,Y,M,C,V}) where {N,P,Y,M,C,V} =
     empty!(st.y)
     return st
 end
-# `P` is a type parameter, so this unrolls into one typed push per column.
+# `P` is a type parameter, so the map unrolls into one typed push per column.
+# `map`, not `foreach`: Julia 1.10's two-tuple `foreach` goes through `zip`
+# and dispatches per column. When 1.10 support is dropped, use `foreach`.
 @inline function update!(st::FitModelState{N,P,Y}, row) where {N,P,Y}
-    foreach(push!, values(st.cols), map(p -> getproperty(row, p), P))
+    map(push!, values(st.cols), map(p -> getproperty(row, p), P))
     push!(st.y, getproperty(row, Y))
     return nothing
 end
