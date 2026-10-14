@@ -156,8 +156,8 @@ exhausted(cur::IntervalCursor) = cur.chunks.done && cur.pos > length(cur.times)
 
 # Pull boundaries onto `buf` until its last one is strictly past `tmax` (so
 # every boundary a row up to `tmax` needs is known) or the clock is exhausted;
-# `tmax = nothing` drains the clock. Shared by intervalize's boundaries and summarizewindows' ticks.
-# Type-unstable, once per chunk.
+# `tmax = nothing` drains the clock. Shared by intervalize's boundaries and
+# summarizewindows' ticks. Type-unstable, once per chunk.
 function pullpast!(buf::Vector{T}, cur::IntervalCursor{T}, tmax) where {T}
     while tmax === nothing || isempty(buf) || @inbounds(buf[end]) <= tmax
         b = nextboundary!(cur)

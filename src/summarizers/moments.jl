@@ -26,8 +26,9 @@ struct CountRatioState{N,D} <: SummarizerState end
 
 # The value type comes from the dependencies' declared field types, not
 # `typeof` of the quotient, so a missing sum keeps the Union{Missing,...} eltype.
-# `promote_op` is behind a function of the types: written inline here, Julia 1.10 cannot fold it to a constant for a Missing-admitting
-# sum, and the whole summary row's type widens.
+# `promote_op` is behind a function of the types: written inline here, Julia
+# 1.10 cannot fold it to a constant for a Missing-admitting sum, and the whole
+# summary row's type widens.
 ratiotype(::Type{A}, ::Type{B}) where {A,B} = Base.promote_op(/, A, B)
 @inline function value(::CountRatioState{N,D}, vals::NamedTuple) where {N,D}
     V = ratiotype(fieldtype(typeof(vals), D), fieldtype(typeof(vals), :count))

@@ -313,8 +313,8 @@ textual times, under both `resolvetime!` (file chunks, resolved in place) and
 `sourcetimes` (tables, whose times are copied out):
 
 - `time` is `nothing`, a `Symbol` or a function, checked when the operator is
-  called (`checksourcetimespec`). The chunk path acts only on a `Symbol` or a
-  function, so anything else would otherwise quietly read the `:time` column.
+  called (`checksourcetimespec`), so the per-chunk resolution (`timecolumn`,
+  typed on `Nothing` or `Symbol`, or a function) never sees anything else.
 - `time = :name` when the source also has a `:time` column is an error, never a
   silent overwrite: which column the user meant is ambiguous.
 - A textual time cannot be ordered against the window and is an error, whether
@@ -770,7 +770,9 @@ the operator in every error message), `JoinState`, `pullright!`,
 direction singleton carried by the config: `Backward` picks the `SlotStore`
 and `joinsegment!`, while the submodule's `Forward` extends `newstore`,
 `widenstore` and `segment!` with the `KeyBuffer` store and `futuresegment!`,
-so everything forward-looking stays in `Acausal`.
+and `joincmp` and `rightcontext` with its comparison and forward-widened right
+window, so everything forward-looking stays in `Acausal`. One constructor,
+`jointransform`, builds both `asofjoin` and `futurejoin` from those methods.
 
 ## Representing a match
 

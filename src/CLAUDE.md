@@ -319,16 +319,18 @@ design rationale and performance constraints behind each module.
   by the tolerance (`widenstart`). It is also the join engine `applymodels`
   and `Acausal.futurejoin` run on: `JoinConfig` (with `op` for messages and a
   direction singleton, `Backward` here), `JoinState`, `pullright!`,
-  `matchchunk!` and `joinchunk!`, with the store and kernel picked by dispatch
-  (`newstore`/`widenstore`/`segment!`). A new join direction adds those three
-  methods, never a second driver. The store is a `SlotStore` (a `Dict{K,Int}`
-  of slot numbers over a `Vector{V}` of rows, shared with `lastrow` through
-  `admitslot!`), and a match is a `Vector{V}` plus a `Vector{Bool}` mask
-  (unmatched slots left undefined, hence `convertmatches` for a mid-chunk
-  widening). Both keep `V` out of a `Union`, which Julia stores inline only if
-  every member is isbits, so a `String` or `Missing`-admitting right column
-  would otherwise cost a box per left row. See DESIGN.md's "Representing a
-  match"; the zero-allocation kernel tests guard it
+  `matchchunk!` and `joinchunk!`, built by `jointransform`, with the store,
+  kernel, comparison and right window picked by dispatch
+  (`newstore`/`widenstore`/`segment!`/`joincmp`/`rightcontext`). A new join
+  direction adds those five methods, never a second driver. The store is a
+  `SlotStore` (a `Dict{K,Int}` of slot numbers over a `Vector{V}` of rows,
+  shared with `lastrow` through `admitslot!`), and a match is a `Vector{V}`
+  plus a `Vector{Bool}` mask (unmatched slots left undefined, hence
+  `convertmatches` for a mid-chunk widening). Both keep `V` out of a `Union`,
+  which Julia stores inline only if every member is isbits, so a `String` or
+  `Missing`-admitting right column would otherwise cost a box per left row.
+  See DESIGN.md's "Representing a match"; the zero-allocation kernel tests
+  guard it
 - `src/lookupjoin.jl` — `lookupjoin`, the key-only join against a timeless
   in-memory table. Not a stream: the table is copied and indexed once, at
   construction, into a `LookupJoin` (a `Dict{K,Int}` of table rows plus the
@@ -527,12 +529,12 @@ design rationale and performance constraints behind each module.
   imported `Acausal`. Reach it as `CausalFrames.Acausal.settime`; a test pins
   its absence from `names(Acausal)`. `futurejoin` runs on `asofjoin`'s join
   engine, supplying only the `Forward` direction's `newstore`/`widenstore`/
-  `segment!` methods (so the forward-looking code stays in the submodule),
-  with the match direction, tie-break and context widening (`stop +
-  tolerance`) inverted. Because it matches the *earliest* qualifying right
-  row, it buffers right rows per key until a left row consumes or outruns
-  them, and proving a key has no future match drains the right stream: worst
-  case O(right rows), against `asofjoin`'s O(keys) store. It shares the
+  `segment!`/`joincmp`/`rightcontext` methods (so the forward-looking code
+  stays in the submodule), with the match direction, tie-break and context
+  widening (`stop + tolerance`) inverted. Because it matches the *earliest*
+  qualifying right row, it buffers right rows per key until a left row
+  consumes or outruns them, and proving a key has no future match drains the
+  right stream: worst case O(right rows), against `asofjoin`'s O(keys) store. It shares the
   `Vector{V}` + mask match buffer, and `KeyBuffer` is mutable, so a store
   lookup answers with a pointer and never boxes
 - `src/precompile.jl` — the PrecompileTools workload over the main pipeline
