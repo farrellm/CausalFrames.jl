@@ -35,6 +35,18 @@ function checkkeycolumns(keycols::Vector{Symbol}, c::DataFrame, op::String,
     return nothing
 end
 
+# The appending transforms' check that none of their output columns `outnames`
+# is already a column of the chunk `c`.
+function checknewcolumns(c::DataFrame, outnames, op::String)
+    for n in outnames
+        columnindex(c, n) > 0 && throw(
+            ArgumentError(
+                "$op output column $(repr(n)) collides with an existing column"),
+        )
+    end
+    return nothing
+end
+
 # A declared key set (`keyset`), which makes a keyed transform dense: every
 # close emits one row per declared key, in declared order. The keys are built
 # at construction as NamedTuples over the key columns, so the declaration, not
@@ -776,15 +788,8 @@ function addsummarycolumns(summarizers; key = nothing)
         step = function (c)
             unchecked = fold.types === nothing   # needs the schema: first chunk
             nt = preparechunk!(fold, protos, grouping, c)
-            if unchecked
-                for n in requested   # hidden dependencies are never added
-                    String(n) in names(c) && throw(
-                        ArgumentError(
-                            "addsummarycolumns output column $(repr(n)) collides with an existing column",
-                        ),
-                    )
-                end
-            end
+            # hidden dependencies are never added
+            unchecked && checknewcolumns(c, requested, "addsummarycolumns")
             vals = foldrunning!(fold.groups, fold.stateprotos, nt, nrow(c),
                 grouping, outs)
             return hcat(c, DataFrame(vals); copycols = false)

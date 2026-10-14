@@ -121,11 +121,7 @@ function predictchunk!(js::JoinState, cfg::JoinConfig, column::Symbol,
     name::Symbol, op::Symbol, c::DataFrame)
     if !js.leftchecked
         checkkeycolumns(cfg.keycols, c, cfg.op, "the left input")
-        String(name) in names(c) && throw(
-            ArgumentError(
-                "applymodels output column $(repr(name)) collides with an existing column",
-            ),
-        )
+        checknewcolumns(c, (name,), "applymodels")
         js.leftchecked = true
     end
     js.rnt === nothing && !js.right.done && pullright!(js, cfg)
@@ -277,12 +273,7 @@ modelreports(p::CausalPipeline; kwargs...) = modelreports(; kwargs...)(p)
 function reportchunk!(c::DataFrame, column::Symbol, name::Symbol)
     hasproperty(c, column) ||
         throw(ArgumentError("modelreports: no column named $(repr(column))"))
-    name !== column && hasproperty(c, name) &&
-        throw(
-            ArgumentError(
-                "modelreports output column $(repr(name)) collides with an existing column",
-            ),
-        )
+    name === column || checknewcolumns(c, (name,), "modelreports")
     # `map` narrows the element type from the reports themselves (the field is
     # untyped): Union{Missing, R} for R-typed reports.
     c[!, column] = map(fitreport, c[!, column])

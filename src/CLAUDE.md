@@ -277,7 +277,8 @@ design rationale and performance constraints behind each module.
   `summarizecycles` and `addsummarycolumns`; also the key validators every
   keyed transform shares, `keycolumns` (eager: unique, never `:time`) and
   `checkkeycolumns` (first chunk: present in the input, naming which input for
-  the binary transforms). `prototypes` expands dependencies topologically and
+  the binary transforms), and `checknewcolumns`, every appending transform's
+  check that its output columns are new. `prototypes` expands dependencies topologically and
   returns the requested output names, which ride through the kernels in a
   `Val` to project hidden dependencies out of the output, plus the row terms
   it unwrapped. Every summarizing transform (these three, `intervalize`,

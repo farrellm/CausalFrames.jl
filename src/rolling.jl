@@ -428,13 +428,7 @@ end
 function checkaugmented!(rs::RollingState, cfg::RollingConfig, c::DataFrame)
     rs.checked && return nothing
     checkkeycolumns(cfg.keycols, c, "addrollingcolumns", "the augmented input")
-    for pn in cfg.prefixednames
-        String(pn) in names(c) && throw(
-            ArgumentError(
-                "addrollingcolumns output column $(repr(pn)) collides with an existing column",
-            ),
-        )
-    end
+    checknewcolumns(c, cfg.prefixednames, "addrollingcolumns")
     rs.checked = true
     return nothing
 end

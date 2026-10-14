@@ -79,12 +79,7 @@ function addchunk(f, c::DataFrame)
     )
     :time in keys(first(vals)) && throw(ArgumentError(
         "addcolumns function may not return a time column"))
-    for n in keys(first(vals))
-        columnindex(c, n) > 0 && throw(
-            ArgumentError(
-                "addcolumns output column $(repr(n)) collides with an existing column"),
-        )
-    end
+    checknewcolumns(c, keys(first(vals)), "addcolumns")
     # The chunk is owned, so its columns can be adopted rather than copied.
     return hcat(c, DataFrame(vals); copycols = false)
 end
