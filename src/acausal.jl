@@ -6,10 +6,10 @@
 # and context widening inverted.
 module Acausal
 
-using ..CausalFrames: CausalPipeline, Context, chunkmap, shiftchunk!,
-    settimechunk!, SetTimeState, checktimespec, timetype, keycolumns,
-    normprefix, rowat, keyat, JoinConfig, JoinState, joinchunk!
-import ..CausalFrames: newstore, widenstore, segment!
+using ..CausalFrames: CausalPipeline, Context, pipetransform, chunkmap, shiftchunk!,
+    settimechunk!, SetTimeState, checktimespec, timetype, rowat, keyat,
+    jointransform
+import ..CausalFrames: newstore, widenstore, segment!, joincmp, rightcontext
 
 export futurejoin, lead
 
@@ -53,27 +53,8 @@ function futurejoin(right::CausalPipeline; key = nothing, tolerance = nothing,
     strict::Bool = false, leftprefix = nothing,
     rightprefix = nothing,
     righttime::Union{Nothing,Symbol} = nothing)
-    keycols = keycolumns(key, "futurejoin")
-    righttime === :time && throw(
-        ArgumentError(
-            "futurejoin righttime may not be :time; it would collide with the left time column",
-        ),
-    )
-    righttime !== nothing && righttime in keycols &&
-        throw(
-            ArgumentError(
-                "futurejoin righttime $(repr(righttime)) collides with a key column"),
-        )
-    lp = normprefix(leftprefix)
-    rp = normprefix(rightprefix)
-    return function (left::CausalPipeline)
-        return CausalPipeline() do ctx::Context
-            cfg = JoinConfig(keycols, Val(Tuple(keycols)), tolerance,
-                strict ? (>) : (>=), Forward(), lp, rp, righttime, "futurejoin")
-            js = JoinState(right.run(futurecontext(ctx, tolerance)))
-            return chunkmap(c -> joinchunk!(js, cfg, c), left.run(ctx))
-        end
-    end
+    return jointransform(right, Forward(), "futurejoin";
+        key, tolerance, strict, leftprefix, rightprefix, righttime)
 end
 futurejoin(left::CausalPipeline, right::CausalPipeline; kwargs...) =
     futurejoin(right; kwargs...)(left)
@@ -122,6 +103,12 @@ end
 # no `Union{Nothing,V}` to box. A widening may arrive mid-left-chunk, so the
 # per-key buffers convert along with the matches buffer.
 newstore(::Forward, ::Type{K}, ::Type{V}) where {K,V} = Dict{K,KeyBuffer{V}}()
+
+# The earliest right row after the left one (at it, unless strict), over a
+# right window widened forward by the tolerance.
+joincmp(::Forward, strict::Bool) = strict ? (>) : (>=)
+rightcontext(::Forward, ctx::Context, tolerance, ::String) =
+    futurecontext(ctx, tolerance)
 widenstore(store::Dict{<:Any,<:KeyBuffer}, ::Type{K}, ::Type{V}) where {K,V} =
     Dict{K,KeyBuffer{V}}(
         convert(K, k) => KeyBuffer{V}(convert(Vector{V}, b.rows), b.head)
@@ -198,10 +185,8 @@ Available after `using CausalFrames.Acausal`.
   identity.
 """
 function lead(offset)
-    return function (p::CausalPipeline)
-        return CausalPipeline() do ctx::Context
-            return chunkmap(c -> shiftchunk!(c, -offset), p.run(leadcontext(ctx, offset)))
-        end
+    return pipetransform() do p, ctx
+        return chunkmap(c -> shiftchunk!(c, -offset), p.run(leadcontext(ctx, offset)))
     end
 end
 lead(p::CausalPipeline, offset) = lead(offset)(p)
@@ -239,15 +224,13 @@ The input is not widened, so a row at or after `stop` is never seen, even if
 """
 function settime(spec)
     checktimespec(spec, "Acausal.settime")
-    return function (p::CausalPipeline)
-        return CausalPipeline() do ctx::Context
-            st = SetTimeState{timetype(ctx)}()
-            return chunkmap(
-                c -> settimechunk!(st, spec, c, ctx.start, ctx.stop, false,
-                    "Acausal.settime"),
-                p.run(ctx),
-            )
-        end
+    return pipetransform() do p, ctx
+        st = SetTimeState{timetype(ctx)}()
+        return chunkmap(
+            c -> settimechunk!(st, spec, c, ctx.start, ctx.stop, false,
+                "Acausal.settime"),
+            p.run(ctx),
+        )
     end
 end
 settime(p::CausalPipeline, spec) = settime(spec)(p)

@@ -58,18 +58,16 @@ function forwardfill(selectors...; key = nothing, tolerance = nothing)
     checkselectors(selectors, "forwardfill", false)
     keycols = keycolumns(key, "forwardfill")
     keynames = Val(Tuple(keycols))
-    return function (p::CausalPipeline)
-        return CausalPipeline() do ctx::Context
-            st = ForwardFillState(keycols, selectors)
-            # With `tolerance` the input runs over a widened context: rows
-            # before `ctx.start` fill the cells and are then dropped.
-            drop = LeadInDrop(ctx.start)
-            step = c -> dropleadin!(drop, fillchunk!(st, keynames, tolerance, c))
-            return chunkmap(
-                step,
-                p.run(widenstart(ctx, tolerance, "forwardfill tolerance")),
-            )
-        end
+    return pipetransform() do p, ctx
+        st = ForwardFillState(keycols, selectors)
+        # With `tolerance` the input runs over a widened context: rows
+        # before `ctx.start` fill the cells and are then dropped.
+        drop = LeadInDrop(ctx.start)
+        step = c -> dropleadin!(drop, fillchunk!(st, keynames, tolerance, c))
+        return chunkmap(
+            step,
+            p.run(widenstart(ctx, tolerance, "forwardfill tolerance")),
+        )
     end
 end
 forwardfill(p::CausalPipeline, selectors...; kwargs...) =
@@ -118,10 +116,7 @@ function resolvefill!(st::ForwardFillState, c::DataFrame)
     cols = names(c)
     st.lastnames == cols && return nothing
     checkkeycolumns(st.keycols, c, "forwardfill")
-    foreachliteral(st.selectors) do n
-        n in cols ||
-            throw(ArgumentError("forwardfill: no column named $(repr(Symbol(n)))"))
-    end
+    checkliterals(st.selectors, cols, "forwardfill")
     fills = Symbol[]
     for n in cols
         (n == "time" || Symbol(n) in st.keycols) && continue
@@ -166,7 +161,7 @@ end
 widencells(::Type{NamedTuple{FN,TT}}, old::NamedTuple{FN}) where {FN,TT} =
     NamedTuple{FN,TT}(ntuple(i -> widencell(fieldtype(TT, i), old[i]), Val(length(FN))))
 
-function widenstore(::Type{Dict{K,NT}}, old::AbstractDict) where {K,NT}
+function widencellstore(::Type{Dict{K,NT}}, old::AbstractDict) where {K,NT}
     new = Dict{K,NT}()
     sizehint!(new, length(old))
     for (k, v) in old
@@ -194,8 +189,9 @@ function fillprepared!(st::ForwardFillState, ::Val{KN}, ::Val{FN}, tolerance,
         fillkeyless!(nt.time, groups, values(cells::NT), tolerance)
     else
         D = Dict{storekeytype(types, Val(KN)),NT}
-        store = st.cells === nothing ? D() :
-                widened ? widenstore(D, st.cells) : st.cells
+        store =
+            st.cells === nothing ? D() :
+            widened ? widencellstore(D, st.cells) : st.cells
         st.cells = store
         fillkeyed!(nt.time, groups, nt, Val(KN), store, tolerance)
     end
@@ -300,10 +296,8 @@ function fillmissing(specs...)
         throw(ArgumentError("fillmissing column names must be unique"))
     :time in fillnames &&
         throw(ArgumentError("fillmissing may not fill the time column"))
-    return function (p::CausalPipeline)
-        return CausalPipeline() do ctx::Context
-            return chunkmap(c -> fillmissingchunk!(c, fillnames, vals), p.run(ctx))
-        end
+    return pipetransform() do p, ctx
+        return chunkmap(c -> fillmissingchunk!(c, fillnames, vals), p.run(ctx))
     end
 end
 fillmissing(p::CausalPipeline, specs...) = fillmissing(specs...)(p)

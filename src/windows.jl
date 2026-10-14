@@ -56,21 +56,16 @@ function summarizewindows(clk::CausalPipeline, lookback, summarizers;
             "`Bars` look-backs are for `addrollingcolumns`",
         ),
     )
-    keycols = keycolumns(key, "summarizewindows")
-    protos, requested, terms =
-        prototypes(tosummarizers(summarizers), keycols, "summarizewindows")
-    ks = tokeyset(keyset, keycols, "summarizewindows")
-    cfg = WindowConfig(keycols, Val(Tuple(keycols)), lookback, protos,
-        Val(requested), Val(isempty(keycols)), ks, terms,
-        storedcolumns(protos, keycols))
-    return function (p::CausalPipeline)
-        return CausalPipeline() do ctx::Context
-            T = timetype(ctx)
-            st = WindowState{T}(IntervalCursor{T}(clk.run(ctx)))
-            return chunkmap(c -> windowstep!(st, cfg, c),
-                p.run(widenstart(ctx, lookback, "summarizewindows lookback"));
-                flush = () -> windowflush!(st, cfg))
-        end
+    (; keycols, protos, terms, ks, keynames, outs, keyed) =
+        summaryspec(summarizers, key, "summarizewindows"; keyset)
+    cfg = WindowConfig(keycols, keynames, lookback, protos, outs, Val(!keyed), ks,
+        terms, storedcolumns(protos, keycols))
+    return pipetransform() do p, ctx
+        T = timetype(ctx)
+        st = WindowState{T}(IntervalCursor{T}(clk.run(ctx)))
+        return chunkmap(c -> windowchunk!(st, cfg, c),
+            p.run(widenstart(ctx, lookback, "summarizewindows lookback"));
+            flush = () -> windowflush!(st, cfg))
     end
 end
 summarizewindows(p::CausalPipeline, clk::CausalPipeline, lookback, summarizers;
@@ -112,24 +107,18 @@ end
 # its window has rows (the running table deletes a group with its last row, an
 # emptied tree is dropped, the refold table is filled at the tick from the live
 # rows), so the first tier present, the primary, gives the keys to emit.
-struct WindowTiers{R,B,G,TR,GT,SR<:Tuple,ST<:Tuple,SF<:Tuple,SD<:Tuple,P,SC}
+struct WindowTiers{R,B,G,TR,GT,TG<:Tiering,SC}
     buffer::B        # Vector{R}, or nothing
     running::G       # RunningTable{K,SR}, or nothing
     trees::TR        # Dict{K,SegTree{ST,R,T}}, or nothing
     refold::GT       # GroupTable{K,SF}, or nothing
-    runprotos::SR
-    treeprotos::ST
-    refoldprotos::SF
-    derived::SD
-    perm::Val{P}
+    tg::TG           # the partition of the states into tiers
     scratch::SC      # Vector{Pair{K,V}} over the primary's dict: the sort buffer
 end
 
-WindowTiers{R}(buffer::B, running::G, trees::TR, refold::GT, runprotos::SR,
-    treeprotos::ST, refoldprotos::SF, derived::SD, perm::Val{P},
-    scratch::SC) where {R,B,G,TR,GT,SR,ST,SF,SD,P,SC} =
-    WindowTiers{R,B,G,TR,GT,SR,ST,SF,SD,P,SC}(buffer, running, trees, refold,
-        runprotos, treeprotos, refoldprotos, derived, perm, scratch)
+WindowTiers{R}(buffer::B, running::G, trees::TR, refold::GT, tg::TG,
+    scratch::SC) where {R,B,G,TR,GT,TG,SC} =
+    WindowTiers{R,B,G,TR,GT,TG,SC}(buffer, running, trees, refold, tg, scratch)
 
 @inline primarygroups(t::WindowTiers) = primarygroups(t.running, t.trees, t.refold)
 @inline primarygroups(rt::RunningTable, trees, refold) = rt.groups
@@ -158,8 +147,7 @@ function preparewindows!(st::WindowState, cfg::WindowConfig, types::NamedTuple)
     refold = isempty(tg.refold) ? nothing : GroupTable{K,typeof(tg.refold)}()
     buffer === nothing && (st.head = 1)
     groups = primarygroups(running, trees, refold)
-    st.tiers = WindowTiers{R}(buffer, running, trees, refold, tg.running,
-        tg.tree, tg.refold, tg.derived, tg.perm,
+    st.tiers = WindowTiers{R}(buffer, running, trees, refold, tg,
         Pair{K,valtype(groups)}[])
     st.valtype = tieredvaluetype(tg, cfg.protos, cfg.outs)
     return nothing
@@ -176,7 +164,7 @@ function windowtypes(st::WindowState{T}, cfg::WindowConfig) where {T}
     return RT, convert(V, emptyvalues(cfg.protos, cfg.outs))
 end
 
-function windowstep!(st::WindowState{T}, cfg::WindowConfig,
+function windowchunk!(st::WindowState{T}, cfg::WindowConfig,
     c::DataFrame) where {T}
     if !st.checked
         checkkeycolumns(cfg.keycols, c, "summarizewindows")
@@ -197,21 +185,14 @@ function windowstep!(st::WindowState{T}, cfg::WindowConfig,
         cfg.ks)
     deleteat!(st.ticks, 1:closed)
     exhausted(st.cur) && isempty(st.ticks) && releasewindows!(st)
-    return isempty(rows) ? nothing : DataFrame(rows)
+    return rowsframe(rows)
 end
 
 # Dead rows before the head are dropped once they dominate the buffer:
 # amortized O(1) per row. Called at each tick, so the buffer stays near the
 # window's size.
 compacthead!(::Nothing, head::Int) = head
-function compacthead!(buffer::Vector, head::Int)
-    dead = head - 1
-    if dead >= 64 && 2 * dead >= length(buffer)
-        deleteat!(buffer, 1:dead)
-        return 1
-    end
-    return head
-end
+compacthead!(buffer::Vector, head::Int) = head - compactdead!(buffer, head - 1)
 
 # After the last tick nothing more is emitted, so the live rows (the buffer,
 # groups and trees) are released rather than held to the end of the stream.
@@ -224,18 +205,6 @@ function releasewindows!(st::WindowState)
     return nothing
 end
 
-# The no-data grid: one empty row per tick when keyless, one per tick per
-# declared key when dense.
-function emptywindowgrid(ticks::Vector{T}, ::Nothing, e) where {T}
-    RT = gridrowtype(T, typeof((;)), typeof(e))
-    return DataFrame(RT[convert(RT, gridrow(t, (;), e)) for t in ticks])
-end
-function emptywindowgrid(ticks::Vector{T}, ks::KeySet{K}, e) where {T,K}
-    RT = gridrowtype(T, K, typeof(e))
-    rows = RT[convert(RT, gridrow(t, k, e)) for t in ticks for k in ks.keys]
-    return isempty(rows) ? nothing : DataFrame(rows)
-end
-
 function windowflush!(st::WindowState{T}, cfg::WindowConfig) where {T}
     pullpast!(st.ticks, st.cur, nothing)
     isempty(st.ticks) && return nothing
@@ -243,7 +212,7 @@ function windowflush!(st::WindowState{T}, cfg::WindowConfig) where {T}
         # No data ever arrived: empty rows when keyless or dense, nothing when
         # sparse.
         (cfg.grid isa Val{true} || cfg.ks !== nothing) || return nothing
-        return emptywindowgrid(st.ticks, cfg.ks,
+        return emptygrid(st.ticks, cfg.ks === nothing ? ((;),) : cfg.ks.keys,
             emptyvalues(cfg.protos, cfg.outs))
     end
     RT, emptyrow = windowtypes(st, cfg)
@@ -251,7 +220,7 @@ function windowflush!(st::WindowState{T}, cfg::WindowConfig) where {T}
     st.head = flushwindows!(rows, st.tiers, st.head, st.ticks, st.prevkeys,
         cfg.lookback, cfg.keynames, cfg.outs, emptyrow, cfg.grid, cfg.ks)
     empty!(st.ticks)
-    return isempty(rows) ? nothing : DataFrame(rows)
+    return rowsframe(rows)
 end
 
 # --- kernels ---------------------------------------------------------------
@@ -298,8 +267,8 @@ end
     ks::Union{Nothing,KeySet})
     pushrow!(tiers.buffer, row)
     k = keyvalues(row, keynames)
-    admitwinrunning!(tiers.running, tiers.runprotos, k, row, ks, keynames)
-    admitwintree!(tiers.trees, tiers.treeprotos, k, row,
+    admitwinrunning!(tiers.running, tiers.tg.running, k, row, ks, keynames)
+    admitwintree!(tiers.trees, tiers.tg.tree, k, row,
         tiers.running === nothing ? ks : nothing, keynames)
     tiers.running === nothing && tiers.trees === nothing &&
         checkdeclared(ks, row, keynames)
@@ -333,7 +302,7 @@ end
     head = evictwindow!(tiers.buffer, head, τ, lookback, tiers.running, keynames)
     head = compacthead!(tiers.buffer, head)
     closetrees!(tiers.trees, τ, lookback)
-    foldrefold!(tiers.refold, tiers.buffer, head, tiers.refoldprotos, keynames)
+    foldrefold!(tiers.refold, tiers.buffer, head, tiers.tg.refold, keynames)
     emitgroups!(rows, τ, primarygroups(tiers), tiers.scratch, prevkeys, tiers,
         outs, emptyrow, grid, ks)
     retirerefold!(tiers.refold)
@@ -404,9 +373,9 @@ end
 @inline tierstates(gt::GroupTable, k, g) = gt.table[k]
 
 @inline tiervalues(tiers::WindowTiers, k, g, outs::Val) = summaryvalues(
-    mergestates(tiers.perm,
+    mergestates(tiers.tg.perm,
         (tierstates(tiers.running, k, g), tierstates(tiers.trees, k, g),
-            tierstates(tiers.refold, k, g), tiers.derived)), outs)
+            tierstates(tiers.refold, k, g), tiers.tg.derived)), outs)
 
 # Emit one tick from the primary tier's groups: without a declared keyset, the
 # present keys sorted into the reused scratch, then `emitwindow!`; with one,

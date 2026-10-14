@@ -11,8 +11,8 @@ using DuckDB
 using Tables
 
 using CausalFrames:
-    ChunkSink, PullCursor, SourceClip, clipchunk!, gatherchunk!, pull!,
-    sortgathered, timesourcename
+    ChunkSink, PullCursor, SourceClip, gathersorted!, nextclipped!,
+    timesourcename
 
 CausalFrames.backendloaded(::Val{:duckdb}) = true
 
@@ -32,31 +32,24 @@ end
 
 # The stateful producer behind readparquet's ChunkSource. The untyped fields
 # are per-chunk setup; per-row work is `clipchunk!`'s.
-mutable struct ParquetProducer{T}
+mutable struct QueryProducer{T}
     const clip::SourceClip{T}
     const sort::Bool
     gather::Bool        # sort in Julia, the query being unable to
     con::Any            # DuckDB connection, opened on first pull
-    parts::Any          # PullCursor over the result chunks
+    parts::Any          # PullCursor over the result chunks, as DataFrames
 end
 
 CausalFrames.parquetproducer(::Val{:duckdb}, clip::SourceClip{T},
     sort::Bool) where {T} =
-    ParquetProducer{T}(clip, sort, false, nothing, nothing)
+    QueryProducer{T}(clip, sort, false, nothing, nothing)
 
-function (p::ParquetProducer)()
+function (p::QueryProducer)()
     clip = p.clip
     clip.done && return nothing
     p.parts === nothing && startquery!(p)
-    p.gather && return gatherread!(p)
-    while !clip.done
-        chunk = pull!(p.parts)
-        chunk === nothing && break
-        out = clipchunk!(clip, DataFrame(chunk))
-        out === nothing || return out
-    end
-    clip.done = true
-    return nothing
+    p.gather && return gathersorted!(clip, p.parts)
+    return nextclipped!(clip, p.parts)
 end
 
 # Open the connection and start the streaming scan. The window is pushed down
@@ -68,7 +61,7 @@ end
 # column (not in `*`), unless a file column of that name (case-insensitively)
 # shadows it. Without a nameable time column or a usable tiebreak, the rows are
 # sorted in Julia.
-function startquery!(p::ParquetProducer)
+function startquery!(p::QueryProducer)
     clip = p.clip
     p.con = connection()
     filenames = columnnames(p.con, clip.path)
@@ -96,19 +89,8 @@ function startquery!(p::ParquetProducer)
             execstream(p.con, "SELECT * FROM read_parquet(?)$order", Any[clip.path])
         end
     end
-    p.parts = PullCursor(Tables.partitions(res))
+    p.parts = PullCursor(Iterators.map(DataFrame, Tables.partitions(res)))
     return nothing
-end
-
-# A `sort = true` read the query couldn't sort: every result chunk is scanned
-# for in-window rows, which are sorted once into a single chunk.
-function gatherread!(p::ParquetProducer{T}) where {T}
-    p.clip.done = true
-    kept = DataFrame[]
-    for chunk in p.parts.iter
-        gatherchunk!(kept, p.clip, DataFrame(chunk))
-    end
-    return sortgathered(kept, T)
 end
 
 execstream(con, sql::String, params::Vector{Any}) =

@@ -91,25 +91,17 @@ function (p::JLSProducer)()
     clip.done && return nothing
     p.io === nothing && (p.io = openjls(clip.path))
     io = p.io::IOStream
-    while !clip.done && !eof(io)
-        df = readrecord(io, clip.path)
-        df isa DataFrame || (
-            finishjls!(p);
-            throw(
-                ArgumentError(
-                    "jls file $(clip.path) holds a $(typeof(df)) record where a chunk was expected",
-                ),
-            )
-        )
-        # a data error (times out of order, say) ends the run: close the file
-        out = try
-            clipchunk!(clip, df)
-        catch
-            finishjls!(p)
-            rethrow()
+    try
+        while !clip.done && !eof(io)
+            out = clipchunk!(clip, readrecord(io, clip.path))
+            out === nothing && continue
+            clip.done && finishjls!(p)
+            return out
         end
-        clip.done && finishjls!(p)
-        out === nothing || return out
+    catch
+        # a bad record or a data error (times out of order, say) ends the run
+        finishjls!(p)
+        rethrow()
     end
     finishjls!(p)
     return nothing
@@ -142,15 +134,17 @@ function openjls(path::String)
     return io
 end
 
-# One record. A truncated last record (an interrupted writejls) surfaces as an
-# EOFError, reported as such.
+# One record, which must be a chunk. A truncated last record (an interrupted
+# writejls) surfaces as an EOFError, reported as such.
 function readrecord(io::IOStream, path::String)
-    try
-        return deserialize(io)
+    df = try
+        deserialize(io)
     catch e
         e isa EOFError || rethrow()
-        close(io)
         throw(ArgumentError("jls file $path ends in a truncated record \
             (an interrupted writejls?)"))
     end
+    df isa DataFrame || throw(ArgumentError("jls file $path holds a \
+        $(typeof(df)) record where a chunk was expected"))
+    return df
 end

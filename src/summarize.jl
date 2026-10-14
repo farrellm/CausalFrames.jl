@@ -311,10 +311,10 @@ newgroups(stateprotos::S, types::NamedTuple, keynames::Val) where {S} =
 emptyvalues(protos::Tuple, ::Val{R}) where {R} =
     NamedTuple{R}(merge(map(emptyvalue, protos)...))
 
-@inline summaryrow(t, states::Tuple, r::Val) =
-    merge((; time = t), summaryvalues(states, r))
-@inline summaryrow(t, k::NamedTuple, states::Tuple, r::Val) =
-    merge((; time = t), k, summaryvalues(states, r))
+@inline summaryrow(t, states::Tuple, outs::Val) =
+    merge((; time = t), summaryvalues(states, outs))
+@inline summaryrow(t, k::NamedTuple, states::Tuple, outs::Val) =
+    merge((; time = t), k, summaryvalues(states, outs))
 
 # The key names ride in a Val so the key's NamedTuple type is known statically.
 # The key is typed by the row's declared field types, as the group table's is,
@@ -428,14 +428,14 @@ end
 # Emit one row per declared key at `t` (the summary for a slot that folded
 # rows, else the empty values), zeroing the folded slots once their values are
 # copied out. Allocates only the rows it pushes.
-function closedense!(rows::Vector{RT}, dg::DenseGroups, ks::KeySet, t, r::Val,
+function closedense!(rows::Vector{RT}, dg::DenseGroups, ks::KeySet, t, outs::Val,
     emptyrow) where {RT}
     states, folded = dg.states, dg.folded
     for i in eachindex(ks.keys, states, folded)
         k = @inbounds ks.keys[i]
         if @inbounds folded[i]
             gs = @inbounds states[i]
-            push!(rows, convert(RT, gridrow(t, k, summaryvalues(gs, r))))
+            push!(rows, convert(RT, gridrow(t, k, summaryvalues(gs, outs))))
             @inbounds states[i] = freshall!(gs)
             @inbounds folded[i] = false
         else
@@ -451,7 +451,6 @@ end
 # kernels' function barrier. Each transform uses the fields it needs.
 mutable struct SummaryFold
     types::Union{Nothing,NamedTuple}  # promotion of every input schema seen
-    widened::Bool          # whether the last chunk moved that promotion
     stateprotos::Any       # state tuple serving as the template for fresh copies
     states::Any            # keyless transforms: the running state tuple
     groups::Any            # keyed transforms: a GroupTable or DenseGroups
@@ -461,8 +460,7 @@ mutable struct SummaryFold
     const op::String       # the transform, for messages
 end
 SummaryFold(terms::NamedTuple, op::String) =
-    SummaryFold(nothing, false, nothing, nothing, nothing, nothing, false,
-        terms, op)
+    SummaryFold(nothing, nothing, nothing, nothing, nothing, false, terms, op)
 
 # Per-chunk setup: promote the schema, then build the states on the first
 # chunk or widen them when the promotion changes. A declared `keyset` uses
@@ -472,7 +470,7 @@ function preparechunk!(fold::SummaryFold, protos::Tuple, keyed::Bool,
     keynames::Val, c::DataFrame; keyset::Union{Nothing,KeySet} = nothing)
     nt = terminput(c, fold.terms, fold.op)
     types = promotetypes(fold.types, chunktypes(nt))
-    fold.widened = fold.types !== nothing && types != fold.types
+    widened = fold.types !== nothing && types != fold.types
     fold.types = types
     if fold.stateprotos === nothing
         fold.stateprotos = newstates(protos, types)
@@ -483,7 +481,7 @@ function preparechunk!(fold::SummaryFold, protos::Tuple, keyed::Bool,
         else
             fold.states = map(fresh, fold.stateprotos)
         end
-    elseif fold.widened
+    elseif widened
         fold.stateprotos = widenstates(fold.stateprotos, types)
         if keyset !== nothing
             fold.groups = widendense(fold.groups, fold.stateprotos, types)
@@ -521,15 +519,15 @@ end
 # A cycle closes when a later time arrives, so the open cycle carries across
 # chunks and the last is closed by flush.
 function foldcycles!(states::S, nt::NamedTuple, cycletime,
-    r::Val) where {S<:Tuple}
-    rows = rowtype(eltype(nt.time), S, r)[]
+    outs::Val) where {S<:Tuple}
+    rows = rowtype(eltype(nt.time), S, outs)[]
     for row in Tables.rows(nt)
         t = row.time
         if cycletime === nothing || t != cycletime
             # summaryrow copied the values out, so the states are zeroed and
             # reused.
             cycletime === nothing ||
-                push!(rows, summaryrow(something(cycletime), states, r))
+                push!(rows, summaryrow(something(cycletime), states, outs))
             cycletime = t
             states = freshall!(states)
         end
@@ -539,13 +537,13 @@ function foldcycles!(states::S, nt::NamedTuple, cycletime,
 end
 
 function foldcyclesgrouped!(gt::GroupTable{K,S}, stateprotos::S, nt::NamedTuple,
-    cycletime, ::Val{KN}, r::Val) where {K,S,KN}
-    rows = rowtype(eltype(nt.time), K, S, r)[]
+    cycletime, ::Val{KN}, outs::Val) where {K,S,KN}
+    rows = rowtype(eltype(nt.time), K, S, outs)[]
     for row in Tables.rows(nt)
         t = row.time
         if cycletime === nothing || t != cycletime
             cycletime === nothing ||
-                closecycle!(rows, gt, something(cycletime), r)
+                closecycle!(rows, gt, something(cycletime), outs)
             cycletime = t
         end
         states = groupstates!(gt, keyvalues(row, Val(KN)), stateprotos)
@@ -557,13 +555,13 @@ end
 # Emit one row per present key, in key order, then retire the state tuples to
 # the pool (`groupstates!` zeroes them on reuse) and clear the table. Allocates
 # only the rows it pushes.
-function closecycle!(rows, gt::GroupTable, t, r::Val)
+function closecycle!(rows, gt::GroupTable, t, outs::Val)
     scratch = gt.scratch
     empty!(scratch)
     append!(scratch, gt.table)
     sort!(scratch; lt = groupisless)
     for (k, states) in scratch
-        push!(rows, summaryrow(t, k, states, r))
+        push!(rows, summaryrow(t, k, states, outs))
         push!(gt.pool, states)
     end
     empty!(gt.table)
@@ -574,12 +572,12 @@ end
 # cycle closes with one row per declared key. Pushes into the caller's `rows`
 # and returns the open cycle's time.
 function foldcyclesdense!(rows::Vector{RT}, dg::DenseGroups, ks::KeySet,
-    nt::NamedTuple, cycletime, keynames::Val, r::Val, emptyrow) where {RT}
+    nt::NamedTuple, cycletime, keynames::Val, outs::Val, emptyrow) where {RT}
     for row in Tables.rows(nt)
         t = row.time
         if cycletime === nothing || t != cycletime
             cycletime === nothing ||
-                closedense!(rows, dg, ks, something(cycletime), r, emptyrow)
+                closedense!(rows, dg, ks, something(cycletime), outs, emptyrow)
             cycletime = t
         end
         densefold!(dg, ks, row, keynames)
@@ -588,29 +586,51 @@ function foldcyclesdense!(rows::Vector{RT}, dg::DenseGroups, ks::KeySet,
 end
 
 function foldrunning!(states::S, nt::NamedTuple, n::Int,
-    r::Val) where {S<:Tuple}
-    vals = Vector{valuetype(S, r)}(undef, n)
+    outs::Val) where {S<:Tuple}
+    vals = Vector{valuetype(S, outs)}(undef, n)
     i = 0
     for row in Tables.rows(nt)
         updateall!(states, row)
-        vals[i+=1] = summaryvalues(states, r)
+        vals[i+=1] = summaryvalues(states, outs)
     end
     return vals
 end
 
 function foldrunninggrouped!(gt::GroupTable{K,S}, stateprotos::S, nt::NamedTuple,
-    n::Int, ::Val{KN}, r::Val) where {K,S,KN}
-    vals = Vector{valuetype(S, r)}(undef, n)
+    n::Int, ::Val{KN}, outs::Val) where {K,S,KN}
+    vals = Vector{valuetype(S, outs)}(undef, n)
     i = 0
     for row in Tables.rows(nt)
         states = groupstates!(gt, keyvalues(row, Val(KN)), stateprotos)
         updateall!(states, row)
-        vals[i+=1] = summaryvalues(states, r)
+        vals[i+=1] = summaryvalues(states, outs)
     end
     return vals
 end
 
 # --- summarization transforms ----------------------------------------------
+
+# The setup every summarizing transform shares: the validated key columns and
+# declared `keyset` (a `KeySet`, or `nothing`), the expanded summarizers with
+# their requested output names and row terms, and the names as the kernels'
+# `Val`s.
+function summaryspec(summarizers, key, op::String; keyset = nothing)
+    keycols = keycolumns(key, op)
+    protos, requested, terms = prototypes(tosummarizers(summarizers), keycols, op)
+    return (; keycols, protos, requested, terms,
+        ks = tokeyset(keyset, keycols, op), keynames = Val(Tuple(keycols)),
+        outs = Val(requested), keyed = !isempty(keycols))
+end
+
+# A chunk of output rows, or nothing when there are none.
+rowsframe(rows::AbstractVector) = isempty(rows) ? nothing : DataFrame(rows)
+
+# The grid of empty values for no data: a row per time per key, `keys` being
+# `((;),)` when keyless.
+function emptygrid(times, keys, e::NamedTuple)
+    RT = gridrowtype(eltype(times), eltype(keys), typeof(e))
+    return rowsframe(RT[convert(RT, gridrow(t, k, e)) for t in times for k in keys])
+end
 
 """
     summarize(summarizers; key = nothing) -> (CausalPipeline -> CausalPipeline)
@@ -630,38 +650,32 @@ A transform summarizing the whole window, emitted at `stop`, with columns
   and nothing for an empty input.
 """
 function summarize(summarizers; key = nothing)
-    keycols = keycolumns(key, "summarize")
-    protos, requested, terms =
-        prototypes(tosummarizers(summarizers), keycols, "summarize")
-    keynames = Val(Tuple(keycols))
-    outs = Val(requested)
-    keyed = !isempty(keycols)
-    return function (p::CausalPipeline)
-        return CausalPipeline() do ctx::Context
-            fold = SummaryFold(terms, "summarize")
-            step = function (c)
-                fold.types === nothing && checkkeycolumns(keycols, c, "summarize")
-                nt = preparechunk!(fold, protos, keyed, keynames, c)
-                keyed ? foldgroups!(fold.groups, fold.stateprotos, nt, keynames) :
-                foldall!(fold.states, nt)
-                return nothing
-            end
-            flush = function ()
-                if !keyed
-                    vals =
-                        fold.states === nothing ? emptyvalues(protos, outs) :
-                        summaryvalues(fold.states, outs)
-                    return DataFrame([merge((; time = ctx.stop), vals)])
-                end
-                fold.groups === nothing && return nothing
-                rows = [
-                    summaryrow(ctx.stop, k, gs, outs)
-                    for (k, gs) in sortedgroups(fold.groups)
-                ]
-                return isempty(rows) ? nothing : DataFrame(rows)
-            end
-            return chunkmap(step, p.run(ctx); flush = flush)
+    (; keycols, protos, terms, keynames, outs, keyed) =
+        summaryspec(summarizers, key, "summarize")
+    return pipetransform() do p, ctx
+        fold = SummaryFold(terms, "summarize")
+        step = function (c)
+            fold.types === nothing && checkkeycolumns(keycols, c, "summarize")
+            nt = preparechunk!(fold, protos, keyed, keynames, c)
+            keyed ? foldgroups!(fold.groups, fold.stateprotos, nt, keynames) :
+            foldall!(fold.states, nt)
+            return nothing
         end
+        flush = function ()
+            if !keyed
+                vals =
+                    fold.states === nothing ? emptyvalues(protos, outs) :
+                    summaryvalues(fold.states, outs)
+                return DataFrame([merge((; time = ctx.stop), vals)])
+            end
+            fold.groups === nothing && return nothing
+            rows = [
+                summaryrow(ctx.stop, k, gs, outs)
+                for (k, gs) in sortedgroups(fold.groups)
+            ]
+            return rowsframe(rows)
+        end
+        return chunkmap(step, p.run(ctx); flush = flush)
     end
 end
 summarize(p::CausalPipeline, summarizers; kwargs...) =
@@ -689,59 +703,52 @@ then the summaries; the input columns are dropped.
   without rows.
 """
 function summarizecycles(summarizers; key = nothing, keyset = nothing)
-    keycols = keycolumns(key, "summarizecycles")
-    protos, requested, terms =
-        prototypes(tosummarizers(summarizers), keycols, "summarizecycles")
-    ks = tokeyset(keyset, keycols, "summarizecycles")
-    keynames = Val(Tuple(keycols))
-    outs = Val(requested)
-    keyed = !isempty(keycols)
-    return function (p::CausalPipeline)
-        return CausalPipeline() do ctx::Context
-            fold = SummaryFold(terms, "summarizecycles")
-            step = function (c)
-                fold.types === nothing &&
-                    checkkeycolumns(keycols, c, "summarizecycles")
-                nt = preparechunk!(fold, protos, keyed, keynames, c; keyset = ks)
-                rows = if ks !== nothing
-                    RT, emptyrow = densetypes(eltype(nt.time), fold.stateprotos,
-                        protos, ks, outs)
-                    rs = RT[]
-                    fold.cycletime = foldcyclesdense!(rs, fold.groups, ks, nt,
-                        fold.cycletime, keynames, outs, emptyrow)
-                    rs
-                elseif keyed
-                    rs, fold.cycletime = foldcyclesgrouped!(
-                        fold.groups, fold.stateprotos, nt, fold.cycletime,
-                        keynames, outs)
-                    rs
-                else
-                    rs, fold.states, fold.cycletime = foldcycles!(
-                        fold.states, nt, fold.cycletime, outs)
-                    rs
-                end
-                return isempty(rows) ? nothing : DataFrame(rows)
+    (; keycols, protos, terms, ks, keynames, outs, keyed) =
+        summaryspec(summarizers, key, "summarizecycles"; keyset)
+    return pipetransform() do p, ctx
+        fold = SummaryFold(terms, "summarizecycles")
+        step = function (c)
+            fold.types === nothing &&
+                checkkeycolumns(keycols, c, "summarizecycles")
+            nt = preparechunk!(fold, protos, keyed, keynames, c; keyset = ks)
+            rows = if ks !== nothing
+                RT, emptyrow = densetypes(eltype(nt.time), fold.stateprotos,
+                    protos, ks, outs)
+                rs = RT[]
+                fold.cycletime = foldcyclesdense!(rs, fold.groups, ks, nt,
+                    fold.cycletime, keynames, outs, emptyrow)
+                rs
+            elseif keyed
+                rs, fold.cycletime = foldcyclesgrouped!(
+                    fold.groups, fold.stateprotos, nt, fold.cycletime,
+                    keynames, outs)
+                rs
+            else
+                rs, fold.states, fold.cycletime = foldcycles!(
+                    fold.states, nt, fold.cycletime, outs)
+                rs
             end
-            flush = function ()
-                fold.cycletime === nothing && return nothing
-                if ks !== nothing
-                    RT, emptyrow = densetypes(typeof(fold.cycletime),
-                        fold.stateprotos, protos, ks, outs)
-                    drows = closedense!(RT[], fold.groups, ks, fold.cycletime,
-                        outs, emptyrow)
-                    return isempty(drows) ? nothing : DataFrame(drows)
-                end
-                rows =
-                    keyed ?
-                    closecycle!(
-                        rowtype(typeof(fold.cycletime), keytype(fold.groups),
-                            valtype(fold.groups), outs)[], fold.groups,
-                        fold.cycletime, outs) :
-                    [summaryrow(fold.cycletime, fold.states, outs)]
-                return isempty(rows) ? nothing : DataFrame(rows)
-            end
-            return chunkmap(step, p.run(ctx); flush = flush)
+            return rowsframe(rows)
         end
+        flush = function ()
+            fold.cycletime === nothing && return nothing
+            if ks !== nothing
+                RT, emptyrow = densetypes(typeof(fold.cycletime),
+                    fold.stateprotos, protos, ks, outs)
+                drows = closedense!(RT[], fold.groups, ks, fold.cycletime,
+                    outs, emptyrow)
+                return rowsframe(drows)
+            end
+            rows =
+                keyed ?
+                closecycle!(
+                    rowtype(typeof(fold.cycletime), keytype(fold.groups),
+                        valtype(fold.groups), outs)[], fold.groups,
+                    fold.cycletime, outs) :
+                [summaryrow(fold.cycletime, fold.states, outs)]
+            return rowsframe(rows)
+        end
+        return chunkmap(step, p.run(ctx); flush = flush)
     end
 end
 summarizecycles(p::CausalPipeline, summarizers; kwargs...) =
@@ -764,37 +771,31 @@ so far, itself included.
   [`Count`](@ref) numbers the rows of each key.
 """
 function addsummarycolumns(summarizers; key = nothing)
-    keycols = keycolumns(key, "addsummarycolumns")
-    protos, requested, terms =
-        prototypes(tosummarizers(summarizers), keycols, "addsummarycolumns")
-    keynames = Val(Tuple(keycols))
-    outs = Val(requested)
-    keyed = !isempty(keycols)
-    return function (p::CausalPipeline)
-        return CausalPipeline() do ctx::Context
-            fold = SummaryFold(terms, "addsummarycolumns")
-            step = function (c)
-                if !fold.checked   # needs the schema: first chunk only
-                    checkkeycolumns(keycols, c, "addsummarycolumns")
-                    for n in requested   # hidden dependencies are never added
-                        String(n) in names(c) && throw(
-                            ArgumentError(
-                                "addsummarycolumns output column $(repr(n)) collides with an existing column",
-                            ),
-                        )
-                    end
-                    fold.checked = true
+    (; keycols, protos, requested, terms, keynames, outs, keyed) =
+        summaryspec(summarizers, key, "addsummarycolumns")
+    return pipetransform() do p, ctx
+        fold = SummaryFold(terms, "addsummarycolumns")
+        step = function (c)
+            if !fold.checked   # needs the schema: first chunk only
+                checkkeycolumns(keycols, c, "addsummarycolumns")
+                for n in requested   # hidden dependencies are never added
+                    String(n) in names(c) && throw(
+                        ArgumentError(
+                            "addsummarycolumns output column $(repr(n)) collides with an existing column",
+                        ),
+                    )
                 end
-                nt = preparechunk!(fold, protos, keyed, keynames, c)
-                vals =
-                    keyed ?
-                    foldrunninggrouped!(fold.groups, fold.stateprotos,
-                        nt, nrow(c), keynames, outs) :
-                    foldrunning!(fold.states, nt, nrow(c), outs)
-                return hcat(c, DataFrame(vals); copycols = false)
+                fold.checked = true
             end
-            return chunkmap(step, p.run(ctx))
+            nt = preparechunk!(fold, protos, keyed, keynames, c)
+            vals =
+                keyed ?
+                foldrunninggrouped!(fold.groups, fold.stateprotos,
+                    nt, nrow(c), keynames, outs) :
+                foldrunning!(fold.states, nt, nrow(c), outs)
+            return hcat(c, DataFrame(vals); copycols = false)
         end
+        return chunkmap(step, p.run(ctx))
     end
 end
 addsummarycolumns(p::CausalPipeline, summarizers; kwargs...) =

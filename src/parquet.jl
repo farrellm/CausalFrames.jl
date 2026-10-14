@@ -175,12 +175,3 @@ function timesourcename(filenames::Vector{String}, time, rename)
     matches = [n for n in filenames if renamedto(n, rename) == target]
     return length(matches) == 1 ? only(matches) : nothing
 end
-
-# A column's name after `rename`, as renamecolumns! renames it.
-renamedto(n::String, ::Nothing) = n
-renamedto(n::String, f) = String(f(n))
-function renamedto(n::String, m::AbstractDict)
-    haskey(m, n) && return String(m[n])
-    haskey(m, Symbol(n)) && return String(m[Symbol(n)])
-    return n
-end

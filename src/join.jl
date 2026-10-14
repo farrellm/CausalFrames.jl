@@ -40,31 +40,31 @@ function asofjoin(right::CausalPipeline; key = nothing, tolerance = nothing,
     strict::Bool = false, leftprefix = nothing,
     rightprefix = nothing,
     righttime::Union{Nothing,Symbol} = nothing)
-    keycols = keycolumns(key, "asofjoin")
-    righttime === :time && throw(
-        ArgumentError(
-            "asofjoin righttime may not be :time; it would collide with the left time column",
-        ),
-    )
-    righttime !== nothing && righttime in keycols &&
-        throw(
-            ArgumentError(
-                "asofjoin righttime $(repr(righttime)) collides with a key column"),
-        )
-    lp = normprefix(leftprefix)
-    rp = normprefix(rightprefix)
-    return function (left::CausalPipeline)
-        return CausalPipeline() do ctx::Context
-            cfg = JoinConfig(keycols, Val(Tuple(keycols)), tolerance,
-                strict ? (<) : (<=), Backward(), lp, rp, righttime, "asofjoin")
-            js = JoinState(right.run(widenstart(ctx, tolerance,
-                "asofjoin tolerance")))
-            return chunkmap(c -> joinchunk!(js, cfg, c), left.run(ctx))
-        end
-    end
+    return jointransform(right, Backward(), "asofjoin";
+        key, tolerance, strict, leftprefix, rightprefix, righttime)
 end
 asofjoin(left::CausalPipeline, right::CausalPipeline; kwargs...) =
     asofjoin(right; kwargs...)(left)
+
+# The as-of joins' shared construction: `asofjoin` matches backward and
+# `Acausal.futurejoin` forward, the direction supplying the comparison
+# (`joincmp`) and the right input's window (`rightcontext`).
+function jointransform(right::CausalPipeline, direction, op::String; key,
+    tolerance, strict::Bool, leftprefix, rightprefix,
+    righttime::Union{Nothing,Symbol})
+    keycols = keycolumns(key, op)
+    righttime === :time && throw(ArgumentError("$op righttime may not be :time; \
+        it would collide with the left time column"))
+    righttime !== nothing && righttime in keycols && throw(ArgumentError("$op \
+        righttime $(repr(righttime)) collides with a key column"))
+    cfg = JoinConfig(keycols, Val(Tuple(keycols)), tolerance,
+        joincmp(direction, strict), direction, normprefix(leftprefix),
+        normprefix(rightprefix), righttime, op)
+    return pipetransform() do left, ctx
+        js = JoinState(right.run(rightcontext(direction, ctx, tolerance, op)))
+        return chunkmap(c -> joinchunk!(js, cfg, c), left.run(ctx))
+    end
+end
 
 normprefix(::Nothing) = nothing
 normprefix(p::Union{Symbol,AbstractString}) = String(p)
@@ -121,6 +121,12 @@ end
 SlotStore{K,V}() where {K,V} = SlotStore{K,V}(Dict{K,Int}(), V[])
 
 newstore(::Backward, ::Type{K}, ::Type{V}) where {K,V} = SlotStore{K,V}()
+
+# A backward match takes the latest right row before the left one (at it,
+# unless strict), over a right window widened back by the tolerance.
+joincmp(::Backward, strict::Bool) = strict ? (<) : (<=)
+rightcontext(::Backward, ctx::Context, tolerance, op::String) =
+    widenstart(ctx, tolerance, "$op tolerance")
 
 # Slot numbers don't move, so only the keys are rebuilt; every slot is
 # occupied, so the vector converts wholesale.
@@ -305,11 +311,7 @@ end
 function checknames(cfg::JoinConfig, c::DataFrame, rvaluenames)
     seen = Set{Symbol}()
     function check(n)
-        n in seen && throw(
-            ArgumentError(
-                "$(cfg.op) output column $(repr(n)) appears more than once; use `leftprefix`/`rightprefix` to disambiguate",
-            ),
-        )
+        n in seen && throw(duplicateoutput(cfg.op, n))
         push!(seen, n)
         return nothing
     end
@@ -325,6 +327,11 @@ function checknames(cfg::JoinConfig, c::DataFrame, rvaluenames)
     cfg.righttime === nothing || check(cfg.righttime)
     return nothing
 end
+
+# The joins' error for an output column named twice.
+duplicateoutput(op::String, n::Symbol) = ArgumentError("$op output column \
+    $(repr(n)) appears more than once; use `leftprefix`/`rightprefix` to \
+    disambiguate")
 
 function assemble(cfg::JoinConfig, js::JoinState, c::DataFrame)
     rdf = DataFrame()

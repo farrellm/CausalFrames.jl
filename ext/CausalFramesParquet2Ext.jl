@@ -9,8 +9,8 @@ using DataFrames
 using Parquet2
 
 using CausalFrames:
-    ChunkSink, SourceClip, clipchunk!, gatherchunk!, sortgathered,
-    timesourcename
+    ChunkSink, PullCursor, SourceClip, gathersorted!, nextclipped!,
+    timesourcename, vcatowned
 
 CausalFrames.backendloaded(::Val{:parquet2}) = true
 
@@ -59,8 +59,7 @@ end
 
 # One row group from the pending chunks, which are merged, never split.
 function emitgroup!(fw, buffered::Vector{DataFrame})
-    Parquet2.writetable!(fw,
-        length(buffered) == 1 ? only(buffered) : reduce(vcat, buffered))
+    Parquet2.writetable!(fw, vcatowned(buffered))
     empty!(buffered)
     return nothing
 end
@@ -72,49 +71,37 @@ mutable struct RowGroupProducer{T}
     const sort::Bool
     dataset::Any        # Parquet2.Dataset, opened on first pull
     timecol::Any        # file-level name of the time column, or nothing
-    index::Int          # next row group
+    groups::Any         # PullCursor over the picked row groups, as DataFrames
     usestats::Bool      # statistics comparable with this context's times
 end
 
 CausalFrames.parquetproducer(::Val{:parquet2}, clip::SourceClip{T},
     sort::Bool) where {T} =
-    RowGroupProducer{T}(clip, sort, nothing, nothing, 1, true)
+    RowGroupProducer{T}(clip, sort, nothing, nothing, nothing, true)
 
 function (p::RowGroupProducer)()
     clip = p.clip
     clip.done && return nothing
-    p.dataset === nothing && open!(p)
-    p.sort && return sortedread!(p)
-    while !clip.done && p.index <= Parquet2.nrowgroups(p.dataset)
-        rg = p.index
-        p.index += 1
-        skip = rowgroupwindow(p, rg)
-        skip === :after && break
-        skip === :before && continue
-        out = clipchunk!(clip, DataFrame(p.dataset[rg]))
-        out === nothing || return out
-    end
-    clip.done = true
-    return nothing
+    p.groups === nothing && open!(p)
+    p.sort && return gathersorted!(clip, p.groups)
+    return nextclipped!(clip, p.groups)
 end
 
-# The `sort = true` read: in an unordered file any row group may hold window
-# rows, so every group overlapping the window by its statistics is read, and
-# the in-window rows are sorted once into a single chunk.
-function sortedread!(p::RowGroupProducer{T}) where {T}
-    p.clip.done = true
-    kept = DataFrame[]
-    for rg in 1:Parquet2.nrowgroups(p.dataset)
-        rowgroupwindow(p, rg) === :overlaps || continue
-        gatherchunk!(kept, p.clip, DataFrame(p.dataset[rg]))
-    end
-    return sortgathered(kept, T)
-end
-
+# Open the file and pick its row groups by their statistics. In a time-ordered
+# file the groups before the window are skipped and the first one after it ends
+# the read. A `sort = true` read can't rely on the order, so it reads every
+# group overlapping the window.
 function open!(p::RowGroupProducer)
     p.dataset = Parquet2.Dataset(p.clip.path)
     p.timecol = timesourcename(String[String(n) for n in Base.names(p.dataset)],
         p.clip.time, p.clip.rename)
+    placed = Iterators.map(rg -> (rg, rowgroupwindow(p, rg)),
+        1:Parquet2.nrowgroups(p.dataset))
+    picked =
+        p.sort ? Iterators.filter(g -> g[2] === :overlaps, placed) :
+        Iterators.filter(g -> g[2] !== :before,
+            Iterators.takewhile(g -> g[2] !== :after, placed))
+    p.groups = PullCursor(Iterators.map(g -> DataFrame(p.dataset[g[1]]), picked))
     return nothing
 end
 

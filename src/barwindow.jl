@@ -452,7 +452,7 @@ end
     ring = st.ring
     ringpush!(ring, row)
     barupdate!(st.running, row)
-    full = ringlength(ring) > st.n
+    full = length(ring) > st.n
     full && queuepop!(st.queue, ring, st.n)
     queuepush!(st.queue, row)
     full && bardowndate!(st.running, ringback(ring, st.n + 1))
@@ -460,7 +460,7 @@ end
 end
 
 function value(st::BarWindowState{R,R0,O,V}) where {R,R0,O,V}
-    ringlength(st.ring) < st.n && return missingrow(V, Val(O))
+    length(st.ring) < st.n && return missingrow(V, Val(O))
     states = mergestates(st.perm,
         (st.running, queuestates(st.queue), (), st.derived))
     return convert(V, barvalues(states, Val(O)))
@@ -471,7 +471,7 @@ fresh(st::BarWindowState{R,R0,O,V}) where {R,R0,O,V} =
         queuefresh(st.queue), st.derived, st.perm, st.protos, st.terms)
 
 function fresh!(st::BarWindowState)
-    emptyring!(st.ring)
+    empty!(st.ring)
     st.running = barfresh!(st.running)
     queuefresh!(st.queue)
     return st
@@ -486,7 +486,7 @@ function widenstate(st::BarWindowState{R,R0,O}, intypes::NamedTuple) where {R,R0
 end
 
 function replaybar!(w::BarWindowState{R}, ring::RowRing, n::Int) where {R}
-    for j in min(ringlength(ring), n):-1:1
+    for j in min(length(ring), n):-1:1
         admitbar!(w, convert(R, ringback(ring, j)))
     end
     return w

@@ -88,10 +88,10 @@ column takes the threaded path:
 
 | site | operator |
 |---|---|
-| `clipchunk!` (`src/operators.jl`) | `readcsv`, `readparquet`, `readjls` |
-| `filterchunk` (`src/operators.jl`) | `filterrows` (Bool mask → `_findall` → threaded) |
-| `takerows!` (`src/operators.jl`) | `head` |
-| `settimechunk!` (`src/operators.jl`) | `settime`, `Acausal.settime` |
+| `clipchunk!` (`src/sourceclip.jl`) | `readcsv`, `readparquet`, `readjls` |
+| `filterchunk` (`src/rowwise.jl`) | `filterrows` (Bool mask → `_findall` → threaded) |
+| `takerows!` (`src/retime.jl`) | `head` |
+| `settimechunk!` (`src/retime.jl`) | `settime`, `Acausal.settime` |
 | `clipstart!` (`src/fill.jl`) | `forwardfill` with `tolerance` |
 | `clipframechunk` (`src/table.jl`) | `readtable` over a DataFrame (every run) or a partial frame chunk |
 | `readtable(::AbstractDataFrame)` sort (`src/table.jl`) | once per pipeline construction |

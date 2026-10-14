@@ -2,7 +2,7 @@
 # fitting, prediction and fitresult persistence go through five hooks, with
 # fallbacks here and MLJModelInterface methods in
 # ext/CausalFramesMLJModelInterfaceExt.jl, so a user who never loads MLJ pays
-# nothing. `FitModel` and `FittedModel` are in summarizers.jl; the operators
+# nothing. `FitModel` and `FittedModel` are in summarizers/fitmodel.jl; the operators
 # over fitted models are here.
 
 const MLJHINT = "model fitting needs MLJModelInterface: `using MLJ`, or any \
@@ -105,15 +105,14 @@ function applymodels(models::CausalPipeline; column::Symbol = :model,
     # selector doesn't fail on an absent column, so a missing model column is
     # reported by predictchunk! under this operator's name.
     right = models |> selectcolumns(n -> Symbol(n) === column || Symbol(n) in keycols)
-    return function (p::CausalPipeline)
-        return CausalPipeline() do ctx::Context
-            cfg = JoinConfig(keycols, Val(Tuple(keycols)), tolerance,
-                strict ? (<) : (<=), Backward(), nothing, nothing, nothing,
-                "applymodels")
-            js = JoinState(right.run(widenstart(ctx, tolerance, "applymodels tolerance")))
-            return chunkmap(c -> predictchunk!(js, cfg, column, name, operation, c),
-                p.run(ctx))
-        end
+    cfg = JoinConfig(keycols, Val(Tuple(keycols)), tolerance,
+        joincmp(Backward(), strict), Backward(), nothing, nothing, nothing,
+        "applymodels")
+    return pipetransform() do p, ctx
+        js = JoinState(right.run(rightcontext(Backward(), ctx, tolerance,
+            "applymodels")))
+        return chunkmap(c -> predictchunk!(js, cfg, column, name, operation, c),
+            p.run(ctx))
     end
 end
 applymodels(p::CausalPipeline, models::CausalPipeline; kwargs...) =
@@ -270,10 +269,8 @@ function modelreports(; column::Symbol = :model, name::Symbol = :report)
         throw(ArgumentError("modelreports column may not be :time"))
     name === :time &&
         throw(ArgumentError("modelreports output column may not be named :time"))
-    return function (p::CausalPipeline)
-        return CausalPipeline() do ctx::Context
-            return chunkmap(c -> reportchunk!(c, column, name), p.run(ctx))
-        end
+    return pipetransform() do p, ctx
+        return chunkmap(c -> reportchunk!(c, column, name), p.run(ctx))
     end
 end
 modelreports(p::CausalPipeline; kwargs...) = modelreports(; kwargs...)(p)

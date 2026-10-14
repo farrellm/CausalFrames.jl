@@ -307,12 +307,14 @@ so it is the transform `sortcycles` (see "Sorting within a cycle").
 ## Resolving the time column
 
 The three sources that resolve their own times — `readcsv`, `readparquet` and
-`readtable` over a table or `DataFrame` — share one set of rules, whether the
-work is done by `resolvetime!` (file chunks) or `tabletimes` (tables):
+`readtable` over a table or `DataFrame` — share one set of rules and one
+implementation: `timecolumn` finds the time column and `checktimes` rejects
+textual times, under both `resolvetime!` (file chunks, resolved in place) and
+`sourcetimes` (tables, whose times are copied out):
 
 - `time` is `nothing`, a `Symbol` or a function, checked when the operator is
-  called (`checksourcetimespec`). The chunk path acts only on a `Symbol` or a
-  function, so anything else would otherwise quietly read the `:time` column.
+  called (`checksourcetimespec`), so the per-chunk resolution (`timecolumn`,
+  typed on `Nothing` or `Symbol`, or a function) never sees anything else.
 - `time = :name` when the source also has a `:time` column is an error, never a
   silent overwrite: which column the user meant is ambiguous.
 - A textual time cannot be ordered against the window and is an error, whether
@@ -395,7 +397,7 @@ and differ in *when* the per-table work runs and in what is copied.
 
 - **Any Tables.jl table.** Each run walks `Tables.partitions(table)` through a
   `CSVProducer`-shaped `TableProducer`, one chunk per partition. Per partition,
-  `tabletimes` resolves the time — `time` works as for `readcsv`: `:time`, a
+  `sourcetimes` resolves the time — `time` works as for `readcsv`: `:time`, a
   column renamed where it stands, or a per-row function behind `maptime` — and
   `tablerows`, the function barrier typed on the time vector and the context's
   time type, checks the order (within the partition and against the previous
@@ -768,7 +770,9 @@ the operator in every error message), `JoinState`, `pullright!`,
 direction singleton carried by the config: `Backward` picks the `SlotStore`
 and `joinsegment!`, while the submodule's `Forward` extends `newstore`,
 `widenstore` and `segment!` with the `KeyBuffer` store and `futuresegment!`,
-so everything forward-looking stays in `Acausal`.
+and `joincmp` and `rightcontext` with its comparison and forward-widened right
+window, so everything forward-looking stays in `Acausal`. One constructor,
+`jointransform`, builds both `asofjoin` and `futurejoin` from those methods.
 
 ## Representing a match
 
@@ -863,7 +867,7 @@ time outside `[start, stop]`, the upstream pipeline is run over an
 
 - `lag(offset)` (`t -> t + offset`) runs upstream over `[start - offset,
   stop - offset)` and adds `offset`. Output at `t` depends only on input at
-  `t - offset <= t`, so it is **causal**, lives in `src/operators.jl`, and is
+  `t - offset <= t`, so it is **causal**, lives in `src/retime.jl`, and is
   exported. `lagcontext` mirrors the shared `widenstart`.
 - `lead(offset)` (`t -> t - offset`) runs upstream over `[start + offset,
   stop + offset)` and subtracts `offset`. Output at `t` depends on input at
@@ -876,7 +880,7 @@ and `Dates` types do), reject a negative `offset` when the pipeline runs (the
 guard `widenstart`/`futurecontext` use, since a negative shift would flip the
 causality contract), and treat `offset == 0` as the identity. The shared
 `shiftchunk!`/`shifttime` (broadcast add behind a function barrier) lives in
-`src/operators.jl` and is imported into the submodule; `lead` shifts by
+`src/retime.jl` and is imported into the submodule; `lead` shifts by
 `-offset`.
 
 ## Warm-up
@@ -956,7 +960,7 @@ no `skipmissing`, since dropping rows is `filterrows`'s job.
 
 It ships as a causal/acausal pair, the same split as `lag`/`lead`:
 
-- `settime` (`src/operators.jl`, exported) requires every row's new time to be
+- `settime` (`src/retime.jl`, exported) requires every row's new time to be
   at least its old one, so a row may only move later. Output at `t` then depends
   only on input at some `t' <= t`: **causal**.
 - `CausalFrames.Acausal.settime` drops that requirement, so rows may move
@@ -1301,7 +1305,7 @@ motivating case (see "Model fitting (MLJ)").
 
 The mechanism is `intervalize`'s driver over `addrollingcolumns`' bookkeeping.
 A `chunkmap` over the data stream pulls ticks on demand through
-`intervalize.jl`'s `IntervalCursor`. Before each chunk it fills a concrete
+`chunks.jl`'s `IntervalCursor`. Before each chunk it fills a concrete
 `Vector{T}` of pending ticks up to just past the chunk's last time (the
 cursor's `pullpast!`, which `intervalize` fills its boundaries with too), so the
 per-row kernel never touches the clock. For each row at time `s`, every pending
@@ -2421,7 +2425,7 @@ are the same number, so folding both would be duplicated per-row work; but
 silently renaming the caller's column would be surprising, so
 `DotProduct(:y, :x)` still produces `:y_x_dotproduct`. The canonical order is
 the `isless`-sorted one, and `canonicaldot`/`canonicaldotname` in
-`src/summarizers.jl` are the shared implementation.
+`src/summarizers/sums.jl` are the shared implementation.
 
 That splits into two cases, and a new symmetric summarizer should follow
 whichever fits:
@@ -2748,16 +2752,22 @@ the second.
 | `src/CausalFrames.jl` | module, includes, exports |
 | `src/context.jl` | `Context{T}`, and `widenstart`, the input context of every operator that reads before `start` |
 | `src/frame.jl` | `CausalFrame{T}`, invariants, Tables.jl interface |
-| `src/chunks.jl` | internal chunk-iterator machinery (`ChunkSource`, `chunkmap`, `PullCursor`, `teesides`) |
+| `src/chunks.jl` | internal chunk-iterator machinery (`ChunkSource`, `chunkmap`, `PullCursor`, `teesides`) and the clock cursor (`IntervalCursor`, `pullpast!`) that `intervalize` and `summarizewindows` pull boundaries with |
 | `src/pipeline.jl` | `CausalPipeline{F}`, `load`, `stream`, `scan` |
-| `src/operators.jl` | sources (including the n-ary `concatenate`), the CSV sink, row-wise transforms, the causal time shift (`lag`) with the shared `shiftchunk!`, the context-widening `warmup` with the shared `dropleadin!`, the column projections and `reordercolumns` over one shared selector vocabulary, the truncating `head` with its `HeadProducer`, and the causal retiming (`settime`) with the shared `settimechunk!` |
+| `src/sources.jl` | the stateless sources: `emptyframe`, the n-ary `concatenate`, `clock` |
+| `src/sourceclip.jl` | `SourceClip` and `clipchunk!`/`gatherchunk!`, the clip every file source shares (rename, `:time` resolution, order checks, window clip) |
+| `src/sinks.jl` | `ChunkSink`, the background writer every file sink shares, and `sinktransform` |
+| `src/csv.jl` | the CSV pair (`readcsv`, `writecsv`) |
+| `src/rowwise.jl` | the row-wise transforms (`filterrows`, `addcolumns`) |
+| `src/retime.jl` | the causal time shift (`lag`) with the shared `shiftchunk!`, the context-widening `warmup` with the shared `dropleadin!`, the truncating `head` with its `HeadProducer`, and the causal retiming (`settime`) with the shared `settimechunk!` |
+| `src/columns.jl` | the column projections and `reordercolumns` over one shared selector vocabulary |
 | `src/merge.jl` | the n-ary time-interleaving source (`Base.merge`) and its per-pipeline cursors |
 | `src/parquet.jl` | the parquet operators, their docstrings, and backend selection |
 | `ext/CausalFramesDuckDBExt.jl` | the DuckDB backend: the preferred reader, the fallback writer |
 | `ext/CausalFramesParquet2Ext.jl` | the Parquet2 backend: the preferred writer, the fallback reader |
 | `src/jls.jl` | the `Serialization`-backed persistence pair (`writejls`, `readjls`) |
 | `src/table.jl` | the in-memory source (`readtable`): the generic Tables.jl path, the eagerly resolved DataFrame path, and the frame path |
-| `src/summarizers.jl` | `Summarizer`/`SummarizerState` interface and the concrete summarizers |
+| `src/summarizers.jl` | the include list for `src/summarizers/`: the `Summarizer`/`SummarizerState` interface (`interface.jl`), the compensated float arithmetic (`compensated.jl`), one file per summarizer family (`sums.jl`, `comoment.jl`, `agesum.jl`, `moments.jl`, `regression.jl`, `orderstats.jl`, `windowvalues.jl`, `extremes.jl`, `fitmodel.jl`), the derived states' no-op folds (`derived.jl`) and every built-in's `inputcolumns` (`inputcolumns.jl`) |
 | `src/summarize.jl` | folding kernels and the summarization transforms |
 | `src/join.jl` | the as-of join transform (`asofjoin`) and the join engine it shares with `applymodels` and `futurejoin` |
 | `src/lookupjoin.jl` | the key-only join against a timeless table (`lookupjoin`) |

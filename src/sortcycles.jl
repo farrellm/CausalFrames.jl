@@ -47,12 +47,10 @@ function sortcycles(by; rev::Bool = false)
     spec = sortspec(by)
     # A concrete ordering, not a runtime Bool, so the sort specializes.
     order = rev ? Base.Order.Reverse : Base.Order.Forward
-    return function (p::CausalPipeline)
-        return CausalPipeline() do ctx::Context
-            st = CycleSortState()
-            return chunkmap(c -> sortcyclechunk!(st, spec, order, c), p.run(ctx);
-                flush = () -> flushcycle!(st, spec, order))
-        end
+    return pipetransform() do p, ctx
+        st = CycleSortState()
+        return chunkmap(c -> sortcyclechunk!(st, spec, order, c), p.run(ctx);
+            flush = () -> sortcycleflush!(st, spec, order))
     end
 end
 sortcycles(p::CausalPipeline, by; kwargs...) = sortcycles(by; kwargs...)(p)
@@ -107,7 +105,7 @@ function sortcyclechunk!(st::CycleSortState, spec, order, c::DataFrame)
         hi = searchsortedlast(times, opentime)
         cycle =
             hi == 0 ?
-            (length(pending) == 1 ? only(pending) : reduce(vcat, pending)) :
+            vcatowned(pending) :
             reduce(vcat, [pending; view(c, 1:hi, :)])
         empty!(pending)
         closed = sortedview(cycle, 1:nrow(cycle), spec, order)
@@ -124,9 +122,9 @@ materialize(a::SubDataFrame, b::SubDataFrame) = vcat(a, b)
 
 # Called once upstream is exhausted: the open cycle is complete. One already in
 # order goes out without a further copy.
-function flushcycle!(st::CycleSortState, spec, order)
+function sortcycleflush!(st::CycleSortState, spec, order)
     isempty(st.pending) && return nothing
-    cycle = length(st.pending) == 1 ? only(st.pending) : reduce(vcat, st.pending)
+    cycle = vcatowned(st.pending)
     empty!(st.pending)
     perm = sortedperm(cycle, 1:nrow(cycle), spec, order)
     return isempty(perm) ? cycle : cycle[perm, :]

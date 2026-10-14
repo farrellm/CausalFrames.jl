@@ -78,12 +78,8 @@ function readtable(df::AbstractDataFrame; time = nothing, checkorder::Bool = tru
     # A private index over the caller's vectors, so the rename and :time
     # assignment below never reach `df`. O(ncols).
     wrapped = DataFrame(df; copycols = false)
-    times, source = tabletimes(wrapped, propertynames(wrapped), time)
-    if source === nothing
-        wrapped[!, :time] = times
-    elseif source !== :time
-        rename!(wrapped, source => :time)
-    end
+    times, source = sourcetimes(wrapped, time, "table", "")
+    applytime!(wrapped, times, source)
     # Unless dropping missing times or sorting copies the rows, the chunk
     # aliases the caller's vectors, so every run must slice rather than share.
     owned = false
@@ -130,21 +126,15 @@ mutable struct TableProducer{T,X}
             stop, nothing, nothing, false)
 end
 
-function (p::TableProducer{T})() where {T}
-    p.done && return nothing
+function (p::TableProducer)()
     p.parts === nothing && (p.parts = PullCursor(tablepartitions(p.table, p.sort)))
-    while true
+    while !p.done
         part = pull!(p.parts)
-        if part === nothing
-            p.done = true
-            return nothing
-        end
-        chunk, sawstop, p.prevtime = tablechunk(part, p.time, p.checkorder,
-            p.sort, p.closed, p.skipmissing, p.prevtime, p.start, p.stop)
-        sawstop && (p.done = true)
+        part === nothing && (p.done = true; break)
+        chunk = tablechunk!(p, part)
         chunk === nothing || return chunk
-        p.done && return nothing
     end
+    return nothing
 end
 
 # The partitions are the chunks, except that a sort concatenates them first.
@@ -156,48 +146,24 @@ function tablepartitions(table, sort::Bool)
     return (reduce(vcat, [DataFrame(x; copycols = false) for x in collected]),)
 end
 
-# One partition's in-window rows as a chunk (nothing if none), whether a time
-# past the window was seen (ending the source), and the last time, for the next
-# partition's order check.
-function tablechunk(part, time, checkorder::Bool, sort::Bool, closed::Bool,
-    skipmissing::Bool, prevtime, start::T, stop::T) where {T}
+# One partition's in-window rows as a chunk, or nothing if none. Carries the
+# last time to the next partition's order check, and ends the source on a time
+# past the window.
+function tablechunk!(p::TableProducer{T}, part) where {T}
     cols = Tables.columns(part)
     colnames = Tables.columnnames(cols)
-    times, source = tabletimes(cols, colnames, time)
-    present = presentrows(times, skipmissing, "table", "")
-    if present === nothing
-        rows, sawstop, prevtime =
-            tablerows(times, checkorder, sort, closed, prevtime, start, stop)
-    else
-        # the present rows' indices into the view, mapped back to the partition
-        kept, sawstop, prevtime = tablerows(view(times, present), checkorder,
-            sort, closed, prevtime, start, stop)
-        rows = present[kept]
-    end
-    isempty(rows) && return (nothing, sawstop, prevtime)
-    chunk = assemblechunk(cols, colnames, source, copytimes(T, times, rows), rows)
-    return (chunk, sawstop, prevtime)
+    times, source = sourcetimes(cols, p.time, "table", "")
+    present = presentrows(times, p.skipmissing, "table", "")
+    # with missing times dropped, the kept indices are into the view of the
+    # present rows, mapped back to the partition below
+    kept, sawstop, p.prevtime =
+        tablerows(present === nothing ? times : view(times, present),
+            p.checkorder, p.sort, p.closed, p.prevtime, p.start, p.stop)
+    sawstop && (p.done = true)
+    rows = present === nothing ? kept : present[kept]
+    isempty(rows) && return nothing
+    return assemblechunk(cols, colnames, source, copytimes(T, times, rows), rows)
 end
-
-# The raw time values, and the column they came from (`nothing` for a function,
-# whose values become a `:time` column). `cols` is a Tables.jl column table.
-tabletimes(cols, colnames, time::Function) =
-    (checktabletimes(maptime(time, Tables.columntable(cols)), true), nothing)
-function tabletimes(cols, colnames, time::Union{Nothing,Symbol})
-    name = something(time, :time)
-    name in colnames || throw(
-        ArgumentError(
-            time === nothing ? "table has no time column; choose one with `time`" :
-            "table has no column $(repr(name))"),
-    )
-    name === :time || !(:time in colnames) ||
-        throw(ArgumentError(timeclash("table", "", name)))
-    return (checktabletimes(Tables.getcolumn(cols, name), false), name)
-end
-
-checktabletimes(v::AbstractVector, fromfunction::Bool) =
-    istextual(v) ? throw(ArgumentError(textualtime("table", "", fromfunction))) :
-    v
 
 # Function barrier over the time vector: the order check (within the partition
 # and against the previous one), the optional stable sort, and the window
