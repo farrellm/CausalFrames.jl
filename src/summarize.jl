@@ -517,8 +517,8 @@ end
 #
 # Called once per chunk with concretely typed arguments, so each specializes on
 # the groups, state tuple and column table. Each kernel has a method per kind
-# of groups (`newgroups`): a keyless state tuple, a `GroupTable` or
-# `DenseGroups`, with the transform's grouping beside them.
+# of groups its transforms build (`newgroups`): a keyless state tuple, a
+# `GroupTable` or `DenseGroups`, with the transform's grouping beside them.
 
 function foldall!(states::Tuple, nt::NamedTuple)
     for row in Tables.rows(nt)
@@ -543,7 +543,7 @@ end
 # cycle carries across chunks and the last is closed by `flushcycle`. Returns
 # the closed cycles' rows, the groups and the open cycle's time; keyless states
 # are zeroed by `freshall!`, which may replace them.
-function foldcycles!(states::S, ::S, nt::NamedTuple, cycletime, ::Val{()},
+function foldcycles!(states::S, ::Tuple, nt::NamedTuple, cycletime, ::Val{()},
     protos::Tuple, outs::Val) where {S<:Tuple}
     rows = rowtype(eltype(nt.time), S, outs)[]
     for row in Tables.rows(nt)
@@ -593,7 +593,7 @@ function foldcycles!(dg::DenseGroups, stateprotos::Tuple, nt::NamedTuple,
 end
 
 # Close the open cycle, at time `t`, once the stream ends.
-flushcycle(states::S, ::S, t, ::Val{()}, protos::Tuple,
+flushcycle(states::S, ::Tuple, t, ::Val{()}, protos::Tuple,
     outs::Val) where {S<:Tuple} = [summaryrow(t, states, outs)]
 flushcycle(gt::GroupTable{K,S}, ::S, t, ::Val, protos::Tuple,
     outs::Val) where {K,S} = closecycle!(rowtype(typeof(t), K, S, outs)[], gt, t, outs)
@@ -620,7 +620,7 @@ function closecycle!(rows, gt::GroupTable, t, outs::Val)
 end
 
 # `addsummarycolumns`' fold: each row's group's values once it is folded.
-function foldrunning!(states::S, ::S, nt::NamedTuple, n::Int, ::Val{()},
+function foldrunning!(states::S, ::Tuple, nt::NamedTuple, n::Int, ::Val{()},
     outs::Val) where {S<:Tuple}
     vals = Vector{valuetype(S, outs)}(undef, n)
     i = 0

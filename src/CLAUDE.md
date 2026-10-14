@@ -302,7 +302,9 @@ design rationale and performance constraints behind each module.
   (`summaryspec`; `newgroups`/`widengroups`): the state tuple itself when
   keyless, a `GroupTable` when keyed, a `DenseGroups` over a declared
   `KeySet`. Each fold kernel (`foldgroups!`, `foldcycles!`, `foldrunning!`,
-  `foldintervals!`, and the flushes) has a method per kind of groups, so the
+  `foldintervals!`, and the flushes) has a method per kind of groups its
+  transforms build (no dense `foldgroups!`/`foldrunning!`, no keyless
+  `foldintervals!`, since `nokeyset` makes that grid dense), so the
   transforms dispatch rather than branch on the key mode, and `preparechunk!`
   checks the key columns against the first chunk for all of them.
   The per-key states live in a `GroupTable{K,S}` (both parameters concrete,
