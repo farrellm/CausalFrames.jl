@@ -40,23 +40,17 @@ Empty values widen the output types (`Mean` gives `Union{Missing, Float64}`).
 """
 function intervalize(clk::CausalPipeline, summarizers; key = nothing,
     keyset = nothing, closelast::Bool = false)
-    (; keycols, protos, terms, ks, keynames, outs) =
+    (; keycols, protos, terms, grouping, outs) =
         summaryspec(summarizers, key, "intervalize"; keyset, grid = true)
     return pipetransform() do p, ctx
         T = timetype(ctx)
         st = IntervalizeState{T}(IntervalCursor{T}(clk.run(ctx)), T[], 2,
-            SummaryFold(terms, "intervalize"), false)
-        step =
-            ks === nothing ?
-            (c -> intervalchunkgrouped!(st, protos, keycols, keynames, outs,
-                closelast, c)) :
-            (c -> intervalchunkdense!(st, protos, ks, keycols, keynames, outs,
-                closelast, c))
-        flush =
-            ks === nothing ?
-            (() -> intervalflushgrouped!(st, ctx.stop, closelast, outs)) :
-            (() -> intervalflushdense!(st, protos, ks, ctx.stop, closelast, outs))
-        return chunkmap(step, p.run(ctx); flush = flush)
+            SummaryFold(keycols, terms, "intervalize"))
+        return chunkmap(
+            c -> intervalchunk!(st, protos, grouping, outs, closelast, c),
+            p.run(ctx);
+            flush = () -> intervalflush!(st, protos, grouping, ctx.stop,
+                closelast, outs))
     end
 end
 intervalize(p::CausalPipeline, clk::CausalPipeline, summarizers; kwargs...) =
@@ -71,7 +65,16 @@ mutable struct IntervalizeState{T}
     bounds::Vector{T}
     bi::Int          # index of the current interval's end in `bounds`
     fold::SummaryFold
-    checked::Bool    # key columns validated against the input schema
+end
+
+function intervalchunk!(st::IntervalizeState, protos::Tuple, grouping,
+    outs::Val, closelast::Bool, c::DataFrame)
+    nt = preparechunk!(st.fold, protos, grouping, c)
+    pullpast!(st.bounds, st.cur, last(nt.time))
+    rows, st.bi = foldintervals!(st.fold.groups, st.fold.stateprotos, nt,
+        st.bounds, st.bi, grouping, closelast, protos, outs)
+    trimbounds!(st)
+    return rowsframe(rows)
 end
 
 # Drop boundaries before the current interval's begin, keeping the buffer
@@ -83,33 +86,41 @@ function trimbounds!(st::IntervalizeState)
     return nothing
 end
 
+function intervalflush!(st::IntervalizeState{T}, protos::Tuple, grouping,
+    stop::T, closelast::Bool, outs::Val) where {T}
+    pullpast!(st.bounds, st.cur, nothing)
+    isempty(st.bounds) && return nothing           # empty clock
+    if st.fold.groups === nothing
+        # No data ever arrived, so no states exist: a dense grid is all empty
+        # values, typed from the summarizers alone, and sparse output is empty.
+        grouping isa KeySet || return nothing
+        return emptygrid(gridtimes(st.bounds, stop, closelast), grouping.keys,
+            emptyvalues(protos, outs))
+    end
+    return rowsframe(
+        flushintervals!(st.fold.groups, st.fold.stateprotos,
+            st.bounds, st.bi, stop, grouping, closelast, protos, outs),
+    )
+end
+
 # The no-data grid's times: the end of every complete interval, then `stop`
 # under closelast.
 gridtimes(bounds::Vector, stop, closelast::Bool) =
     closelast ? [bounds[2:end]; stop] : bounds[2:end]
 
-# --- keyed (sparse) path ---------------------------------------------------
-
-function intervalchunkgrouped!(st::IntervalizeState, protos::Tuple,
-    keycols::Vector{Symbol}, keynames::Val, outs::Val,
-    closelast::Bool, c::DataFrame)
-    if !st.checked
-        checkkeycolumns(keycols, c, "intervalize")
-        st.checked = true
-    end
-    nt = preparechunk!(st.fold, protos, true, keynames, c)
-    pullpast!(st.bounds, st.cur, last(nt.time))
-    rows, st.bi = foldintervalsgrouped!(st.fold.groups, st.fold.stateprotos, nt,
-        st.bounds, st.bi, keynames, closelast, outs)
-    trimbounds!(st)
-    return rowsframe(rows)
-end
-
-# The keyed analogue: closing an interval emits a row per present key, sorted,
-# and empties the groups (closecycle!), so an empty interval emits nothing.
-function foldintervalsgrouped!(groups::GroupTable{K,S}, stateprotos::S,
-    nt::NamedTuple, bounds::Vector{T}, bi::Int, keynames::Val{KN},
-    closelast::Bool, outs::Val) where {K,S,T,KN}
+# --- kernels ---------------------------------------------------------------
+#
+# Close every interval a row crosses, then fold the row into the current
+# interval. `bi > length(bounds)` is the trailing region after the last
+# boundary, whose rows are folded only under closelast; rows before the first
+# boundary, or of an empty clock, are dropped. Returns the closed rows and
+# `bi`. Keyed, closing an interval emits a row per present key, sorted, and
+# empties the groups (`closecycle!`), so an empty interval emits nothing;
+# over declared keys (keyless included), it closes every slot (`closedense!`),
+# so an empty interval still emits a row per key.
+function foldintervals!(gt::GroupTable{K,S}, stateprotos::S, nt::NamedTuple,
+    bounds::Vector{T}, bi::Int, keynames::Val, closelast::Bool,
+    protos::Tuple, outs::Val) where {K,S,T}
     rows = rowtype(T, K, S, outs)[]
     nb = length(bounds)
     nb == 0 && return rows, bi
@@ -117,68 +128,21 @@ function foldintervalsgrouped!(groups::GroupTable{K,S}, stateprotos::S,
         t = row.time
         t < @inbounds(bounds[1]) && continue
         while bi <= nb && t >= @inbounds(bounds[bi])
-            closecycle!(rows, groups, @inbounds(bounds[bi]), outs)
+            closecycle!(rows, gt, @inbounds(bounds[bi]), outs)
             bi += 1
         end
         (bi > nb && !closelast) && continue
-        states = groupstates!(groups, keyvalues(row, keynames), stateprotos)
-        updateall!(states, row)
+        updateall!(groupstates!(gt, keyvalues(row, keynames), stateprotos), row)
     end
     return rows, bi
 end
-
-function intervalflushgrouped!(st::IntervalizeState{T}, stop::T, closelast::Bool,
+function foldintervals!(dg::DenseGroups, stateprotos::Tuple, nt::NamedTuple,
+    bounds::Vector{T}, bi::Int, ks::KeySet, closelast::Bool, protos::Tuple,
     outs::Val) where {T}
-    pullpast!(st.bounds, st.cur, nothing)
-    isempty(st.bounds) && return nothing
-    st.fold.groups === nothing && return nothing   # no data ever: emit nothing
-    RT = rowtype(T, keytype(st.fold.groups), valtype(st.fold.groups), outs)
-    rows = flushintervalsgrouped!(st.fold.groups, st.bounds, st.bi, RT, stop,
-        closelast, outs)
-    return rowsframe(rows)
-end
-
-# The current interval closes at its end, emitting its present keys; if data
-# reached the trailing region instead, closelast closes it at stop. Later
-# intervals are empty and emit nothing.
-function flushintervalsgrouped!(groups::GroupTable{K,S}, bounds::Vector{T},
-    bi::Int, ::Type{RT}, stop, closelast::Bool, outs::Val) where {K,S,T,RT}
+    RT, emptyrow = densetypes(T, stateprotos, protos, ks, outs)
     rows = RT[]
-    if bi <= length(bounds)
-        closecycle!(rows, groups, @inbounds(bounds[bi]), outs)
-    elseif closelast
-        closecycle!(rows, groups, stop, outs)
-    end
-    return rows
-end
-
-# --- declared-key (dense) path, keyless included --------------------------
-
-function intervalchunkdense!(st::IntervalizeState{T}, protos::Tuple, ks::KeySet,
-    keycols::Vector{Symbol}, keynames::Val, outs::Val, closelast::Bool,
-    c::DataFrame) where {T}
-    if !st.checked
-        checkkeycolumns(keycols, c, "intervalize")
-        st.checked = true
-    end
-    nt = preparechunk!(st.fold, protos, true, keynames, c; keyset = ks)
-    pullpast!(st.bounds, st.cur, last(nt.time))
-    RT, emptyrow = densetypes(T, st.fold.stateprotos, protos, ks, outs)
-    rows = RT[]
-    st.bi = foldintervalsdense!(rows, st.fold.groups, ks, nt, st.bounds, st.bi,
-        keynames, closelast, outs, emptyrow)
-    trimbounds!(st)
-    return rowsframe(rows)
-end
-
-# The grid fold over declared-key slots: every crossed boundary closes all of
-# them (closedense!), so an empty interval still emits a row per key. Rows that
-# won't be emitted are skipped before their key is looked up. Returns `bi`.
-function foldintervalsdense!(rows::Vector{RT}, dg::DenseGroups, ks::KeySet,
-    nt::NamedTuple, bounds::Vector{T}, bi::Int, keynames::Val,
-    closelast::Bool, outs::Val, emptyrow) where {RT,T}
     nb = length(bounds)
-    nb == 0 && return bi
+    nb == 0 && return rows, bi
     for row in Tables.rows(nt)
         t = row.time
         t < @inbounds(bounds[1]) && continue
@@ -187,33 +151,33 @@ function foldintervalsdense!(rows::Vector{RT}, dg::DenseGroups, ks::KeySet,
             bi += 1
         end
         (bi > nb && !closelast) && continue
-        densefold!(dg, ks, row, keynames)
+        densefold!(dg, ks, row)
     end
-    return bi
+    return rows, bi
 end
 
-function intervalflushdense!(st::IntervalizeState{T}, protos::Tuple,
-    ks::KeySet, stop::T, closelast::Bool, outs::Val) where {T}
-    pullpast!(st.bounds, st.cur, nothing)
-    isempty(st.bounds) && return nothing
-    st.fold.stateprotos === nothing &&
-        return emptygrid(gridtimes(st.bounds, stop, closelast), ks.keys,
-            emptyvalues(protos, outs))
-    RT, emptyrow = densetypes(T, st.fold.stateprotos, protos, ks, outs)
-    rows = flushintervalsdense!(RT[], st.fold.groups, ks, st.bounds, st.bi,
-        stop, closelast, outs, emptyrow)
-    return rowsframe(rows)
+# Drain at the end of the stream. Keyed, the current interval closes at its
+# end, emitting its present keys, or, if data reached the trailing region
+# instead, closelast closes it at stop; later intervals are empty and emit
+# nothing. Dense, the current interval and every later complete one (empty)
+# close, then the trailing partial at stop under closelast.
+function flushintervals!(gt::GroupTable{K,S}, ::S, bounds::Vector{T}, bi::Int,
+    stop::T, ::Val, closelast::Bool, protos::Tuple, outs::Val) where {K,S,T}
+    rows = rowtype(T, K, S, outs)[]
+    if bi <= length(bounds)
+        closecycle!(rows, gt, @inbounds(bounds[bi]), outs)
+    elseif closelast
+        closecycle!(rows, gt, stop, outs)
+    end
+    return rows
 end
-
-# Drain the remaining grid: the current interval, every later complete one
-# (empty), then the trailing partial at stop when closelast.
-function flushintervalsdense!(rows::Vector{RT}, dg::DenseGroups, ks::KeySet,
-    bounds::Vector{T}, bi::Int, stop::T, closelast::Bool, outs::Val,
-    emptyrow) where {RT,T}
-    nb = length(bounds)
-    while bi <= nb
-        closedense!(rows, dg, ks, @inbounds(bounds[bi]), outs, emptyrow)
-        bi += 1
+function flushintervals!(dg::DenseGroups, stateprotos::Tuple, bounds::Vector{T},
+    bi::Int, stop::T, ks::KeySet, closelast::Bool, protos::Tuple,
+    outs::Val) where {T}
+    RT, emptyrow = densetypes(T, stateprotos, protos, ks, outs)
+    rows = RT[]
+    for i in bi:length(bounds)
+        closedense!(rows, dg, ks, @inbounds(bounds[i]), outs, emptyrow)
     end
     closelast && closedense!(rows, dg, ks, stop, outs, emptyrow)
     return rows

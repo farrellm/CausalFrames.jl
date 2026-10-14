@@ -297,7 +297,13 @@ design rationale and performance constraints behind each module.
   keys and the summarizers' `inputcolumns`) with `projectinput`, per chunk:
   an unread `Union{Missing,T}` column would box every stored row.
   Per-run state lives in `SummaryFold`, never in reassigned closure captures
-  (those get boxed).
+  (those get boxed). Its `groups` are built by the transform's `grouping`
+  (`summaryspec`; `newgroups`/`widengroups`): the state tuple itself when
+  keyless, a `GroupTable` when keyed, a `DenseGroups` over a declared
+  `KeySet`. Each fold kernel (`foldgroups!`, `foldcycles!`, `foldrunning!`,
+  `foldintervals!`, and the flushes) has a method per kind of groups, so the
+  transforms dispatch rather than branch on the key mode, and `preparechunk!`
+  checks the key columns against the first chunk for all of them.
   The per-key states live in a `GroupTable{K,S}` (both parameters concrete,
   `K` the promoted schema's `storekeytype`, re-keyed by `widengroups` when a
   key column widens),
