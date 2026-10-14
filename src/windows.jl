@@ -3,8 +3,9 @@
 # The data stream drives a chunkmap and pulls the clock on demand, as in
 # intervalize; the window bookkeeping is addrollingcolumns' (a buffer of
 # admitted rows with an eviction head), sampled at ticks rather than rows.
-# Keyless output is a grid (one row per tick); keyed output is sparse, with one
-# empty row marking a key whose window has emptied.
+# Keyless output is a grid (one row per tick), the dense output over the empty
+# key; keyed output is sparse, with one empty row marking a key whose window
+# has emptied.
 #
 # The tiers are rolling.jl's (tiers.jl): running groups (O(1) amortized per
 # row), segment trees queried at each tick (O(log window)), and refolds
@@ -56,10 +57,10 @@ function summarizewindows(clk::CausalPipeline, lookback, summarizers;
             "`Bars` look-backs are for `addrollingcolumns`",
         ),
     )
-    (; keycols, protos, terms, ks, keynames, outs, keyed) =
-        summaryspec(summarizers, key, "summarizewindows"; keyset)
-    cfg = WindowConfig(keycols, keynames, lookback, protos, outs, Val(!keyed), ks,
-        terms, storedcolumns(protos, keycols))
+    (; keycols, protos, terms, ks, keynames, outs) =
+        summaryspec(summarizers, key, "summarizewindows"; keyset, grid = true)
+    cfg = WindowConfig(keycols, keynames, lookback, protos, outs, ks, terms,
+        storedcolumns(protos, keycols))
     return pipetransform() do p, ctx
         T = timetype(ctx)
         st = WindowState{T}(IntervalCursor{T}(clk.run(ctx)))
@@ -71,15 +72,14 @@ end
 summarizewindows(p::CausalPipeline, clk::CausalPipeline, lookback, summarizers;
     kwargs...) = summarizewindows(clk, lookback, summarizers; kwargs...)(p)
 
-# `grid` (keyless) and the declared key set (`Nothing` unless dense) are type
-# parameters, so neither costs a per-row branch.
-struct WindowConfig{KN,LB,P<:Tuple,O,G,KS<:Union{Nothing,KeySet},TM<:NamedTuple}
+# The declared key set (`Nothing` when sparse, `nokeyset` when keyless) is a
+# type parameter, so it costs no per-row branch.
+struct WindowConfig{KN,LB,P<:Tuple,O,KS<:Union{Nothing,KeySet},TM<:NamedTuple}
     keycols::Vector{Symbol}
     keynames::Val{KN}
     lookback::LB
     protos::P
     outs::Val{O}
-    grid::Val{G}
     ks::KS
     terms::TM  # the row terms, from `prototypes`
     stored::Union{Nothing,Tuple{Vararg{Symbol}}}  # from `storedcolumns`
@@ -181,8 +181,7 @@ function windowchunk!(st::WindowState{T}, cfg::WindowConfig,
     RT, emptyrow = windowtypes(st, cfg)
     rows = RT[]
     st.head, closed = windowrows!(rows, st.tiers, st.head, nt, st.ticks,
-        st.prevkeys, cfg.lookback, cfg.keynames, cfg.outs, emptyrow, cfg.grid,
-        cfg.ks)
+        st.prevkeys, cfg.lookback, cfg.keynames, cfg.outs, emptyrow, cfg.ks)
     deleteat!(st.ticks, 1:closed)
     exhausted(st.cur) && isempty(st.ticks) && releasewindows!(st)
     return rowsframe(rows)
@@ -209,16 +208,14 @@ function windowflush!(st::WindowState{T}, cfg::WindowConfig) where {T}
     pullpast!(st.ticks, st.cur, nothing)
     isempty(st.ticks) && return nothing
     if st.tiers === nothing
-        # No data ever arrived: empty rows when keyless or dense, nothing when
-        # sparse.
-        (cfg.grid isa Val{true} || cfg.ks !== nothing) || return nothing
-        return emptygrid(st.ticks, cfg.ks === nothing ? ((;),) : cfg.ks.keys,
-            emptyvalues(cfg.protos, cfg.outs))
+        # No data ever arrived: empty rows when dense, nothing when sparse.
+        cfg.ks === nothing && return nothing
+        return emptygrid(st.ticks, cfg.ks.keys, emptyvalues(cfg.protos, cfg.outs))
     end
     RT, emptyrow = windowtypes(st, cfg)
     rows = RT[]
     st.head = flushwindows!(rows, st.tiers, st.head, st.ticks, st.prevkeys,
-        cfg.lookback, cfg.keynames, cfg.outs, emptyrow, cfg.grid, cfg.ks)
+        cfg.lookback, cfg.keynames, cfg.outs, emptyrow, cfg.ks)
     empty!(st.ticks)
     return rowsframe(rows)
 end
@@ -231,38 +228,39 @@ end
 # the eviction head and the number of ticks closed.
 function windowrows!(rows::Vector{RT}, tiers::WindowTiers{R}, head::Int,
     nt::NamedTuple, ticks::Vector{T}, prevkeys::Vector, lookback,
-    keynames::Val, outs::Val, emptyrow, grid::Val,
+    keynames::Val, outs::Val, emptyrow,
     ks::Union{Nothing,KeySet}) where {RT,R,T}
+    admitks = admissionkeys(ks)
     bi = 1
     nb = length(ticks)
     for i in eachindex(nt.time)
         s = @inbounds nt.time[i]
         while bi <= nb && @inbounds(ticks[bi]) <= s
             head = closewindow!(rows, @inbounds(ticks[bi]), tiers, head,
-                prevkeys, lookback, keynames, outs, emptyrow, grid, ks)
+                prevkeys, lookback, keynames, outs, emptyrow, ks)
             bi += 1
         end
-        admitwindow!(tiers, rowat(R, nt, i), keynames, ks)
+        admitwindow!(tiers, rowat(R, nt, i), keynames, admitks)
     end
     return head, bi - 1
 end
 
 function flushwindows!(rows::Vector, tiers::WindowTiers, head::Int,
     ticks::Vector, prevkeys::Vector, lookback, keynames::Val, outs::Val,
-    emptyrow, grid::Val, ks::Union{Nothing,KeySet})
+    emptyrow, ks::Union{Nothing,KeySet})
     for τ in ticks
         head = closewindow!(rows, τ, tiers, head, prevkeys, lookback, keynames,
-            outs, emptyrow, grid, ks)
+            outs, emptyrow, ks)
     end
     return head
 end
 
 # Admit one row into every tier. A row may already be outside the next tick's
 # window (a look-back shorter than the tick spacing); that tick's eviction
-# downdates it right back out. A declared keyset is checked when the primary
-# tier makes a key's group or tree, or on every admission when the primary is
-# the refold table, which is filled only at ticks. Trees get a bare leaf,
-# synced at the tick.
+# downdates it right back out. A declared keyset (`admissionkeys`) is checked
+# when the primary tier makes a key's group or tree, or on every admission when
+# the primary is the refold table, which is filled only at ticks. Trees get a
+# bare leaf, synced at the tick.
 @inline function admitwindow!(tiers::WindowTiers, row, keynames::Val,
     ks::Union{Nothing,KeySet})
     pushrow!(tiers.buffer, row)
@@ -297,14 +295,14 @@ end
 # trees and syncing the rest; fold the live rows into the refold table; emit;
 # then retire the refold states to the pool.
 @noinline function closewindow!(rows::Vector, τ, tiers::WindowTiers, head::Int,
-    prevkeys::Vector, lookback, keynames::Val, outs::Val, emptyrow, grid::Val,
+    prevkeys::Vector, lookback, keynames::Val, outs::Val, emptyrow,
     ks::Union{Nothing,KeySet})
     head = evictwindow!(tiers.buffer, head, τ, lookback, tiers.running, keynames)
     head = compacthead!(tiers.buffer, head)
     closetrees!(tiers.trees, τ, lookback)
     foldrefold!(tiers.refold, tiers.buffer, head, tiers.tg.refold, keynames)
     emitgroups!(rows, τ, primarygroups(tiers), tiers.scratch, prevkeys, tiers,
-        outs, emptyrow, grid, ks)
+        outs, emptyrow, ks)
     retirerefold!(tiers.refold)
     return head
 end
@@ -378,19 +376,19 @@ end
             tierstates(tiers.refold, k, g), tiers.tg.derived)), outs)
 
 # Emit one tick from the primary tier's groups: without a declared keyset, the
-# present keys sorted into the reused scratch, then `emitwindow!`; with one,
-# `emitdense!`.
+# present keys sorted into the reused scratch, then `emitwindow!`; with one
+# (keyless included), `emitdense!`.
 @inline function emitgroups!(rows::Vector, τ, groups::AbstractDict,
     scratch::Vector{<:Pair}, prevkeys::Vector, tiers::WindowTiers, outs::Val,
-    emptyrow, grid::Val, ::Nothing)
+    emptyrow, ::Nothing)
     empty!(scratch)
     append!(scratch, groups)
     sort!(scratch; lt = groupisless)
-    return emitwindow!(rows, τ, scratch, prevkeys, tiers, outs, emptyrow, grid)
+    return emitwindow!(rows, τ, scratch, prevkeys, tiers, outs, emptyrow)
 end
 @inline emitgroups!(rows::Vector, τ, groups::AbstractDict, scratch,
-    prevkeys::Vector, tiers::WindowTiers, outs::Val, emptyrow, grid::Val,
-    ks::KeySet) = emitdense!(rows, τ, groups, ks, tiers, outs, emptyrow)
+    prevkeys::Vector, tiers::WindowTiers, outs::Val, emptyrow, ks::KeySet) =
+    emitdense!(rows, τ, groups, ks, tiers, outs, emptyrow)
 
 # One row per declared key, in declared order: the key's summary when it has a
 # group, else the empty values. Lookups by the declared key need no conversion.
@@ -409,25 +407,12 @@ function emitdense!(rows::Vector{RT}, τ, groups::AbstractDict, ks::KeySet,
     return rows
 end
 
-# Emit one tick. Keyless (grid): one row, the summary or the empty values.
-# Keyed: the present keys in key order, merged with an empty row for each key
-# present at the previous tick and absent now; the present keys then become
-# `prevkeys`. Both lists are sorted by `keyisless`, so one merge walk suffices.
+# Emit one sparse tick: the present keys in key order, merged with an empty
+# row for each key present at the previous tick and absent now; the present
+# keys then become `prevkeys`. Both lists are sorted by `keyisless`, so one
+# merge walk suffices.
 function emitwindow!(rows::Vector{RT}, τ, present::Vector{<:Pair},
-    prevkeys::Vector{K}, tiers::WindowTiers, outs::Val, emptyrow,
-    ::Val{G}) where {RT,K,G}
-    if G
-        push!(rows,
-            convert(RT,
-                isempty(present) ? gridrow(τ, (;), emptyrow) :
-                gridrow(
-                    τ,
-                    (;),
-                    tiervalues(tiers, first(first(present)),
-                        last(first(present)), outs),
-                )))
-        return rows
-    end
+    prevkeys::Vector{K}, tiers::WindowTiers, outs::Val, emptyrow) where {RT,K}
     j = 1
     np = length(prevkeys)
     for (k, g) in present

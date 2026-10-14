@@ -105,12 +105,9 @@ function applymodels(models::CausalPipeline; column::Symbol = :model,
     # selector doesn't fail on an absent column, so a missing model column is
     # reported by predictchunk! under this operator's name.
     right = models |> selectcolumns(n -> Symbol(n) === column || Symbol(n) in keycols)
-    cfg = JoinConfig(keycols, Val(Tuple(keycols)), tolerance,
-        joincmp(Backward(), strict), Backward(), nothing, nothing, nothing,
-        "applymodels")
+    cfg = JoinConfig(Backward(), "applymodels", keycols; tolerance, strict)
     return pipetransform() do p, ctx
-        js = JoinState(right.run(rightcontext(Backward(), ctx, tolerance,
-            "applymodels")))
+        js = JoinState(right, cfg, ctx)
         return chunkmap(c -> predictchunk!(js, cfg, column, name, operation, c),
             p.run(ctx))
     end
@@ -124,11 +121,7 @@ function predictchunk!(js::JoinState, cfg::JoinConfig, column::Symbol,
     name::Symbol, op::Symbol, c::DataFrame)
     if !js.leftchecked
         checkkeycolumns(cfg.keycols, c, cfg.op, "the left input")
-        String(name) in names(c) && throw(
-            ArgumentError(
-                "applymodels output column $(repr(name)) collides with an existing column",
-            ),
-        )
+        checknewcolumns(c, (name,), "applymodels")
         js.leftchecked = true
     end
     js.rnt === nothing && !js.right.done && pullright!(js, cfg)
@@ -280,12 +273,7 @@ modelreports(p::CausalPipeline; kwargs...) = modelreports(; kwargs...)(p)
 function reportchunk!(c::DataFrame, column::Symbol, name::Symbol)
     hasproperty(c, column) ||
         throw(ArgumentError("modelreports: no column named $(repr(column))"))
-    name !== column && hasproperty(c, name) &&
-        throw(
-            ArgumentError(
-                "modelreports output column $(repr(name)) collides with an existing column",
-            ),
-        )
+    name === column || checknewcolumns(c, (name,), "modelreports")
     # `map` narrows the element type from the reports themselves (the field is
     # untyped): Union{Missing, R} for R-typed reports.
     c[!, column] = map(fitreport, c[!, column])
