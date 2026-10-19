@@ -268,9 +268,10 @@ storedbase(intypes::NamedTuple, protos::Tuple, hoisted::Tuple{Vararg{Symbol}}) =
         storedcolumns(protos, Symbol[]))
 
 # Build the state for the realized types; type-unstable, once per state and
-# per widening.
-function newbarwindow(protos::Tuple, outs::Val{O}, terms, n::Int,
-    intypes::NamedTuple) where {O}
+# per widening, so unspecialized.
+function newbarwindow(@nospecialize(protos::Tuple), @nospecialize(outs::Val),
+    @nospecialize(terms), n::Int, @nospecialize(intypes::NamedTuple))
+    O = valvalue(outs)
     checkbarterms(terms, intypes)
     rowtypes, types = barwindowtypes(terms, intypes, protos)
     tg = tiering(protos, types)
@@ -289,6 +290,8 @@ function newbarwindow(protos::Tuple, outs::Val{O}, terms, n::Int,
     return BarWindowState{R,storerowtype(rowtypes),O,V}(n, RowRing{R}(n + 1),
         map(fresh, tg.running), queue, tg.derived, tg.perm, protos, terms)
 end
+
+valvalue(::Val{X}) where {X} = X
 
 # R is the stored row type, R0 the input row type, O the output names, V
 # the value type; `terms` the row terms to evaluate, or `HoistedTerms`;
