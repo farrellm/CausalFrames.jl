@@ -310,15 +310,14 @@ design rationale and performance constraints behind each module.
   transforms build (no dense `foldgroups!`/`foldrunning!`, no keyless
   `foldintervals!`, since `nokeyset` makes that grid dense), so the
   transforms dispatch rather than branch on the key mode, and `preparechunk!`
-  checks the key columns against the first chunk for all of them. It takes
-  `protos` and `grouping` `@nospecialize`: it is per-chunk setup whose results
-  land in `SummaryFold`'s untyped fields, so its callers reach the kernels by a
-  dispatch per chunk either way. `summarize`, `summarizecycles` and
-  `addsummarycolumns` read their `FoldConfig` through `FoldRun`'s abstract
-  field, and their chunk steps and flushes (`summarizechunk!`,
-  `summarizeflush`, `cyclechunk!`, `cycleflush`, `runningchunk!`) take it
-  `@nospecialize`, so only the kernels (and
-  `sortedrows`, `summarize`'s keyed emission) specialize per summarizer set.
+  checks the key columns against the first chunk for all of them. The
+  transform's `FoldConfig` (`protos`, `grouping`, `outs`) sits in
+  `SummaryFold`'s abstract `cfg` field, so `preparechunk!` and every chunk step
+  and flush (`summarizechunk!`, `summarizeflush`, `cyclechunk!`, `cycleflush`,
+  `runningchunk!`, intervalize's) read it untyped and reach the kernels by a
+  dispatch per chunk: the chunk iterators and drivers compile once, and only
+  the kernels (and `sortedrows`, `summarize`'s keyed emission) specialize per
+  summarizer set.
   The per-key states live in a `GroupTable{K,S}` (both parameters concrete,
   `K` the promoted schema's `storekeytype`, re-keyed by `widengroups` when a
   key column widens),
@@ -526,9 +525,9 @@ design rationale and performance constraints behind each module.
   the data stream pulls clock boundaries into a concrete `Vector{T}` per chunk
   (the pull is the only dynamism; the per-row kernel stays dispatch-free),
   reusing `SummaryFold` whole; `closelast` closes the trailing partial at
-  `stop`. As in `summarizewindows`, the chunk step and flush read their
-  `IntervalConfig` through `IntervalizeState`'s abstract field and take it
-  `@nospecialize`, so only the kernels specialize per summarizer set
+  `stop`. The chunk step and flush read the config through the
+  `SummaryFold`'s erased `cfg`, so only the kernels specialize per summarizer
+  set
 - `src/windows.jl` — `summarizewindows`, the clock-sampled trailing window
   (`[τ - lookback, τ)` at each tick): `intervalize`'s driver (`chunks.jl`'s `IntervalCursor`
   and `pullpast!`, a concrete tick vector per chunk) over `addrollingcolumns`'
