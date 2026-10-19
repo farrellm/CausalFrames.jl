@@ -128,7 +128,7 @@ order as well as the sides before believing a few percent.
 In `test/summarize.jl`'s trace, `summarizecycles`' `load` entries were 1.13 s
 over 15 calls (about 75 ms each), and its kernel `foldcycles!` was 2.9 s.
 `summarize` (2.9 s over 22) and `addsummarycolumns` (0.7 s over 10) have the
-same closure pattern and haven't been narrowed.
+same closure pattern; they follow.
 
 | Change | Harness, 6 fresh `summarizecycles` calls (two runs each) |
 |---|---|
@@ -147,6 +147,27 @@ Runtime: `summarize/cycles`, `cycles-keyed`, `keyless` and `keyed` plus the
 `rowwise/filterrows` control, 4 alternating rounds with the side that goes
 first swapped each round: geometric mean 0.998, every range overlapping,
 allocation counts unchanged.
+
+## `summarize`
+
+The same erasure, reusing `summarizecycles`' `FoldConfig` and `FoldRun`
+(`keyed` is `!isempty(fold.keycols)`, so the config needs nothing more).
+
+| Change | Harness, 6 fresh `summarize` calls |
+|---|---|
+| Before (two runs) | 5.08–5.50 s |
+| `summarizechunk!` and `summarizeflush` read the config through `FoldRun`, `@nospecialize`; the keyed emission moves behind a typed barrier, `sortedrows` (three runs) | 4.30–4.39 s |
+| The keyless flush's one row goes through `rowsdataframe` instead of `DataFrame([row])`, which compiled Tables.jl's path per row type (three runs) | 3.96–4.11 s |
+
+The outputs are identical. `test/summarize.jl` on its own: 20.9–21.3 s wall
+before, 19.4–19.9 s after (−7%), two runs each. Before the change, the keyed flush's comprehension ran
+over `fold.groups`, which is untyped, so it was inferred abstractly. Behind
+`sortedrows` it is concretely typed. `lastrow`'s flush still has a one-row
+`DataFrame([row])`.
+
+Runtime: the whole `summarize` group plus the control, 4 alternating rounds
+with the first side swapped: geometric mean 0.984, every range overlapping;
+allocations 1–6 fewer per run.
 
 ## Per-file timings, before and after
 

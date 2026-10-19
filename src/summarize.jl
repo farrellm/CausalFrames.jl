@@ -705,6 +705,21 @@ function emptygrid(times, keys, e::NamedTuple)
     return rowsframe(RT[convert(RT, gridrow(t, k, e)) for t in times for k in keys])
 end
 
+# A summarizing transform's configuration, which `summarize` and
+# `summarizecycles` keep in `FoldRun` beside the run's fold, erased, so their
+# chunk iterators and per-chunk drivers compile once for every summarizer set.
+struct FoldConfig{P<:Tuple,G,O}
+    protos::P
+    grouping::G  # summaryspec's: the key names' `Val`, or a KeySet
+    outs::Val{O}
+end
+
+# A run's fold beside its config, erased.
+struct FoldRun
+    cfg::FoldConfig  # abstract, a dispatch per chunk
+    fold::SummaryFold
+end
+
 """
     summarize(summarizers; key = nothing) -> (CausalPipeline -> CausalPipeline)
     summarize(p::CausalPipeline, summarizers; key = nothing) -> CausalPipeline
@@ -723,34 +738,39 @@ A transform summarizing the whole window, emitted at `stop`, with columns
   and nothing for an empty input.
 """
 function summarize(summarizers; key = nothing)
-    (; keycols, protos, terms, grouping, outs, keyed) =
+    (; keycols, protos, terms, grouping, outs) =
         summaryspec(summarizers, key, "summarize")
+    cfg = FoldConfig(protos, grouping, outs)
     return pipetransform() do p, ctx
-        fold = SummaryFold(keycols, terms, "summarize")
-        step = function (c)
-            nt = preparechunk!(fold, protos, grouping, c)
-            foldgroups!(fold.groups, fold.stateprotos, nt, grouping)
-            return nothing
-        end
-        flush = function ()
-            groups = fold.groups
-            if groups isa GroupTable
-                return rowsframe([
-                    summaryrow(ctx.stop, k, gs, outs)
-                    for (k, gs) in sortedgroups(groups)
-                ])
-            end
-            keyed && return nothing   # keyed, and no data
-            vals =
-                groups === nothing ? emptyvalues(protos, outs) :
-                summaryvalues(groups, outs)
-            return DataFrame([merge((; time = ctx.stop), vals)])
-        end
-        return chunkmap(step, p.run(ctx); flush = flush)
+        r = FoldRun(cfg, SummaryFold(keycols, terms, "summarize"))
+        # Through `r`, whose `cfg` is erased (`FoldRun`).
+        return chunkmap(c -> summarizechunk!(r.fold, r.cfg, c), p.run(ctx);
+            flush = () -> summarizeflush(r.fold, r.cfg, ctx.stop))
     end
 end
 summarize(p::CausalPipeline, summarizers; kwargs...) =
     summarize(summarizers; kwargs...)(p)
+
+function summarizechunk!(fold::SummaryFold, @nospecialize(cfg::FoldConfig),
+    c::DataFrame)
+    nt = preparechunk!(fold, cfg.protos, cfg.grouping, c)
+    foldgroups!(fold.groups, fold.stateprotos, nt, cfg.grouping)
+    return nothing
+end
+
+function summarizeflush(fold::SummaryFold, @nospecialize(cfg::FoldConfig), stop)
+    groups = fold.groups
+    groups isa GroupTable && return sortedrows(groups, stop, cfg.outs)
+    isempty(fold.keycols) || return nothing   # keyed, and no data
+    vals =
+        groups === nothing ? emptyvalues(cfg.protos, cfg.outs) :
+        summaryvalues(groups, cfg.outs)
+    return rowsdataframe([merge((; time = stop), vals)])
+end
+
+# `summarize`'s keyed output, a row per key, sorted.
+sortedrows(gt::GroupTable, stop, outs::Val) =
+    rowsframe([summaryrow(stop, k, gs, outs) for (k, gs) in sortedgroups(gt)])
 
 """
     summarizecycles(summarizers; key = nothing,
@@ -779,26 +799,13 @@ function summarizecycles(summarizers; key = nothing, keyset = nothing)
     cfg = FoldConfig(protos, grouping, outs)
     return pipetransform() do p, ctx
         r = FoldRun(cfg, SummaryFold(keycols, terms, "summarizecycles"))
-        # Through `r`, whose `cfg` is erased, so the iterator's type and the
-        # per-chunk driver are the same for every summarizer set.
+        # Through `r`, whose `cfg` is erased (`FoldRun`).
         return chunkmap(c -> cyclechunk!(r.fold, r.cfg, c), p.run(ctx);
             flush = () -> cycleflush(r.fold, r.cfg))
     end
 end
 summarizecycles(p::CausalPipeline, summarizers; kwargs...) =
     summarizecycles(summarizers; kwargs...)(p)
-
-struct FoldConfig{P<:Tuple,G,O}
-    protos::P
-    grouping::G  # summaryspec's: the key names' `Val`, or a KeySet
-    outs::Val{O}
-end
-
-# A run's fold beside its config, erased.
-struct FoldRun
-    cfg::FoldConfig  # abstract, a dispatch per chunk
-    fold::SummaryFold
-end
 
 function cyclechunk!(fold::SummaryFold, @nospecialize(cfg::FoldConfig),
     c::DataFrame)
