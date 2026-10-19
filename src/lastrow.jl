@@ -38,15 +38,12 @@ A chunk whose column names differ from the first chunk's is an
 """
 function lastrow(; key = nothing)
     keycols = keycolumns(key, "lastrow")
-    keynames = Val(Tuple(keycols))
     return pipetransform() do p, ctx
         st = LastRowState(keycols)
-        step = function (c)
-            lastrowchunk!(st, keynames, c)
-            return nothing
-        end
-        return chunkmap(step, p.run(ctx);
-            flush = () -> lastrowflush!(st, keynames, ctx.stop))
+        # The key names reach the kernels through `st`, erased, so the
+        # iterator's type and the driver are the same for every key.
+        return chunkmap(c -> lastrowchunk!(st, c), p.run(ctx);
+            flush = () -> lastrowflush!(st, ctx.stop))
     end
 end
 lastrow(p::CausalPipeline; kwargs...) = lastrow(; kwargs...)(p)
@@ -56,32 +53,33 @@ lastrow(p::CausalPipeline; kwargs...) = lastrow(; kwargs...)(p)
 # setup; the per-row work sits behind the `lastsegment!` function barrier.
 mutable struct LastRowState
     const keycols::Vector{Symbol}
+    const keynames::Val   # Val(Tuple(keycols)), abstract: a dispatch per chunk
     names::Union{Nothing,Vector{String}}  # column names, fixed by the first chunk
     types::Union{Nothing,NamedTuple}      # promotion of every input schema seen
     store::Any    # SlotStore{K,V}: per-key slot holding that key's last row
     row::Any      # keyless: the last row seen, as a V
 end
 LastRowState(keycols::Vector{Symbol}) =
-    LastRowState(keycols, nothing, nothing, nothing, nothing)
+    LastRowState(keycols, Val(Tuple(keycols)), nothing, nothing, nothing, nothing)
 
-function lastrowchunk!(st::LastRowState, ::Val{KN}, c::DataFrame) where {KN}
+function lastrowchunk!(st::LastRowState, c::DataFrame)
     checkschema!(st, c)
     types = promotetypes(st.types, chunktypes(c))
     widened = st.types !== nothing && types != st.types
     st.types = types
     V = storerowtype(types)
     nt = Tables.columntable(c)
-    if isempty(KN)
+    if isempty(st.keycols)
         # Keyless: only the chunk's last row matters. O(ncols) per chunk.
         st.row = rowat(V, nt, length(nt.time))
         return nothing
     end
     if st.store === nothing
-        st.store = SlotStore{storekeytype(types, Val(KN)),V}()
+        st.store = SlotStore{storekeytype(types, st.keynames),V}()
     elseif widened
-        st.store = widenstore(st.store, storekeytype(types, Val(KN)), V)
+        st.store = widenstore(st.store, storekeytype(types, st.keynames), V)
     end
-    lastsegment!(st.store.index, st.store.slots, nt, Val(KN))
+    lastsegment!(st.store.index, st.store.slots, nt, st.keynames)
     return nothing
 end
 
@@ -112,19 +110,19 @@ function lastsegment!(index::Dict{K,Int}, slots::Vector{V}, nt::NamedTuple,
     return nothing
 end
 
-function lastrowflush!(st::LastRowState, ::Val{KN}, stop) where {KN}
-    if isempty(KN)
+function lastrowflush!(st::LastRowState, stop)
+    if isempty(st.keycols)
         st.row === nothing && return nothing
-        return DataFrame([retime(st.row, stop)])
+        return rowsdataframe([retime(st.row, stop)])
     end
     st.store === nothing && return nothing
     ordered = sortedgroups(st.store.index)
     isempty(ordered) && return nothing
-    return DataFrame(emitlast(st.store.slots, ordered, stop))
+    return rowsdataframe(emitlast(st.store.slots, ordered, stop))
 end
 
-# Function barrier: the rows are concretely typed, so DataFrame builds typed
-# columns directly and the slot reads don't dispatch through `st.store::Any`.
+# Function barrier: the rows are concretely typed, so `rowsdataframe` builds
+# typed columns directly and the slot reads don't dispatch through `st.store::Any`.
 emitlast(slots::Vector{V}, ordered::Vector{<:Pair}, stop) where {V} =
     [retime(@inbounds(slots[j]), stop) for (_, j) in ordered]
 

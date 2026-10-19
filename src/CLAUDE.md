@@ -372,7 +372,10 @@ design rationale and performance constraints behind each module.
   instant it is claimed, so widening is a plain `convert`), and the keyless
   path skips the store: only the chunk's last row matters, so it costs nothing
   per row. The output schema is the input's exactly, `:time` overwritten with
-  `stop` via `merge`, which keeps the column position
+  `stop` via `merge`, which keeps the column position. The key names reach
+  `storekeytype` and `lastsegment!` through `LastRowState`'s abstract
+  `keynames` field, so the chunk iterator and driver compile once for every
+  key; the flush builds its frame with `rowsdataframe`
 - `src/sortcycles.jl` — `sortcycles`, the within-timestamp stable sort. A
   `chunkmap` whose only state is the open cycle, held as a `Vector{DataFrame}`
   of pieces and concatenated once when a later time (or flush) closes it, so a

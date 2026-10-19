@@ -189,6 +189,26 @@ small, and what remains is `foldrunning!` (1.9 s over 7 instances) and the
 `addsummarycolumns` benchmark), 6 alternating rounds with the first side
 swapped: 1.001, with the control at 0.996, and 9 more allocations per run.
 
+## `lastrow`
+
+`lastrow` has no summarizers, so its closure captured only `Val(keynames)`,
+and the driver compiled under `load` once per key-name tuple (100–200 ms
+each in `test/lastrow.jl`'s trace). Its flushes built frames with
+`DataFrame(rows)`, about 120 ms per output row type.
+
+| Change | Harness, 6 fresh `lastrow` calls (three runs each) |
+|---|---|
+| Before | 2.43–2.60 s |
+| Both flushes build with `rowsdataframe` | 2.35–2.41 s |
+| The key names move into `LastRowState` as an abstract `Val` field; `lastrowchunk!` and `lastrowflush!` read them there, and `storekeytype`/`lastsegment!` take them by dispatch | 1.85–1.89 s |
+
+The outputs are identical. `test/lastrow.jl` on its own, alternating: 5.0–5.1 s
+wall before, 4.3–4.4 s after (−14%). Runtime: the `lastrow` group and the control, 6
+alternating rounds with the first side swapped: geometric mean 0.986, every
+range overlapping. Allocations went up 18 per run (1M rows). The control's
+count also differs between the two environments (651 against 671), so not
+all of that is the change.
+
 ## Per-file timings, before and after
 
 Each test file's `include` timed with `@timed` over a whole run of
