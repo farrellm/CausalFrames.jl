@@ -313,7 +313,10 @@ design rationale and performance constraints behind each module.
   checks the key columns against the first chunk for all of them. It takes
   `protos` and `grouping` `@nospecialize`: it is per-chunk setup whose results
   land in `SummaryFold`'s untyped fields, so its callers reach the kernels by a
-  dispatch per chunk either way.
+  dispatch per chunk either way. `summarizecycles` reads its `FoldConfig`
+  through `FoldRun`'s abstract field, and its chunk step and flush
+  (`cyclechunk!`, `cycleflush`) take it `@nospecialize`, so only the kernels
+  specialize per summarizer set.
   The per-key states live in a `GroupTable{K,S}` (both parameters concrete,
   `K` the promoted schema's `storekeytype`, re-keyed by `widengroups` when a
   key column widens),

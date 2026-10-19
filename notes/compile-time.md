@@ -123,6 +123,31 @@ current side first in each round, the same three came out at 0.983, 0.991 and
 0.996. The deficit followed the run position, not the code, so alternate the
 order as well as the sides before believing a few percent.
 
+## `summarizecycles`
+
+In `test/summarize.jl`'s trace, `summarizecycles`' `load` entries were 1.13 s
+over 15 calls (about 75 ms each), and its kernel `foldcycles!` was 2.9 s.
+`summarize` (2.9 s over 22) and `addsummarycolumns` (0.7 s over 10) have the
+same closure pattern and haven't been narrowed.
+
+| Change | Harness, 6 fresh `summarizecycles` calls (two runs each) |
+|---|---|
+| Before | 5.46–5.71 s |
+| The chunk step and flush (`cyclechunk!`, `cycleflush`) read a `FoldConfig` through `FoldRun`'s abstract field and take it `@nospecialize` | 4.97–5.00 s |
+
+The outputs are identical. `test/summarize.jl` on its own barely moves
+(21.1–21.3 s wall before, 20.9–21.1 s after, two runs each): its 15
+`summarizecycles` calls were about 1.1 s of `load` to begin with. What
+remains in the harness is `foldcycles!`
+(3.1 s over 14 instances), the `rowsframe` unzip (0.65 s), and `newstates`
+plus `newgroups` (0.4 s, once per run, shared by every summarizing transform;
+they compute the state types, so there is nothing to erase).
+
+Runtime: `summarize/cycles`, `cycles-keyed`, `keyless` and `keyed` plus the
+`rowwise/filterrows` control, 4 alternating rounds with the side that goes
+first swapped each round: geometric mean 0.998, every range overlapping,
+allocation counts unchanged.
+
 ## Per-file timings, before and after
 
 Each test file's `include` timed with `@timed` over a whole run of
@@ -200,4 +225,4 @@ Most of what remains in the window transforms is their kernels: in
 `leadinsegment!` (about 32 s); in `windows.jl`, `windowrows!` (about 41 s over
 152 instances). There is one instance per tested summarizer set, window set,
 schema and key, and the tests exercise many such combinations by design.
-`intervalize`'s is `foldintervals!`.
+`intervalize`'s is `foldintervals!`, and `summarizecycles`' is `foldcycles!`.

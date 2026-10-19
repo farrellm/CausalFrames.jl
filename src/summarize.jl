@@ -776,26 +776,47 @@ then the summaries; the input columns are dropped.
 function summarizecycles(summarizers; key = nothing, keyset = nothing)
     (; keycols, protos, terms, grouping, outs) =
         summaryspec(summarizers, key, "summarizecycles"; keyset)
+    cfg = FoldConfig(protos, grouping, outs)
     return pipetransform() do p, ctx
-        fold = SummaryFold(keycols, terms, "summarizecycles")
-        step = function (c)
-            nt = preparechunk!(fold, protos, grouping, c)
-            rows, fold.groups, fold.cycletime = foldcycles!(fold.groups,
-                fold.stateprotos, nt, fold.cycletime, grouping, protos, outs)
-            return rowsframe(rows)
-        end
-        flush = function ()
-            fold.cycletime === nothing && return nothing
-            return rowsframe(
-                flushcycle(fold.groups, fold.stateprotos,
-                    fold.cycletime, grouping, protos, outs),
-            )
-        end
-        return chunkmap(step, p.run(ctx); flush = flush)
+        r = FoldRun(cfg, SummaryFold(keycols, terms, "summarizecycles"))
+        # Through `r`, whose `cfg` is erased, so the iterator's type and the
+        # per-chunk driver are the same for every summarizer set.
+        return chunkmap(c -> cyclechunk!(r.fold, r.cfg, c), p.run(ctx);
+            flush = () -> cycleflush(r.fold, r.cfg))
     end
 end
 summarizecycles(p::CausalPipeline, summarizers; kwargs...) =
     summarizecycles(summarizers; kwargs...)(p)
+
+struct FoldConfig{P<:Tuple,G,O}
+    protos::P
+    grouping::G  # summaryspec's: the key names' `Val`, or a KeySet
+    outs::Val{O}
+end
+
+# A run's fold beside its config, erased.
+struct FoldRun
+    cfg::FoldConfig  # abstract, a dispatch per chunk
+    fold::SummaryFold
+end
+
+function cyclechunk!(fold::SummaryFold, @nospecialize(cfg::FoldConfig),
+    c::DataFrame)
+    (; protos, grouping, outs) = cfg
+    nt = preparechunk!(fold, protos, grouping, c)
+    rows, fold.groups, fold.cycletime = foldcycles!(fold.groups,
+        fold.stateprotos, nt, fold.cycletime, grouping, protos, outs)
+    return rowsframe(rows)
+end
+
+function cycleflush(fold::SummaryFold, @nospecialize(cfg::FoldConfig))
+    fold.cycletime === nothing && return nothing
+    (; protos, grouping, outs) = cfg
+    return rowsframe(
+        flushcycle(fold.groups, fold.stateprotos, fold.cycletime, grouping,
+            protos, outs),
+    )
+end
 
 """
     addsummarycolumns(summarizers; key = nothing) -> (CausalPipeline -> CausalPipeline)
