@@ -705,9 +705,10 @@ function emptygrid(times, keys, e::NamedTuple)
     return rowsframe(RT[convert(RT, gridrow(t, k, e)) for t in times for k in keys])
 end
 
-# A summarizing transform's configuration, which `summarize` and
-# `summarizecycles` keep in `FoldRun` beside the run's fold, erased, so their
-# chunk iterators and per-chunk drivers compile once for every summarizer set.
+# A summarizing transform's configuration, which `summarize`,
+# `summarizecycles` and `addsummarycolumns` keep in `FoldRun` beside the run's
+# fold, erased, so their chunk iterators and per-chunk drivers compile once for
+# every summarizer set.
 struct FoldConfig{P<:Tuple,G,O}
     protos::P
     grouping::G  # summaryspec's: the key names' `Val`, or a KeySet
@@ -842,19 +843,24 @@ so far, itself included.
   [`Count`](@ref) numbers the rows of each key.
 """
 function addsummarycolumns(summarizers; key = nothing)
-    (; keycols, protos, requested, terms, grouping, outs) =
+    (; keycols, protos, terms, grouping, outs) =
         summaryspec(summarizers, key, "addsummarycolumns")
+    cfg = FoldConfig(protos, grouping, outs)
     return pipetransform() do p, ctx
-        fold = SummaryFold(keycols, terms, "addsummarycolumns")
-        step = function (c)
-            # hidden dependencies are never added
-            nt = preparechunk!(fold, protos, grouping, c, requested)
-            vals = foldrunning!(fold.groups, fold.stateprotos, nt, nrow(c),
-                grouping, outs)
-            return hcat(c, rowsdataframe(vals); copycols = false)
-        end
-        return chunkmap(step, p.run(ctx))
+        r = FoldRun(cfg, SummaryFold(keycols, terms, "addsummarycolumns"))
+        # Through `r`, whose `cfg` is erased (`FoldRun`).
+        return chunkmap(c -> runningchunk!(r.fold, r.cfg, c), p.run(ctx))
     end
 end
 addsummarycolumns(p::CausalPipeline, summarizers; kwargs...) =
     addsummarycolumns(summarizers; kwargs...)(p)
+
+function runningchunk!(fold::SummaryFold, @nospecialize(cfg::FoldConfig),
+    c::DataFrame)
+    # hidden dependencies are never added, so only the requested outputs are
+    # checked as new columns
+    nt = preparechunk!(fold, cfg.protos, cfg.grouping, c, valvalue(cfg.outs))
+    vals = foldrunning!(fold.groups, fold.stateprotos, nt, nrow(c),
+        cfg.grouping, cfg.outs)
+    return hcat(c, rowsdataframe(vals); copycols = false)
+end

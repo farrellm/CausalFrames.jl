@@ -169,6 +169,26 @@ Runtime: the whole `summarize` group plus the control, 4 alternating rounds
 with the first side swapped: geometric mean 0.984, every range overlapping;
 allocations 1–6 fewer per run.
 
+## `addsummarycolumns`
+
+The same erasure through `FoldRun`, with `runningchunk!` the driver. The
+output names `preparechunk!` checks as new columns are read back from
+`cfg.outs`, so `FoldConfig` needs no extra field.
+
+| | Harness, 6 fresh `addsummarycolumns` calls (three runs each) |
+|---|---|
+| Before | 3.58–3.73 s |
+| After | 3.36–3.45 s |
+
+The outputs are identical. `test/summarize.jl` moves within noise, 19.0–19.1 s
+before and 18.8–18.9 s after, alternating. Two runs of each side back to back
+had first put it 0.8 s *slower*, the current side's block run straight after
+a full `Pkg.test()`: time a file alternating too, not in blocks. It gains less than the others: the driver was
+small, and what remains is `foldrunning!` (1.9 s over 7 instances) and the
+`rowsdataframe` unzip (0.5 s). Runtime: `summarize/running` (the
+`addsummarycolumns` benchmark), 6 alternating rounds with the first side
+swapped: 1.001, with the control at 0.996, and 9 more allocations per run.
+
 ## Per-file timings, before and after
 
 Each test file's `include` timed with `@timed` over a whole run of
