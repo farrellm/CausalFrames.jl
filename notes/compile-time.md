@@ -93,6 +93,36 @@ Rejected:
 per-row `update!`/`value` and the test file's helpers, so a few percent is
 what this file has to give.
 
+## `intervalize`
+
+In its trace before this pass, `load` was 3.5 s of the file's 14 s: about
+250 ms per summarizer set, with the closure capturing `protos`, `grouping`
+and `outs`, and the whole driver compiling under it. `foldintervals!`, the
+kernel, was 3.0 s.
+
+| Change | Harness, 6 fresh `intervalize` calls (two runs each) |
+|---|---|
+| Before | 6.35–6.55 s |
+| The chunk step and flush read an `IntervalConfig` through `IntervalizeState`'s abstract field, taken `@nospecialize`, as in `summarizewindows` | 5.68–5.70 s |
+| `preparechunk!` takes `protos` and `grouping` `@nospecialize` (shared with `summarize`, `summarizecycles` and `addsummarycolumns`) | 5.42–5.43 s |
+
+That is 17% off the harness, with identical outputs. `intervalize.jl` on its
+own, two runs each: 13.4–13.5 s wall (13.0–13.1 s compile) before, 12.3–12.4 s
+(11.9–12.0 s) after, −8%. The second change is
+sound for every caller: its results go into `SummaryFold`'s untyped fields,
+and its column table is untyped too (it comes from a `DataFrame`), so each
+caller already reached its kernel by a dispatch per chunk. What remains in the
+harness is `foldintervals!` (3.0 s over 7 instances) and the generated
+`rowsframe` unzip, one per output row type (about 0.1 s each for 15 columns).
+
+Runtime: over the `intervalize` and `summarize` groups, the geometric mean of
+3 alternating rounds against the parent commit was 0.997. Allocations rose
+by 3–9 per run (dispatches per chunk). A second run put `intervalize/keyless`
+at +4.7%, with the `rowwise/filterrows` control at +2%. Re-run with the
+current side first in each round, the same three came out at 0.983, 0.991 and
+0.996. The deficit followed the run position, not the code, so alternate the
+order as well as the sides before believing a few percent.
+
 ## Per-file timings, before and after
 
 Each test file's `include` timed with `@timed` over a whole run of
@@ -170,5 +200,4 @@ Most of what remains in the window transforms is their kernels: in
 `leadinsegment!` (about 32 s); in `windows.jl`, `windowrows!` (about 41 s over
 152 instances). There is one instance per tested summarizer set, window set,
 schema and key, and the tests exercise many such combinations by design.
-`intervalize` follows `summarizewindows`' driver pattern and hasn't been
-narrowed.
+`intervalize`'s is `foldintervals!`.

@@ -502,8 +502,8 @@ SummaryFold(keycols::Vector{Symbol}, terms::NamedTuple, op::String) =
 # the states and groups on the first chunk, by `grouping` (`summaryspec`'s), or
 # widen them when the promotion changes. Returns the column table, with the row
 # terms' columns.
-function preparechunk!(fold::SummaryFold, protos::Tuple, grouping, c::DataFrame,
-    newcols = ())
+function preparechunk!(fold::SummaryFold, @nospecialize(protos::Tuple),
+    @nospecialize(grouping), c::DataFrame, newcols = ())
     if fold.types === nothing
         checkkeycolumns(fold.keycols, c, fold.op)
         checknewcolumns(c, newcols, fold.op)

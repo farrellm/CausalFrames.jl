@@ -310,7 +310,10 @@ design rationale and performance constraints behind each module.
   transforms build (no dense `foldgroups!`/`foldrunning!`, no keyless
   `foldintervals!`, since `nokeyset` makes that grid dense), so the
   transforms dispatch rather than branch on the key mode, and `preparechunk!`
-  checks the key columns against the first chunk for all of them.
+  checks the key columns against the first chunk for all of them. It takes
+  `protos` and `grouping` `@nospecialize`: it is per-chunk setup whose results
+  land in `SummaryFold`'s untyped fields, so its callers reach the kernels by a
+  dispatch per chunk either way.
   The per-key states live in a `GroupTable{K,S}` (both parameters concrete,
   `K` the promoted schema's `storekeytype`, re-keyed by `widengroups` when a
   key column widens),
@@ -515,7 +518,9 @@ design rationale and performance constraints behind each module.
   the data stream pulls clock boundaries into a concrete `Vector{T}` per chunk
   (the pull is the only dynamism; the per-row kernel stays dispatch-free),
   reusing `SummaryFold` whole; `closelast` closes the trailing partial at
-  `stop`
+  `stop`. As in `summarizewindows`, the chunk step and flush read their
+  `IntervalConfig` through `IntervalizeState`'s abstract field and take it
+  `@nospecialize`, so only the kernels specialize per summarizer set
 - `src/windows.jl` — `summarizewindows`, the clock-sampled trailing window
   (`[τ - lookback, τ)` at each tick): `intervalize`'s driver (`chunks.jl`'s `IntervalCursor`
   and `pullpast!`, a concrete tick vector per chunk) over `addrollingcolumns`'
