@@ -435,6 +435,9 @@ design rationale and performance constraints behind each module.
   types inferred from `intypes`), the other monoids sit in `BarQueue`, a
   preallocated two-stack queue (measured 3-13x faster than a segment tree and
   flat in `n`; DESIGN.md has the table), and a plain summarizer is rejected.
+  `newbarwindow` builds it unspecialized (its type is decided at runtime
+  anyway), once per state and per widening; a key's new state is `fresh(st)`,
+  a copy.
   A stored row is cut to `:time`, the terms and the columns `readcolumns`
   names, hoisted or not. It must not call the transforms' tuple folds
   (`updateall!`, `freshall!`, `summaryvalues`, `combinenodes!`): it runs inside an outer state's
@@ -533,7 +536,9 @@ design rationale and performance constraints behind each module.
   `intervalize`, and `admissionkeys` skips its admission check. The
   declaration is checked where the primary tier makes a group or tree (a key's
   first row); a refold primary groups only at ticks, so it checks on admission
-  instead
+  instead. As in `addrollingcolumns`, the chunk step and flush read `cfg`
+  through `WindowState`'s abstract field and the per-chunk driver takes it
+  `@nospecialize`, so only the kernels specialize per summarizer set
 - `src/models.jl` — the MLJ operators (`applymodels`, `addpredictions`,
   `modelreports`) and the five hooks the extension implements (`ismodel`,
   `fitmodel`, `predictmodel`, `savefitresult`, `restorefitresult`). It names no
