@@ -209,6 +209,30 @@ range overlapping. Allocations went up 18 per run (1M rows). The control's
 count also differs between the two environments (651 against 671), so not
 all of that is the change.
 
+## The as-of join engine
+
+`asofjoin`, `applymodels` and `Acausal.futurejoin` share one driver, and its
+closure captured `JoinConfig{KN,Tol,C,D}`, so `joinchunk!`, `pullright!`,
+`matchchunk!`, `checknames` and `assemble` compiled once per key, tolerance
+type, strictness and direction. The config moves into `JoinState` as an
+abstract field, read back by the closure, and the driver takes it
+`@nospecialize`, as in `addrollingcolumns`. `js.store` was already untyped,
+so `segment!` was already reached by a dispatch per call; nothing is added on
+the hot path.
+
+| | Harness, 6 fresh `asofjoin`/`futurejoin` calls (two runs each) |
+|---|---|
+| Before | 4.37–4.39 s |
+| After | 2.63–2.77 s |
+
+The outputs are identical. `test/join.jl` on its own, alternating: 7.7–7.8 s
+before, 7.1–7.3 s after; `test/acausal.jl` 5.7–5.8 s before, 4.8 s after.
+Runtime: the `join` group and the control, 6 alternating rounds with the first
+side swapped: the four as-of and future joins at 1.004–1.015, ranges
+overlapping, 8 fewer allocations per run. `lookup-drop` read 1.04 (1.06 in a
+first 4-round run) although `lookupjoin` was untouched, which is this
+machine's noise at that size.
+
 ## Per-file timings, before and after
 
 Each test file's `include` timed with `@timed` over a whole run of

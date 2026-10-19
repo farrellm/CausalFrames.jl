@@ -61,7 +61,9 @@ function jointransform(right::CausalPipeline, direction, op::String; key,
         rightprefix, righttime)
     return pipetransform() do left, ctx
         js = JoinState(right, cfg, ctx)
-        return chunkmap(c -> joinchunk!(js, cfg, c), left.run(ctx))
+        # Through `js`, whose `cfg` is erased, so the iterator's type and the
+        # per-chunk driver are the same for every key and tolerance.
+        return chunkmap(c -> joinchunk!(js, js.cfg, c), left.run(ctx))
     end
 end
 
@@ -101,6 +103,7 @@ JoinConfig(direction, op::String, keycols::Vector{Symbol}; tolerance = nothing,
 # Per-run state. The untyped fields are per-chunk setup; the per-row work sits
 # behind the `segment!` function barrier.
 mutable struct JoinState
+    const cfg::JoinConfig    # abstract, a dispatch per chunk
     const right::PullCursor  # the right chunks; `done` once exhausted
     rnt::Any           # current right column table (nothing until first pull)
     rpos::Int          # index of the next unadmitted right row in rnt
@@ -112,13 +115,15 @@ mutable struct JoinState
     passthrough::Bool  # the right stream produced no chunks at all
     leftchecked::Bool  # key validation against the left schema done
     checked::Bool      # output-name duplicate validation done
-    JoinState(rchunks) = new(PullCursor(rchunks), nothing, 1, nothing,
-        nothing, nothing, nothing, Bool[], false, false, false)
+    JoinState(rchunks, cfg::JoinConfig) =
+        new(cfg, PullCursor(rchunks), nothing, 1, nothing,
+            nothing, nothing, nothing, Bool[], false, false, false)
 end
 
 # A run's state, over the right input run on the direction's window.
 JoinState(right::CausalPipeline, cfg::JoinConfig, ctx::Context) =
-    JoinState(right.run(rightcontext(cfg.direction, ctx, cfg.tolerance, cfg.op)))
+    JoinState(right.run(rightcontext(cfg.direction, ctx, cfg.tolerance, cfg.op)),
+        cfg)
 
 # The backward store, shared with `lastrow`: a `Dict{K,Int}` of slot numbers
 # over a `Vector{V}` of rows. A Dict of rows answers a lookup as
@@ -174,7 +179,7 @@ end
 # Pull the next right chunk (type-unstable, once per chunk), creating the store
 # or widening it when the promoted right schema changes. The matches buffer may
 # be half-filled mid-left-chunk, so it is widened too, with `convertmatches`.
-function pullright!(js::JoinState, cfg::JoinConfig)
+function pullright!(js::JoinState, @nospecialize(cfg::JoinConfig))
     chunk = pull!(js.right)
     if chunk === nothing
         js.rnt === nothing && (js.passthrough = true)
@@ -202,7 +207,8 @@ function pullright!(js::JoinState, cfg::JoinConfig)
     return nothing
 end
 
-function joinchunk!(js::JoinState, cfg::JoinConfig, c::DataFrame)
+function joinchunk!(js::JoinState, @nospecialize(cfg::JoinConfig),
+    c::DataFrame)
     if !js.leftchecked
         checkkeycolumns(cfg.keycols, c, cfg.op, "the left input")
         js.leftchecked = true
@@ -220,7 +226,8 @@ end
 # Match every row of the left column table `nt` into `js.matches`/`js.found`,
 # pulling right chunks as the kernel asks. The fields are re-read on each pass,
 # since `pullright!` may replace the store and the buffer.
-function matchchunk!(js::JoinState, cfg::JoinConfig, nt::NamedTuple)
+function matchchunk!(js::JoinState, @nospecialize(cfg::JoinConfig),
+    nt::NamedTuple)
     n = length(nt.time)
     resize!(js.matches, n)
     resize!(js.found, n)
@@ -303,7 +310,7 @@ end
 
 # One rename! over every pair, since each call rebuilds the column index. The
 # field form is shared with lookupjoin.
-prefixleft!(cfg::JoinConfig, c::DataFrame) =
+prefixleft!(@nospecialize(cfg::JoinConfig), c::DataFrame) =
     prefixleft!(cfg.leftprefix, cfg.keycols, c)
 function prefixleft!(leftprefix::Union{Nothing,String}, keycols::Vector{Symbol},
     c::DataFrame)
@@ -318,7 +325,7 @@ end
 
 # Needs both schemas, so it runs after the first right chunk and before the
 # first output chunk.
-function checknames(cfg::JoinConfig, c::DataFrame, rvaluenames)
+function checknames(@nospecialize(cfg::JoinConfig), c::DataFrame, rvaluenames)
     seen = Set{Symbol}()
     function check(n)
         n in seen && throw(duplicateoutput(cfg.op, n))
@@ -343,7 +350,7 @@ duplicateoutput(op::String, n::Symbol) = ArgumentError("$op output column \
     $(repr(n)) appears more than once; use `leftprefix`/`rightprefix` to \
     disambiguate")
 
-function assemble(cfg::JoinConfig, js::JoinState, c::DataFrame)
+function assemble(@nospecialize(cfg::JoinConfig), js::JoinState, c::DataFrame)
     rdf = DataFrame()
     for n in js.rvaluenames
         rdf[!, prefixed(cfg.rightprefix, n)] =

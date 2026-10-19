@@ -108,7 +108,7 @@ function applymodels(models::CausalPipeline; column::Symbol = :model,
     cfg = JoinConfig(Backward(), "applymodels", keycols; tolerance, strict)
     return pipetransform() do p, ctx
         js = JoinState(right, cfg, ctx)
-        return chunkmap(c -> predictchunk!(js, cfg, column, name, operation, c),
+        return chunkmap(c -> predictchunk!(js, js.cfg, column, name, operation, c),
             p.run(ctx))
     end
 end
@@ -117,8 +117,8 @@ applymodels(p::CausalPipeline, models::CausalPipeline; kwargs...) =
 
 # joinchunk!'s driver, with the prediction column in place of the right
 # table's columns.
-function predictchunk!(js::JoinState, cfg::JoinConfig, column::Symbol,
-    name::Symbol, op::Symbol, c::DataFrame)
+function predictchunk!(js::JoinState, @nospecialize(cfg::JoinConfig),
+    column::Symbol, name::Symbol, op::Symbol, c::DataFrame)
     if !js.leftchecked
         checkkeycolumns(cfg.keycols, c, cfg.op, "the left input")
         checknewcolumns(c, (name,), "applymodels")

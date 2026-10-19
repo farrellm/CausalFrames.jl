@@ -350,7 +350,11 @@ design rationale and performance constraints behind each module.
   which Julia stores inline only if every member is isbits, so a `String` or
   `Missing`-admitting right column would otherwise cost a box per left row.
   See DESIGN.md's "Representing a match"; the zero-allocation kernel tests
-  guard it
+  guard it. As in `addrollingcolumns`, the chunk step reads `cfg` through
+  `JoinState`'s abstract field and the per-chunk driver (`joinchunk!`,
+  `pullright!`, `matchchunk!`, `checknames`, `assemble`, `predictchunk!`)
+  takes it `@nospecialize`, so only `segment!`'s kernels specialize per key,
+  tolerance and direction
 - `src/lookupjoin.jl` — `lookupjoin`, the key-only join against a timeless
   in-memory table. Not a stream: the table is copied and indexed once, at
   construction, into a `LookupJoin` (a `Dict{K,Int}` of table rows plus the
