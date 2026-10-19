@@ -45,8 +45,8 @@ end
 # The outer kernel's allocations beyond its output vector.
 function barfoldalloc(states, nt, r)
     n = length(nt.time)
-    CF.foldrunning!(states, nt, n, r)
-    total = @allocated CF.foldrunning!(states, nt, n, r)
+    CF.foldrunning!(states, states, nt, n, Val(()), r)
+    total = @allocated CF.foldrunning!(states, states, nt, n, Val(()), r)
     return total - @allocated Vector{CF.valuetype(typeof(states), r)}(undef, n)
 end
 

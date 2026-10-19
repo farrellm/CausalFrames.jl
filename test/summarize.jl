@@ -494,6 +494,15 @@ time,sym,qty
     @test_throws ArgumentError load(Context(0, 9),
         readcsv(path; types = tt) |> addsummarycolumns(MinMax(:qty)) |>
         addsummarycolumns(MinMax(:qty)))
+    # checked after the key columns but before any row term runs
+    taken = readtable(DataFrame(time = [1], k = [1], qty = [1], qty_sum = [9]))
+    @test_throws ArgumentError(
+        "addsummarycolumns output column :qty_sum collides with an existing column",
+    ) load(Context(0, 9),
+        taken |> addsummarycolumns([Sum(:qty), Sum(:d => r -> error("ran"))]))
+    @test_throws ArgumentError(
+        "addsummarycolumns key column :j not found in the input",
+    ) load(Context(0, 9), taken |> addsummarycolumns(Sum(:qty); key = :j))
 end
 
 @testset "uncurried summarization forms" begin

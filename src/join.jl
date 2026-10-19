@@ -57,11 +57,10 @@ function jointransform(right::CausalPipeline, direction, op::String; key,
         it would collide with the left time column"))
     righttime !== nothing && righttime in keycols && throw(ArgumentError("$op \
         righttime $(repr(righttime)) collides with a key column"))
-    cfg = JoinConfig(keycols, Val(Tuple(keycols)), tolerance,
-        joincmp(direction, strict), direction, normprefix(leftprefix),
-        normprefix(rightprefix), righttime, op)
+    cfg = JoinConfig(direction, op, keycols; tolerance, strict, leftprefix,
+        rightprefix, righttime)
     return pipetransform() do left, ctx
-        js = JoinState(right.run(rightcontext(direction, ctx, tolerance, op)))
+        js = JoinState(right, cfg, ctx)
         return chunkmap(c -> joinchunk!(js, cfg, c), left.run(ctx))
     end
 end
@@ -92,6 +91,13 @@ struct JoinConfig{KN,Tol,C,D}
     op::String
 end
 
+JoinConfig(direction, op::String, keycols::Vector{Symbol}; tolerance = nothing,
+    strict::Bool = false, leftprefix = nothing, rightprefix = nothing,
+    righttime::Union{Nothing,Symbol} = nothing) =
+    JoinConfig(keycols, Val(Tuple(keycols)), tolerance,
+        joincmp(direction, strict), direction, normprefix(leftprefix),
+        normprefix(rightprefix), righttime, op)
+
 # Per-run state. The untyped fields are per-chunk setup; the per-row work sits
 # behind the `segment!` function barrier.
 mutable struct JoinState
@@ -109,6 +115,10 @@ mutable struct JoinState
     JoinState(rchunks) = new(PullCursor(rchunks), nothing, 1, nothing,
         nothing, nothing, nothing, Bool[], false, false, false)
 end
+
+# A run's state, over the right input run on the direction's window.
+JoinState(right::CausalPipeline, cfg::JoinConfig, ctx::Context) =
+    JoinState(right.run(rightcontext(cfg.direction, ctx, cfg.tolerance, cfg.op)))
 
 # The backward store, shared with `lastrow`: a `Dict{K,Int}` of slot numbers
 # over a `Vector{V}` of rows. A Dict of rows answers a lookup as

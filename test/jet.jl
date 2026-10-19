@@ -18,7 +18,7 @@ using JET
     JET.@test_opt CausalFrames.summaryvalues(states, outs)
 
     keynames = Val((:k,))
-    groups = CausalFrames.newgroups(states, intypes, keynames)
+    groups = CausalFrames.newgroups(keynames, states, intypes)
     JET.@test_opt CausalFrames.foldgroups!(groups, states, nt, keynames)
 
     # Keys over `missing`-admitting columns: built in the table's key type and
@@ -27,18 +27,25 @@ using JET
     unt = (time = [1, 1, 2], k = Union{Missing,String}["a", missing, "a"],
         j = Union{Missing,Int}[1, 2, missing], x = [1.0, 2.0, 3.0])
     untypes = map(eltype, unt)
-    ugroups = CausalFrames.newgroups(states, untypes, unames)
+    ugroups = CausalFrames.newgroups(unames, states, untypes)
     JET.@test_opt CausalFrames.sortedgroups(ugroups)
     # On Julia 1.10, Base's NamedTuple `hash` dispatches from two `Union`
     # fields (issue #116), so the fold is checked over one key column there.
     # When 1.10 support is dropped, check both columns on every version.
     fnames = VERSION < v"1.11" ? Val((:k,)) : unames
-    fgroups = CausalFrames.newgroups(states, untypes, fnames)
+    fgroups = CausalFrames.newgroups(fnames, states, untypes)
     JET.@test_opt CausalFrames.foldgroups!(fgroups, states, unt, fnames)
 
-    JET.@test_opt CausalFrames.foldcycles!(states, nt, nothing, outs)
+    JET.@test_opt CausalFrames.foldgroups!(states, states, nt, Val(()))
+    JET.@test_opt CausalFrames.foldcycles!(states, states, nt, nothing, Val(()),
+        protos, outs)
+    JET.@test_opt CausalFrames.foldcycles!(groups, states, nt, nothing, keynames,
+        protos, outs)
+    JET.@test_opt CausalFrames.flushcycle(states, states, 1, Val(()), protos, outs)
+    JET.@test_opt CausalFrames.flushcycle(groups, states, 1, keynames, protos, outs)
     JET.@test_opt CausalFrames.freshall!(states)
-    JET.@test_opt CausalFrames.foldrunning!(states, nt, 3, outs)
+    JET.@test_opt CausalFrames.foldrunning!(states, states, nt, 3, Val(()), outs)
+    JET.@test_opt CausalFrames.foldrunning!(groups, states, nt, 3, keynames, outs)
 end
 
 @testset "wide rows" begin
@@ -201,32 +208,35 @@ end
     nt = (time = [1, 3, 6], k = [1, 2, 1], x = [1.0, 2.0, 3.0])
     bounds = [0, 5, 10]
 
-    JET.@test_opt CausalFrames.foldintervals!(states, protos, nt,
-        bounds, 2, false, true, outs)
-    JET.@test_opt CausalFrames.flushintervals!(states, protos, bounds,
-        2, false, 10, true, outs)
+    # the keyless grid: the dense kernels over the empty key
+    nks = CausalFrames.nokeyset("intervalize")
+    ndg = CausalFrames.newgroups(nks, states, intypes)
+    JET.@test_opt CausalFrames.foldintervals!(ndg, states, nt, bounds, 2, nks,
+        true, protos, outs)
+    JET.@test_opt CausalFrames.flushintervals!(ndg, states, bounds, 2, 10, nks,
+        true, protos, outs)
 
     keynames = Val((:k,))
-    groups = CausalFrames.newgroups(states, intypes, keynames)
-    JET.@test_opt CausalFrames.foldintervalsgrouped!(groups, states, nt, bounds,
-        2, keynames, true, outs)
-    RT = CausalFrames.rowtype(Int, keytype(groups), valtype(groups), outs)
-    JET.@test_opt CausalFrames.flushintervalsgrouped!(groups, bounds, 2, RT, 10,
-        true, outs)
+    groups = CausalFrames.newgroups(keynames, states, intypes)
+    JET.@test_opt CausalFrames.foldintervals!(groups, states, nt, bounds, 2,
+        keynames, true, protos, outs)
+    JET.@test_opt CausalFrames.flushintervals!(groups, states, bounds, 2, 10,
+        keynames, true, protos, outs)
 
     # the declared-key (dense) kernels, shared with summarizecycles; the keyset
     # is declared Float64 against the Int key column, so the slot lookup crosses
     # key types as a real declaration may
     ks = CausalFrames.tokeyset([2.0, 1.0], [:k], "intervalize")
-    dg = CausalFrames.densegroups(states, 2)
+    dg = CausalFrames.newgroups(ks, states, intypes)
+    JET.@test_opt CausalFrames.foldintervals!(dg, states, nt, bounds, 2, ks,
+        true, protos, outs)
+    JET.@test_opt CausalFrames.flushintervals!(dg, states, bounds, 2, 10, ks,
+        true, protos, outs)
     DRT, emptyrow = CausalFrames.densetypes(Int, states, protos, ks, outs)
-    JET.@test_opt CausalFrames.foldintervalsdense!(DRT[], dg, ks, nt, bounds, 2,
-        keynames, true, outs, emptyrow)
-    JET.@test_opt CausalFrames.flushintervalsdense!(DRT[], dg, ks, bounds, 2, 10,
-        true, outs, emptyrow)
     JET.@test_opt CausalFrames.closedense!(DRT[], dg, ks, 5, outs, emptyrow)
-    JET.@test_opt CausalFrames.foldcyclesdense!(DRT[], dg, ks, nt, nothing,
-        keynames, outs, emptyrow)
+    JET.@test_opt CausalFrames.foldcycles!(dg, states, nt, nothing, ks, protos,
+        outs)
+    JET.@test_opt CausalFrames.flushcycle(dg, states, 1, ks, protos, outs)
 end
 
 @testset "asofjoin kernel" begin
@@ -331,23 +341,22 @@ end
     ticks = [0, 5, 10]
     declared = CausalFrames.tokeyset(["b", "a"], [:k], "summarizewindows")
     for ss in JETTIERSETS,
-        (kc, grid, ks) in (([:k], Val(false), nothing),
-            (Symbol[], Val(true), nothing), ([:k], Val(false), declared))
+        (kc, ks) in (([:k], nothing),
+            (Symbol[], CausalFrames.nokeyset("summarizewindows")), ([:k], declared))
 
         protos, requested = CausalFrames.prototypes(
             CausalFrames.tosummarizers(ss), kc)
         outs = Val(requested)
         kn = Val(Tuple(kc))
-        cfg = CausalFrames.WindowConfig(kc, kn, 5, protos, outs, grid, ks, (;),
-            nothing)
+        cfg = CausalFrames.WindowConfig(kc, kn, 5, protos, outs, ks, (;), nothing)
         st = CausalFrames.WindowState{Int}(
             CausalFrames.IntervalCursor{Int}(clock(5).run(Context(0, 10))))
         CausalFrames.preparewindows!(st, cfg, types)
         RT, emptyrow = CausalFrames.windowtypes(st, cfg)
         JET.@test_opt CausalFrames.windowrows!(RT[], st.tiers, 1, nt, ticks,
-            st.prevkeys, 5, kn, outs, emptyrow, grid, ks)
+            st.prevkeys, 5, kn, outs, emptyrow, ks)
         JET.@test_opt CausalFrames.flushwindows!(RT[], st.tiers, 1, ticks,
-            st.prevkeys, 5, kn, outs, emptyrow, grid, ks)
+            st.prevkeys, 5, kn, outs, emptyrow, ks)
     end
 end
 
@@ -479,7 +488,7 @@ end
     nt = (time = [1, 2, 3, 4], x = [1.0, 2.0, 3.0, 4.0])
     JET.@test_opt CausalFrames.foldall!(states, nt)
     JET.@test_opt CausalFrames.summaryvalues(states, outs)
-    JET.@test_opt CausalFrames.foldrunning!(states, nt, 4, outs)
+    JET.@test_opt CausalFrames.foldrunning!(states, states, nt, 4, Val(()), outs)
     # with the window's row term hoisted to the transform
     protos, requested, terms = CausalFrames.prototypes(
         CausalFrames.tosummarizers([LastN(Covariance(:x, :range => rangeterm), 3)]),
@@ -490,5 +499,5 @@ end
     states = CausalFrames.newstates(protos, CausalFrames.chunktypes(tnt))
     JET.@test_opt CausalFrames.foldall!(states, tnt)
     JET.@test_opt CausalFrames.summaryvalues(states, outs)
-    JET.@test_opt CausalFrames.foldrunning!(states, tnt, 2, outs)
+    JET.@test_opt CausalFrames.foldrunning!(states, states, tnt, 2, Val(()), outs)
 end

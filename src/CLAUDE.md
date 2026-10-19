@@ -277,7 +277,8 @@ design rationale and performance constraints behind each module.
   `summarizecycles` and `addsummarycolumns`; also the key validators every
   keyed transform shares, `keycolumns` (eager: unique, never `:time`) and
   `checkkeycolumns` (first chunk: present in the input, naming which input for
-  the binary transforms). `prototypes` expands dependencies topologically and
+  the binary transforms), and `checknewcolumns`, every appending transform's
+  check that its output columns are new. `prototypes` expands dependencies topologically and
   returns the requested output names, which ride through the kernels in a
   `Val` to project hidden dependencies out of the output, plus the row terms
   it unwrapped. Every summarizing transform (these three, `intervalize`,
@@ -297,7 +298,15 @@ design rationale and performance constraints behind each module.
   keys and the summarizers' `inputcolumns`) with `projectinput`, per chunk:
   an unread `Union{Missing,T}` column would box every stored row.
   Per-run state lives in `SummaryFold`, never in reassigned closure captures
-  (those get boxed).
+  (those get boxed). Its `groups` are built by the transform's `grouping`
+  (`summaryspec`; `newgroups`/`widengroups`): the state tuple itself when
+  keyless, a `GroupTable` when keyed, a `DenseGroups` over a declared
+  `KeySet`. Each fold kernel (`foldgroups!`, `foldcycles!`, `foldrunning!`,
+  `foldintervals!`, and the flushes) has a method per kind of groups its
+  transforms build (no dense `foldgroups!`/`foldrunning!`, no keyless
+  `foldintervals!`, since `nokeyset` makes that grid dense), so the
+  transforms dispatch rather than branch on the key mode, and `preparechunk!`
+  checks the key columns against the first chunk for all of them.
   The per-key states live in a `GroupTable{K,S}` (both parameters concrete,
   `K` the promoted schema's `storekeytype`, re-keyed by `widengroups` when a
   key column widens),
@@ -483,11 +492,13 @@ design rationale and performance constraints behind each module.
   over the intervals a `clock` pipeline defines (`[bₖ, bₖ₊₁)`, timestamped at
   `bₖ₊₁`). It is the `summarizecycles` fold, closing on clock boundaries.
   Keyless output is a regular grid (empty intervals get `emptyvalue`s, output
-  types promoted via the shared `promotedvaluetype`); keyed output is sparse
-  (present keys only, via `closecycle!`). The `chunkmap` over the data stream
-  pulls clock boundaries into a concrete `Vector{T}` per chunk (the pull is
-  the only dynamism; the per-row kernel stays dispatch-free), reusing
-  `SummaryFold` whole; `closelast` closes the trailing partial at `stop`
+  types promoted via the shared `promotedvaluetype`), run as the declared-key
+  path over `nokeyset`, the one empty key, whose lookups compile away; keyed
+  output is sparse (present keys only, via `closecycle!`). The `chunkmap` over
+  the data stream pulls clock boundaries into a concrete `Vector{T}` per chunk
+  (the pull is the only dynamism; the per-row kernel stays dispatch-free),
+  reusing `SummaryFold` whole; `closelast` closes the trailing partial at
+  `stop`
 - `src/windows.jl` — `summarizewindows`, the clock-sampled trailing window
   (`[τ - lookback, τ)` at each tick): `intervalize`'s driver (`chunks.jl`'s `IntervalCursor`
   and `pullpast!`, a concrete tick vector per chunk) over `addrollingcolumns`'
@@ -504,9 +515,11 @@ design rationale and performance constraints behind each module.
   a per-key as-of consumer (`applymodels`) from using a stale summary. A
   declared `keyset` rides in `WindowConfig`'s type (`Nothing` otherwise) and
   replaces the sort and vanish merge with `emitdense!`, a lookup per declared
-  key per tick. The declaration is checked where the primary tier makes a
-  group or tree (a key's first row); a refold primary groups only at ticks, so
-  it checks on admission instead
+  key per tick; keyless output is `emitdense!` over `nokeyset`, as in
+  `intervalize`, and `admissionkeys` skips its admission check. The
+  declaration is checked where the primary tier makes a group or tree (a key's
+  first row); a refold primary groups only at ticks, so it checks on admission
+  instead
 - `src/models.jl` — the MLJ operators (`applymodels`, `addpredictions`,
   `modelreports`) and the five hooks the extension implements (`ismodel`,
   `fitmodel`, `predictmodel`, `savefitresult`, `restorefitresult`). It names no
