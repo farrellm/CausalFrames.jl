@@ -233,6 +233,25 @@ overlapping, 8 fewer allocations per run. `lookup-drop` read 1.04 (1.06 in a
 first 4-round run) although `lookupjoin` was untouched, which is this
 machine's noise at that size.
 
+## `forwardfill`
+
+`lastrow`'s shape before its change: the closure captured `Val(keynames)` and
+`tolerance`, so `fillchunk!` and the iterator compiled once per key and
+tolerance type. Both move into `ForwardFillState` as abstract fields.
+`fillprepared!` was already reached by a dispatch per chunk (on
+`st.fillval`), so the kernels see the same concrete types.
+
+| | Harness, 6 fresh `forwardfill` calls (two runs each) |
+|---|---|
+| Before | 2.27–2.30 s |
+| After | 1.54–1.55 s |
+
+The outputs are identical. `test/fill.jl` on its own, alternating: 7.4–7.5 s
+before, 7.0–7.1 s after. There is no `forwardfill` benchmark; over 1M rows,
+three alternating runs each, minimums 9.12 ms against 9.24 ms keyless and
+28.68 ms against 28.07 ms keyed (two filled columns, `tolerance = 10`), with 6
+fewer allocations.
+
 ## Per-file timings, before and after
 
 Each test file's `include` timed with `@timed` over a whole run of

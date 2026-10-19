@@ -404,7 +404,9 @@ design rationale and performance constraints behind each module.
   promoted type admits no `Missing` gets `nothing` instead of a replacement
   column, which folds the write out of the unrolled kernel. `tolerance` widens
   the input context as `asofjoin` does, so `warmup`'s `dropleadin!` drops the pre-`start`
-  rows the fill was allowed to see
+  rows the fill was allowed to see. As in `lastrow`, the key names (and the
+  tolerance) reach the kernels through `ForwardFillState`'s abstract fields,
+  so the chunk iterator and driver compile once for every key
 - `src/ring.jl` — `RowRing`, the package's one ring buffer: preallocated,
   overwriting its oldest row when full, with `ringback(r, j)` reading the j-th
   newest. A caller that downdates the row leaving sizes it one past its window
