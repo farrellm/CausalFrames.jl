@@ -140,7 +140,8 @@ function prototypes(
     visiting = Tuple{Vararg{Symbol}}[]  # walk in progress: cycle guard
     used = Set{Symbol}()
     terms = Pair{Symbol,Any}[]
-    function expand(t::Summarizer)
+    # Unspecialized: it runs once per summarizer, at construction.
+    function expand(@nospecialize(t::Summarizer))
         s = unterm(t)
         # the constructor's terms, then the summarizer's own hook (the same
         # terms again when `t` is unwrapped, which `addterm!` skips)
@@ -154,7 +155,9 @@ function prototypes(
                 "$op: summarizer dependency cycle through $(repr(first(outnames)))"),
         )
         push!(visiting, outnames)          # a stack: the walk is depth-first
-        foreach(expand, dependencies(s))
+        for d in dependencies(s)
+            expand(d)
+        end
         pop!(visiting)
         for n in outnames
             n in used && throw(
@@ -668,7 +671,32 @@ function summaryspec(summarizers, key, op::String; keyset = nothing,
 end
 
 # A chunk of output rows, or nothing when there are none.
-rowsframe(rows::AbstractVector) = isempty(rows) ? nothing : DataFrame(rows)
+rowsframe(rows::AbstractVector) = isempty(rows) ? nothing : rowsdataframe(rows)
+
+# Rows as a DataFrame of fresh columns. Concretely typed rows are unzipped by
+# generated code and handed to DataFrames' vector-of-columns constructor, which
+# compiles once, where `DataFrame(rows)` compiles Tables.jl's row-to-column
+# path per row type.
+rowsdataframe(rows::AbstractVector) = DataFrame(rows)
+@generated function rowsdataframe(rows::AbstractVector{NamedTuple{N,T}}) where {N,T}
+    (isempty(N) || !isconcretetype(NamedTuple{N,T})) && return :(DataFrame(rows))
+    names = Expr(:ref, :Symbol, map(QuoteNode, N)...)
+    return :(DataFrame(unzipcolumns(rows), $names; copycols = false))
+end
+
+@generated function unzipcolumns(rows::AbstractVector{NamedTuple{N,T}}) where {N,T}
+    cols = [Symbol(:col, j) for j in eachindex(N)]
+    allocs = [:($(cols[j]) = Vector{$(fieldtype(T, j))}(undef, n)) for j in eachindex(N)]
+    sets = [:(@inbounds $(cols[j])[i] = getfield(r, $j)) for j in eachindex(N)]
+    return quote
+        n = length(rows)
+        $(allocs...)
+        for (i, r) in enumerate(rows)
+            $(sets...)
+        end
+        return AbstractVector[$(cols...)]
+    end
+end
 
 # The grid of empty values for no data: a row per time per declared key, the
 # empty key for a keyless grid.
@@ -795,7 +823,7 @@ function addsummarycolumns(summarizers; key = nothing)
             nt = preparechunk!(fold, protos, grouping, c, requested)
             vals = foldrunning!(fold.groups, fold.stateprotos, nt, nrow(c),
                 grouping, outs)
-            return hcat(c, DataFrame(vals); copycols = false)
+            return hcat(c, rowsdataframe(vals); copycols = false)
         end
         return chunkmap(step, p.run(ctx))
     end

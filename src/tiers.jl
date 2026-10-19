@@ -54,9 +54,19 @@ function tiering(protos::Tuple, intypes::NamedTuple)
     end
     counts = zeros(Int, length(TIERNAMES))
     perm = map(c -> (c, counts[c] += 1), codes)
-    pick(c, src) = Tuple(src[i] for i in eachindex(codes) if codes[i] == c)
-    return Tiering(pick(RUNNINGTIER, windowed), pick(TREETIER, states),
-        pick(REFOLDTIER, states), pick(DERIVEDTIER, states), Val(perm))
+    return tiered(Val(perm), windowed, states)
+end
+
+# The barrier past the runtime permutation: with it a constant, each tier's
+# templates are picked by `tierpick` without inferring a growing tuple.
+tiered(perm::Val, windowed::Tuple, states::Tuple) =
+    Tiering(tierpick(perm, Val(RUNNINGTIER), windowed),
+        tierpick(perm, Val(TREETIER), states), tierpick(perm, Val(REFOLDTIER), states),
+        tierpick(perm, Val(DERIVEDTIER), states), perm)
+
+# The elements of `src` whose tier is `C`, in topological order.
+@generated function tierpick(::Val{P}, ::Val{C}, src::Tuple) where {P,C}
+    return Expr(:tuple, (:(getfield(src, $i)) for i in eachindex(P) if P[i][1] == C)...)
 end
 
 # Each state's tier, in topological order: `barwindow` refuses a refold tier

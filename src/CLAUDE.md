@@ -278,7 +278,11 @@ design rationale and performance constraints behind each module.
   keyed transform shares, `keycolumns` (eager: unique, never `:time`) and
   `checkkeycolumns` (first chunk: present in the input, naming which input for
   the binary transforms), and `checknewcolumns`, every appending transform's
-  check that its output columns are new. `prototypes` expands dependencies topologically and
+  check that its output columns are new; and `rowsdataframe`, every
+  summarizing transform's (and `addcolumns`') rows-to-frame step, generated
+  per row type over DataFrames' vector-of-columns constructor, which compiles
+  once where `DataFrame(rows)` compiles Tables.jl's path per row type (and is
+  faster). `prototypes` expands dependencies topologically and
   returns the requested output names, which ride through the kernels in a
   `Val` to project hidden dependencies out of the output, plus the row terms
   it unwrapped. Every summarizing transform (these three, `intervalize`,
@@ -408,7 +412,9 @@ design rationale and performance constraints behind each module.
   appends rather than amortizing away
 - `src/tiers.jl` — the per-accumulator window tiers shared by
   `addrollingcolumns` and `summarizewindows`. `tiering` partitions the realized
-  states once per run and per widening: running (a group whose `freshwindowed`
+  states once per run and per widening (each tier's templates picked by the
+  generated `tierpick` past a `Val` of the permutation: a tuple generator there
+  compiled a widening `grow_to!` chain per state type): running (a group whose `freshwindowed`
   state is `isinvertible`), tree (another monoid), refold (anything else), and
   no tier for a singleton-typed (fieldless, dependent) state, unless every
   state is one, when they keep their structural tier so something tracks
@@ -457,7 +463,15 @@ design rationale and performance constraints behind each module.
   lead-in at full input width. `afterleadin`'s `LeadInGate` keeps abstract
   fields on purpose: a wrapper capturing its input's iterator type nests every
   earlier stage's type in a chain's, and `chain8-keyed` then took inference
-  over five minutes to compile, against 8 s erased. `sharedrun = false` keeps
+  over five minutes to compile, against 8 s erased. The chunk step reads
+  `cfg` back through the gate, and the per-chunk driver (`rollchunk!`,
+  `pullsummarized!`, `setvaltype!`, `admitleadin!`, `assemble`,
+  `assembleempty`) takes it `@nospecialize`, so the iterator and the driver
+  compile once for every summarizer set; only the kernels and `rolltiers`'
+  typed half (past the schema's type values) specialize. The kernels' inlining
+  is load-bearing: a `@noinline` barrier around `emitroll!`'s `summaryvalues`
+  saved 5% of their compile time and cost the refold benchmark 12% at runtime
+  (`notes/compile-time.md`). `sharedrun = false` keeps
   the second run over `ctx` when a time look-back widens the context. One
   kernel, `rollsegment!`, over a `RollTiers` (a shared row buffer with
   per-window eviction heads, per-window running tables, per-key trees owning

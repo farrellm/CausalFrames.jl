@@ -81,7 +81,7 @@ function addchunk(f, c::DataFrame)
         "addcolumns function may not return a time column"))
     checknewcolumns(c, keys(first(vals)), "addcolumns")
     # The chunk is owned, so its columns can be adopted rather than copied.
-    return hcat(c, DataFrame(vals); copycols = false)
+    return hcat(c, rowsdataframe(vals); copycols = false)
 end
 
 # Function barrier: over concretely typed rows the comprehension infers a
