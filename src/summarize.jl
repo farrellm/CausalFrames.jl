@@ -679,10 +679,9 @@ function summaryspec(summarizers, key, op::String; keyset = nothing,
     keynames = Val(Tuple(keycols))
     ks = tokeyset(keyset, keycols, op)   # a keyless `keyset` is an error
     grid && !keyed && (ks = nokeyset(op))
-    grouping = something(ks, keynames)
     outs = Val(requested)
-    return (; keycols, protos, requested, terms, ks, keynames, grouping, outs,
-        cfg = FoldConfig(protos, grouping, outs))
+    return (; keycols, protos, requested, terms, ks, keynames, outs,
+        cfg = FoldConfig(protos, something(ks, keynames), outs))
 end
 
 # A chunk of output rows, or nothing when there are none.
