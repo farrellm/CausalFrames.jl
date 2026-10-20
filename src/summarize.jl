@@ -670,7 +670,7 @@ end
 # their requested output names and row terms, and the names as the kernels'
 # `Val`s. A `grid` transform's keyless output is dense over `nokeyset`. The
 # `grouping` is what the fold's groups are built by (`newgroups`): the declared
-# key set if any, else the key names.
+# key set if any, else the key names. `cfg` bundles what a `SummaryFold` reads.
 function summaryspec(summarizers, key, op::String; keyset = nothing,
     grid::Bool = false)
     keycols = keycolumns(key, op)
@@ -679,8 +679,10 @@ function summaryspec(summarizers, key, op::String; keyset = nothing,
     keynames = Val(Tuple(keycols))
     ks = tokeyset(keyset, keycols, op)   # a keyless `keyset` is an error
     grid && !keyed && (ks = nokeyset(op))
-    return (; keycols, protos, requested, terms, ks, keynames,
-        grouping = something(ks, keynames), outs = Val(requested))
+    grouping = something(ks, keynames)
+    outs = Val(requested)
+    return (; keycols, protos, requested, terms, ks, keynames, grouping, outs,
+        cfg = FoldConfig(protos, grouping, outs))
 end
 
 # A chunk of output rows, or nothing when there are none.
@@ -736,9 +738,7 @@ A transform summarizing the whole window, emitted at `stop`, with columns
   and nothing for an empty input.
 """
 function summarize(summarizers; key = nothing)
-    (; keycols, protos, terms, grouping, outs) =
-        summaryspec(summarizers, key, "summarize")
-    cfg = FoldConfig(protos, grouping, outs)
+    (; keycols, terms, cfg) = summaryspec(summarizers, key, "summarize")
     return pipetransform() do p, ctx
         fold = SummaryFold(cfg, keycols, terms, "summarize")
         return chunkmap(c -> summarizechunk!(fold, c), p.run(ctx);
@@ -791,9 +791,8 @@ then the summaries; the input columns are dropped.
   without rows.
 """
 function summarizecycles(summarizers; key = nothing, keyset = nothing)
-    (; keycols, protos, terms, grouping, outs) =
+    (; keycols, terms, cfg) =
         summaryspec(summarizers, key, "summarizecycles"; keyset)
-    cfg = FoldConfig(protos, grouping, outs)
     return pipetransform() do p, ctx
         fold = SummaryFold(cfg, keycols, terms, "summarizecycles")
         return chunkmap(c -> cyclechunk!(fold, c), p.run(ctx);
@@ -837,9 +836,8 @@ so far, itself included.
   [`Count`](@ref) numbers the rows of each key.
 """
 function addsummarycolumns(summarizers; key = nothing)
-    (; keycols, protos, requested, terms, grouping, outs) =
+    (; keycols, requested, terms, cfg) =
         summaryspec(summarizers, key, "addsummarycolumns")
-    cfg = FoldConfig(protos, grouping, outs)
     return pipetransform() do p, ctx
         # hidden dependencies are never added, so only the requested outputs
         # are checked as new columns

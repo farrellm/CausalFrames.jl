@@ -174,8 +174,8 @@ allocations 1–6 fewer per run.
 ## `addsummarycolumns`
 
 The same erasure through `FoldRun`, with `runningchunk!` the driver. The
-output names `preparechunk!` checks as new columns are read back from
-`cfg.outs`, so `FoldConfig` needs no extra field.
+output names `preparechunk!` checks as new columns now sit in `SummaryFold`'s
+`newcols` field (empty for the other transforms), not in `FoldConfig`.
 
 | | Harness, 6 fresh `addsummarycolumns` calls (three runs each) |
 |---|---|
