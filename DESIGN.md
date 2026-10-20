@@ -1570,7 +1570,7 @@ claims is written the same instant, so the store is never half-filled and a
 widening (the join's own `widenstore`) is a plain `convert(Vector{V}, slots)`
 rather than `convertmatches`, rebuilding only the dict's keys since slot
 numbers don't move. Because the store is one concretely typed
-vector, the flush builds the output through a `DataFrame(rows)` over it directly:
+vector, the flush builds the output through `rowsdataframe` over it directly:
 no `vcat` of per-key frames, and so no `cols = :union` question and no promotion
 pass. Element types may drift chunk to chunk, as everywhere else, and the store
 tracks the promotion; column *names* may not, because the row type is fixed by

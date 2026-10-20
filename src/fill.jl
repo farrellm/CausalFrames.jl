@@ -57,13 +57,14 @@ DataFrame(load(Context(t0, t0 + Hour(1)), p))
 function forwardfill(selectors...; key = nothing, tolerance = nothing)
     checkselectors(selectors, "forwardfill", false)
     keycols = keycolumns(key, "forwardfill")
-    keynames = Val(Tuple(keycols))
     return pipetransform() do p, ctx
-        st = ForwardFillState(keycols, selectors)
+        st = ForwardFillState(keycols, selectors, tolerance)
         # With `tolerance` the input runs over a widened context: rows
         # before `ctx.start` fill the cells and are then dropped.
         drop = LeadInDrop(ctx.start)
-        step = c -> dropleadin!(drop, fillchunk!(st, keynames, tolerance, c))
+        # The key names and tolerance reach the kernels through `st`, erased,
+        # so the iterator's type and the driver are the same for every key.
+        step = c -> dropleadin!(drop, fillchunk!(st, c))
         return chunkmap(
             step,
             p.run(widenstart(ctx, tolerance, "forwardfill tolerance")),
@@ -90,22 +91,24 @@ end
 mutable struct ForwardFillState
     const keycols::Vector{Symbol}
     const selectors::Tuple
+    const keynames::Val   # Val(Tuple(keycols)), abstract: a dispatch per chunk
+    const tolerance::Any  # a dispatch per chunk
     lastnames::Union{Nothing,Vector{String}}  # names the fill set was resolved from
     fillnames::Union{Nothing,Vector{Symbol}}  # the columns being filled
     fillval::Any     # Val{Tuple(fillnames)}, memoized alongside it
     types::Union{Nothing,NamedTuple}          # promotion of every schema seen
     cells::Any       # keyless: the NamedTuple of cells; keyed: Dict{K,NT} of them
 end
-ForwardFillState(keycols::Vector{Symbol}, selectors::Tuple) =
-    ForwardFillState(keycols, selectors, nothing, nothing, nothing, nothing,
-        nothing)
+ForwardFillState(keycols::Vector{Symbol}, selectors::Tuple, tolerance) =
+    ForwardFillState(keycols, selectors, Val(Tuple(keycols)), tolerance,
+        nothing, nothing, nothing, nothing, nothing)
 
-function fillchunk!(st::ForwardFillState, keynames::Val, tolerance, c::DataFrame)
+function fillchunk!(st::ForwardFillState, c::DataFrame)
     resolvefill!(st, c)
     types = promotetypes(st.types, chunktypes(c))
     widened = st.types !== nothing && types != st.types
     st.types = types
-    fillprepared!(st, keynames, st.fillval, tolerance, types, widened, c)
+    fillprepared!(st, st.keynames, st.fillval, st.tolerance, types, widened, c)
     return c
 end
 

@@ -350,7 +350,7 @@ end
         kn = Val(Tuple(kc))
         cfg = CausalFrames.WindowConfig(kc, kn, 5, protos, outs, ks, (;), nothing)
         st = CausalFrames.WindowState{Int}(
-            CausalFrames.IntervalCursor{Int}(clock(5).run(Context(0, 10))))
+            CausalFrames.IntervalCursor{Int}(clock(5).run(Context(0, 10))), cfg)
         CausalFrames.preparewindows!(st, cfg, types)
         RT, emptyrow = CausalFrames.windowtypes(st, cfg)
         JET.@test_opt CausalFrames.windowrows!(RT[], st.tiers, 1, nt, ticks,

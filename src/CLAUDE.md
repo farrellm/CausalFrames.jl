@@ -278,7 +278,11 @@ design rationale and performance constraints behind each module.
   keyed transform shares, `keycolumns` (eager: unique, never `:time`) and
   `checkkeycolumns` (first chunk: present in the input, naming which input for
   the binary transforms), and `checknewcolumns`, every appending transform's
-  check that its output columns are new. `prototypes` expands dependencies topologically and
+  check that its output columns are new; and `rowsdataframe`, every
+  summarizing transform's (and `addcolumns`') rows-to-frame step, generated
+  per row type over DataFrames' vector-of-columns constructor, which compiles
+  once where `DataFrame(rows)` compiles Tables.jl's path per row type (and is
+  faster). `prototypes` expands dependencies topologically and
   returns the requested output names, which ride through the kernels in a
   `Val` to project hidden dependencies out of the output, plus the row terms
   it unwrapped. Every summarizing transform (these three, `intervalize`,
@@ -306,7 +310,14 @@ design rationale and performance constraints behind each module.
   transforms build (no dense `foldgroups!`/`foldrunning!`, no keyless
   `foldintervals!`, since `nokeyset` makes that grid dense), so the
   transforms dispatch rather than branch on the key mode, and `preparechunk!`
-  checks the key columns against the first chunk for all of them.
+  checks the key columns against the first chunk for all of them. The
+  transform's `FoldConfig` (`protos`, `grouping`, `outs`) sits in
+  `SummaryFold`'s abstract `cfg` field, so `preparechunk!` and every chunk step
+  and flush (`summarizechunk!`, `summarizeflush`, `cyclechunk!`, `cycleflush`,
+  `runningchunk!`, intervalize's) read it untyped and reach the kernels by a
+  dispatch per chunk: the chunk iterators and drivers compile once, and only
+  the kernels (and `sortedrows`, `summarize`'s keyed emission) specialize per
+  summarizer set.
   The per-key states live in a `GroupTable{K,S}` (both parameters concrete,
   `K` the promoted schema's `storekeytype`, re-keyed by `widengroups` when a
   key column widens),
@@ -339,7 +350,11 @@ design rationale and performance constraints behind each module.
   which Julia stores inline only if every member is isbits, so a `String` or
   `Missing`-admitting right column would otherwise cost a box per left row.
   See DESIGN.md's "Representing a match"; the zero-allocation kernel tests
-  guard it
+  guard it. As in `addrollingcolumns`, the chunk step reads `cfg` through
+  `JoinState`'s abstract field and the per-chunk driver (`joinchunk!`,
+  `pullright!`, `matchchunk!`, `checknames`, `assemble`, `predictchunk!`)
+  takes it `@nospecialize`, so only `segment!`'s kernels specialize per key,
+  tolerance and direction
 - `src/lookupjoin.jl` — `lookupjoin`, the key-only join against a timeless
   in-memory table. Not a stream: the table is copied and indexed once, at
   construction, into a `LookupJoin` (a `Dict{K,Int}` of table rows plus the
@@ -360,7 +375,10 @@ design rationale and performance constraints behind each module.
   instant it is claimed, so widening is a plain `convert`), and the keyless
   path skips the store: only the chunk's last row matters, so it costs nothing
   per row. The output schema is the input's exactly, `:time` overwritten with
-  `stop` via `merge`, which keeps the column position
+  `stop` via `merge`, which keeps the column position. The key names reach
+  `storekeytype` and `lastsegment!` through `LastRowState`'s abstract
+  `keynames` field, so the chunk iterator and driver compile once for every
+  key; the flush builds its frame with `rowsdataframe`
 - `src/sortcycles.jl` — `sortcycles`, the within-timestamp stable sort. A
   `chunkmap` whose only state is the open cycle, held as a `Vector{DataFrame}`
   of pieces and concatenated once when a later time (or flush) closes it, so a
@@ -386,7 +404,9 @@ design rationale and performance constraints behind each module.
   promoted type admits no `Missing` gets `nothing` instead of a replacement
   column, which folds the write out of the unrolled kernel. `tolerance` widens
   the input context as `asofjoin` does, so `warmup`'s `dropleadin!` drops the pre-`start`
-  rows the fill was allowed to see
+  rows the fill was allowed to see. As in `lastrow`, the key names (and the
+  tolerance) reach the kernels through `ForwardFillState`'s abstract fields,
+  so the chunk iterator and driver compile once for every key
 - `src/ring.jl` — `RowRing`, the package's one ring buffer: preallocated,
   overwriting its oldest row when full, with `ringback(r, j)` reading the j-th
   newest. A caller that downdates the row leaving sizes it one past its window
@@ -408,7 +428,9 @@ design rationale and performance constraints behind each module.
   appends rather than amortizing away
 - `src/tiers.jl` — the per-accumulator window tiers shared by
   `addrollingcolumns` and `summarizewindows`. `tiering` partitions the realized
-  states once per run and per widening: running (a group whose `freshwindowed`
+  states once per run and per widening (each tier's templates picked by the
+  generated `tierpick` past a `Val` of the permutation: a tuple generator there
+  compiled a widening `grow_to!` chain per state type): running (a group whose `freshwindowed`
   state is `isinvertible`), tree (another monoid), refold (anything else), and
   no tier for a singleton-typed (fieldless, dependent) state, unless every
   state is one, when they keep their structural tier so something tracks
@@ -429,6 +451,9 @@ design rationale and performance constraints behind each module.
   types inferred from `intypes`), the other monoids sit in `BarQueue`, a
   preallocated two-stack queue (measured 3-13x faster than a segment tree and
   flat in `n`; DESIGN.md has the table), and a plain summarizer is rejected.
+  `newbarwindow` builds it unspecialized (its type is decided at runtime
+  anyway), once per state and per widening; a key's new state is `fresh(st)`,
+  a copy.
   A stored row is cut to `:time`, the terms and the columns `readcolumns`
   names, hoisted or not. It must not call the transforms' tuple folds
   (`updateall!`, `freshall!`, `summaryvalues`, `combinenodes!`): it runs inside an outer state's
@@ -457,7 +482,15 @@ design rationale and performance constraints behind each module.
   lead-in at full input width. `afterleadin`'s `LeadInGate` keeps abstract
   fields on purpose: a wrapper capturing its input's iterator type nests every
   earlier stage's type in a chain's, and `chain8-keyed` then took inference
-  over five minutes to compile, against 8 s erased. `sharedrun = false` keeps
+  over five minutes to compile, against 8 s erased. The chunk step reads
+  `cfg` back through the gate, and the per-chunk driver (`rollchunk!`,
+  `pullsummarized!`, `setvaltype!`, `admitleadin!`, `assemble`,
+  `assembleempty`) takes it `@nospecialize`, so the iterator and the driver
+  compile once for every summarizer set; only the kernels and `rolltiers`'
+  typed half (past the schema's type values) specialize. The kernels' inlining
+  is load-bearing: a `@noinline` barrier around `emitroll!`'s `summaryvalues`
+  saved 5% of their compile time and cost the refold benchmark 12% at runtime
+  (`notes/compile-time.md`). `sharedrun = false` keeps
   the second run over `ctx` when a time look-back widens the context. One
   kernel, `rollsegment!`, over a `RollTiers` (a shared row buffer with
   per-window eviction heads, per-window running tables, per-key trees owning
@@ -498,7 +531,9 @@ design rationale and performance constraints behind each module.
   the data stream pulls clock boundaries into a concrete `Vector{T}` per chunk
   (the pull is the only dynamism; the per-row kernel stays dispatch-free),
   reusing `SummaryFold` whole; `closelast` closes the trailing partial at
-  `stop`
+  `stop`. The chunk step and flush read the config through the
+  `SummaryFold`'s erased `cfg`, so only the kernels specialize per summarizer
+  set
 - `src/windows.jl` — `summarizewindows`, the clock-sampled trailing window
   (`[τ - lookback, τ)` at each tick): `intervalize`'s driver (`chunks.jl`'s `IntervalCursor`
   and `pullpast!`, a concrete tick vector per chunk) over `addrollingcolumns`'
@@ -519,7 +554,9 @@ design rationale and performance constraints behind each module.
   `intervalize`, and `admissionkeys` skips its admission check. The
   declaration is checked where the primary tier makes a group or tree (a key's
   first row); a refold primary groups only at ticks, so it checks on admission
-  instead
+  instead. As in `addrollingcolumns`, the chunk step and flush read `cfg`
+  through `WindowState`'s abstract field and the per-chunk driver takes it
+  `@nospecialize`, so only the kernels specialize per summarizer set
 - `src/models.jl` — the MLJ operators (`applymodels`, `addpredictions`,
   `modelreports`) and the five hooks the extension implements (`ismodel`,
   `fitmodel`, `predictmodel`, `savefitresult`, `restorefitresult`). It names no

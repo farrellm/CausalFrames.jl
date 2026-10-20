@@ -40,17 +40,14 @@ Empty values widen the output types (`Mean` gives `Union{Missing, Float64}`).
 """
 function intervalize(clk::CausalPipeline, summarizers; key = nothing,
     keyset = nothing, closelast::Bool = false)
-    (; keycols, protos, terms, grouping, outs) =
+    (; keycols, terms, cfg) =
         summaryspec(summarizers, key, "intervalize"; keyset, grid = true)
     return pipetransform() do p, ctx
         T = timetype(ctx)
         st = IntervalizeState{T}(IntervalCursor{T}(clk.run(ctx)), T[], 2,
-            SummaryFold(keycols, terms, "intervalize"))
-        return chunkmap(
-            c -> intervalchunk!(st, protos, grouping, outs, closelast, c),
-            p.run(ctx);
-            flush = () -> intervalflush!(st, protos, grouping, ctx.stop,
-                closelast, outs))
+            SummaryFold(cfg, keycols, terms, "intervalize"), closelast)
+        return chunkmap(c -> intervalchunk!(st, c), p.run(ctx);
+            flush = () -> intervalflush!(st, ctx.stop))
     end
 end
 intervalize(p::CausalPipeline, clk::CausalPipeline, summarizers; kwargs...) =
@@ -58,18 +55,20 @@ intervalize(p::CausalPipeline, clk::CausalPipeline, summarizers; kwargs...) =
 
 # Per-run state. `bounds` holds the pulled boundaries not yet behind the
 # current interval, which ends at `bounds[bi]` and begins at `bounds[bi-1]`.
-# The SummaryFold's untyped fields are per-chunk setup; per-row work sits in
-# the fold kernels.
+# The SummaryFold's untyped fields (and its erased config) are per-chunk setup;
+# per-row work sits in the fold kernels.
 mutable struct IntervalizeState{T}
     cur::IntervalCursor{T}
     bounds::Vector{T}
     bi::Int          # index of the current interval's end in `bounds`
-    fold::SummaryFold
+    const fold::SummaryFold
+    const closelast::Bool
 end
 
-function intervalchunk!(st::IntervalizeState, protos::Tuple, grouping,
-    outs::Val, closelast::Bool, c::DataFrame)
-    nt = preparechunk!(st.fold, protos, grouping, c)
+function intervalchunk!(st::IntervalizeState, c::DataFrame)
+    (; protos, grouping, outs) = st.fold.cfg
+    closelast = st.closelast
+    nt = preparechunk!(st.fold, c)
     pullpast!(st.bounds, st.cur, last(nt.time))
     rows, st.bi = foldintervals!(st.fold.groups, st.fold.stateprotos, nt,
         st.bounds, st.bi, grouping, closelast, protos, outs)
@@ -86,8 +85,9 @@ function trimbounds!(st::IntervalizeState)
     return nothing
 end
 
-function intervalflush!(st::IntervalizeState{T}, protos::Tuple, grouping,
-    stop::T, closelast::Bool, outs::Val) where {T}
+function intervalflush!(st::IntervalizeState{T}, stop::T) where {T}
+    (; protos, grouping, outs) = st.fold.cfg
+    closelast = st.closelast
     pullpast!(st.bounds, st.cur, nothing)
     isempty(st.bounds) && return nothing           # empty clock
     if st.fold.groups === nothing

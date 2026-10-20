@@ -159,9 +159,11 @@ function addrollingcolumns(windows, summarizers; key = nothing,
     return pipetransform() do p, ctx
         summarized, augmented, leadin = rollinginputs(p, from, sharedrun,
             ctx, rollingcontext(ctx, lookbacks))
-        rs = RollingState(summarized)
-        return chunkmap(c -> rollchunk!(rs, cfg, c),
-            afterleadin(rs, cfg, augmented, leadin))
+        gate = LeadInGate(RollingState(summarized), cfg, PullCursor(augmented),
+            leadin)
+        # Through the gate, whose `cfg` is erased, so the iterator's type and
+        # the per-chunk driver are the same for every summarizer set.
+        return chunkmap(c -> rollchunk!(gate.rs, gate.cfg, c), afterleadin(gate))
     end
 end
 
@@ -184,10 +186,7 @@ end
 # The augmented chunks, pulled only once the lead-in is admitted: pulling one
 # first would have the tee queue the whole lead-in for the summarized side, at
 # full width, before the windows could drop any of it.
-function afterleadin(rs, cfg, augmented, leadin)
-    gate = LeadInGate(rs, cfg, PullCursor(augmented), leadin)
-    return ChunkSource(() -> pullafterleadin!(gate))
-end
+afterleadin(gate) = ChunkSource(() -> pullafterleadin!(gate))
 addrollingcolumns(p::CausalPipeline, windows, summarizers; kwargs...) =
     addrollingcolumns(windows, summarizers; kwargs...)(p)
 
@@ -271,10 +270,13 @@ end
 # widening always rebuilds rather than widening in place: rare, O(live), and
 # correct for every transition, including one that demotes an accumulator from
 # the running tier to the tree. Type-unstable, once per run and per widening.
-function rolltiers(tg::Tiering, types::NamedTuple, keynames::Val,
-    lookbacks::Tuple, old)
-    K = storekeytype(types, keynames)
-    R = storerowtype(types)
+rolltiers(tg::Tiering, types::NamedTuple, keynames::Val, lookbacks::Tuple, old) =
+    rolltiers(tg, storekeytype(types, keynames), storerowtype(types), types.time,
+        keynames, lookbacks, old)
+
+# The barrier past the schema's type values, so the build is inferred.
+function rolltiers(tg::Tiering, ::Type{K}, ::Type{R}, ::Type{T}, keynames::Val,
+    lookbacks::Tuple, old) where {K,R,T}
     nwindows = length(lookbacks)
     anybars = any(isbars, lookbacks)
     barcap = anybars ? maximum(lb -> isbars(lb) ? lb.n : 0, lookbacks) + 1 : 0
@@ -297,11 +299,11 @@ function rolltiers(tg::Tiering, types::NamedTuple, keynames::Val,
         ntuple(
             w -> replaywindow!(RunningTable{K,typeof(tg.running)}(), lookbacks[w],
                 buffer, buffer === nothing ? 1 : winheads[w], rings, tg.running,
-                keynames), nwindows)
+                keynames), Val(nwindows))
     trees =
         suffixes === nothing ?
-        rebuildtrees(tg, K, R, types.time, old, oldhead, keynames) :
-        suffixtrees(tg, K, R, types.time, suffixes, keynames)
+        rebuildtrees(tg, K, R, T, old, oldhead, keynames) :
+        suffixtrees(tg, K, R, T, suffixes, keynames)
     return RollTiers{R}(buffer, winheads, rings, barcap, running, trees, tg)
 end
 
@@ -382,7 +384,7 @@ end
 # tiers on the first and rebuilding them when the promoted schema changes. A
 # shared run's first chunk is the augmented input's too, and is pulled before
 # any augmented chunk, so it takes the augmented side's checks.
-function pullsummarized!(rs::RollingState, cfg::RollingConfig,
+function pullsummarized!(rs::RollingState, @nospecialize(cfg::RollingConfig),
     shared::Bool = false)
     chunk = pull!(rs.summarized)
     if chunk === nothing
@@ -412,7 +414,8 @@ end
 # Cache each window's output value type and empty row, re-typing any
 # half-filled value vectors. A time window's empty row is the empty values; a
 # Bars window's is all missing, which its type admits instead.
-function setvaltype!(rs::RollingState, cfg::RollingConfig, tg::Tiering)
+function setvaltype!(rs::RollingState, @nospecialize(cfg::RollingConfig),
+    @nospecialize(tg::Tiering))
     V = tieredvaluetype(tg, cfg.protos, cfg.outs)
     VB = missingfields(valuetype(typeof(mergedstates(tg)), cfg.outs), cfg.outs)
     empty = convert(V, emptyvalues(cfg.protos, cfg.outs))
@@ -425,7 +428,8 @@ function setvaltype!(rs::RollingState, cfg::RollingConfig, tg::Tiering)
 end
 
 # The augmented side's key and output-name checks, once per run.
-function checkaugmented!(rs::RollingState, cfg::RollingConfig, c::DataFrame)
+function checkaugmented!(rs::RollingState, @nospecialize(cfg::RollingConfig),
+    c::DataFrame)
     rs.checked && return nothing
     checkkeycolumns(cfg.keycols, c, "addrollingcolumns", "the augmented input")
     checknewcolumns(c, cfg.prefixednames, "addrollingcolumns")
@@ -433,7 +437,8 @@ function checkaugmented!(rs::RollingState, cfg::RollingConfig, c::DataFrame)
     return nothing
 end
 
-function rollchunk!(rs::RollingState, cfg::RollingConfig, c::DataFrame)
+function rollchunk!(rs::RollingState, @nospecialize(cfg::RollingConfig),
+    c::DataFrame)
     checkaugmented!(rs, cfg, c)
     rs.snt === nothing && !rs.summarized.done && pullsummarized!(rs, cfg)
     rs.passthrough && return assembleempty(cfg, c)
@@ -456,7 +461,8 @@ end
 # Admit every summarized row before `start` ahead of the first augmented pull,
 # evicting as it goes, so the windows hold only the rows a row at or after
 # `start` can still see. Type-unstable, once per chunk of the lead-in.
-function admitleadin!(rs::RollingState, cfg::RollingConfig, start)
+function admitleadin!(rs::RollingState, @nospecialize(cfg::RollingConfig),
+    start)
     rs.snt === nothing && pullsummarized!(rs, cfg, true)
     while rs.snt !== nothing
         rs.spos, more = leadinsegment!(rs.tiers, rs.snt, rs.spos, start,
@@ -743,9 +749,10 @@ end
 
 # --- output assembly -------------------------------------------------------
 
-function assemble(cfg::RollingConfig, rs::RollingState, c::DataFrame)
+function assemble(@nospecialize(cfg::RollingConfig), rs::RollingState,
+    c::DataFrame)
     for (wname, v) in zip(cfg.windownames, rs.vals)
-        wdf = DataFrame(v)
+        wdf = rowsdataframe(v)
         rename!(n -> string(wname, '_', n), wdf)
         # The chunk is owned, so its columns are adopted, not copied.
         c = hcat(c, wdf; copycols = false)
@@ -755,7 +762,7 @@ end
 
 # A summarized stream with no chunks: every window is empty, so every row gets
 # the empty values, or missing under a Bars window.
-function assembleempty(cfg::RollingConfig, c::DataFrame)
+function assembleempty(@nospecialize(cfg::RollingConfig), c::DataFrame)
     e = emptyvalues(cfg.protos, cfg.outs)
     for (wname, lb) in zip(cfg.windownames, cfg.lookbacks), (name, val) in pairs(e)
         c[!, Symbol(wname, '_', name)] =

@@ -63,10 +63,12 @@ function summarizewindows(clk::CausalPipeline, lookback, summarizers;
         storedcolumns(protos, keycols))
     return pipetransform() do p, ctx
         T = timetype(ctx)
-        st = WindowState{T}(IntervalCursor{T}(clk.run(ctx)))
-        return chunkmap(c -> windowchunk!(st, cfg, c),
+        st = WindowState{T}(IntervalCursor{T}(clk.run(ctx)), cfg)
+        # Through `st`, whose `cfg` is erased, so the iterator's type and the
+        # per-chunk driver are the same for every summarizer set.
+        return chunkmap(c -> windowchunk!(st, st.cfg, c),
             p.run(widenstart(ctx, lookback, "summarizewindows lookback"));
-            flush = () -> windowflush!(st, cfg))
+            flush = () -> windowflush!(st, st.cfg))
     end
 end
 summarizewindows(p::CausalPipeline, clk::CausalPipeline, lookback, summarizers;
@@ -88,6 +90,7 @@ end
 # Per-run state. The untyped fields are per-chunk setup; per-row work sits
 # behind the kernels' function barrier.
 mutable struct WindowState{T}
+    const cfg::WindowConfig  # abstract, a dispatch per chunk
     cur::IntervalCursor{T}
     ticks::Vector{T}    # pulled ticks not yet closed
     types::Union{Nothing,NamedTuple}  # promotion of every input schema seen
@@ -96,8 +99,8 @@ mutable struct WindowState{T}
     head::Int           # first buffered row not yet evicted
     prevkeys::Any       # Vector{K}: keys emitted with rows at the previous tick
     checked::Bool       # key columns validated against the input
-    WindowState{T}(cur) where {T} = new{T}(cur, T[], nothing, nothing,
-        nothing, 1, nothing, false)
+    WindowState{T}(cur, cfg::WindowConfig) where {T} = new{T}(cfg, cur, T[],
+        nothing, nothing, nothing, 1, nothing, false)
 end
 
 # The window structures for one tiering (tiers.jl), R being the stored row type.
@@ -130,7 +133,8 @@ WindowTiers{R}(buffer::B, running::G, trees::TR, refold::GT, tg::TG,
 # for every transition, including one that demotes an accumulator from the
 # running tier to the tree. The refold table is filled only at ticks, so it
 # starts empty.
-function preparewindows!(st::WindowState, cfg::WindowConfig, types::NamedTuple)
+function preparewindows!(st::WindowState, @nospecialize(cfg::WindowConfig),
+    types::NamedTuple)
     tg = tiering(cfg.protos, types)
     K = storekeytype(types, cfg.keynames)
     R = storerowtype(types)
@@ -158,13 +162,13 @@ end
 windowkeytype(::Nothing, st::WindowState) = eltype(st.prevkeys)
 windowkeytype(::KeySet{K}, st::WindowState) where {K} = K
 
-function windowtypes(st::WindowState{T}, cfg::WindowConfig) where {T}
+function windowtypes(st::WindowState{T}, @nospecialize(cfg::WindowConfig)) where {T}
     V = st.valtype
     RT = gridrowtype(T, windowkeytype(cfg.ks, st), V)
     return RT, convert(V, emptyvalues(cfg.protos, cfg.outs))
 end
 
-function windowchunk!(st::WindowState{T}, cfg::WindowConfig,
+function windowchunk!(st::WindowState{T}, @nospecialize(cfg::WindowConfig),
     c::DataFrame) where {T}
     if !st.checked
         checkkeycolumns(cfg.keycols, c, "summarizewindows")
@@ -204,7 +208,7 @@ function releasewindows!(st::WindowState)
     return nothing
 end
 
-function windowflush!(st::WindowState{T}, cfg::WindowConfig) where {T}
+function windowflush!(st::WindowState{T}, @nospecialize(cfg::WindowConfig)) where {T}
     pullpast!(st.ticks, st.cur, nothing)
     isempty(st.ticks) && return nothing
     if st.tiers === nothing
