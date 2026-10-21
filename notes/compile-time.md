@@ -359,3 +359,43 @@ Most of what remains in the window transforms is their kernels: in
 152 instances). There is one instance per tested summarizer set, window set,
 schema and key, and the tests exercise many such combinations by design.
 `intervalize`'s is `foldintervals!`, and `summarizecycles`' is `foldcycles!`.
+
+## The idiom refactor (2026-10-21)
+
+A clarity refactor, four commits: the summarizing kernels written once over
+their groups, the window tiers' shared eviction, `outname` and an abstract
+`DerivedState`, and shared producer/argument helpers. It was gated on compile
+time as well as runtime. Julia 1.13.2, 4 threads for the suite, `-t1` for the
+harness and benchmarks.
+
+| | `master` | branch |
+|---|---|---|
+| Included test files, compile | 643.1 s | 628.0 s |
+| Included test files, wall | 687.4 s | 671.0 s |
+| Harness (14 first calls), compile | 10.17–10.28 s | 10.13 s |
+
+The harness is `load` of 14 representative transforms in a fresh process, each
+its own specialization (summarize, summarizecycles keyless/keyed/dense,
+addsummarycolumns, intervalize keyless/keyed/dense, summarizewindows, two
+addrollingcolumns, lastrow, asofjoin), with the outputs serialized and
+compared with `master`'s, which they matched exactly. The suite's 15 s drop
+is mostly `rolling.jl` (243 → 231 s); the rest moved by less than noise.
+
+At runtime, a full-`SUITE` A/B of two worktrees (4 rounds, alternating order,
+minimums) gave a geomean ratio of 1.004 over 89 benchmarks. No allocation
+count rose: every `rolling`, `windows` and `join` benchmark allocates 9–285
+fewer per run. Every flag past 2% (`rowwise/filterrows` ×1.09, and
+`lastrow/keyless`, `sources/readtable-frame` and `rowwise/pipeline` near ×1.03)
+re-measured in isolation over 6 rounds at ×1.000–1.018, which is within noise.
+
+### Rejected: `compsub` as `compadd` of the negated term
+
+`compsub(a, x) = isfinite(x) ? compadd(a, -x) : compcount(a, x, -1)`, and
+`compsubpair` as `compaddpair(s, -p, -e)`, are bit-identical to the written-out
+forms (negating a float is exact, and `c + -e` is `c - e`). But a keyed
+`summarize(Variance(:x))` went from 1.0 to 3.4 s of compile, and the harness
+from 10.1 to 13.6 s (an addrollingcolumns over `Variance` and `Quantile` from
+1.3 to 2.4 s). Reverting `compensated.jl` alone restored both. The cause
+wasn't traced; the co-moment state calls these several times per row, so a
+larger inlined body at each subtraction site is the likely suspect. Kept
+written out.
