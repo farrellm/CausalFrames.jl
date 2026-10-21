@@ -748,7 +748,7 @@ barrier — with three inversions:
   (`asofjoin` keeps the last).
 - **Context widening.** With `tolerance` the match requires
   `rtime - time <= tolerance` and the right pipeline runs over the widened
-  context `[start, stop + tolerance)` (`futurecontext`, the mirror of
+  context `[start, stop + tolerance)` (`widenstop`, the mirror of
   `widenstart`; an explicit guard rejects negative tolerance, which the
   `Context` constructor would accept). Without `tolerance` the right sees
   only `[start, stop)`, so left rows near `stop` may find no later right row
@@ -873,11 +873,11 @@ time outside `[start, stop]`, the upstream pipeline is run over an
   stop + offset)` and subtracts `offset`. Output at `t` depends on input at
   `t + offset > t`, so it is **acausal** and lives in the `CausalFrames.Acausal`
   submodule alongside `futurejoin`, never re-exported. `leadcontext` mirrors
-  `futurecontext`.
+  `lagcontext`, guarded by `widenstop`.
 
 Both require the time type to support adding and subtracting the offset (numbers
 and `Dates` types do), reject a negative `offset` when the pipeline runs (the
-guard `widenstart`/`futurecontext` use, since a negative shift would flip the
+guard `widenstart`/`widenstop` use, since a negative shift would flip the
 causality contract), and treat `offset == 0` as the identity. The shared
 `shiftchunk!`/`shifttime` (broadcast add behind a function barrier) lives in
 `src/retime.jl` and is imported into the submodule; `lead` shifts by
@@ -1981,7 +1981,7 @@ and carrying the accumulator across with `widenacc`.
 
 A column whose element type is exactly `Missing` has no non-missing type to
 accumulate at (`sumtype(Missing)` and `prodtype(Missing)` are `Missing`), so
-the sum family, `AgeWeightedSum` and `Product` fold it into a `MissingState`
+the sum family, `CoMoment`, `AgeWeightedSum` and `Product` fold it into a `MissingState`
 instead. That state only counts rows, its value is always `missing` (the output
 column is `Missing`, as `Base.sum` of such a column is), and a fresh one is
 still the identity. When a later chunk widens the column, `widenstate` builds
@@ -2427,8 +2427,9 @@ while still emitting the output column the caller asked for.** `Σab` and `Σba`
 are the same number, so folding both would be duplicated per-row work; but
 silently renaming the caller's column would be surprising, so
 `DotProduct(:y, :x)` still produces `:y_x_dotproduct`. The canonical order is
-the `isless`-sorted one, and `canonicaldot`/`canonicaldotname` in
-`src/summarizers/sums.jl` are the shared implementation.
+the `isless`-sorted one, and `canonicalpair`/`canonicaldot` in
+`src/summarizers/sums.jl` are the shared implementation (a dependent names the
+canonical form's column by `outname`).
 
 That splits into two cases, and a new symmetric summarizer should follow
 whichever fits:

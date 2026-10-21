@@ -13,7 +13,6 @@ struct CoMoment{A,B} <: GroupSummarizer end
 comomentname(a, b) = Symbol(a, :_, b, :_comoment)
 canonicalcomoment(a::Symbol, b::Symbol) =
     ((x, y) = canonicalpair(a, b); CoMoment{x,y}())
-canonicalcomomentname(a::Symbol, b::Symbol) = comomentname(canonicalpair(a, b)...)
 
 emptyvalue(::CoMoment{A,B}) where {A,B} = NamedTuple{(comomentname(A, B),)}((0,))
 fresh(s::CoMoment{A,B}, intypes::NamedTuple) where {A,B} =
@@ -50,7 +49,7 @@ end
 # The state for accumulator type T, chosen as `accumfresh` chooses.
 function comomentfresh(s::CoMoment{A,B}, ::Type{T}) where {A,B,T}
     N = comomentname(A, B)
-    T === Missing && return MissingState{N,CoMoment{A,B}}(s, 0)
+    T === Missing && return MissingState{N}(s)
     M = Missing <: T
     Tn = nonmissingtype(T)
     return CoMomentState{N,A,B,Tn,M,accstorage(Tn)}()
@@ -86,8 +85,7 @@ comomenttype(::Type{T}) where {T} = Base.promote_op(comomentof, Int, T, T, T)
 end
 
 
-fresh(::CoMomentState{N,A,B,T,M,S}) where {N,A,B,T,M,S} =
-    CoMomentState{N,A,B,T,M,S}()
+fresh(::S) where {S<:CoMomentState} = S()
 @inline function fresh!(st::CoMomentState{N,A,B,T,M,S}) where {N,A,B,T,M,S}
     st.n = 0
     st.age = 0

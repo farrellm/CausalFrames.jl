@@ -66,7 +66,7 @@ end
 # column (accumulator type `Missing`) has no non-missing type to fold at, so it
 # gets a `MissingState` (below).
 function accumfresh(term, N::Symbol, ::Type{A}) where {A}
-    A === Missing && return MissingState{N,typeof(term)}(term, 0)
+    A === Missing && return MissingState{N}(term)
     M = Missing <: A
     An = nonmissingtype(A)
     S = accstorage(An)
@@ -118,7 +118,7 @@ function widenstate(st::AccumState{N}, intypes::NamedTuple) where {N}
     return w
 end
 
-# The state of a sum-family, AgeWeightedSum or Product accumulator over an
+# The state of a sum-family, CoMoment, AgeWeightedSum or Product accumulator over an
 # all-`missing` input (accumulator type `Missing`). Every term is missing, so it
 # only counts rows; a fresh state is still the identity, and the value is always
 # `missing`. `recipe` (a sum-family term functor, or the summarizer) rebuilds the
@@ -128,8 +128,9 @@ mutable struct MissingState{N,R} <: SummarizerState
     recipe::R
     n::Int
 end
+MissingState{N}(recipe::R) where {N,R} = MissingState{N,R}(recipe, 0)
 
-fresh(st::MissingState{N,R}) where {N,R} = MissingState{N,R}(st.recipe, 0)
+fresh(st::MissingState{N}) where {N} = MissingState{N}(st.recipe)
 @inline fresh!(st::MissingState) = (st.n = 0; st)
 @inline update!(st::MissingState, row) = (st.n += 1; nothing)
 @inline downdate!(st::MissingState, row) = (st.n -= 1; nothing)
@@ -199,7 +200,7 @@ emptyvalue(::CountDistinct{C}) where {C} =
     NamedTuple{(Symbol(C, :_countdistinct),)}((0,))
 fresh(::CountDistinct{C}, intypes::NamedTuple) where {C} =
     CountDistinctState{C,Symbol(C, :_countdistinct),intypes[C]}()
-fresh(::CountDistinctState{C,N,T}) where {C,N,T} = CountDistinctState{C,N,T}()
+fresh(::S) where {S<:CountDistinctState} = S()
 # `empty!` keeps the set's slots, so repeated zeroing doesn't allocate.
 @inline fresh!(st::CountDistinctState) = (empty!(st.seen); st)
 @inline update!(st::CountDistinctState{C}, row) where {C} =
@@ -231,28 +232,28 @@ end
 # The windowed state: a row count per distinct value, dropping a value when its
 # last row leaves. The non-window folds keep the Set, since a Dict count
 # increment hashes twice (measured 1.4-1.7x slower; see DESIGN.md).
-struct CountDistinctWindowState{C,N,T} <: SummarizerState
+struct WindowCountDistinctState{C,N,T} <: SummarizerState
     counts::Dict{T,Int}
 end
 
 freshwindowed(::CountDistinct{C}, intypes::NamedTuple) where {C} =
-    CountDistinctWindowState{C,Symbol(C, :_countdistinct),intypes[C]}(
+    WindowCountDistinctState{C,Symbol(C, :_countdistinct),intypes[C]}(
         Dict{intypes[C],Int}())
-fresh(::CountDistinctWindowState{C,N,T}) where {C,N,T} =
-    CountDistinctWindowState{C,N,T}(Dict{T,Int}())
-@inline fresh!(st::CountDistinctWindowState) = (empty!(st.counts); st)
-@inline function update!(st::CountDistinctWindowState{C}, row) where {C}
+fresh(::WindowCountDistinctState{C,N,T}) where {C,N,T} =
+    WindowCountDistinctState{C,N,T}(Dict{T,Int}())
+@inline fresh!(st::WindowCountDistinctState) = (empty!(st.counts); st)
+@inline function update!(st::WindowCountDistinctState{C}, row) where {C}
     v = getproperty(row, C)
     st.counts[v] = get(st.counts, v, 0) + 1
     return nothing
 end
-@inline function downdate!(st::CountDistinctWindowState{C}, row) where {C}
+@inline function downdate!(st::WindowCountDistinctState{C}, row) where {C}
     v = getproperty(row, C)
     c = st.counts[v]
     c == 1 ? delete!(st.counts, v) : (st.counts[v] = c - 1)
     return nothing
 end
-value(st::CountDistinctWindowState{C,N}) where {C,N} =
+value(st::WindowCountDistinctState{C,N}) where {C,N} =
     NamedTuple{(N,),Tuple{Int}}((length(st.counts),))
 
 """
@@ -360,7 +361,7 @@ emptyvalue(::Product{C}) where {C} = NamedTuple{(Symbol(C, :_product),)}((1,))
 # An all-Missing column has no `1` to start from, so it gets a `MissingState`.
 function fresh(::Product{C}, intypes::NamedTuple) where {C}
     A = prodtype(intypes[C])
-    A === Missing && return MissingState{Symbol(C, :_product),Product{C}}(Product{C}(), 0)
+    A === Missing && return MissingState{Symbol(C, :_product)}(Product{C}())
     return ProductState{C,Symbol(C, :_product),A}(convert(A, 1))
 end
 fresh(::ProductState{C,N,A}) where {C,N,A} = ProductState{C,N,A}(convert(A, 1))
@@ -380,11 +381,11 @@ end
 withmissings!(w::ProductState, n::Int) = (n > 0 && (w.total = missing); w)
 
 # Emits, under its own name N, the value a dependency computed under D, which
-# the topological expansion puts in `vals` first. Fieldless, so it joins
-# DerivedState below. It lets a summarizer symmetric in two columns fold under
+# the topological expansion puts in `vals` first. Fieldless, so it is a
+# DerivedState. It lets a summarizer symmetric in two columns fold under
 # one canonical argument order while answering to the name the caller asked
 # for (see DESIGN.md's "Symmetric summarizers").
-struct AliasState{N,D} <: SummarizerState end
+struct AliasState{N,D} <: DerivedState end
 
 # The value type comes from the dependency's declared field type, not `typeof`
 # of the value, so a missing value keeps the column's Union{Missing,...} eltype.
@@ -432,7 +433,6 @@ dotname(a, b) = Symbol(a, :_, b, :_dotproduct)
 # "Symmetric summarizers").
 canonicalpair(a::Symbol, b::Symbol) = isless(b, a) ? (b, a) : (a, b)
 canonicaldot(a::Symbol, b::Symbol) = DotProduct(canonicalpair(a, b)...)
-canonicaldotname(a::Symbol, b::Symbol) = dotname(canonicalpair(a, b)...)
 
 emptyvalue(::DotProduct{A,B}) where {A,B} = NamedTuple{(dotname(A, B),)}((0,))
 # Reversed arguments name the canonical accumulator as their one dependency and

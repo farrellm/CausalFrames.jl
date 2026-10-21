@@ -16,7 +16,7 @@ mutable struct TrackState{C,N,T,F} <: SummarizerState
     TrackState{C,N,T,F}(seen::Bool, val) where {C,N,T,F} = new{C,N,T,F}(seen, val)
 end
 
-fresh(::TrackState{C,N,T,F}) where {C,N,T,F} = TrackState{C,N,T,F}()
+fresh(::S) where {S<:TrackState} = S()
 # Only `seen` is cleared; the stale `val` is never read.
 @inline fresh!(st::TrackState) = (st.seen = false; st)
 @inline function update!(st::TrackState{C,N,T,F}, row) where {C,N,T,F}
@@ -70,8 +70,7 @@ end
 WindowTrackState{C,N,T,F,K}() where {C,N,T,F,K} =
     WindowTrackState{C,N,T,F,K}(T[], Int[], 1, 0, 0)
 
-fresh(::WindowTrackState{C,N,T,F,K}) where {C,N,T,F,K} =
-    WindowTrackState{C,N,T,F,K}()
+fresh(::S) where {S<:WindowTrackState} = S()
 @inline function fresh!(st::WindowTrackState)
     empty!(st.vals)
     empty!(st.seqs)
@@ -184,9 +183,6 @@ emptyvalue(::Last{C}) where {C} = NamedTuple{(Symbol(C, :_last),)}((missing,))
 fresh(::Last{C}, intypes::NamedTuple) where {C} =
     TrackState{C,Symbol(C, :_last),intypes[C],typeof(keeplast)}()
 
-# Min, Max and First slide the deque above, since TrackState has no inverse.
-freshwindowed(s::Union{Min,Max,First}, intypes::NamedTuple) =
-    windowtrack(fresh(s, intypes))
 windowtrack(::TrackState{C,N,T,F}) where {C,N,T,F} =
     WindowTrackState{C,N,T,F,:value}()
 
@@ -203,7 +199,7 @@ end
 
 freshwindowed(::Last{C}, intypes::NamedTuple) where {C} =
     WindowLastState{C,Symbol(C, :_last),intypes[C]}()
-fresh(::WindowLastState{C,N,T}) where {C,N,T} = WindowLastState{C,N,T}()
+fresh(::S) where {S<:WindowLastState} = S()
 @inline fresh!(st::WindowLastState) = (st.n = 0; st)
 @inline function update!(st::WindowLastState{C}, row) where {C}
     st.val = getproperty(row, C)
@@ -230,7 +226,7 @@ mutable struct IndexState{C,N,T,F,K} <: SummarizerState
         new{C,N,T,F,K}(n, pos, val)
 end
 
-fresh(::IndexState{C,N,T,F,K}) where {C,N,T,F,K} = IndexState{C,N,T,F,K}()
+fresh(::S) where {S<:IndexState} = S()
 # Only `n` is cleared; `update!` resets `pos` with the first row.
 @inline fresh!(st::IndexState) = (st.n = 0; st)
 @inline function update!(st::IndexState{C,N,T,F}, row) where {C,N,T,F}
@@ -431,5 +427,7 @@ fresh(::MinWithIndex{C}, intypes::NamedTuple) where {C} =
     IndexState{C,(Symbol(C, :_min), Symbol(C, :_minindex)),intypes[C],typeof(min),
         :both}()
 
-freshwindowed(s::Union{MaxIndex,MinIndex,MaxWithIndex,MinWithIndex},
-    intypes::NamedTuple) = windowtrack(fresh(s, intypes))
+# Every extreme but Last slides the deque above, since TrackState and
+# IndexState have no inverse.
+freshwindowed(s::Union{Min,Max,First,MaxIndex,MinIndex,MaxWithIndex,
+    MinWithIndex}, intypes::NamedTuple) = windowtrack(fresh(s, intypes))

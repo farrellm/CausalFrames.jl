@@ -1,6 +1,6 @@
 # The summarizer interface and the concrete summarizers, one file per family.
 # Include order matters only for types: `Compensated` precedes the states
-# holding it, and `DerivedState` follows every derived state.
+# holding it.
 include("summarizers/interface.jl")
 include("summarizers/compensated.jl")
 include("summarizers/sums.jl")

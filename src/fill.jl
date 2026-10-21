@@ -55,7 +55,7 @@ DataFrame(load(Context(t0, t0 + Hour(1)), p))
 ```
 """
 function forwardfill(selectors...; key = nothing, tolerance = nothing)
-    checkselectors(selectors, "forwardfill", false)
+    checkselectors(selectors, "forwardfill")
     keycols = keycolumns(key, "forwardfill")
     return pipetransform() do p, ctx
         st = ForwardFillState(keycols, selectors, tolerance)

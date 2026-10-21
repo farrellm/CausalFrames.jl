@@ -73,7 +73,7 @@ fresh(::AgeWeightedSum{C}, intypes::NamedTuple) where {C} =
 # all-Missing column gets a `MissingState`.
 function agesumfresh(::Val{N}, ::Val{C}, ::Type{A}) where {N,C,A}
     A === Missing &&
-        return MissingState{N,AgeWeightedSum{C}}(AgeWeightedSum{C}(), 0)
+        return MissingState{N}(AgeWeightedSum{C}())
     M = Missing <: A
     An = nonmissingtype(A)
     compensable(An) && return CompensatedAgeSumState{N,C,An,M}()

@@ -1,4 +1,4 @@
-# The stateless sources: the empty stream, sequential concatenation and the
+# The basic sources: the empty stream, sequential concatenation and the
 # clock. Sources return a CausalPipeline; transforms are curried and return a
 # CausalPipeline -> CausalPipeline function, so both chain with |>.
 
@@ -123,8 +123,7 @@ A source with only a `:time` column, one row at each of `start`,
 - `batchsize = 1024`: rows per emitted chunk. Must be positive.
 """
 function clock(interval; batchsize::Integer = 1024)
-    batchsize > 0 ||
-        throw(ArgumentError("clock batchsize must be positive, got $batchsize"))
+    checkpositive(batchsize, "clock batchsize")
     return CausalPipeline() do ctx::Context
         ctx.start + interval > ctx.start ||
             throw(ArgumentError("clock interval must be positive, got $interval"))

@@ -5,7 +5,9 @@ design rationale and performance constraints behind each module.
 
 - `src/context.jl` / `src/chunks.jl` — `Context{T}`, the `[start, stop)`
   evaluation window, with `widenstart`, which every operator reading before
-  `start` (a tolerance, a look-back) uses to widen and validate it; and the
+  `start` (a tolerance, a look-back) uses to widen and validate it, its mirror
+  `widenstop` for the acausal operators reading past `stop`, and the shared
+  integer-argument checks `checkpositive`/`checknonnegative`; and the
   internal chunk protocol (`ChunkSource`, `chunkmap`): a single-pass lazy
   iterator of non-empty DataFrame chunks whose consumers own what they're
   given. Empty chunks are filtered out here, so downstream code may assume a
@@ -54,7 +56,10 @@ design rationale and performance constraints behind each module.
     this as the `writecsv` hand-off argument
   - `CSVProducer` is the stateful-source shape (pull state in mutable fields
     behind a `ChunkSource`), shared by `ConcatProducer`, `HeadProducer`,
-    `TableProducer` and `JLSProducer`. `concatenate` is sequential and checks
+    `MergeProducer`, `TableProducer`, `JLSProducer` and the extensions'
+    `QueryProducer`/`RowGroupProducer`. The three file producers pull through
+    `sourceclip.jl`'s `pullclipped!`, which streams (`nextclipped!`) or, under
+    `sort = true`, gathers (`gathersorted!`). `concatenate` is sequential and checks
     that its pipelines arrive in time order; `concatenate()` is `emptyframe()`.
     `clock` is the timestamp-only tick source that `intervalize` and
     `summarizewindows` sample on
@@ -165,16 +170,18 @@ design rationale and performance constraints behind each module.
     reports, so wanting both costs one deque, not two. `Product` is the only
     built-in monoid that is not a group
   - the dependent summarizers (`Moment`, `Mean`, `Variance`, `Std`,
-    `Covariance`, `Correlation`, `LinearRegression`) have empty state structs:
-    they declare `dependencies` and read those values back through the
-    two-argument `value(st, vals)`. Such a state joins the `DerivedState`
-    union, which gives it no-op `fresh`, `update!`, `combine!` and
+    `Covariance`, `Correlation`, `LinearRegression`, `Quantile`, `Median`,
+    `PercentRank`, `MeanAbsDev`, and a reversed `DotProduct`'s `AliasState`)
+    have empty state structs: they declare `dependencies` and read those
+    values back through the two-argument `value(st, vals)`, naming each
+    dependency by `outname`. Such a state subtypes the abstract
+    `DerivedState`, which gives it no-op `fresh`, `update!`, `combine!` and
     `downdate!`. States are shared by shape, not summarizer (`Mean` and
     `Moment` are one `CountRatioState`, and `Variance` is `Covariance`'s state
     over a column and itself)
   - a summarizer whose value is symmetric in two columns (`DotProduct`,
     `Covariance`, every pairwise term in `LinearRegression`) folds under the
-    `isless`-sorted argument order via `canonicaldot`/`canonicaldotname`, but
+    `isless`-sorted argument order via `canonicaldot`/`canonicalcomoment`, but
     emits the column name the caller asked for. For an accumulator, the
     reversed form becomes a dependent over the canonical one through the
     fieldless `AliasState{N,D}`; something already dependent just names the
@@ -227,11 +234,13 @@ design rationale and performance constraints behind each module.
   - a `Missing`-admitting accumulator type sets the flag `M` and folds at the
     non-missing type, counting `missing` terms as the compensated storage
     counts nonfinites, so the accumulator stays invertible. `Union{Missing,_}`
-    appears only in `value`'s return, never in an accumulation field. With `M`
+    appears only in `value`'s return, never in an accumulation field, except
+    `Product`'s, a monoid that never downdates, whose total absorbs a
+    `missing`. With `M`
     false the count is never touched and its tests compile away. An
     all-`Missing` column (accumulator type `Missing`) has no type to fold at,
-    so it gets a count-only `MissingState` instead (also for `AgeWeightedSum`
-    and `Product`). It is valued `missing`, its fresh state is still the
+    so it gets a count-only `MissingState` instead (also for `CoMoment`,
+    `AgeWeightedSum` and `Product`). It is valued `missing`, its fresh state is still the
     identity, and on widening it rebuilds the real state from its `recipe`,
     handing over the count (`withmissings!`)
   - the order statistics (`Quantile`, `Median`, `PercentRank`) are fieldless
@@ -305,11 +314,15 @@ design rationale and performance constraints behind each module.
   (those get boxed). Its `groups` are built by the transform's `grouping`
   (`summaryspec`; `newgroups`/`widengroups`): the state tuple itself when
   keyless, a `GroupTable` when keyed, a `DenseGroups` over a declared
-  `KeySet`. Each fold kernel (`foldgroups!`, `foldcycles!`, `foldrunning!`,
-  `foldintervals!`, and the flushes) has a method per kind of groups its
-  transforms build (no dense `foldgroups!`/`foldrunning!`, no keyless
-  `foldintervals!`, since `nokeyset` makes that grid dense), so the
-  transforms dispatch rather than branch on the key mode, and `preparechunk!`
+  `KeySet`. The fold kernels (`foldgroups!`, `foldcycles!`, `foldrunning!`,
+  `foldintervals!`, and the flushes) are written once over the groups and
+  reach them through helpers with a method per kind (`rowstates!`/`foldrow!`
+  to fold a row, `closerows`/`closegroups!` to close), so the transforms
+  dispatch rather than branch on the key mode. Only the keyless
+  `foldcycles!`/`flushcycle` (which rebind the state tuple) and the keyed and
+  dense `flushintervals!` (which close different intervals) keep a method per
+  kind; there is no keyless `foldintervals!`, since `nokeyset` makes that grid
+  dense. `preparechunk!`
   checks the key columns against the first chunk for all of them. The
   transform's `FoldConfig` (`protos`, `grouping`, `outs`) sits in
   `SummaryFold`'s abstract `cfg` field, so `preparechunk!` and every chunk step
@@ -503,7 +516,7 @@ design rationale and performance constraints behind each module.
   that accumulator); float sums stay running because the compensated states
   evict NaN/±Inf rows cleanly. `Bars(n)` windows change membership only: each
   key keeps a `RowRing` of its newest rows (sized for the longest count, plus
-  one), a row leaves on admission when pushed `n + 1` deep (`admitbars!`
+  one), a row leaves on admission when pushed `n + 1` deep (`admitrings!`
   downdates it), the tree queries the key's last `n` rows, the refold tier
   folds the ring, and a tier seeing fewer than `n` rows returns `nothing`,
   whose empty row is all `missing`. The shared buffer serves only time windows;

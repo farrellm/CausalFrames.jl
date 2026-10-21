@@ -67,7 +67,7 @@ order it expects. [`widenstate`](@ref) re-types the state and keeps its window.
 """
 function barwindow(s::Summarizer, n::Integer, intypes::NamedTuple;
     hoistedby::Union{Nothing,Summarizer} = nothing)
-    n >= 1 || throw(ArgumentError("barwindow count must be positive, got $n"))
+    checkpositive(n, "barwindow count")
     protos, requested, terms =
         prototypes(Summarizer[s], Symbol[], "barwindow")
     return newbarwindow(protos, Val(requested), windowterms(terms, hoistedby),
@@ -285,7 +285,7 @@ function newbarwindow(@nospecialize(protos::Tuple), @nospecialize(outs::Val),
         )
     end
     R = storerowtype(types)
-    V = missingfields(valuetype(typeof(mergedstates(tg)), outs), outs)
+    V = barsvaluetype(tg, outs)
     queue = isempty(tg.tree) ? nothing : BarQueue(tg.tree, n)
     return BarWindowState{R,storerowtype(rowtypes),O,V}(n, RowRing{R}(n + 1),
         map(fresh, tg.running), queue, tg.derived, tg.perm, protos, terms)
@@ -391,9 +391,9 @@ end
 # rows before the newest, front[i] taking the i-th oldest.
 @noinline function flipqueue!(q::BarQueue, ring::RowRing, n::Int)
     front = q.front
-    last = barfresh!(@inbounds front[n])
-    barupdate!(last, ringback(ring, 2))
-    @inbounds front[n] = last
+    oldest = barfresh!(@inbounds front[n])
+    barupdate!(oldest, ringback(ring, 2))
+    @inbounds front[n] = oldest
     for i in (n-1):-1:1
         single = barfresh!(q.single)
         q.single = single

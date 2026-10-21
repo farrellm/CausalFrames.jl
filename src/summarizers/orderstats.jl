@@ -68,7 +68,7 @@ end
 emptyvalue(::SortedValues{C}) where {C} = NamedTuple{(sortedname(C),)}((missing,))
 fresh(::SortedValues{C}, intypes::NamedTuple) where {C} =
     sortedfresh(Val(C), intypes[C])
-fresh(::SortedState{C,N,T,M}) where {C,N,T,M} = SortedState{C,N,T,M}()
+fresh(::S) where {S<:SortedState} = S()
 @inline function fresh!(st::SortedState)
     empty!(st.vals)
     st.nans = 0
@@ -266,7 +266,7 @@ Median(column::ColumnSpec) = withterms(Median{colname(column)}(), column)
 # Fieldless: the output names NS, the accumulator's name D, the probabilities
 # PS and the interpolation I are type parameters, so `value` infers and the map
 # over PS unrolls. Median is a QuantileState of one probability.
-struct QuantileState{NS,D,PS,I} <: SummarizerState end
+struct QuantileState{NS,D,PS,I} <: DerivedState end
 
 dependencies(::Quantile{C}) where {C} = (SortedValues(C),)
 emptyvalue(::Quantile{C,PS}) where {C,PS} =
@@ -276,8 +276,8 @@ fresh(::Quantile{C,PS,I}, ::NamedTuple) where {C,PS,I} =
 
 dependencies(::Median{C}) where {C} = (SortedValues(C),)
 emptyvalue(::Median{C}) where {C} = NamedTuple{(Symbol(C, :_median),)}((missing,))
-fresh(::Median{C}, ::NamedTuple) where {C} =
-    QuantileState{(Symbol(C, :_median),),sortedname(C),(0.5,),:linear}()
+fresh(m::Median{C}, ::NamedTuple) where {C} =
+    QuantileState{(outname(m),),sortedname(C),(0.5,),:linear}()
 
 @inline value(::QuantileState{NS,D,PS,I}, vals::NamedTuple) where {NS,D,PS,I} =
     quantilevalue(Val(NS), vals[D], Val(PS), Val(I))
@@ -383,18 +383,18 @@ DataFrame(load(Context(0, 10), p))
 struct PercentRank{C} <: GroupSummarizer end
 PercentRank(column::ColumnSpec) = withterms(PercentRank{colname(column)}(), column)
 
-struct PercentRankState{N,D,L} <: SummarizerState end
+struct PercentRankState{N,D,L} <: DerivedState end
 
 dependencies(::PercentRank{C}) where {C} = (SortedValues(C), Last(C))
 emptyvalue(::PercentRank{C}) where {C} =
     NamedTuple{(Symbol(C, :_percentrank),)}((missing,))
-fresh(::PercentRank{C}, ::NamedTuple) where {C} =
-    PercentRankState{Symbol(C, :_percentrank),sortedname(C),Symbol(C, :_last)}()
+fresh(r::PercentRank{C}, ::NamedTuple) where {C} =
+    PercentRankState{outname(r),sortedname(C),outname(Last(C))}()
 @inline value(::PercentRankState{N,D,L}, vals::NamedTuple) where {N,D,L} =
     percentrank(Val(N), vals[D], vals[L])
 
-@inline function percentrank(::Val{N}, st::SortedState{C,S,T,M},
-    newest) where {N,C,S,T,M}
+@inline function percentrank(::Val{N}, st::SortedState{C,D,T,M},
+    newest) where {N,C,D,T,M}
     V = maybemissing(Float64, M)
     M && st.missings > 0 && return NamedTuple{(N,),Tuple{V}}((missing,))
     st.nans > 0 && return NamedTuple{(N,),Tuple{V}}((NaN,))

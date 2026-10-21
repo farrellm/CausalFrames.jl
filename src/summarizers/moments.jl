@@ -22,7 +22,7 @@ Moment(column::ColumnSpec, order::Integer) =
 # A sum D over the row count, emitted as N: Moment's power sum or Mean's plain
 # sum. Fieldless; the names are type parameters so the two-argument `value`
 # infers.
-struct CountRatioState{N,D} <: SummarizerState end
+struct CountRatioState{N,D} <: DerivedState end
 
 # The value type comes from the dependencies' declared field types, not
 # `typeof` of the quotient, so a missing sum keeps the Union{Missing,...} eltype.
@@ -39,8 +39,7 @@ dependencies(m::Moment{C}) where {C} = (Count(), SumPower(C, m.order))
 emptyvalue(m::Moment{C}) where {C} =
     NamedTuple{(Symbol(C, :_moment_, m.order),)}((missing,))
 fresh(m::Moment{C}, ::NamedTuple) where {C} =
-    CountRatioState{Symbol(C, :_moment_, m.order),
-        Symbol(C, :_sumpower_, m.order)}()
+    CountRatioState{outname(m),outname(SumPower(C, m.order))}()
 
 """
     Mean(column::ColumnSpec) -> Summarizer
@@ -57,8 +56,8 @@ Mean(column::ColumnSpec) = withterms(Mean{colname(column)}(), column)
 
 dependencies(::Mean{C}) where {C} = (Count(), Sum(C))
 emptyvalue(::Mean{C}) where {C} = NamedTuple{(Symbol(C, :_mean),)}((missing,))
-fresh(::Mean{C}, ::NamedTuple) where {C} =
-    CountRatioState{Symbol(C, :_mean),Symbol(C, :_sum)}()
+fresh(m::Mean{C}, ::NamedTuple) where {C} =
+    CountRatioState{outname(m),outname(Sum(C))}()
 
 """
     Variance(column::ColumnSpec; corrected = true) -> Summarizer
@@ -89,7 +88,7 @@ emptyvalue(::Variance{C}) where {C} =
 # A variance is the covariance of a column with itself, so it uses
 # CovarianceState (below) over the co-moment of the column with itself.
 fresh(v::Variance{C}, ::NamedTuple) where {C} =
-    CovarianceState{Symbol(C, :_variance),comomentname(C, C),v.corrected}()
+    CovarianceState{outname(v),outname(CoMoment{C,C}()),v.corrected}()
 
 """
     Std(column::ColumnSpec; corrected = true) -> Summarizer
@@ -110,16 +109,16 @@ end
 Std(column::ColumnSpec; corrected::Bool = true) =
     withterms(Std{colname(column)}(corrected), column)
 
-struct StdState{C,N,V} <: SummarizerState end
+struct StdState{N,V} <: DerivedState end
 
 stdsqrt(::Missing) = missing
 stdsqrt(v) = sqrt(max(v, zero(v)))
 
 dependencies(s::Std{C}) where {C} = (Variance(C; corrected = s.corrected),)
 emptyvalue(::Std{C}) where {C} = NamedTuple{(Symbol(C, :_std),)}((missing,))
-fresh(::Std{C}, ::NamedTuple) where {C} =
-    StdState{C,Symbol(C, :_std),Symbol(C, :_variance)}()
-@inline function value(::StdState{C,N,V}, vals::NamedTuple) where {C,N,V}
+fresh(s::Std{C}, ::NamedTuple) where {C} =
+    StdState{outname(s),outname(Variance(C))}()
+@inline function value(::StdState{N,V}, vals::NamedTuple) where {N,V}
     T = Base.promote_op(sqrt, fieldtype(typeof(vals), V))
     return NamedTuple{(N,),Tuple{T}}((stdsqrt(vals[V]),))
 end
@@ -148,7 +147,7 @@ Covariance(a::ColumnSpec, b::ColumnSpec; corrected::Bool = true) =
 # The co-moment D over the divisor `n - Int(R)`, emitted as N. R (the
 # corrected flag) is a type parameter so the state stays fieldless. Variance
 # uses it too, over the co-moment of a column with itself.
-struct CovarianceState{N,D,R} <: SummarizerState end
+struct CovarianceState{N,D,R} <: DerivedState end
 
 covname(a, b) = Symbol(a, :_, b, :_covariance)
 # Reads the canonically ordered co-moment: Covariance(:y, :x) produces
@@ -158,7 +157,7 @@ dependencies(::Covariance{A,B}) where {A,B} =
 emptyvalue(::Covariance{A,B}) where {A,B} =
     NamedTuple{(covname(A, B),)}((missing,))
 fresh(c::Covariance{A,B}, ::NamedTuple) where {A,B} =
-    CovarianceState{covname(A, B),canonicalcomomentname(A, B),c.corrected}()
+    CovarianceState{outname(c),outname(canonicalcomoment(A, B)),c.corrected}()
 @inline function value(::CovarianceState{N,D,R}, vals::NamedTuple) where {N,D,R}
     V = ratiotype(fieldtype(typeof(vals), D), Int)
     return NamedTuple{(N,),Tuple{V}}((vals[D] / (vals.count - Int(R)),))
@@ -179,7 +178,7 @@ struct Correlation{A,B} <: GroupSummarizer end
 Correlation(a::ColumnSpec, b::ColumnSpec) =
     withterms(Correlation{colname(a),colname(b)}(), a, b)
 
-struct CorrelationState{A,B,N,CV,SA,SB} <: SummarizerState end
+struct CorrelationState{N,CV,SA,SB} <: DerivedState end
 
 clampcor(::Missing) = missing
 clampcor(x) = clamp(x, -one(x), one(x))
@@ -189,11 +188,11 @@ dependencies(::Correlation{A,B}) where {A,B} =
     (Covariance(A, B), Std(A), Std(B))
 emptyvalue(::Correlation{A,B}) where {A,B} =
     NamedTuple{(corname(A, B),)}((missing,))
-fresh(::Correlation{A,B}, ::NamedTuple) where {A,B} =
-    CorrelationState{A,B,corname(A, B),covname(A, B),Symbol(A, :_std),
-        Symbol(B, :_std)}()
-@inline function value(::CorrelationState{A,B,N,CV,SA,SB},
-    vals::NamedTuple) where {A,B,N,CV,SA,SB}
+fresh(c::Correlation{A,B}, ::NamedTuple) where {A,B} =
+    CorrelationState{outname(c),outname(Covariance(A, B)),outname(Std(A)),
+        outname(Std(B))}()
+@inline function value(::CorrelationState{N,CV,SA,SB},
+    vals::NamedTuple) where {N,CV,SA,SB}
     Cvf = fieldtype(typeof(vals), CV)
     Saf = fieldtype(typeof(vals), SA)
     Sbf = fieldtype(typeof(vals), SB)

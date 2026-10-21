@@ -66,7 +66,7 @@ emptyvalue(::WindowValues{C}) where {C} =
     NamedTuple{(windowvaluesname(C),)}((missing,))
 fresh(::WindowValues{C}, intypes::NamedTuple) where {C} =
     windowvaluesfresh(Val(C), intypes[C])
-fresh(::WindowValuesState{C,N,T,M}) where {C,N,T,M} = WindowValuesState{C,N,T,M}()
+fresh(::S) where {S<:WindowValuesState} = S()
 @inline function fresh!(st::WindowValuesState)
     empty!(st.vals)
     st.head = 1
@@ -169,21 +169,21 @@ DataFrame(load(Context(0, 10), p))
 struct MeanAbsDev{C} <: GroupSummarizer end
 MeanAbsDev(column::ColumnSpec) = withterms(MeanAbsDev{colname(column)}(), column)
 
-struct MeanAbsDevState{N,D,M} <: SummarizerState end
+struct MeanAbsDevState{N,D,MN} <: DerivedState end
 
 dependencies(::MeanAbsDev{C}) where {C} = (WindowValues(C), Mean(C))
 emptyvalue(::MeanAbsDev{C}) where {C} =
     NamedTuple{(Symbol(C, :_meanabsdev),)}((missing,))
-fresh(::MeanAbsDev{C}, ::NamedTuple) where {C} =
-    MeanAbsDevState{Symbol(C, :_meanabsdev),windowvaluesname(C),Symbol(C, :_mean)}()
-@inline value(::MeanAbsDevState{N,D,M}, vals::NamedTuple) where {N,D,M} =
-    meanabsdev(Val(N), vals[D], vals[M], fieldtype(typeof(vals), M))
+fresh(s::MeanAbsDev{C}, ::NamedTuple) where {C} =
+    MeanAbsDevState{outname(s),windowvaluesname(C),outname(Mean(C))}()
+@inline value(::MeanAbsDevState{N,D,MN}, vals::NamedTuple) where {N,D,MN} =
+    meanabsdev(Val(N), vals[D], vals[MN], fieldtype(typeof(vals), MN))
 
 # The window's values hold every finite row (NaN and missing are only counted),
 # so the scan is the whole window; their order is not needed, which is why this
 # reads WindowValues rather than SortedValues.
-@inline function meanabsdev(::Val{N}, st::WindowValuesState{C,S,T,M}, mean,
-    ::Type{A}) where {N,C,S,T,M,A}
+@inline function meanabsdev(::Val{N}, st::WindowValuesState{C,D,T,M}, mean,
+    ::Type{A}) where {N,C,D,T,M,A}
     V0 = absdevtype(T, nonmissingtype(A))
     V = maybemissing(V0, M)
     M && st.missings > 0 && return NamedTuple{(N,),Tuple{V}}((missing,))

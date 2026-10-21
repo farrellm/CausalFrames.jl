@@ -91,6 +91,11 @@ mergedstates(tg::Tiering) =
 tieredvaluetype(tg::Tiering, protos::Tuple, outs::Val) =
     promotedvaluetype(typeof(mergedstates(tg)), protos, outs)
 
+# A count window's value type, which is all `missing` until the window fills
+# (`Bars`, `barwindow`).
+barsvaluetype(tg::Tiering, outs::Val) =
+    missingfields(valuetype(typeof(mergedstates(tg)), outs), outs)
+
 # Append an admitted row to the shared buffer, when the call keeps one.
 @inline pushrow!(::Nothing, row) = nothing
 @inline pushrow!(buffer::Vector, row) = (push!(buffer, row); nothing)
@@ -153,6 +158,33 @@ end
         push!(rt.pool, g)
     end
     return nothing
+end
+
+# Evict a row from a running table, absent (`nothing`) without a running tier;
+# `evictrow!` keys it first.
+@inline evictkey!(::Nothing, k, row) = nothing
+@inline evictkey!(rt::RunningTable, k, row) = evictgroup!(rt, k, row)
+@inline evictrow!(::Nothing, row, keynames::Val) = nothing
+@inline evictrow!(rt::RunningTable, row, keynames::Val) =
+    evictgroup!(rt, keyvalues(row, keynames), row)
+
+# Window w's running table, of a per-window tuple (homogeneous, so the Int
+# index is type-stable), or `nothing` without a running tier.
+@inline windowtable(::Nothing, w::Int) = nothing
+@inline windowtable(tables::Tuple, w::Int) = @inbounds tables[w]
+
+# Advance a time window's eviction head past the buffered rows older than its
+# look-back at t, evicting each from the window's running table. No buffer
+# holds no rows.
+@inline evicthead!(::Nothing, head::Int, t, lookback, running, keynames::Val) =
+    head
+@inline function evicthead!(buffer::Vector, head::Int, t, lookback, running,
+    keynames::Val)
+    while head <= length(buffer) && t - @inbounds(buffer[head]).time > lookback
+        evictrow!(running, @inbounds(buffer[head]), keynames)
+        head += 1
+    end
+    return head
 end
 
 # Fold the live rows (from head on) into a fresh table; a function barrier.

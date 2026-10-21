@@ -1,9 +1,17 @@
 # The background writer every file sink (writecsv, writeparquet, writejls)
 # hands its chunks to, and the pass-through transform wiring it in.
 
-checkqueue(queue::Integer, op::String) =
-    queue >= 0 ||
-    throw(ArgumentError("$op queue must be non-negative, got $queue"))
+checkqueue(queue::Integer, op::String) = checknonnegative(queue, "$op queue")
+
+# Per-run writer state for every file sink: the queue feeding the background
+# task, and the first chunk's column names, which fix the file's columns.
+# `label` names the operator in errors.
+mutable struct ChunkSink
+    const chan::Channel{DataFrame}
+    const task::Task
+    const label::String
+    names::Union{Nothing,Vector{String}}
+end
 
 # Every file sink's transform: a pass-through chunkmap handing each chunk to a
 # `ChunkSink` built by `makesink()` when the run starts (truncating the file
@@ -22,9 +30,9 @@ end
 # A file sink's chunks, releasing the writer when a run fails: an error from
 # upstream, from the sink's own checks or from the writer itself would otherwise
 # leave the writer blocked on its queue, holding the file open, for good.
-struct SinkGuard{I,S}
+struct SinkGuard{I}
     inner::I
-    sink::S     # the ChunkSink, defined below
+    sink::ChunkSink
 end
 
 Base.IteratorSize(::Type{<:SinkGuard}) = Base.SizeUnknown()
@@ -39,16 +47,6 @@ function Base.iterate(g::SinkGuard, state...)
     end
 end
 
-# Per-run writer state for every file sink: the queue feeding the background
-# task, and the first chunk's column names, which fix the file's columns.
-# `label` names the operator in errors.
-mutable struct ChunkSink
-    const chan::Channel{DataFrame}
-    const task::Task
-    const label::String
-    names::Union{Nothing,Vector{String}}
-end
-
 function ChunkSink(writeloop, queue::Int, label::String)
     chan = Channel{DataFrame}(queue)
     task = Threads.@spawn writeloop(chan)
@@ -59,13 +57,7 @@ function ChunkSink(writeloop, queue::Int, label::String)
 end
 
 function sinkchunk(sink::ChunkSink, c::DataFrame)
-    cols = names(c)
-    if sink.names === nothing
-        sink.names = cols
-    elseif sink.names != cols
-        throw(ArgumentError("$(sink.label): chunk columns changed mid-stream, \
-            from $(sink.names) to $(cols)"))
-    end
+    sink.names = samecolumns(sink.names, c, sink.label)
     put!(sink.chan, c)
     # The writer reads `c` concurrently while downstream may mutate its chunk's
     # column index, so hand downstream a private index over the same vectors,

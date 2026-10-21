@@ -9,8 +9,7 @@ using DataFrames
 using Parquet2
 
 using CausalFrames:
-    ChunkSink, PullCursor, SourceClip, gathersorted!, nextclipped!,
-    timesourcename, vcatowned
+    ChunkSink, PullCursor, SourceClip, pullclipped!, timesourcename, vcatowned
 
 CausalFrames.backendloaded(::Val{:parquet2}) = true
 
@@ -80,11 +79,8 @@ CausalFrames.parquetproducer(::Val{:parquet2}, clip::SourceClip{T},
     RowGroupProducer{T}(clip, sort, nothing, nothing, nothing, true)
 
 function (p::RowGroupProducer)()
-    clip = p.clip
-    clip.done && return nothing
     p.groups === nothing && open!(p)
-    p.sort && return gathersorted!(clip, p.groups)
-    return nextclipped!(clip, p.groups)
+    return pullclipped!(p.clip, p.groups, p.sort)
 end
 
 # Open the file and pick its row groups by their statistics. In a time-ordered
