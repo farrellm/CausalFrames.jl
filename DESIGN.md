@@ -1981,7 +1981,7 @@ and carrying the accumulator across with `widenacc`.
 
 A column whose element type is exactly `Missing` has no non-missing type to
 accumulate at (`sumtype(Missing)` and `prodtype(Missing)` are `Missing`), so
-the sum family, `AgeWeightedSum` and `Product` fold it into a `MissingState`
+the sum family, `CoMoment`, `AgeWeightedSum` and `Product` fold it into a `MissingState`
 instead. That state only counts rows, its value is always `missing` (the output
 column is `Missing`, as `Base.sum` of such a column is), and a fresh one is
 still the identity. When a later chunk widens the column, `widenstate` builds
@@ -2427,8 +2427,9 @@ while still emitting the output column the caller asked for.** `Σab` and `Σba`
 are the same number, so folding both would be duplicated per-row work; but
 silently renaming the caller's column would be surprising, so
 `DotProduct(:y, :x)` still produces `:y_x_dotproduct`. The canonical order is
-the `isless`-sorted one, and `canonicaldot`/`canonicaldotname` in
-`src/summarizers/sums.jl` are the shared implementation.
+the `isless`-sorted one, and `canonicalpair`/`canonicaldot` in
+`src/summarizers/sums.jl` are the shared implementation (a dependent names the
+canonical form's column by `outname`).
 
 That splits into two cases, and a new symmetric summarizer should follow
 whichever fits:

@@ -65,6 +65,10 @@ A [`GroupSummarizer`](@ref) may also build a separate windowed state with
 """
 abstract type SummarizerState end
 
+# The fieldless states of the dependent summarizers, whose value comes from
+# their dependencies' at emission (derived.jl gives them no-op folds).
+abstract type DerivedState <: SummarizerState end
+
 """
     emptyvalue(s::Summarizer) -> NamedTuple
 
@@ -73,6 +77,10 @@ names from it before any data arrives, and use it when there is no data to
 build a state from.
 """
 function emptyvalue end
+
+# The output column of a single-output summarizer, which is how a dependent
+# names the dependency values it reads.
+outname(s::Summarizer) = only(keys(emptyvalue(s)))
 
 """
     fresh(s::Summarizer, intypes::NamedTuple) -> SummarizerState
@@ -379,7 +387,7 @@ isinvertible(::SummarizerState) = true
 
 # Zero a state tuple in place, returning the tuple to use (as with `fresh!`, a
 # state that can't be zeroed in place returns a new object). Over a concrete
-# tuple the map unrolls; for the built-in states it allocates nothing.
+# tuple of up to 32 states the map unrolls; for the built-in states it allocates nothing.
 @inline freshall!(states::Tuple) = map(fresh!, states)
 
 @inline maybemissing(::Type{A}, M::Bool) where {A} = M ? Union{Missing,A} : A

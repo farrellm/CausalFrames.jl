@@ -165,16 +165,18 @@ design rationale and performance constraints behind each module.
     reports, so wanting both costs one deque, not two. `Product` is the only
     built-in monoid that is not a group
   - the dependent summarizers (`Moment`, `Mean`, `Variance`, `Std`,
-    `Covariance`, `Correlation`, `LinearRegression`) have empty state structs:
-    they declare `dependencies` and read those values back through the
-    two-argument `value(st, vals)`. Such a state joins the `DerivedState`
-    union, which gives it no-op `fresh`, `update!`, `combine!` and
+    `Covariance`, `Correlation`, `LinearRegression`, `Quantile`, `Median`,
+    `PercentRank`, `MeanAbsDev`, and a reversed `DotProduct`'s `AliasState`)
+    have empty state structs: they declare `dependencies` and read those
+    values back through the two-argument `value(st, vals)`, naming each
+    dependency by `outname`. Such a state subtypes the abstract
+    `DerivedState`, which gives it no-op `fresh`, `update!`, `combine!` and
     `downdate!`. States are shared by shape, not summarizer (`Mean` and
     `Moment` are one `CountRatioState`, and `Variance` is `Covariance`'s state
     over a column and itself)
   - a summarizer whose value is symmetric in two columns (`DotProduct`,
     `Covariance`, every pairwise term in `LinearRegression`) folds under the
-    `isless`-sorted argument order via `canonicaldot`/`canonicaldotname`, but
+    `isless`-sorted argument order via `canonicaldot`/`canonicalcomoment`, but
     emits the column name the caller asked for. For an accumulator, the
     reversed form becomes a dependent over the canonical one through the
     fieldless `AliasState{N,D}`; something already dependent just names the
@@ -227,11 +229,13 @@ design rationale and performance constraints behind each module.
   - a `Missing`-admitting accumulator type sets the flag `M` and folds at the
     non-missing type, counting `missing` terms as the compensated storage
     counts nonfinites, so the accumulator stays invertible. `Union{Missing,_}`
-    appears only in `value`'s return, never in an accumulation field. With `M`
+    appears only in `value`'s return, never in an accumulation field, except
+    `Product`'s, a monoid that never downdates, whose total absorbs a
+    `missing`. With `M`
     false the count is never touched and its tests compile away. An
     all-`Missing` column (accumulator type `Missing`) has no type to fold at,
-    so it gets a count-only `MissingState` instead (also for `AgeWeightedSum`
-    and `Product`). It is valued `missing`, its fresh state is still the
+    so it gets a count-only `MissingState` instead (also for `CoMoment`,
+    `AgeWeightedSum` and `Product`). It is valued `missing`, its fresh state is still the
     identity, and on widening it rebuilds the real state from its `recipe`,
     handing over the count (`withmissings!`)
   - the order statistics (`Quantile`, `Median`, `PercentRank`) are fieldless

@@ -70,11 +70,7 @@ end
 function LinearRegression(predictors, response::ColumnSpec;
     intercept::Bool = true, name::Union{Nothing,Symbol} = nothing)
     specs = Tuple(p isa Pair ? p : Symbol(p) for p in predictors)
-    ps = map(colname, specs)
-    isempty(ps) &&
-        throw(ArgumentError("LinearRegression requires at least one predictor"))
-    allunique(ps) || throw(ArgumentError(
-        "LinearRegression predictors must be unique, got $ps"))
+    ps = checkpredictors(map(colname, specs), "LinearRegression")
     # Catches, e.g., a predictor named `intercept`, which would otherwise fail
     # later in the NamedTuple constructor with no mention of this summarizer.
     outs = regnames(ps, name, intercept)
@@ -89,13 +85,22 @@ LinearRegression(predictor::Union{ColumnSpec,AbstractString},
     response::ColumnSpec; kwargs...) =
     LinearRegression((predictor,), response; kwargs...)
 
+# A model's predictor names, of which there must be at least one, all distinct
+# (LinearRegression, FitModel). `op` names the summarizer.
+function checkpredictors(ps::Tuple{Vararg{Symbol}}, op::String)
+    isempty(ps) && throw(ArgumentError("$op requires at least one predictor"))
+    allunique(ps) ||
+        throw(ArgumentError("$op predictors must be unique, got $ps"))
+    return ps
+end
+
 # Fieldless, with every name a type parameter so the two-argument `value`
 # infers. NN and SN are the output names (the row count, then the statistics);
 # AN every accumulator name read, deduplicated (a predictor may be the
 # response); SP and SY the predictor and response sums, QY the response's power
 # sum, GN the packed upper triangle of the cross-product matrix, DN the
 # predictor-response cross products; I the intercept flag.
-struct LinearRegressionState{NN,SN,AN,SP,SY,QY,GN,DN,I} <: SummarizerState end
+struct LinearRegressionState{NN,SN,AN,SP,SY,QY,GN,DN,I} <: DerivedState end
 
 regname(::Nothing, base::Symbol) = base
 regname(prefix::Symbol, base::Symbol) = Symbol(prefix, :_, base)
@@ -124,8 +129,7 @@ crossdep(a::Symbol, b::Symbol, intercept::Bool) =
     intercept ? canonicalcomoment(a, b) :
     a === b ? SumPower(a, 2) : canonicaldot(a, b)
 crossname(a::Symbol, b::Symbol, intercept::Bool) =
-    intercept ? canonicalcomomentname(a, b) :
-    a === b ? Symbol(a, :_sumpower_2) : canonicaldotname(a, b)
+    outname(crossdep(a, b, intercept))
 
 # Entry (i, j), i <= j, of a K x K matrix packed row-major over its upper
 # triangle — the layout GN is built in.
@@ -142,7 +146,7 @@ function dependencies(r::LinearRegression{P,Y}) where {P,Y}
             push!(ds, crossdep(p, P[j], I))
         end
     end
-    if r.intercept
+    if I
         push!(ds, Sum(Y))
         for p in P
             push!(ds, Sum(p))
@@ -162,11 +166,10 @@ function fresh(r::LinearRegression{P,Y}, ::NamedTuple) where {P,Y}
     gn = Tuple(crossname(P[i], P[j], I) for i in eachindex(P) for j in i:length(P))
     dn = map(p -> crossname(p, Y, I), P)
     qy = (crossname(Y, Y, I),)
-    sy = r.intercept ? (Symbol(Y, :_sum),) : ()
-    sp = r.intercept ? map(p -> Symbol(p, :_sum), P) : ()
+    sy = I ? (outname(Sum(Y)),) : ()
+    sp = I ? map(p -> outname(Sum(p)), P) : ()
     an = Tuple(unique((qy..., gn..., dn..., sy..., sp...)))
-    return LinearRegressionState{first(ns),Base.tail(ns),an,sp,sy,qy,gn,dn,
-        r.intercept}()
+    return LinearRegressionState{first(ns),Base.tail(ns),an,sp,sy,qy,gn,dn,I}()
 end
 
 # The dependency values this regression reads, and the tuple type they are

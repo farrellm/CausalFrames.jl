@@ -65,10 +65,7 @@ function FitModel(model, predictors, response::Symbol; name::Symbol = :model,
         ArgumentError(
             "FitModel predictors must be column names, got a row term"),
     )
-    ps = Tuple(Symbol(p) for p in predictors)
-    isempty(ps) && throw(ArgumentError("FitModel requires at least one predictor"))
-    allunique(ps) || throw(ArgumentError(
-        "FitModel predictors must be unique, got $ps"))
+    ps = checkpredictors(Tuple(Symbol(p) for p in predictors), "FitModel")
     response in ps && throw(ArgumentError(
         "FitModel response $(repr(response)) is also a predictor"))
     return FitModel{name,ps,response,typeof(model)}(model, Int(verbosity))
@@ -117,8 +114,7 @@ function value(st::FitModelState{N,P,Y,M}) where {N,P,Y,M}
     fitresult, report = fitmodel(st.model, st.verbosity, map(copy, st.cols),
         copy(st.y))
     return NamedTuple{(N,),Tuple{FittedModel{P,M}}}((
-        FittedModel{P,M}(st.model,
-            fitresult, report),
+        FittedModel{P,M}(st.model, fitresult, report),
     ))
 end
 function widenstate(st::FitModelState{N,P,Y,M},
