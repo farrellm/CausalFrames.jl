@@ -423,6 +423,11 @@ gridrow(t, k, v) = merge((; time = t), k, v)
 gridrowtype(::Type{T}, ::Type{K}, ::Type{V}) where {T,K,V} =
     Base.promote_op(gridrow, T, K, V)
 
+# A grid's row type, over value type V, and its empty row.
+gridtypes(::Type{T}, ::Type{K}, ::Type{V}, protos::Tuple,
+    outs::Val) where {T,K,V} =
+    gridrowtype(T, K, V), convert(V, emptyvalues(protos, outs))
+
 # --- dense (declared-key) groups -------------------------------------------
 #
 # The per-key state tuples of a dense transform, one slot per declared key in
@@ -446,11 +451,9 @@ widengroups(dg::DenseGroups, ::S, intypes::NamedTuple, ::KeySet) where {S<:Tuple
 declarednames(::KeySet{NamedTuple{KN,T}}) where {KN,T} = Val(KN)
 
 # The dense row type and empty row. Type-unstable setup, once per chunk.
-function densetypes(::Type{T}, stateprotos::S, protos::Tuple, ::KeySet{K},
-    outs::Val) where {T,S,K}
-    V = promotedvaluetype(S, protos, outs)
-    return gridrowtype(T, K, V), convert(V, emptyvalues(protos, outs))
-end
+densetypes(::Type{T}, stateprotos::S, protos::Tuple, ::KeySet{K},
+    outs::Val) where {T,S,K} =
+    gridtypes(T, K, promotedvaluetype(S, protos, outs), protos, outs)
 
 @inline function densefold!(dg::DenseGroups, ks::KeySet, row)
     i = keyindex(ks, keyvalues(row, declarednames(ks)))

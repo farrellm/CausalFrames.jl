@@ -33,10 +33,13 @@ mutable struct SegTree{S<:Tuple,R,T}
     synced::Int        # leaves 1:synced have up-to-date ancestors
 end
 
+# The smallest leaf capacity; a tree's nodes are twice its capacity.
+const MINCAP = 4
+
 newsegtree(stateprotos::S, ::Type{R}, ::Type{T}) where {S<:Tuple,R,T} =
-    SegTree{S,R,T}(R[], T[], [map(fresh, stateprotos) for _ in 1:8],
+    SegTree{S,R,T}(R[], T[], [map(fresh, stateprotos) for _ in 1:(2*MINCAP)],
         map(fresh, stateprotos), map(fresh, stateprotos),
-        map(fresh, stateprotos), 4, 1, 0)
+        map(fresh, stateprotos), MINCAP, 1, 0)
 
 # Peeled explicitly: the three-argument `foreach` goes through a `zip` and
 # doesn't unroll for tuples (a runtime dispatch per node), and `map` would
@@ -75,14 +78,14 @@ function treesync!(tr::SegTree)
         l = tr.cap + lo - 1
         r = tr.cap + n - 1
         while l > 1
-            last = r          # the last maintained node on the child level
+            lastnode = r      # the last maintained node on the child level
             l >>>= 1
             r >>>= 1
             for i in l:(r-1)
                 @inbounds combinenodes!(nodes[i], nodes[2i], nodes[2i+1])
             end
             @inbounds combinenodes!(nodes[r], nodes[2r],
-                2r + 1 <= last ? nodes[2r+1] : tr.ident)
+                2r + 1 <= lastnode ? nodes[2r+1] : tr.ident)
         end
     end
     tr.synced = n
@@ -161,7 +164,7 @@ function rebuild!(tr::SegTree{S}, stateprotos::S) where {S<:Tuple}
     deleteat!(tr.rows, 1:dead)
     deleteat!(tr.times, 1:dead)
     live = length(tr.rows)
-    cap = max(4, nextpow(2, 2 * (live + 1)))
+    cap = max(MINCAP, nextpow(2, 2 * (live + 1)))
     if cap == tr.cap
         nodes = tr.nodes
         for i in cap:(cap+live-1)

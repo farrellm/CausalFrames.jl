@@ -507,7 +507,7 @@ design rationale and performance constraints behind each module.
   that accumulator); float sums stay running because the compensated states
   evict NaN/±Inf rows cleanly. `Bars(n)` windows change membership only: each
   key keeps a `RowRing` of its newest rows (sized for the longest count, plus
-  one), a row leaves on admission when pushed `n + 1` deep (`admitbars!`
+  one), a row leaves on admission when pushed `n + 1` deep (`admitrings!`
   downdates it), the tree queries the key's last `n` rows, the refold tier
   folds the ring, and a tier seeing fewer than `n` rows returns `nothing`,
   whose empty row is all `missing`. The shared buffer serves only time windows;

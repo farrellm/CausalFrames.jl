@@ -141,15 +141,16 @@ function preparewindows!(st::WindowState, @nospecialize(cfg::WindowConfig),
     st.prevkeys =
         st.prevkeys === nothing ? K[] : convert(Vector{K}, st.prevkeys)
     old = st.tiers
+    # The live rows start at the old head, if the old tiers buffered rows.
+    oldhead = old === nothing || old.buffer === nothing ? 1 : st.head
     buffer = rebuildbuffer(tg, R, old)
-    (old === nothing || old.buffer === nothing) && (st.head = 1)
     running =
         isempty(tg.running) ? nothing :
-        replayrunning!(RunningTable{K,typeof(tg.running)}(), buffer, st.head,
+        replayrunning!(RunningTable{K,typeof(tg.running)}(), buffer, oldhead,
             tg.running, cfg.keynames)
-    trees = rebuildtrees(tg, K, R, types.time, old, st.head, cfg.keynames)
+    trees = rebuildtrees(tg, K, R, types.time, old, oldhead, cfg.keynames)
     refold = isempty(tg.refold) ? nothing : GroupTable{K,typeof(tg.refold)}()
-    buffer === nothing && (st.head = 1)
+    st.head = buffer === nothing ? 1 : oldhead
     groups = primarygroups(running, trees, refold)
     st.tiers = WindowTiers{R}(buffer, running, trees, refold, tg,
         Pair{K,valtype(groups)}[])
@@ -162,11 +163,8 @@ end
 windowkeytype(::Nothing, st::WindowState) = eltype(st.prevkeys)
 windowkeytype(::KeySet{K}, st::WindowState) where {K} = K
 
-function windowtypes(st::WindowState{T}, @nospecialize(cfg::WindowConfig)) where {T}
-    V = st.valtype
-    RT = gridrowtype(T, windowkeytype(cfg.ks, st), V)
-    return RT, convert(V, emptyvalues(cfg.protos, cfg.outs))
-end
+windowtypes(st::WindowState{T}, @nospecialize(cfg::WindowConfig)) where {T} =
+    gridtypes(T, windowkeytype(cfg.ks, st), st.valtype, cfg.protos, cfg.outs)
 
 function windowchunk!(st::WindowState{T}, @nospecialize(cfg::WindowConfig),
     c::DataFrame) where {T}
@@ -178,7 +176,7 @@ function windowchunk!(st::WindowState{T}, @nospecialize(cfg::WindowConfig),
     exhausted(st.cur) && isempty(st.ticks) && return nothing
     nt = projectinput(terminput(c, cfg.terms, "summarizewindows"), cfg.stored)
     types = promotetypes(st.types, chunktypes(nt))
-    moved = st.types === nothing || types != st.types
+    moved = types != st.types
     st.types = types
     moved && preparewindows!(st, cfg, types)
     pullpast!(st.ticks, st.cur, last(nt.time))
@@ -301,7 +299,7 @@ end
 @noinline function closewindow!(rows::Vector, τ, tiers::WindowTiers, head::Int,
     prevkeys::Vector, lookback, keynames::Val, outs::Val, emptyrow,
     ks::Union{Nothing,KeySet})
-    head = evictwindow!(tiers.buffer, head, τ, lookback, tiers.running, keynames)
+    head = evicthead!(tiers.buffer, head, τ, lookback, tiers.running, keynames)
     head = compacthead!(tiers.buffer, head)
     closetrees!(tiers.trees, τ, lookback)
     foldrefold!(tiers.refold, tiers.buffer, head, tiers.tg.refold, keynames)
@@ -310,21 +308,6 @@ end
     retirerefold!(tiers.refold)
     return head
 end
-
-@inline evictwindow!(::Nothing, head::Int, τ, lookback, running, keynames::Val) =
-    head
-@inline function evictwindow!(buffer::Vector, head::Int, τ, lookback, running,
-    keynames::Val)
-    while head <= length(buffer) && τ - @inbounds(buffer[head]).time > lookback
-        evictwinrunning!(running, @inbounds(buffer[head]), keynames)
-        head += 1
-    end
-    return head
-end
-
-@inline evictwinrunning!(::Nothing, row, keynames::Val) = nothing
-@inline evictwinrunning!(rt::RunningTable, row, keynames::Val) =
-    evictgroup!(rt, keyvalues(row, keynames), row)
 
 # Every admitted row is before τ, so a tree's window is head:length(rows). An
 # emptied tree is dropped, since ticks only advance. The survivors sync once,

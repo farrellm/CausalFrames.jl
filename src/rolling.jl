@@ -7,7 +7,7 @@
 # states merged back into dependency order. Type-unstable setup runs once per
 # chunk; the kernel takes concretely typed arguments. A `Bars` window counts
 # rows instead: each key keeps a ring of its newest rows, and a row leaves the
-# window when it is pushed `n` rows deep, on admission rather than by time.
+# window when it is pushed `n + 1` rows deep, on admission rather than by time.
 
 """
     Bars(n::Integer) -> Bars
@@ -146,7 +146,7 @@ function addrollingcolumns(windows, summarizers; key = nothing,
         prototypes(tosummarizers(summarizers), Symbol[], "addrollingcolumns")
     prefixednames = Symbol[]
     for w in windownames, n in requested
-        pn = Symbol(w, '_', n)
+        pn = prefixedname(w, n)
         pn in prefixednames && throw(
             ArgumentError(
                 "addrollingcolumns output column $(repr(pn)) appears more than once"),
@@ -166,6 +166,8 @@ function addrollingcolumns(windows, summarizers; key = nothing,
         return chunkmap(c -> rollchunk!(gate.rs, gate.cfg, c), afterleadin(gate))
     end
 end
+addrollingcolumns(p::CausalPipeline, windows, summarizers; kwargs...) =
+    addrollingcolumns(windows, summarizers; kwargs...)(p)
 
 # The summarized and augmented chunk streams, and the start of the shared
 # run's output rows (`nothing` without one). Summarizing its own input, the
@@ -187,8 +189,9 @@ end
 # first would have the tee queue the whole lead-in for the summarized side, at
 # full width, before the windows could drop any of it.
 afterleadin(gate) = ChunkSource(() -> pullafterleadin!(gate))
-addrollingcolumns(p::CausalPipeline, windows, summarizers; kwargs...) =
-    addrollingcolumns(windows, summarizers; kwargs...)(p)
+
+# A window's output column for the summary `n`.
+prefixedname(w, n) = Symbol(w, '_', n)
 
 # Normalized window spec: names as a Symbol tuple and look-backs as a tuple, so
 # heterogeneous look-back types (say Minute and Hour) stay concrete.
@@ -352,7 +355,9 @@ function barsuffixes(::Type{K}, ::Type{R}, old, head::Int,
             row = convert(R, old.buffer[j])
             push!(get!(() -> R[], bykey, keyvalues(row, keynames)), row)
         end
-        foreach(((k, rows),) -> offer!(k, rows), bykey)
+        for (k, rows) in bykey
+            offer!(k, rows)
+        end
     end
     return suffixes
 end
@@ -363,7 +368,9 @@ function rebuildrings(::Type{K}, ::Type{R}, cap::Int, suffixes) where {K,R}
     suffixes === nothing && return rings
     for (k, rows) in suffixes
         ring = RowRing{R}(cap)
-        foreach(row -> ringpush!(ring, row), rows[max(1, end-cap+1):end])
+        for j in max(1, length(rows)-cap+1):length(rows)
+            ringpush!(ring, rows[j])
+        end
         rings[k] = ring
     end
     return rings
@@ -399,7 +406,7 @@ function pullsummarized!(rs::RollingState, @nospecialize(cfg::RollingConfig),
     nt = projectinput(terminput(chunk, cfg.terms, "addrollingcolumns"),
         cfg.stored)
     types = promotetypes(rs.stypes, chunktypes(nt))
-    moved = rs.stypes === nothing || types != rs.stypes
+    moved = types != rs.stypes
     rs.stypes = types
     rs.snt = nt
     rs.spos = 1
@@ -417,7 +424,7 @@ end
 function setvaltype!(rs::RollingState, @nospecialize(cfg::RollingConfig),
     @nospecialize(tg::Tiering))
     V = tieredvaluetype(tg, cfg.protos, cfg.outs)
-    VB = missingfields(valuetype(typeof(mergedstates(tg)), cfg.outs), cfg.outs)
+    VB = barsvaluetype(tg, cfg.outs)
     empty = convert(V, emptyvalues(cfg.protos, cfg.outs))
     partial = missingrow(VB, cfg.outs)
     rs.valtypes = map(lb -> isbars(lb) ? VB : V, cfg.lookbacks)
@@ -582,14 +589,14 @@ end
     k = keyvalues(row, keynames)
     admitrunning!(tiers.running, tiers.tg.running, k, row)
     admittree!(tiers.trees, tiers.tg.tree, k, row)
-    admitbars!(tiers.rings, tiers.running, tiers.barcap, k, row, lookbacks)
+    admitrings!(tiers.rings, tiers.running, tiers.barcap, k, row, lookbacks)
     return k
 end
 
 # Push the row into its key's ring, then downdate, from each Bars window's
 # running table, the row the push took it past: n + 1 rows deep, oldest first.
-@inline admitbars!(::Nothing, running, cap::Int, k, row, lookbacks) = nothing
-@inline function admitbars!(rings::Dict{K,RowRing{R}}, running, cap::Int, k,
+@inline admitrings!(::Nothing, running, cap::Int, k, row, lookbacks) = nothing
+@inline function admitrings!(rings::Dict{K,RowRing{R}}, running, cap::Int, k,
     row, lookbacks::Tuple) where {K,R}
     ring = get!(() -> RowRing{R}(cap), rings, k)
     ringpush!(ring, row)
@@ -603,12 +610,10 @@ end
 @inline function evictbars!(running, ring::RowRing, k, w::Int, lb::Bars,
     rest...)
     length(ring) > lb.n &&
-        evictbarrow!(running, w, k, ringback(ring, lb.n + 1))
+        evictkey!(windowtable(running, w), k, ringback(ring, lb.n + 1))
     return evictbars!(running, ring, k, w + 1, rest...)
 end
 
-@inline evictbarrow!(::Nothing, w::Int, k, row) = nothing
-@inline evictbarrow!(tables::Tuple, w::Int, k, row) = evictgroup!(tables[w], k, row)
 
 # The per-window tables are a homogeneous tuple, so Int indexing is type-stable.
 @inline admitrunning!(::Nothing, stateprotos, k, row) = nothing
@@ -639,25 +644,18 @@ end
 end
 @inline function evictroll!(t, tiers::RollTiers, buffer::Vector, keynames::Val,
     w::Int, lb, rest...)
-    head = @inbounds tiers.winheads[w]
-    while head <= length(buffer) && t - @inbounds(buffer[head]).time > lb
-        evictrunning!(tiers.running, w, @inbounds(buffer[head]), keynames)
-        head += 1
-    end
-    @inbounds tiers.winheads[w] = head
+    @inbounds tiers.winheads[w] = evicthead!(buffer, tiers.winheads[w], t, lb,
+        windowtable(tiers.running, w), keynames)
     return evictroll!(t, tiers, buffer, keynames, w + 1, rest...)
 end
 
-@inline evictrunning!(::Nothing, w::Int, row, keynames::Val) = nothing
-@inline evictrunning!(tables::Tuple, w::Int, row, keynames::Val) =
-    evictgroup!(tables[w], keyvalues(row, keynames), row)
-
-# A tier's states for one window: `()` when the call has no such tier, `nothing`
-# when the window holds no rows of the key, the state tuple otherwise.
+# The key's tree: `()` without a tree tier, `nothing` for a key with no rows.
 @inline keytree(::Nothing, k) = ()
 @inline keytree(trees::AbstractDict, k) = get(trees, k, nothing)
 
-# A Bars window holding fewer than n rows is partial: `nothing`, as if empty.
+# A tier's states for one window: `()` when the call has no such tier, `nothing`
+# when the window holds no rows of the key, the state tuple otherwise. A Bars
+# window holding fewer than n rows is partial: `nothing`, as if empty.
 @inline runningstates(::Nothing, w::Int, k, lb) = ()
 @inline function runningstates(tables::Tuple, w::Int, k, lb)
     g = get(tables[w].groups, k, nothing)
@@ -753,7 +751,7 @@ function assemble(@nospecialize(cfg::RollingConfig), rs::RollingState,
     c::DataFrame)
     for (wname, v) in zip(cfg.windownames, rs.vals)
         wdf = rowsdataframe(v)
-        rename!(n -> string(wname, '_', n), wdf)
+        rename!(n -> prefixedname(wname, n), wdf)
         # The chunk is owned, so its columns are adopted, not copied.
         c = hcat(c, wdf; copycols = false)
     end
@@ -765,7 +763,7 @@ end
 function assembleempty(@nospecialize(cfg::RollingConfig), c::DataFrame)
     e = emptyvalues(cfg.protos, cfg.outs)
     for (wname, lb) in zip(cfg.windownames, cfg.lookbacks), (name, val) in pairs(e)
-        c[!, Symbol(wname, '_', name)] =
+        c[!, prefixedname(wname, name)] =
             isbars(lb) ? Vector{Union{Missing,typeof(val)}}(missing, nrow(c)) :
             fill(val, nrow(c))
     end
