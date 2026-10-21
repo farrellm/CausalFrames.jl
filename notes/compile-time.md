@@ -380,6 +380,9 @@ addsummarycolumns, intervalize keyless/keyed/dense, summarizewindows, two
 addrollingcolumns, lastrow, asofjoin), with the outputs serialized and
 compared with `master`'s, which they matched exactly. The suite's 15 s drop
 is mostly `rolling.jl` (243 → 231 s); the rest moved by less than noise.
+The benchmark's `chain8-keyed`, the case that once caught a type-nesting
+blow-up, compiles its first `load` in 2.27–2.31 s against `master`'s
+2.27–2.35 s (three fresh processes each, alternating).
 
 At runtime, a full-`SUITE` A/B of two worktrees (4 rounds, alternating order,
 minimums) gave a geomean ratio of 1.004 over 89 benchmarks. No allocation
