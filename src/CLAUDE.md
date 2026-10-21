@@ -5,7 +5,9 @@ design rationale and performance constraints behind each module.
 
 - `src/context.jl` / `src/chunks.jl` — `Context{T}`, the `[start, stop)`
   evaluation window, with `widenstart`, which every operator reading before
-  `start` (a tolerance, a look-back) uses to widen and validate it; and the
+  `start` (a tolerance, a look-back) uses to widen and validate it, its mirror
+  `widenstop` for the acausal operators reading past `stop`, and the shared
+  integer-argument checks `checkpositive`/`checknonnegative`; and the
   internal chunk protocol (`ChunkSource`, `chunkmap`): a single-pass lazy
   iterator of non-empty DataFrame chunks whose consumers own what they're
   given. Empty chunks are filtered out here, so downstream code may assume a

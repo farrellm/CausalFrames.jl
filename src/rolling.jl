@@ -614,7 +614,6 @@ end
     return evictbars!(running, ring, k, w + 1, rest...)
 end
 
-
 # The per-window tables are a homogeneous tuple, so Int indexing is type-stable.
 @inline admitrunning!(::Nothing, stateprotos, k, row) = nothing
 @inline function admitrunning!(tables::Tuple, stateprotos::Tuple, k, row)

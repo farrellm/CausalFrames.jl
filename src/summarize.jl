@@ -538,9 +538,11 @@ end
 # --- folding kernels -------------------------------------------------------
 #
 # Called once per chunk with concretely typed arguments, so each specializes on
-# the groups, state tuple and column table. Each kernel has a method per kind
-# of groups its transforms build (`newgroups`): a keyless state tuple, a
-# `GroupTable` or `DenseGroups`, with the transform's grouping beside them.
+# the groups, state tuple and column table. The kernels are written once over
+# the kinds of groups the transforms build (`newgroups`): a keyless state tuple,
+# a `GroupTable` or `DenseGroups`, with the transform's grouping beside them,
+# reaching them through helpers with a method per kind (`rowstates!`,
+# `foldrow!`, `closerows`, `closegroups!`).
 
 function foldall!(states::Tuple, nt::NamedTuple)
     for row in Tables.rows(nt)
