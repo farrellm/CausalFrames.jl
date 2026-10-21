@@ -31,7 +31,7 @@ names(load(Context(0, 10), p))
 ```
 """
 function selectcolumns(selectors...)
-    checkselectors(selectors, "selectcolumns", false)
+    checkselectors(selectors, "selectcolumns")
     return columntransform(cols -> keptcolumns(selectors, cols, true,
         "selectcolumns"))
 end
@@ -51,7 +51,8 @@ order.
   naming it is an `ArgumentError`, as is naming a column the data lacks.
 """
 function dropcolumns(selectors...)
-    checkselectors(selectors, "dropcolumns", true)
+    checkselectors(selectors, "dropcolumns",
+        "dropcolumns may not drop the time column")
     return columntransform(cols -> keptcolumns(selectors, cols, false,
         "dropcolumns"))
 end
@@ -88,11 +89,8 @@ names(load(Context(0, 10), p))
 ```
 """
 function reordercolumns(selectors...)
-    checkselectors(selectors, "reordercolumns", false)
-    foreachliteral(selectors) do n
-        n == "time" && throw(
-            ArgumentError("reordercolumns: the time column is always first"))
-    end
+    checkselectors(selectors, "reordercolumns",
+        "reordercolumns: the time column is always first")
     return columntransform(cols -> orderedcolumns(selectors, cols))
 end
 reordercolumns(p::CausalPipeline, selectors...) = reordercolumns(selectors...)(p)
@@ -178,8 +176,8 @@ checkselector(selectors) =
 # Whether a selector spec matches a column name. Leaves dispatch first, so a
 # predicate is never taken for a collection; anything else must be iterable
 # and is matched recursively.
-matchescolumn(s::Symbol, name::AbstractString) = String(s) == name
-matchescolumn(s::AbstractString, name::AbstractString) = String(s) == name
+matchescolumn(s::Union{Symbol,AbstractString}, name::AbstractString) =
+    String(s) == name
 matchescolumn(r::Regex, name::AbstractString) = occursin(r, name)
 matchescolumn(f::Function, name::AbstractString) = f(name)::Bool
 matchescolumn(x::ScalarSelector, ::AbstractString) = selectorerror(x)
@@ -189,10 +187,8 @@ function matchescolumn(selectors, name::AbstractString)
 end
 
 # Walk every leaf of a selector spec in order.
-foreachselector(f, s::Symbol) = (f(s); nothing)
-foreachselector(f, s::AbstractString) = (f(s); nothing)
-foreachselector(f, r::Regex) = (f(r); nothing)
-foreachselector(f, g::Function) = (f(g); nothing)
+foreachselector(f, s::Union{Symbol,AbstractString,Regex,Function}) =
+    (f(s); nothing)
 foreachselector(::Any, x::ScalarSelector) = selectorerror(x)
 function foreachselector(f, selectors)
     checkselector(selectors)
@@ -215,14 +211,14 @@ checkliterals(selectors, cols::Vector{String}, opname::String) =
             throw(ArgumentError("$opname: no column named $(repr(Symbol(n)))"))
     end
 
-# Eager validation: at least one selector, every leaf usable, and, for
-# dropcolumns, no literal `:time`.
-function checkselectors(selectors::Tuple, opname::String, dropping::Bool)
+# Eager validation: at least one selector, every leaf usable, and, given the
+# error `timeerror`, no literal `:time` (dropcolumns, reordercolumns).
+function checkselectors(selectors::Tuple, opname::String,
+    timeerror::Union{Nothing,String} = nothing)
     isempty(selectors) &&
         throw(ArgumentError("$opname requires at least one column selector"))
     foreachliteral(selectors) do n
-        dropping && n == "time" &&
-            throw(ArgumentError("$opname may not drop the time column"))
+        timeerror !== nothing && n == "time" && throw(ArgumentError(timeerror))
     end
     return nothing
 end

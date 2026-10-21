@@ -47,8 +47,7 @@ function readcsv(path::AbstractString; types = nothing, time = nothing,
     chunkbytes::Integer = 4 * 1024 * 1024, closed::Bool = false,
     skipmissing::Bool = false)
     checksourcetimespec(time, "readcsv")
-    chunkbytes > 0 ||
-        throw(ArgumentError("readcsv chunkbytes must be positive, got $chunkbytes"))
+    checkpositive(chunkbytes, "readcsv chunkbytes")
     # Fail eagerly when the time column is provably untyped: no `types`, or a
     # name-keyed dict with no entry for it. Other `types` forms, and any
     # `rename` (`types` names the file's original columns), can only be judged
@@ -122,15 +121,13 @@ tochunk(filechunk) = filechunk isa DataFrame ? filechunk : DataFrame(filechunk)
 
 function (p::CSVProducer)()
     clip = p.clip
-    clip.done && return nothing
     p.chunks === nothing && (
         p.chunks = PullCursor(
             Iterators.map(tochunk,
                 csvchunks(clip.path, p.chunkbytes, p.types, p.delim)),
         )
     )
-    p.sort && return gathersorted!(clip, p.chunks)
-    return nextclipped!(clip, p.chunks)
+    return pullclipped!(clip, p.chunks, p.sort)
 end
 
 """

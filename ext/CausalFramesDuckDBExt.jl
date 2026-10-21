@@ -11,8 +11,7 @@ using DuckDB
 using Tables
 
 using CausalFrames:
-    ChunkSink, PullCursor, SourceClip, gathersorted!, nextclipped!,
-    timesourcename
+    ChunkSink, PullCursor, SourceClip, pullclipped!, timesourcename
 
 CausalFrames.backendloaded(::Val{:duckdb}) = true
 
@@ -45,11 +44,8 @@ CausalFrames.parquetproducer(::Val{:duckdb}, clip::SourceClip{T},
     QueryProducer{T}(clip, sort, false, nothing, nothing)
 
 function (p::QueryProducer)()
-    clip = p.clip
-    clip.done && return nothing
     p.parts === nothing && startquery!(p)
-    p.gather && return gathersorted!(clip, p.parts)
-    return nextclipped!(clip, p.parts)
+    return pullclipped!(p.clip, p.parts, p.gather)
 end
 
 # Open the connection and start the streaming scan. The window is pushed down

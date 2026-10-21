@@ -137,7 +137,7 @@ writecsv(path)`): a writer finalizes its file only when its input is exhausted,
 which `head` prevents.
 """
 function head(n::Integer)
-    n >= 0 || throw(ArgumentError("head n must be non-negative, got $n"))
+    checknonnegative(n, "head n")
     limit = Int(n)
     return pipetransform() do p, ctx
         return ChunkSource(HeadProducer(p.run(ctx), limit))
@@ -307,7 +307,7 @@ end
 
 # The Symbol form drops the old :time and renames the named column to :time,
 # in its own position. The Function form overwrites :time in place. Both mutate
-# the owned chunk's column index (see DESIGN.md, "CSV output").
+# the owned chunk's column index (the `writecsv` hand-off argument).
 function settimecolumn!(c::DataFrame, spec::Symbol, new::AbstractVector)
     if spec !== :time
         select!(c, Not(:time))

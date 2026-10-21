@@ -67,7 +67,7 @@ order it expects. [`widenstate`](@ref) re-types the state and keeps its window.
 """
 function barwindow(s::Summarizer, n::Integer, intypes::NamedTuple;
     hoistedby::Union{Nothing,Summarizer} = nothing)
-    n >= 1 || throw(ArgumentError("barwindow count must be positive, got $n"))
+    checkpositive(n, "barwindow count")
     protos, requested, terms =
         prototypes(Summarizer[s], Symbol[], "barwindow")
     return newbarwindow(protos, Val(requested), windowterms(terms, hoistedby),

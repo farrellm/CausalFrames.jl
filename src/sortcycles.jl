@@ -112,13 +112,15 @@ function sortcyclechunk!(st::CycleSortState, spec, order, c::DataFrame)
     end
     rest = lo > hi + 1 ? sortedview(c, (hi+1):(lo-1), spec, order) : nothing
     push!(pending, lo == 1 ? c : c[lo:end, :])
-    return materialize(closed, rest)
+    return vcatviews(closed, rest)
 end
 
-materialize(::Nothing, ::Nothing) = nothing
-materialize(v::SubDataFrame, ::Nothing) = DataFrame(v)
-materialize(::Nothing, v::SubDataFrame) = DataFrame(v)
-materialize(a::SubDataFrame, b::SubDataFrame) = vcat(a, b)
+# The emitted rows: the closed cycle's and the chunk's complete cycles, either
+# of which may be absent, copied out of their sorted views once.
+vcatviews(::Nothing, ::Nothing) = nothing
+vcatviews(v::SubDataFrame, ::Nothing) = DataFrame(v)
+vcatviews(::Nothing, v::SubDataFrame) = DataFrame(v)
+vcatviews(a::SubDataFrame, b::SubDataFrame) = vcat(a, b)
 
 # Called once upstream is exhausted: the open cycle is complete. One already in
 # order goes out without a further copy.

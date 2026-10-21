@@ -8,7 +8,7 @@ module Acausal
 
 using ..CausalFrames: CausalPipeline, Context, pipetransform, chunkmap, shiftchunk!,
     settimechunk!, SetTimeState, checktimespec, timetype, rowat, keyat,
-    jointransform
+    jointransform, widenstop
 import ..CausalFrames: newstore, widenstore, segment!, joincmp, rightcontext
 
 export futurejoin, lead
@@ -59,17 +59,6 @@ end
 futurejoin(left::CausalPipeline, right::CausalPipeline; kwargs...) =
     futurejoin(right; kwargs...)(left)
 
-# The mirror of `widenstart`: a tolerance widens the right window forward, so
-# lookahead past the window's end is covered. The guard rejects a negative
-# tolerance, which the Context constructor would accept.
-futurecontext(ctx::Context, ::Nothing) = ctx
-function futurecontext(ctx::Context, tolerance)
-    stop = ctx.stop + tolerance
-    stop >= ctx.stop || throw(ArgumentError(
-        "futurejoin tolerance must be non-negative, got $tolerance"))
-    return Context(ctx.start, stop)
-end
-
 # The forward direction of the join engine: the same driver, with the store and
 # kernel below picked by dispatch, and `cmp` being `>` or `>=`.
 struct Forward end
@@ -107,8 +96,8 @@ newstore(::Forward, ::Type{K}, ::Type{V}) where {K,V} = Dict{K,KeyBuffer{V}}()
 # The earliest right row after the left one (at it, unless strict), over a
 # right window widened forward by the tolerance.
 joincmp(::Forward, strict::Bool) = strict ? (>) : (>=)
-rightcontext(::Forward, ctx::Context, tolerance, ::String) =
-    futurecontext(ctx, tolerance)
+rightcontext(::Forward, ctx::Context, tolerance, op::String) =
+    widenstop(ctx, tolerance, "$op tolerance")
 widenstore(store::Dict{<:Any,<:KeyBuffer}, ::Type{K}, ::Type{V}) where {K,V} =
     Dict{K,KeyBuffer{V}}(
         convert(K, k) => KeyBuffer{V}(convert(Vector{V}, b.rows), b.head)
@@ -194,12 +183,8 @@ lead(p::CausalPipeline, offset) = lead(offset)(p)
 # The mirror of `lagcontext`: the window slides forward by `offset`, so the
 # shift lands the output in [start, stop). The guard rejects a negative offset,
 # which would silently act as a lag.
-function leadcontext(ctx::Context, offset)
-    start = ctx.start + offset
-    start >= ctx.start ||
-        throw(ArgumentError("lead offset must be non-negative, got $offset"))
-    return Context(start, ctx.stop + offset)
-end
+leadcontext(ctx::Context, offset) =
+    Context(ctx.start + offset, widenstop(ctx, offset, "lead offset").stop)
 
 # --- settime: the permissive time reassignment -----------------------------
 

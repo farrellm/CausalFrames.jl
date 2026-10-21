@@ -32,6 +32,12 @@ The time type of a context.
 """
 timetype(::Context{T}) where {T} = T
 
+# Eager checks of an integer argument; `what` names the operator and argument.
+checkpositive(n::Integer, what::String) =
+    n > 0 || throw(ArgumentError("$what must be positive, got $n"))
+checknonnegative(n::Integer, what::String) =
+    n >= 0 || throw(ArgumentError("$what must be non-negative, got $n"))
+
 # The context an operator reads its input over when it must see `amount` before
 # `start`: the rows a `tolerance` may still match, or a look-back's worth.
 # Non-negativity is probed by subtracting rather than by comparing with zero,
@@ -43,4 +49,13 @@ function widenstart(ctx::Context, amount, what::String)
     start <= ctx.start ||
         throw(ArgumentError("$what must be non-negative, got $amount"))
     return Context(start, ctx.stop)
+end
+
+# Its mirror, for the acausal operators reading `amount` past `stop`.
+widenstop(ctx::Context, ::Nothing, what::String) = ctx
+function widenstop(ctx::Context, amount, what::String)
+    stop = ctx.stop + amount
+    stop >= ctx.stop ||
+        throw(ArgumentError("$what must be non-negative, got $amount"))
+    return Context(ctx.start, stop)
 end

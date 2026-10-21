@@ -52,8 +52,7 @@ DataFrame(load(Context(0, 10), merge(trades, quotes)))
 """
 function Base.merge(p::CausalPipeline, ps::CausalPipeline...;
     batchsize::Integer = 1024)
-    batchsize > 0 ||
-        throw(ArgumentError("merge batchsize must be positive, got $batchsize"))
+    checkpositive(batchsize, "merge batchsize")
     pipelines = (p, ps...)
     n = Int(batchsize)
     return CausalPipeline(ctx::Context -> ChunkSource(MergeProducer(pipelines, ctx, n)))
@@ -297,10 +296,10 @@ function buildcolumn(pieces::Vector{MergePiece}, k::Int, n::Int)
         j = pc.colmap[k]
         T = promote_type(T, j == 0 ? Missing : eltype(pc.chunk[!, j]))
     end
-    return fillcolumn!(Vector{T}(undef, n), pieces, k)
+    return gathercolumn!(Vector{T}(undef, n), pieces, k)
 end
 
-function fillcolumn!(out::Vector, pieces::Vector{MergePiece}, k::Int)
+function gathercolumn!(out::Vector, pieces::Vector{MergePiece}, k::Int)
     span = CopySpan(0, 0, 0)
     for pc in pieces
         j = pc.colmap[k]

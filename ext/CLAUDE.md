@@ -36,10 +36,13 @@ fallbacks in `src/parquet.jl` throw the `READHINT`/`WRITEHINT` message:
 - `clipchunk!(clip, df)` returns the clipped chunk, or `nothing` when no row
   is in the window. It carries `prevtime` across pulls itself (that is what
   catches a cross-chunk sortedness violation) and sets `clip.done` on seeing a
-  time past the window, so the loop is `while !clip.done … end`, setting
-  `clip.done` too when the reader runs dry. It also drops (or, without
-  `skipmissing`, refuses) missing times, so a producer never handles them
-  itself
+  time past the window. It also drops (or, without `skipmissing`, refuses)
+  missing times, so a producer never handles them itself
+- A producer drives it through `pullclipped!(clip, cursor, gather)`, a
+  `PullCursor` over its freshly read DataFrames: that loops `clipchunk!` until
+  a chunk keeps rows (`nextclipped!`), setting `clip.done` when the reader runs
+  dry, or under `gather` reads the whole file into one sorted chunk
+  (`gathersorted!`). The producer only opens its reader on the first call
 - DuckDB's pushed-down `WHERE` drops null times silently, which is accepted:
   an `OR col IS NULL` to surface them costs the row-group skip (see
   `notes/duckdb-null-pushdown.md`). Any other pre-filter should leave them for

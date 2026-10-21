@@ -149,10 +149,7 @@ DataFrame(load(Context(0, 10), readparquet(joinpath(dir, "mids.parquet"))))
 function writeparquet(path::AbstractString; queue::Integer = 1,
     rowgroupsize::Integer = 1_000_000, backend::Symbol = :auto, kwargs...)
     checkqueue(queue, "writeparquet")
-    rowgroupsize >= 1 || throw(
-        ArgumentError(
-            "writeparquet rowgroupsize must be positive, got $rowgroupsize"),
-    )
+    checkpositive(rowgroupsize, "writeparquet rowgroupsize")
     resolvebackend(backend, :parquet2, WRITEHINT)   # eager: fail at the call site
     # A concretely typed NamedTuple, for the per-row-group splat.
     opts = values(kwargs)

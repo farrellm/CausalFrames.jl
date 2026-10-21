@@ -107,7 +107,7 @@ mutable struct JoinState
     const right::PullCursor  # the right chunks; `done` once exhausted
     rnt::Any           # current right column table (nothing until first pull)
     rpos::Int          # index of the next unadmitted right row in rnt
-    rvaluenames::Any   # Vector{Symbol}: right columns minus keys minus time
+    rvaluenames::Union{Nothing,Vector{Symbol}}  # right columns minus keys and time
     rtypes::Union{Nothing,NamedTuple}  # promotion of right schemas seen
     store::Any         # the direction's store (`newstore`), keyed by K over rows V
     matches::Any       # Vector{V}: per-left-row match, reused; see `found`

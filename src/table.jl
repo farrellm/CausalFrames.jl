@@ -287,9 +287,9 @@ function firstchunk(pred, chunks::Vector{DataFrame})
     return lo
 end
 
-# Consumers may mutate a chunk's column index but never a column vector (see
-# DESIGN.md, "CSV output"), so a shared chunk goes on as a private index over
-# the same vectors.
+# Consumers may mutate a chunk's column index but never a column vector (the
+# `writecsv` hand-off argument), so a shared chunk goes on as a private index
+# over the same vectors.
 function clipframechunk(c::DataFrame, start::T, stop::T, closed::Bool,
     share::Bool) where {T}
     lo, hi = windowbounds(c.time, closed, start, stop)

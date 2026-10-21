@@ -54,7 +54,10 @@ design rationale and performance constraints behind each module.
     this as the `writecsv` hand-off argument
   - `CSVProducer` is the stateful-source shape (pull state in mutable fields
     behind a `ChunkSource`), shared by `ConcatProducer`, `HeadProducer`,
-    `TableProducer` and `JLSProducer`. `concatenate` is sequential and checks
+    `MergeProducer`, `TableProducer`, `JLSProducer` and the extensions'
+    `QueryProducer`/`RowGroupProducer`. The three file producers pull through
+    `sourceclip.jl`'s `pullclipped!`, which streams (`nextclipped!`) or, under
+    `sort = true`, gathers (`gathersorted!`). `concatenate` is sequential and checks
     that its pipelines arrive in time order; `concatenate()` is `emptyframe()`.
     `clock` is the timestamp-only tick source that `intervalize` and
     `summarizewindows` sample on

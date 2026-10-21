@@ -63,7 +63,10 @@ LastRowState(keycols::Vector{Symbol}) =
     LastRowState(keycols, Val(Tuple(keycols)), nothing, nothing, nothing, nothing)
 
 function lastrowchunk!(st::LastRowState, c::DataFrame)
-    checkschema!(st, c)
+    st.names === nothing && checkkeycolumns(st.keycols, c, "lastrow")
+    # Names, including their order, fix the store's row type, so a change
+    # would otherwise surface as an opaque `convert` failure.
+    st.names = samecolumns(st.names, c, "lastrow")
     types = promotetypes(st.types, chunktypes(c))
     widened = st.types !== nothing && types != st.types
     st.types = types
@@ -80,23 +83,6 @@ function lastrowchunk!(st::LastRowState, c::DataFrame)
         st.store = widenstore(st.store, storekeytype(types, st.keynames), V)
     end
     lastsegment!(st.store.index, st.store.slots, nt, st.keynames)
-    return nothing
-end
-
-# O(ncols) per chunk. Keys are checked on the first chunk; names, including
-# their order, on every chunk, since they fix the store's row type and a change
-# would otherwise surface as an opaque `convert` failure.
-function checkschema!(st::LastRowState, c::DataFrame)
-    cols = names(c)
-    if st.names === nothing
-        checkkeycolumns(st.keycols, c, "lastrow")
-        st.names = cols
-    elseif st.names != cols
-        throw(
-            ArgumentError("lastrow: chunk columns changed mid-stream, from \
-                $(st.names) to $(cols)"),
-        )
-    end
     return nothing
 end
 

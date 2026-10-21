@@ -49,7 +49,7 @@ DataFrame(load(Context(0, 10), p))
 struct Bars
     n::Int
     function Bars(n::Integer)
-        n >= 1 || throw(ArgumentError("Bars count must be positive, got $n"))
+        checkpositive(n, "Bars count")
         return new(Int(n))
     end
 end

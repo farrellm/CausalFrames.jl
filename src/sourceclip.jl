@@ -69,6 +69,15 @@ function nextclipped!(clip::SourceClip, chunks::PullCursor)
     return nothing
 end
 
+# A file producer's next chunk from its cursor over freshly read DataFrames:
+# streamed through the clip, or, when the read must `gather` (`sort = true`
+# without sorting at the source), every in-window row sorted into one chunk.
+# `nothing` once the clip is done.
+function pullclipped!(clip::SourceClip, chunks::PullCursor, gather::Bool)
+    clip.done && return nothing
+    return gather ? gathersorted!(clip, chunks) : nextclipped!(clip, chunks)
+end
+
 # A `sort = true` read, which cannot stream: every chunk `chunks` yields is
 # scanned for in-window rows, which are sorted once into a single chunk.
 function gathersorted!(clip::SourceClip{T}, chunks::PullCursor) where {T}

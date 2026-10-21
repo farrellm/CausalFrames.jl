@@ -166,3 +166,17 @@ function pullpast!(buf::Vector{T}, cur::IntervalCursor{T}, tmax) where {T}
     end
     return nothing
 end
+
+# A chunk's column names, checked against `prev`, the first chunk's
+# (`nothing` before it), for an operator whose chunks must share one schema.
+# O(ncols) per chunk. `label` names the operator in the error.
+function samecolumns(prev::Union{Nothing,Vector{String}}, c::DataFrame,
+    label::String)
+    cols = names(c)
+    prev === nothing || prev == cols ||
+        throw(
+            ArgumentError(
+                "$label: chunk columns changed mid-stream, from $prev to $cols"),
+        )
+    return cols
+end
