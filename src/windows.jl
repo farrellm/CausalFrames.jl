@@ -352,13 +352,7 @@ end
 end
 
 @inline retirerefold!(::Nothing) = nothing
-@inline function retirerefold!(gt::GroupTable)
-    for states in values(gt.table)
-        push!(gt.pool, states)
-    end
-    empty!(gt.table)
-    return nothing
-end
+@inline retirerefold!(gt::GroupTable) = retireall!(gt)
 
 # One tier's states for key k, whose entry in the primary tier is g: `()` for
 # an absent tier, g itself for the primary, a lookup by key for the others,
@@ -385,9 +379,7 @@ end
 @inline function emitgroups!(rows::Vector, τ, groups::AbstractDict,
     scratch::Vector{<:Pair}, prevkeys::Vector, tiers::WindowTiers, outs::Val,
     emptyrow, ::Nothing)
-    empty!(scratch)
-    append!(scratch, groups)
-    sort!(scratch; lt = groupisless)
+    sortinto!(scratch, groups)
     return emitwindow!(rows, τ, scratch, prevkeys, tiers, outs, emptyrow)
 end
 @inline emitgroups!(rows::Vector, τ, groups::AbstractDict, scratch,

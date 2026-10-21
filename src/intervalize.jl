@@ -67,11 +67,10 @@ end
 
 function intervalchunk!(st::IntervalizeState, c::DataFrame)
     (; protos, grouping, outs) = st.fold.cfg
-    closelast = st.closelast
     nt = preparechunk!(st.fold, c)
     pullpast!(st.bounds, st.cur, last(nt.time))
     rows, st.bi = foldintervals!(st.fold.groups, st.fold.stateprotos, nt,
-        st.bounds, st.bi, grouping, closelast, protos, outs)
+        st.bounds, st.bi, grouping, st.closelast, protos, outs)
     trimbounds!(st)
     return rowsframe(rows)
 end
@@ -87,7 +86,7 @@ end
 
 function intervalflush!(st::IntervalizeState{T}, stop::T) where {T}
     (; protos, grouping, outs) = st.fold.cfg
-    closelast = st.closelast
+    (; closelast) = st
     pullpast!(st.bounds, st.cur, nothing)
     isempty(st.bounds) && return nothing           # empty clock
     if st.fold.groups === nothing
@@ -118,40 +117,22 @@ gridtimes(bounds::Vector, stop, closelast::Bool) =
 # empties the groups (`closecycle!`), so an empty interval emits nothing;
 # over declared keys (keyless included), it closes every slot (`closedense!`),
 # so an empty interval still emits a row per key.
-function foldintervals!(gt::GroupTable{K,S}, stateprotos::S, nt::NamedTuple,
-    bounds::Vector{T}, bi::Int, keynames::Val, closelast::Bool,
-    protos::Tuple, outs::Val) where {K,S,T}
-    rows = rowtype(T, K, S, outs)[]
-    nb = length(bounds)
-    nb == 0 && return rows, bi
-    for row in Tables.rows(nt)
-        t = row.time
-        t < @inbounds(bounds[1]) && continue
-        while bi <= nb && t >= @inbounds(bounds[bi])
-            closecycle!(rows, gt, @inbounds(bounds[bi]), outs)
-            bi += 1
-        end
-        (bi > nb && !closelast) && continue
-        updateall!(groupstates!(gt, keyvalues(row, keynames), stateprotos), row)
-    end
-    return rows, bi
-end
-function foldintervals!(dg::DenseGroups, stateprotos::Tuple, nt::NamedTuple,
-    bounds::Vector{T}, bi::Int, ks::KeySet, closelast::Bool, protos::Tuple,
+function foldintervals!(groups, stateprotos::Tuple, nt::NamedTuple,
+    bounds::Vector{T}, bi::Int, grouping, closelast::Bool, protos::Tuple,
     outs::Val) where {T}
-    RT, emptyrow = densetypes(T, stateprotos, protos, ks, outs)
-    rows = RT[]
+    rows, emptyrow = closerows(groups, T, stateprotos, protos, grouping, outs)
     nb = length(bounds)
     nb == 0 && return rows, bi
     for row in Tables.rows(nt)
         t = row.time
         t < @inbounds(bounds[1]) && continue
         while bi <= nb && t >= @inbounds(bounds[bi])
-            closedense!(rows, dg, ks, @inbounds(bounds[bi]), outs, emptyrow)
+            closegroups!(rows, groups, grouping, @inbounds(bounds[bi]), outs,
+                emptyrow)
             bi += 1
         end
         (bi > nb && !closelast) && continue
-        densefold!(dg, ks, row)
+        foldrow!(groups, stateprotos, grouping, row)
     end
     return rows, bi
 end
@@ -161,9 +142,10 @@ end
 # instead, closelast closes it at stop; later intervals are empty and emit
 # nothing. Dense, the current interval and every later complete one (empty)
 # close, then the trailing partial at stop under closelast.
-function flushintervals!(gt::GroupTable{K,S}, ::S, bounds::Vector{T}, bi::Int,
-    stop::T, ::Val, closelast::Bool, protos::Tuple, outs::Val) where {K,S,T}
-    rows = rowtype(T, K, S, outs)[]
+function flushintervals!(gt::GroupTable, stateprotos::Tuple, bounds::Vector{T},
+    bi::Int, stop::T, keynames::Val, closelast::Bool, protos::Tuple,
+    outs::Val) where {T}
+    rows, _ = closerows(gt, T, stateprotos, protos, keynames, outs)
     if bi <= length(bounds)
         closecycle!(rows, gt, @inbounds(bounds[bi]), outs)
     elseif closelast
@@ -174,8 +156,7 @@ end
 function flushintervals!(dg::DenseGroups, stateprotos::Tuple, bounds::Vector{T},
     bi::Int, stop::T, ks::KeySet, closelast::Bool, protos::Tuple,
     outs::Val) where {T}
-    RT, emptyrow = densetypes(T, stateprotos, protos, ks, outs)
-    rows = RT[]
+    rows, emptyrow = closerows(dg, T, stateprotos, protos, ks, outs)
     for i in bi:length(bounds)
         closedense!(rows, dg, ks, @inbounds(bounds[i]), outs, emptyrow)
     end

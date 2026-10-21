@@ -305,11 +305,15 @@ design rationale and performance constraints behind each module.
   (those get boxed). Its `groups` are built by the transform's `grouping`
   (`summaryspec`; `newgroups`/`widengroups`): the state tuple itself when
   keyless, a `GroupTable` when keyed, a `DenseGroups` over a declared
-  `KeySet`. Each fold kernel (`foldgroups!`, `foldcycles!`, `foldrunning!`,
-  `foldintervals!`, and the flushes) has a method per kind of groups its
-  transforms build (no dense `foldgroups!`/`foldrunning!`, no keyless
-  `foldintervals!`, since `nokeyset` makes that grid dense), so the
-  transforms dispatch rather than branch on the key mode, and `preparechunk!`
+  `KeySet`. The fold kernels (`foldgroups!`, `foldcycles!`, `foldrunning!`,
+  `foldintervals!`, and the flushes) are written once over the groups and
+  reach them through helpers with a method per kind (`rowstates!`/`foldrow!`
+  to fold a row, `closerows`/`closegroups!` to close), so the transforms
+  dispatch rather than branch on the key mode. Only the keyless
+  `foldcycles!`/`flushcycle` (which rebind the state tuple) and the keyed and
+  dense `flushintervals!` (which close different intervals) keep a method per
+  kind; there is no keyless `foldintervals!`, since `nokeyset` makes that grid
+  dense. `preparechunk!`
   checks the key columns against the first chunk for all of them. The
   transform's `FoldConfig` (`protos`, `grouping`, `outs`) sits in
   `SummaryFold`'s abstract `cfg` field, so `preparechunk!` and every chunk step
