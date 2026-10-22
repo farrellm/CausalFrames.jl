@@ -1139,7 +1139,10 @@ so the weakest structure in a call slows only its own summarizers:
   sum accumulators use compensated summation and count nonfinite terms instead
   of folding them in (see "Summarizers"), so eviction is clean: a window
   recovers exactly once a `NaN` or `±Inf` row ages out, and finite values carry
-  only the compensated round-off rather than the usual sliding-sum drift.
+  only the compensated round-off rather than the usual sliding-sum drift. A
+  state may still ask, after a `downdate!`, to be refolded from the window's
+  live rows (the co-moment does once a dominant row has left; see "Dependent
+  summarizers"), and the tier then rebuilds that key's group from them.
 - **Monoid tier — the other `MonoidSummarizer`s.** Each key keeps its rows
   and, per look-back, a Two-Stacks Lite queue of `combine!`d partial state
   tuples (`monoidqueue.jl`). The queue's raw half is the key's stored rows,
@@ -2425,6 +2428,36 @@ does not help: the rewrite is exact now, but the shift still lags the window.
 `notes/variance-cancellation.md` records the measurements and the alternatives
 rejected (Welford/Chan updates, error-free squares on the shared raw sums,
 recentring on every row).
+
+That rounding, and the compensation's own, are at the scale of the largest
+product folded, so under a window a row far larger than the rest left a
+residue once it had gone (issue #97): a `1e8` print among prices near `100`
+kept a `Bars(5)` variance 500 times too large for as long as the stream ran.
+The row's deviation is rounded at its own distance from the shift, and when
+it is removed under a later shift it rounds differently; and a compensation
+term holding a `1e16`-scale error loses what lies below it. Sliding can't
+undo either, so the state asks to be **refolded** instead:
+
+- a float state keeps `peak`, the largest `|d_a·d_b|` folded since its sums
+  restarted, and after each `downdate!` asks (the internal `needsrefold`) once
+  `peak` exceeds `2^10` times the window's own scale: `Σd²` for a variance,
+  and `√(Σd_a²·Σd_b²)` for a covariance, from two plain (uncompensated) sums
+  kept for this alone, since the co-moment itself may be near zero. A live
+  row's product is part of that scale, so the state asks only once a dominant
+  row has left, and what is left behind short of the ratio is at most about
+  `eps · 2^10` of the scale;
+- every caller that downdates — the running tier of `addrollingcolumns`
+  (`Bars` and time windows) and `summarizewindows`, and `barwindow` — refolds
+  the key's group from its live rows when one of its states asks, behind a
+  barrier off the per-row path. The whole group is refolded, not just the
+  asking state: its `freshall!`/`updateall!` are already compiled for
+  admission, and folds over only the asking states measured several times the
+  kernels' compile time. A group whose states never ask (`needsrefold` is the
+  constant `false` for them) compiles the check away;
+- ordinary data rarely asks: over 10⁶ rows of a random walk, at most 35
+  times at `Bars(5)` (its levels; 5 for its steps) and never at `Bars(20)` or
+  `Bars(100)`. Cauchy-tailed steps ask on 1.4% of rows at `Bars(5)` and 0.06%
+  at `Bars(100)`, each refold costing a window's `update!`s.
 
 `Variance`, `Std`, and `Covariance` follow `Statistics`: a `corrected::Bool`
 keyword (default `true`) selects the divisor `n − Int(corrected)`, so the

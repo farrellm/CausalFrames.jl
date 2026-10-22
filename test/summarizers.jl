@@ -1051,6 +1051,119 @@ end
             a[i, :w_intercept_beta] - 1e8 - 1e8 * a[i, :w_x_beta]; rtol = 1e-5), 10:60)
 end
 
+@testset "co-moment refold after a dominant row leaves" begin
+    # A row far larger than the rest of the window left a residue in the
+    # sliding sums once it had gone (issue #97): its deviation rounded
+    # differently under the later shift it was removed with, and compensation
+    # can't hold what lies 1e16 below it. The running tiers now refold the
+    # group from its live rows, so every window path recovers exactly.
+    exact(a, b) =
+        let qa = Rational{BigInt}.(a), qb = Rational{BigInt}.(b)
+            sum((qa .- sum(qa) / length(qa)) .* (qb .- sum(qb) / length(qb))) /
+            length(qa)
+        end
+    relerr(v, r) = abs(v - Float64(r)) / Float64(r)
+    roll(s, cols, w; key = nothing) =
+        DataFrame(
+            load(Context(0, length(first(cols)) + 1),
+                readtable(
+                    merge(
+                        (time = collect(1:length(first(cols))),
+                            k = [isodd(i) ? "a" : "b" for i in 1:length(first(cols))]),
+                        cols),
+                ) |> addrollingcolumns((w = w,), s; key)),
+        )
+
+    # a 1e8 print in prices near 100 (CausalIndicators' spike transit)
+    y = [100.0 + ((i * 37) % 11) * 0.01 for i in 0:199]
+    y[101] = 1e8
+    vs = Variance(:y; corrected = false)
+    bars = roll(vs, (; y), Bars(5)).w_y_variance
+    @test maximum(i -> relerr(bars[i], exact(y[(i-4):i], y[(i-4):i])), 106:200) < 1e-15
+    # a time window of 5 holds six rows
+    timed = roll(vs, (; y), 5).w_y_variance
+    @test maximum(i -> relerr(timed[i], exact(y[(i-5):i], y[(i-5):i])), 107:200) < 1e-15
+    # keyed: each key's window slides over its own rows
+    keyed = roll(vs, (; y), Bars(3); key = :k).w_y_variance
+    @test maximum(i -> (w = y[(i-4):2:i]; relerr(keyed[i], exact(w, w))), 107:200) <
+          1e-15
+    # ... and over a time window, refolding the key's rows from the buffer
+    keyed = roll(vs, (; y), 10; key = :k).w_y_variance
+    @test maximum(i -> (w = y[(i-10):2:i]; relerr(keyed[i], exact(w, w))), 113:200) <
+          1e-15
+    # summarizewindows, at ticks t over [t - 5, t)
+    out = DataFrame(
+        load(Context(0, 201),
+            readtable((time = collect(1:200), y = y)) |>
+            summarizewindows(clock(1), 5, vs)),
+    )
+    byt = Dict(zip(out.time, out.y_variance))
+    @test maximum(t -> relerr(byt[t], exact(y[(t-5):(t-1)], y[(t-5):(t-1)])), 107:200) <
+          1e-15
+    # barwindow, the count window inside a recursive state
+    st = CausalFrames.barwindow(vs, 5, (y = Float64,))
+    bw = map(
+        v -> (CausalFrames.update!(st, (; y = v)); CausalFrames.value(st).y_variance),
+        y,
+    )
+    @test maximum(i -> relerr(bw[i], exact(y[(i-4):i], y[(i-4):i])), 106:200) < 1e-15
+
+    # a covariance recovers too, the spike on either column
+    x = [50.0 + ((i * 53) % 13) * 0.02 for i in 0:199]
+    for (a, b) in ((x, y), (y, x))
+        cv = roll(Covariance(:a, :b; corrected = false), (; a, b), Bars(5)).w_a_b_covariance
+        @test maximum(106:200) do i
+            wa, wb = a[(i-4):i], b[(i-4):i]
+            abs(cv[i] - Float64(exact(wa, wb))) /
+            sqrt(Float64(exact(wa, wa) * exact(wb, wb)))
+        end < 1e-15
+    end
+
+    # pandas GH#52407: tiny values after a 3e-16 one has left
+    x = [0.0, 0.0, 3.16188252e-18, 2.95781651e-16, 2.23153542e-51, 0.0, 0.0,
+        5.39943432e-48, 1.3820626e-73, 0.0]
+    v = roll(vs, (; y = x), Bars(3)).w_y_variance
+    @test all(i -> relerr(v[i], exact(x[(i-2):i], x[(i-2):i])) < 1e-15, 7:10)
+
+    # pandas' extreme range: Correlation is finite again once ±3e37 have left
+    a = [3.0e37, 1.0, 2.0, 3.0, -3.0e37, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]
+    b = [0.2, 0.1, 0.5, 0.3, 0.8, 0.4, 0.9, 0.6, 0.7, 0.2, 0.5]
+    c = roll(Correlation(:a, :b), (; a, b), Bars(5)).w_a_b_correlation
+    exactcor(i) =
+        let wa = a[(i-4):i], wb = b[(i-4):i]
+            Float64(exact(wa, wb)) / sqrt(Float64(exact(wa, wa) * exact(wb, wb)))
+        end
+    @test c[10] ≈ exactcor(10) rtol = 1e-14
+    @test c[11] ≈ exactcor(11) rtol = 1e-14
+
+    # the ask itself: none on ordinary data, one once the spike has left
+    intypes = (time = Int, x = Float64, y = Float64)
+    rows = [(time = i, x = 1e3 * sin(i), y = cos(1.3i)) for i in 1:40]
+    rows[30] = (time = 30, x = 1e12, y = 1e12)
+    for s in (CausalFrames.CoMoment{:x,:x}(), CausalFrames.CoMoment{:x,:y}())
+        st = CausalFrames.fresh(s, intypes)
+        asks = map(eachindex(rows)) do i
+            CausalFrames.update!(st, rows[i])
+            i > 5 && CausalFrames.downdate!(st, rows[i-5])
+            CausalFrames.needsrefold(st)
+        end
+        # (nothing refolds it here, so it keeps asking after)
+        @test !any(asks[1:34]) && asks[35]
+    end
+    # combine! re-expresses the covariance's plain squares at the left shift
+    s = CausalFrames.CoMoment{:x,:y}()
+    l, r = CausalFrames.fresh(s, intypes), CausalFrames.fresh(s, intypes)
+    shifted = [(time = i, x = 1e6 + sin(i), y = 2e6 + cos(i)) for i in 21:40]
+    foreach(row -> CausalFrames.update!(l, row), rows[1:20])
+    foreach(row -> CausalFrames.update!(r, row), shifted)
+    peak = max(l.peak, r.peak)
+    CausalFrames.combine!(l, l, r)
+    both = [rows[1:20]; shifted]
+    @test l.qa ≈ sum(row -> (row.x - l.ka)^2, both) rtol = 1e-12
+    @test l.qb ≈ sum(row -> (row.y - l.kb)^2, both) rtol = 1e-12
+    @test l.peak == peak
+end
+
 @testset "SumPower term specialization" begin
     # SumPower(c, 1) and SumPower(c, 2) fold terms whose exponent is in the type
     # (a move and a multiply) rather than PowerTerm's runtime `^`. That must not

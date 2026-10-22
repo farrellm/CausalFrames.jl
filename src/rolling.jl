@@ -605,8 +605,11 @@ end
     evictbars!(running, ring, k, w + 1, rest...)
 @inline function evictbars!(running, ring::RowRing, k, w::Int, lb::Bars,
     rest...)
-    length(ring) > lb.n &&
-        evictkey!(windowtable(running, w), k, ringback(ring, lb.n + 1))
+    if length(ring) > lb.n
+        g = evictkey!(windowtable(running, w), k, ringback(ring, lb.n + 1))
+        # The ring's newest n rows are the group's live rows.
+        refoldgroup!(g, ring, lb.n)
+    end
     return evictbars!(running, ring, k, w + 1, rest...)
 end
 

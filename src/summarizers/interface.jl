@@ -381,6 +381,21 @@ instead.
 """
 isinvertible(::SummarizerState) = true
 
+# A downdated state whose sums may have kept round-off from rows already gone
+# (a co-moment after a dominant row has left, issue #97) asks the running tiers
+# to refold its group from the live rows, read after each downdate. Internal
+# for now.
+needsrefold(::SummarizerState) = false
+
+# Whether any state of a group asks for a refold. Straight-line `||` rather
+# than a tuple `map`: every state that never asks is the constant `false`, so
+# for any other group the check, and the refold behind it, compile away.
+@generated function anyrefold(states::Tuple)
+    asks = [:(needsrefold(getfield(states, $i))) for i in 1:fieldcount(states)]
+    isempty(asks) && return false
+    return Expr(:block, Expr(:meta, :inline), foldl((a, b) -> :($a || $b), asks))
+end
+
 # Fold one row into (or, for group states, out of) every state in a tuple. Over
 # a concrete tuple the foreach unrolls and dispatches statically.
 @inline updateall!(states::Tuple, row) = foreach(st -> update!(st, row), states)

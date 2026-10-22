@@ -458,7 +458,20 @@ end
     full = length(ring) > st.n
     full && queuepop!(st.queue, ring, st.n)
     queuepush!(st.queue, row)
-    full && bardowndate!(st.running, ringback(ring, st.n + 1))
+    if full
+        bardowndate!(st.running, ringback(ring, st.n + 1))
+        # A state asking to be refolded (issue #97) is rebuilt from the ring's
+        # newest n rows, the window's live rows.
+        anyrefold(st.running) && barrefold!(st)
+    end
+    return nothing
+end
+
+@noinline function barrefold!(st::BarWindowState)
+    st.running = barfresh!(st.running)
+    for j in (st.n):-1:1
+        barupdate!(st.running, ringback(st.ring, j))
+    end
     return nothing
 end
 

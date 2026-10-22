@@ -149,7 +149,9 @@ end
     return r
 end
 
-# Remove `row`, the oldest row of key `k`'s group, retiring the group with it.
+# Remove `row`, the oldest row of key `k`'s group, retiring the group with it
+# if that was its last row. Returns the group while it still holds rows (for
+# the caller's `refoldgroup!`), else `nothing`.
 @inline function evictgroup!(rt::RunningTable, k, row)
     g = rt.groups[k]
     downdateall!(g.states, row)
@@ -157,17 +159,60 @@ end
     if g.live == 0
         delete!(rt.groups, k)
         push!(rt.pool, g)
+        return nothing
     end
+    return g
+end
+
+# Evict a row from a running table, absent (`nothing`) without a running tier.
+@inline evictkey!(::Nothing, k, row) = nothing
+@inline evictkey!(rt::RunningTable, k, row) = evictgroup!(rt, k, row)
+
+# Evict the buffered row at `head` from a time window's running table, then
+# refold its key's group from the rows after it if a state asks to (issue
+# #97): every buffered row past the head is still in the window's table.
+@inline evictbuffered!(::Nothing, buffer::Vector, head::Int, keynames::Val) =
+    nothing
+@inline function evictbuffered!(rt::RunningTable, buffer::Vector, head::Int,
+    keynames::Val)
+    row = @inbounds buffer[head]
+    k = keyvalues(row, keynames)
+    g = evictgroup!(rt, k, row)
+    g === nothing || refoldgroup!(g, k, buffer, head + 1, keynames)
     return nothing
 end
 
-# Evict a row from a running table, absent (`nothing`) without a running tier;
-# `evictrow!` keys it first.
-@inline evictkey!(::Nothing, k, row) = nothing
-@inline evictkey!(rt::RunningTable, k, row) = evictgroup!(rt, k, row)
-@inline evictrow!(::Nothing, row, keynames::Val) = nothing
-@inline evictrow!(rt::RunningTable, row, keynames::Val) =
-    evictgroup!(rt, keyvalues(row, keynames), row)
+# Refold a group whose states ask for it from its live rows: the buffered
+# rows of key k from `from` on, or (`refoldgroup!(g, ring, n)`) the newest n
+# rows of the key's ring. Every state is refolded, not only the one asking:
+# the group's `freshall!`/`updateall!` are already compiled for admission,
+# while folds over just the asking states measured several times the kernels'
+# compile time. Rare, so the folds sit behind a barrier off the per-row path;
+# for a group whose states never ask, all of it compiles away.
+@inline refoldgroup!(g::RunningGroup, k, buffer::Vector, from::Int,
+    keynames::Val) =
+    anyrefold(g.states) && refoldbuffer!(g, k, buffer, from, keynames)
+@noinline function refoldbuffer!(g::RunningGroup, k, buffer::Vector, from::Int,
+    keynames::Val)
+    states = freshall!(g.states)
+    for j in from:length(buffer)
+        row = @inbounds buffer[j]
+        isequal(keyvalues(row, keynames), k) && updateall!(states, row)
+    end
+    g.states = states
+    return true
+end
+@inline refoldgroup!(::Nothing, ring, n::Int) = nothing
+@inline refoldgroup!(g::RunningGroup, ring, n::Int) =
+    anyrefold(g.states) && refoldring!(g, ring, n)
+@noinline function refoldring!(g::RunningGroup, ring, n::Int)
+    states = freshall!(g.states)
+    for j in n:-1:1
+        updateall!(states, ringback(ring, j))
+    end
+    g.states = states
+    return true
+end
 
 # Window w's running table, of a per-window tuple (homogeneous, so the Int
 # index is type-stable), or `nothing` without a running tier.
@@ -182,7 +227,7 @@ end
 @inline function evicthead!(buffer::Vector, head::Int, t, lookback, running,
     keynames::Val)
     while head <= length(buffer) && t - @inbounds(buffer[head]).time > lookback
-        evictrow!(running, @inbounds(buffer[head]), keynames)
+        evictbuffered!(running, buffer, head, keynames)
         head += 1
     end
     return head

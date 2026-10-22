@@ -212,7 +212,13 @@ design rationale and performance constraints behind each module.
     reads the compensated pairs as double-doubles (`comomentvalue`), since the
     sums sit at the scale of the squared distance to the shift and the
     co-moment at the spread's (issue #91). `combine!` re-expresses one side at
-    the other's shift. It costs 20-26% on regressions and
+    the other's shift. Sliding still kept a residue at the scale of a dominant
+    row once it had left (issue #97), so a float state tracks its largest
+    product (`peak`) and, past `REFOLDRATIO` times the window's scale (`Σd²`,
+    or `√(qa·qb)` from plain squares kept only for a covariance), asks to be
+    refolded (`needsrefold`, internal, `false` for every other state; the
+    generated `anyrefold` reads a group's asks as straight-line `||`, so a
+    group that can't ask compiles the check away). It costs 20-26% on regressions and
     `Correlation` over the old raw sums, and the error-free products up to
     ~13% more; `notes/variance-cancellation.md` has
     the numbers and the rejected designs (Welford, error-free squares on the
@@ -465,6 +471,13 @@ design rationale and performance constraints behind each module.
   `summaryvalues` and dependents read across tiers. An absent tier is
   `nothing`/`()`, so a single-tier call compiles to a single-algorithm kernel.
   `RunningTable` pools retired groups (windowed trackers own vectors).
+  `evictgroup!` returns the group while it still holds rows, so the caller can
+  `refoldgroup!` it from its live rows when a state asks (issue #97): from the
+  buffer past the head for a time window (`evictbuffered!`), from the key's
+  ring for `Bars`. The refold is the whole group through `freshall!`/
+  `updateall!`, already compiled for admission, behind a `@noinline` barrier:
+  a generated fold over only the asking states took the window kernels'
+  compile time from about 0.4 to 3 s.
   `rebuildbuffer` and `rebuildmonoids` choose a rebuild's buffer and queues
   for both transforms, and `replayrunning!`, `replaymonoids!` and
   `replayoldmonoids!` rebuild from the live rows. Built-in states only demote,
@@ -486,7 +499,10 @@ design rationale and performance constraints behind each module.
   (`updateall!`, `freshall!`, `summaryvalues`, `combinenodes!`): it runs inside an outer state's
   `update!`/`value`, which those folds call, and inference's recursion limit
   on a repeated caller-to-callee edge would leave the inner fold dispatching
-  and allocating per row. Its generated `bar*` folds have edges of their own;
+  and allocating per row. Its generated `bar*` folds have edges of their own
+  (`barrefold!`, its refold for a state that asks, uses them too). It shares
+  only `anyrefold`, which an outer group reads through the window's own
+  `needsrefold`, the constant `false`, so no edge repeats;
   `test/jet.jl` guards the embedded path. `barinputcolumns` is the outer
   state's `inputcolumns`, sharing `storedcolumns`' union (`readcolumns`);
   `barterms` is its `rowterms`, hoisting the window's terms (wrapped in

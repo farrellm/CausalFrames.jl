@@ -185,3 +185,114 @@ alternative for regressions, one multivariate co-moment accumulator per fit
 (one shift per column, as many sums as before), would recover most of the
 regression overhead but lose the sharing with `Variance`/`Covariance`; at
 20-26% it wasn't judged worth a second state type.
+
+## Refolding after a dominant row leaves (issue #97)
+
+Under a window, a row much larger than the rest left a residue once it had
+gone. CausalIndicators' port of TA-Lib's `test_reference.c` found it: a `1e8`
+print among prices near 100 kept a `Bars(5)` variance 500-600 times too large
+for the rest of the stream (300 bars and counting), pandas GH#52407's tiny
+values under `Bars(3)` read `3.3e-48` for `1e-102` to `6.5e-96`, and pandas'
+`±3e37` case gave a `NaN` correlation after both extremes had left. Time
+windows, `summarizewindows` and `barwindow` showed it too; the tree and
+refold tiers never did, since they don't downdate.
+
+### Where the residue comes from
+
+Stepping a `CoMomentState` through the spike case: while the spike is in the
+window the value is exact to 1e-16. The shift then moves (rows 102 and 105),
+and when the spike leaves at 106, `Σd` is off by 3.5e-8 and `Σd²` by 2.15,
+against a true `Σd²` of 0.005. Two mechanisms, either enough alone:
+
+1. **A row's deviation is rounded at its own scale and removed under another
+   shift.** `1e8 - K` rounds at about `eps·1e8 ≈ 1.5e-8`. Folded under one
+   `K` and removed under a later one, it rounds differently, and the
+   difference times `2·d ≈ 2e8` (about 2) stays in `Σd²`. The recentring
+   rewrite is exact, so it carries the rounding along unchanged. This is the
+   `eps·D/s` cost the error-free-products section above left in place, at a
+   `D` it didn't anticipate: a single row, not a level.
+2. **Compensation can't hold what is far below it.** The Neumaier `comp` is a
+   plain float. Once it holds a `1e16`-scale term's rounding, anything about
+   1e-16 below that is lost. This alone gives the GH#52407 and `±3e37`
+   failures, and it also reaches the plain sums: on GH#52407, `Sum` keeps a
+   lasting 4e-4 relative error and `SumPower(:x, 2)` 2e-7 (not fixed here,
+   since they had no report; the same ask would serve them).
+
+### The fix: ask to be refolded
+
+Only a refold from the live rows removes both, since sliding has already lost
+the information. The design is in DESIGN.md's "Dependent summarizers": a
+float state keeps `peak`, the largest `|d_a·d_b|` folded since its sums
+restarted, and asks after a `downdate!` once `peak > 2^10 · scale`, with the
+scale `Σd²` for a variance and `√(Σd_a²·Σd_b²)` for a covariance. The two
+plain sums are kept for the covariance alone, since a covariance near zero is
+legitimate and comparing against it would refold on every eviction. A live
+row's product is at most the scale, so the state asks only once a dominant
+row has left, and the residue that stays short of the trigger is at most
+about `eps · 2^10` of the scale (about 2e-13).
+
+After the fix every path is exact to 2e-16 on the spike (master: 607 on
+`Bars(5)`, 375 on a time window, 607 on `summarizewindows` and `barwindow`).
+GH#52407 and the `±3e37` correlation match the exact values. A sweep shaped
+like CausalIndicators' `test_beta.c` outlier transit (spikes of 1e3 to 1e12,
+1e-3 and 1e-9, on either column, at periods 5, 14 and 30) has a worst error of
+2.2e-16 of the scale after the spike leaves, against 6.5e13 on master.
+
+How often it asks, per 10⁶ rows of `refoldrate.jl`'s data:
+
+| data | `Bars(5)` var / cov | `Bars(20)` | `Bars(100)` |
+|---|---|---|---|
+| random-walk levels | 35 / 0 | 0 / 0 | 0 / 0 |
+| its steps | 5 / 0 | 0 / 0 | 0 / 0 |
+| Cauchy steps | 14,234 / 7,245 | 2,811 / 1,365 | 554 / 253 |
+
+The Cauchy refolds are warranted: each follows the departure of a product
+more than `2^10` times what the window still holds, whose rounding would
+otherwise stay. Even there the extra work is about
+0.06-0.07 row folds per row.
+
+### Alternatives rejected
+
+- **Exact deviations** (`TwoDiff` for `x − K`, the shift carried as a pair):
+  removes mechanism 1 but not 2, at a cost on every row.
+- **TA-Lib's trigger**, comparing the leaving term to what remains: misses a
+  slow decline, where no single leaving term is large against the rest but
+  the residue of all of them is. A high-water mark sees it. TA-Lib's
+  fixed-interval rebuild is unnecessary with the mark.
+- **A ratio near 1**: ordinary data at short windows would refold often. At
+  `2^10` the bound is about 2e-13 of the scale, and ordinary data rarely
+  asks.
+- **Refolding only the asking states** (a generated fold over the states that
+  can ask, the others kept): far worse to compile. The keyed `leadinsegment!`
+  went from 387 ms to 3,056 ms and `windowrows!` from 471 to 2,390 ms, the
+  compile harness from 9.2 to 15.7-22 s. Refolding the whole group through
+  `freshall!`/`updateall!`, which admission has already compiled, brought the
+  harness back to 9.5-9.6 s.
+- **An unspecialized refold** (dispatched per row, compiled only if a refold
+  happens): would cost no compile time up front, but `test/jet.jl`'s tier sets
+  include `Std`, so `@test_opt` would report the dispatch.
+
+### Cost
+
+Runtime, 200,000 rows of a correlated random walk, single-threaded, ns/row,
+minimum over four alternating rounds of two identically built worktrees
+(master and the branch). Allocations are unchanged in every case.
+
+| case | master | refold |
+|---|---|---|
+| `Sum`, `Bars(20)` (control) | 40.6 | 40.7 |
+| `Std`, `Bars(20)` | 72.5 | 70.6 |
+| `Std`, `Bars(20)`, 10 keys | 147.7 | 149.0 |
+| `Std`, time window 50 | 64.8 | 67.4 |
+| `Covariance`, `Bars(20)` | 73.7 | 76.6 |
+| `Correlation`, `Bars(20)` | 127.6 | 133.2 |
+| `LinearRegression` K = 1, `Bars(20)` | 179.7 | 184.9 |
+| `summarizewindows`, `Std` + `Correlation` | 75.8 | 80.4 |
+| `barwindow` `Std(20)` | 40.7 | 41.3 |
+
+Compile time: a harness of seven first calls with co-moments (rolling `Bars`
+and time windows, keyed, a regression, `summarizewindows`, `barwindow`) went
+from 9.05-9.24 s to 9.39-9.55 s over four runs each. The timed test suite's
+included files compiled in 641.8 s on master and 649.1 s on the branch, the
+difference being this issue's own new testset (about 10 s); `rolling.jl` and
+`windows.jl` were unchanged within noise.
