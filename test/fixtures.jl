@@ -80,7 +80,7 @@ CausalFrames.inputcolumns(::Recording{S,C}) where {S,C} = C
 CausalFrames.rowterms(r::Recording) = CausalFrames.rowterms(r.inner)
 
 # Opaque's monoid counterpart: a group hidden down to a monoid, so it takes the
-# tree tier rather than the running tier, putting a built-in group's `combine!`
+# monoid tier rather than the running tier, putting a built-in group's `combine!`
 # under a window.
 struct AsMonoid{S<:Summarizer} <: MonoidSummarizer
     inner::S
@@ -173,7 +173,7 @@ CausalFrames.widenstate(st::LateSumState{C,N}, intypes::NamedTuple) where {C,N} 
 CausalFrames.isinvertible(::LateSumState{C,N,Int}) where {C,N} = false
 
 # A dependent spanning every window tier: its dependencies are a group (Sum,
-# running), a monoid (Product, tree) and a plain summarizer (Opaque(Sum) under
+# running), a monoid (Product, monoid) and a plain summarizer (Opaque(Sum) under
 # its own name, refold), and its fieldless state reads all three at emission.
 struct TierSpan{C} <: Summarizer end
 TierSpan(column::Symbol) = TierSpan{column}()

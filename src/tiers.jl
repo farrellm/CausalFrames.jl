@@ -5,7 +5,7 @@
 # - running: GroupSummarizers whose windowed state (`freshwindowed`) is
 #   invertible. Per-key running states, update!d as rows arrive and downdate!d,
 #   oldest first, as they leave: O(1) amortized per row.
-# - tree: the other MonoidSummarizers, plus any group whose realized state
+# - monoid: the other MonoidSummarizers, plus any group whose realized state
 #   defeats `isinvertible`. Per-key segment trees (segtree.jl): O(log window).
 # - refold: everything else. Fresh states folded over the window's buffered
 #   rows: O(window).
@@ -23,17 +23,17 @@
 # single-algorithm kernel.
 
 const RUNNINGTIER = 1
-const TREETIER = 2
+const MONOIDTIER = 2
 const REFOLDTIER = 3
 const DERIVEDTIER = 4
-const TIERNAMES = (:running, :tree, :refold, :derived)
+const TIERNAMES = (:running, :monoid, :refold, :derived)
 
 # The partition of one realized state set: each tier's template tuple and, per
 # topological position, its (tier, index). The running templates are windowed
 # states; the others are ordinary ones.
 struct Tiering{SR<:Tuple,ST<:Tuple,SF<:Tuple,SD<:Tuple,P}
     running::SR
-    tree::ST
+    monoid::ST
     refold::SF
     derived::SD
     perm::Val{P}
@@ -50,7 +50,7 @@ function tiering(protos::Tuple, intypes::NamedTuple)
     codes = map(protos, windowed, stateless) do p, w, sl
         folding && sl ? DERIVEDTIER :
         p isa GroupSummarizer && isinvertible(w) ? RUNNINGTIER :
-        p isa MonoidSummarizer ? TREETIER : REFOLDTIER
+        p isa MonoidSummarizer ? MONOIDTIER : REFOLDTIER
     end
     counts = zeros(Int, length(TIERNAMES))
     perm = map(c -> (c, counts[c] += 1), codes)
@@ -61,7 +61,7 @@ end
 # templates are picked by `tierpick` without inferring a growing tuple.
 tiered(perm::Val, windowed::Tuple, states::Tuple) =
     Tiering(tierpick(perm, Val(RUNNINGTIER), windowed),
-        tierpick(perm, Val(TREETIER), states), tierpick(perm, Val(REFOLDTIER), states),
+        tierpick(perm, Val(MONOIDTIER), states), tierpick(perm, Val(REFOLDTIER), states),
         tierpick(perm, Val(DERIVEDTIER), states), perm)
 
 # The elements of `src` whose tier is `C`, in topological order.
@@ -83,7 +83,7 @@ tiernames(::Tiering{SR,ST,SF,SD,P}) where {SR,ST,SF,SD,P} =
 end
 
 mergedstates(tg::Tiering) =
-    mergestates(tg.perm, (tg.running, tg.tree, tg.refold, tg.derived))
+    mergestates(tg.perm, (tg.running, tg.monoid, tg.refold, tg.derived))
 
 # The emitted value type, from the merged templates. Windowed states have the
 # ordinary states' value type (the `freshwindowed` contract), so every tier
@@ -233,17 +233,17 @@ function rebuildbuffer(tg::Tiering, ::Type{R}, old) where {R}
     return convert(Vector{R}, old.buffer)
 end
 
-# The tree tier of a tiering being built: `nothing` without tree states, else
+# The monoid tier of a tiering being built: `nothing` without tree states, else
 # per-key trees replayed from the previous trees' rows if any, else from the
 # previous buffer's live rows (from `head`), else (a first build) empty.
 function rebuildtrees(tg::Tiering, ::Type{K}, ::Type{R}, ::Type{T}, old,
     head::Int, keynames::Val) where {K,R,T}
-    isempty(tg.tree) && return nothing
-    trees = Dict{K,SegTree{typeof(tg.tree),R,T}}()
+    isempty(tg.monoid) && return nothing
+    trees = Dict{K,SegTree{typeof(tg.monoid),R,T}}()
     if old !== nothing && old.trees !== nothing
-        replayoldtrees!(trees, old.trees, tg.tree, keynames)
+        replayoldtrees!(trees, old.trees, tg.monoid, keynames)
     elseif old !== nothing && old.buffer !== nothing
-        replaytrees!(trees, old.buffer, head, tg.tree, keynames)
+        replaytrees!(trees, old.buffer, head, tg.monoid, keynames)
     end
     return trees
 end

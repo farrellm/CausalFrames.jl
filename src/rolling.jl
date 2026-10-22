@@ -376,13 +376,13 @@ function rebuildrings(::Type{K}, ::Type{R}, cap::Int, suffixes) where {K,R}
     return rings
 end
 
-# The tree tier, replayed from every key's live rows.
+# The monoid tier, replayed from every key's live rows.
 function suffixtrees(tg::Tiering, ::Type{K}, ::Type{R}, ::Type{T}, suffixes,
     keynames::Val) where {K,R,T}
-    isempty(tg.tree) && return nothing
-    trees = Dict{K,SegTree{typeof(tg.tree),R,T}}()
+    isempty(tg.monoid) && return nothing
+    trees = Dict{K,SegTree{typeof(tg.monoid),R,T}}()
     for (_, rows) in suffixes
-        replaytrees!(trees, rows, 1, tg.tree, keynames)
+        replaytrees!(trees, rows, 1, tg.monoid, keynames)
     end
     return trees
 end
@@ -588,7 +588,7 @@ end
     pushrow!(tiers.buffer, row)
     k = keyvalues(row, keynames)
     admitrunning!(tiers.running, tiers.tg.running, k, row)
-    admittree!(tiers.trees, tiers.tg.tree, k, row)
+    admittree!(tiers.trees, tiers.tg.monoid, k, row)
     admitrings!(tiers.rings, tiers.running, tiers.barcap, k, row, lookbacks)
     return k
 end
@@ -648,7 +648,7 @@ end
     return evictroll!(t, tiers, buffer, keynames, w + 1, rest...)
 end
 
-# The key's tree: `()` without a tree tier, `nothing` for a key with no rows.
+# The key's tree: `()` without a monoid tier, `nothing` for a key with no rows.
 @inline keytree(::Nothing, k) = ()
 @inline keytree(trees::AbstractDict, k) = get(trees, k, nothing)
 

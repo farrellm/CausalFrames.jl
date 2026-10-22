@@ -425,7 +425,7 @@ design rationale and performance constraints behind each module.
   newest. A caller that downdates the row leaving sizes it one past its window
   and reads that row back after the push
 - `src/segtree.jl` — the monoid segment tree behind the rolling and window
-  tree tiers: an implicit array tree of `combine!`d partial state tuples,
+  monoid tiers: an implicit array tree of `combine!`d partial state tuples,
   append-only rows, logical front expiry (`head`), amortized rebuilds, and
   order-preserving two-accumulator range queries (`treequery`,
   `windowstart`). Appending (`treeappend!`, a bare leaf) and recombining

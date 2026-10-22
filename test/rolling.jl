@@ -457,7 +457,7 @@ end
     trackset = [Min(:x), Max(:x), First(:x), Last(:x), CountDistinct(:x)]
     # the arg-extremes slide the same deque; the small integer pools tie often
     indexset = [MinIndex(:x), MaxIndex(:x), MinWithIndex(:y), MaxWithIndex(:y)]
-    monoidset = [Product(:x), MinMax(:y)]                 # the tree alone
+    monoidset = [Product(:x), MinMax(:y)]                 # the monoid tier alone
     mixedset = [Sum(:x), Min(:x), MinMax(:y), Product(:x)] # running + tree
     plainset = [Sum(:x), TestVar(:x), PlainSum(:y)]       # running + re-fold
     spanset = [TierSpan(:x), Mean(:y), Last(:y)]          # every tier at once
@@ -488,7 +488,7 @@ end
         end
     end
 
-    @testset "the tree tier agrees with the running one" begin
+    @testset "the monoid tier agrees with the running one" begin
         # AsMonoid hides the groups down to monoids, so the sorted accumulator
         # and the arg-extremes merge through the segment tree's combine!
         # instead of sliding
@@ -634,13 +634,13 @@ end
         it = (time = Int, k = String, x = Int, y = Int)
         # in expansion order: TierSpan's dependencies, TierSpan (fieldless, so
         # no tier), then Mean's Count and Sum, Mean, and Last
-        @test tiers(spanset, it) == (:running, :tree, :refold, :derived,
+        @test tiers(spanset, it) == (:running, :monoid, :refold, :derived,
             :running, :running, :derived, :running)
         # the sorted accumulator is a group, and so is Last beside it
         @test tiers([PercentRank(:x), Quantile(:x, 0.5)], it) ==
               (:running, :running, :derived, :derived)
         @test tiers(map(AsMonoid, [PercentRank(:x)]), it) ==
-              (:tree, :tree, :derived)
+              (:monoid, :monoid, :derived)
         # the arg-extremes slide their deque
         @test tiers(indexset, it) == (:running, :running, :running, :running)
         # Last is a group, so beside Mean the whole call slides
@@ -649,7 +649,7 @@ end
         # a widening that defeats isinvertible demotes only its accumulator
         @test tiers([FragileSum(:x), Sum(:y)], it) == (:running, :running)
         @test tiers([FragileSum(:x), Sum(:y)], merge(it, (; x = Float64))) ==
-              (:tree, :running)
+              (:monoid, :running)
 
         # Last beside Mean, keyed, over ties and windows that empty and refill
         for p in (intdata, floatdata)
@@ -669,7 +669,7 @@ end
             ])
         # LateSum goes the other way, promoted from a tree-only call that kept
         # no buffer, so the running tier gathers one from the previous trees
-        @test tiers([LateSum(:x)], it) == (:tree,)
+        @test tiers([LateSum(:x)], it) == (:monoid,)
         @test tiers([LateSum(:x)], merge(it, (; x = Float64))) == (:running,)
         for ss in ([FragileSum(:x), Sum(:y), Last(:x)],
                 [FragileSum(:x), Product(:y)], [FragileSum(:x), PlainSum(:y)],
