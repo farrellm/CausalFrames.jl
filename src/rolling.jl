@@ -622,7 +622,11 @@ end
 @inline admitmonoid!(::Nothing, stateprotos, k, row, lookbacks) = nothing
 @inline admitmonoid!(monoids::Dict{K,Q}, stateprotos::Tuple, k, row,
     lookbacks::Tuple) where {K,Q<:MonoidQueues} =
-    queuepush!(get!(() -> newqueues(Q, stateprotos, length(lookbacks)), monoids, k), row, lookbacks)
+    queuepush!(
+        get!(() -> newqueues(Q, stateprotos, length(lookbacks)), monoids, k),
+        row,
+        lookbacks,
+    )
 
 # One window per recursion step, peeling the (possibly heterogeneous)
 # look-backs with the window index in tow.

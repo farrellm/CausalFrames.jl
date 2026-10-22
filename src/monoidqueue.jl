@@ -70,7 +70,7 @@ queuestype(::S, ::Type{R}, ::Type{T}) where {S<:Tuple,R,T} = MonoidQueues{S,R,T}
 
 # The live rows, oldest first: from the earliest window's `lo`.
 liverows(mq::MonoidQueues) =
-    view(mq.rows, (minimum(q -> q.lo, mq.queues)-mq.dropped):length(mq.rows))
+    view(mq.rows, (minimum(q->q.lo, mq.queues)-mq.dropped):length(mq.rows))
 
 # Peeled explicitly: the three-argument `foreach` goes through a `zip` and
 # doesn't unroll for tuples (a runtime dispatch per state), and `map` would
