@@ -105,7 +105,7 @@ end
 # look-backs with the window index in tow.
 @inline queueexpire!(mq::MonoidQueues, t, w::Int) = nothing
 @inline function queueexpire!(mq::MonoidQueues, t, w::Int, lb, rest...)
-    expirewindow!(mq, @inbounds(mq.queues[w]), t, lb)
+    expirequeue!(mq, w, t, lb)
     return queueexpire!(mq, t, w + 1, rest...)
 end
 
@@ -136,8 +136,8 @@ end
 end
 
 # Drop the rows no window still holds once they are at least half the rows
-# (`compactdead!`'s rule, which needs 128 rows, tested first so most pushes
-# skip the scan over the windows): amortized O(1) per row.
+# (`compactdead!`'s rule, which needs 128 rows, tested first so a key holding
+# fewer skips the scan over the windows): amortized O(1) per row.
 @inline function compactqueues!(mq::MonoidQueues)
     length(mq.rows) >= 128 || return nothing
     dead = compactdead!(mq.rows, oldestlo(mq) - mq.dropped - 1)
