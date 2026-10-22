@@ -110,7 +110,7 @@ end
 
     @testset "rows past the clock's last tick are released" begin
         # the clock ends at 10 while the data runs on: the second chunk falls in
-        # no window and is dropped, in the running and the monoid tiers alike
+        # no window and is dropped, in the running and the tree modes alike
         p = CausalPipeline(
             ctx -> [DataFrame(time = [2, 7, 12], x = [1, 2, 3]),
                 DataFrame(time = [20, 30], x = [4, 5])],
@@ -191,7 +191,7 @@ end
         @test df.count == zeros(Int, 6)
         @test all(ismissing, df.x_mean)
 
-        # an undeclared key throws whichever tier is primary: running, monoid,
+        # an undeclared key throws whichever tier is primary: running, tree,
         # refold
         for ss in ([Count(), Sum(:x)], Product(:x), Opaque(Sum(:x)))
             @test_throws ArgumentError load(Context(5, 25),
@@ -232,8 +232,8 @@ end
     groupset = [Count(), Sum(:x), Mean(:x), Variance(:x), Correlation(:x, :y),
         AgeWeightedSum(:x), LinearRegression(:x, :y; name = :m1)]
     trackset = [Min(:x), Max(:x), First(:x), Last(:x), CountDistinct(:x)]
-    monoidset = [Product(:y), MinMax(:x)]                 # the monoid tier alone
-    mixedset = [Sum(:x), Min(:x), MinMax(:y), Product(:y)] # running + monoid
+    monoidset = [Product(:y), MinMax(:x)]                 # the tree alone
+    mixedset = [Sum(:x), Min(:x), MinMax(:y), Product(:y)] # running + tree
     plainset = [Sum(:x), TestVar(:x), PlainSum(:y)]       # running + re-fold
     spanset = [TierSpan(:y), Mean(:x), Last(:x)]          # every tier at once
     orderset = [Quantile(:x, [0.1, 0.5]), Median(:y), PercentRank(:x), MeanAbsDev(:y),
@@ -265,8 +265,8 @@ end
         @test all(==((:time, :k, :x, :y, :z)), undeclared.seen)
     end
 
-    @testset "monoid and mixed tiers agree with re-fold" begin
-        # L = 40 spans eight ticks, so queues flip and slide; the
+    @testset "tree and mixed tiers agree with re-fold" begin
+        # L = 40 spans eight ticks, so trees grow, rebuild and slide; the
         # oracle differential already covers every set at L = 3 and 11
         for x in (intx, floatx), ss in (monoidset, mixedset, plainset, spanset),
             opts in layouts
@@ -274,14 +274,14 @@ end
             windowsagree(windowed(mkdata(x), 40, ss; opts...),
                 windowed(mkdata(x), 40, map(Opaque, ss); opts...))
         end
-        # the sorted accumulator merged through the queues
+        # the sorted accumulator merged through the tree
         for x in (intx, floatx), opts in layouts
             windowsagree(windowed(mkdata(x), 40, orderset; opts...),
                 windowed(mkdata(x), 40, map(AsMonoid, orderset); opts...))
         end
     end
 
-    @testset "widening, and demotion from running to monoid" begin
+    @testset "widening, and demotion from running to tree" begin
         # x arrives Int in the first chunk and Float64 afterwards
         mixed = CausalPipeline(
             ctx -> [
@@ -290,9 +290,9 @@ end
                 for r in ranges
             ])
         whole = frame(Float64.(xs))
-        # running stays running; FragileSum alone demotes to the monoid tier, rebuilt
-        # from the buffer beside a running Count, from the previous queues beside
-        # Product, and beside a refold PlainSum; monoid and refold states widen
+        # running stays running; FragileSum alone demotes to the tree, rebuilt
+        # from the buffer beside a running Count, from the previous trees beside
+        # Product, and beside a refold PlainSum; tree and refold states widen
         # within their tiers
         for ss in ([Sum(:x), Mean(:x)], [FragileSum(:x), Count()],
                 [FragileSum(:x), Product(:y)], [FragileSum(:x), PlainSum(:y)],
@@ -317,7 +317,7 @@ end
 
     @testset "allocations do not grow with rows" begin
         # as in the rolling tests: with pooled running groups, reused windowed
-        # states and queues, and one refold table pool, quadrupling the rows
+        # states and trees, and one refold table pool, quadrupling the rows
         # (and ticks) adds only logarithmic buffer growth and the emitted rows
         function windowallocs(ss, n; opts...)
             src = DataFrame(time = 1:n, k = repeat(["a", "b"], n ÷ 2),

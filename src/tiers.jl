@@ -5,9 +5,8 @@
 # - running: GroupSummarizers whose windowed state (`freshwindowed`) is
 #   invertible. Per-key running states, update!d as rows arrive and downdate!d,
 #   oldest first, as they leave: O(1) amortized per row.
-# - monoid: the other MonoidSummarizers, plus any group whose realized state
-#   defeats `isinvertible`. Per-key two-stack queues (monoidqueue.jl): O(1)
-#   amortized per row.
+# - tree: the other MonoidSummarizers, plus any group whose realized state
+#   defeats `isinvertible`. Per-key segment trees (segtree.jl): O(log window).
 # - refold: everything else. Fresh states folded over the window's buffered
 #   rows: O(window).
 # - derived: states with no fields (the dependent summarizers). They fold
@@ -24,17 +23,17 @@
 # single-algorithm kernel.
 
 const RUNNINGTIER = 1
-const MONOIDTIER = 2
+const TREETIER = 2
 const REFOLDTIER = 3
 const DERIVEDTIER = 4
-const TIERNAMES = (:running, :monoid, :refold, :derived)
+const TIERNAMES = (:running, :tree, :refold, :derived)
 
 # The partition of one realized state set: each tier's template tuple and, per
 # topological position, its (tier, index). The running templates are windowed
 # states; the others are ordinary ones.
 struct Tiering{SR<:Tuple,ST<:Tuple,SF<:Tuple,SD<:Tuple,P}
     running::SR
-    monoid::ST
+    tree::ST
     refold::SF
     derived::SD
     perm::Val{P}
@@ -51,7 +50,7 @@ function tiering(protos::Tuple, intypes::NamedTuple)
     codes = map(protos, windowed, stateless) do p, w, sl
         folding && sl ? DERIVEDTIER :
         p isa GroupSummarizer && isinvertible(w) ? RUNNINGTIER :
-        p isa MonoidSummarizer ? MONOIDTIER : REFOLDTIER
+        p isa MonoidSummarizer ? TREETIER : REFOLDTIER
     end
     counts = zeros(Int, length(TIERNAMES))
     perm = map(c -> (c, counts[c] += 1), codes)
@@ -62,7 +61,7 @@ end
 # templates are picked by `tierpick` without inferring a growing tuple.
 tiered(perm::Val, windowed::Tuple, states::Tuple) =
     Tiering(tierpick(perm, Val(RUNNINGTIER), windowed),
-        tierpick(perm, Val(MONOIDTIER), states), tierpick(perm, Val(REFOLDTIER), states),
+        tierpick(perm, Val(TREETIER), states), tierpick(perm, Val(REFOLDTIER), states),
         tierpick(perm, Val(DERIVEDTIER), states), perm)
 
 # The elements of `src` whose tier is `C`, in topological order.
@@ -84,7 +83,7 @@ tiernames(::Tiering{SR,ST,SF,SD,P}) where {SR,ST,SF,SD,P} =
 end
 
 mergedstates(tg::Tiering) =
-    mergestates(tg.perm, (tg.running, tg.monoid, tg.refold, tg.derived))
+    mergestates(tg.perm, (tg.running, tg.tree, tg.refold, tg.derived))
 
 # The emitted value type, from the merged templates. Windowed states have the
 # ordinary states' value type (the `freshwindowed` contract), so every tier
@@ -198,68 +197,64 @@ function replayrunning!(rt::RunningTable{K,S}, rows::Vector, head::Int,
     return rt
 end
 
-# Push the live rows (from head on) into per-key queues, converting each to
-# the queues' row type; a function barrier like replayrunning!.
-function replaymonoids!(monoids::Dict{K,Q}, rows::Vector, head::Int,
-    stateprotos::S, keynames::Val,
-    lookbacks::Tuple) where {K,S<:Tuple,R,Q<:MonoidQueues{S,R}}
+# Push the live rows (from head on) into per-key trees, converting each to the
+# trees' row type; a function barrier like replayrunning!.
+function replaytrees!(trees::Dict{K,SegTree{S,R,T}}, rows::Vector, head::Int,
+    stateprotos::S, keynames::Val) where {K,S<:Tuple,R,T}
     for j in head:length(rows)
         row = convert(R, @inbounds rows[j])
-        mq = get!(() -> newqueues(Q, stateprotos, length(lookbacks)), monoids,
+        tr = get!(() -> newsegtree(stateprotos, R, T), trees,
             keyvalues(row, keynames))
-        queuepush!(mq, row, lookbacks)
+        treepush!(tr, stateprotos, row)
     end
-    return monoids
+    return trees
 end
 
-# The queues' live rows as one time-ordered buffer, for a rebuild that needs a
+# The trees' live rows as one time-ordered buffer, for a rebuild that needs a
 # buffer where the previous tiers kept none. Built-in states only demote, so
 # only a custom state that becomes invertible on widening gets here. The stable
 # sort keeps each key's rows in stream order.
-function monoidbuffer(::Type{R}, monoids::AbstractDict) where {R}
+function treebuffer(::Type{R}, trees::AbstractDict) where {R}
     rows = R[]
-    for (_, mq) in monoids, row in liverows(mq)
-        push!(rows, convert(R, row))
+    for (_, tr) in trees, j in tr.head:length(tr.rows)
+        push!(rows, convert(R, @inbounds tr.rows[j]))
     end
     return sort!(rows; by = r -> r.time, alg = Base.Sort.DEFAULT_STABLE)
 end
 
 # The shared row buffer of a tiering being built: `nothing` when neither the
-# running nor the refold tier needs one (the queues own their rows); empty on a
-# first build; after a widening, the previous buffer converted to the new row
-# type, or gathered from the previous queues (`monoidbuffer`) if there was none.
+# running nor the refold tier needs one (trees own their rows); empty on a first
+# build; after a widening, the previous buffer converted to the new row type,
+# or gathered from the previous trees (`treebuffer`) if there was none.
 function rebuildbuffer(tg::Tiering, ::Type{R}, old) where {R}
     isempty(tg.running) && isempty(tg.refold) && return nothing
     old === nothing && return R[]
-    old.buffer === nothing && return monoidbuffer(R, old.monoids)
+    old.buffer === nothing && return treebuffer(R, old.trees)
     return convert(Vector{R}, old.buffer)
 end
 
-# The monoid tier of a tiering being built: `nothing` without monoid states,
-# else per-key queues (one per look-back) replayed from the previous queues'
-# live rows if any, else from the previous buffer's live rows (from `head`),
-# else (a first build) empty.
-function rebuildmonoids(tg::Tiering, ::Type{K}, ::Type{R}, ::Type{T}, old,
-    head::Int, keynames::Val, lookbacks::Tuple) where {K,R,T}
-    isempty(tg.monoid) && return nothing
-    monoids =
-        Dict{K,queuestype(tg.monoid, R, T)}()
-    if old !== nothing && old.monoids !== nothing
-        replayoldmonoids!(monoids, old.monoids, tg.monoid, keynames, lookbacks)
+# The tree tier of a tiering being built: `nothing` without tree states, else
+# per-key trees replayed from the previous trees' rows if any, else from the
+# previous buffer's live rows (from `head`), else (a first build) empty.
+function rebuildtrees(tg::Tiering, ::Type{K}, ::Type{R}, ::Type{T}, old,
+    head::Int, keynames::Val) where {K,R,T}
+    isempty(tg.tree) && return nothing
+    trees = Dict{K,SegTree{typeof(tg.tree),R,T}}()
+    if old !== nothing && old.trees !== nothing
+        replayoldtrees!(trees, old.trees, tg.tree, keynames)
     elseif old !== nothing && old.buffer !== nothing
-        replaymonoids!(monoids, old.buffer, head, tg.monoid, keynames, lookbacks)
+        replaytrees!(trees, old.buffer, head, tg.tree, keynames)
     end
-    return monoids
+    return trees
 end
 
-# Replay every live row of the previous queues, which own their rows.
-function replayoldmonoids!(monoids::Dict, old::AbstractDict, stateprotos::Tuple,
-    keynames::Val, lookbacks::Tuple)
-    for (_, mq) in old
-        replaymonoids!(monoids, mq.rows, oldestlo(mq) - mq.dropped, stateprotos,
-            keynames, lookbacks)
+# Replay every live row of the previous trees, which own their rows.
+function replayoldtrees!(trees::Dict{K,SegTree{S,R,T}}, old::AbstractDict,
+    stateprotos::S, keynames::Val) where {K,S<:Tuple,R,T}
+    for (_, tr) in old
+        replaytrees!(trees, tr.rows, tr.head, stateprotos, keynames)
     end
-    return monoids
+    return trees
 end
 
 # Drop a row buffer's `dead` prefix, the rows no window still holds, once it is

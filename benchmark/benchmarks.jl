@@ -56,7 +56,7 @@ end
 
 # A structure-hiding wrapper: delegates to the wrapped summarizer but subtypes
 # plain Summarizer, so the window transforms re-fold it, the baseline for the
-# running and monoid tiers.
+# running and tree tiers.
 struct RefoldWrap{S<:CausalFrames.Summarizer} <: CausalFrames.Summarizer
     inner::S
 end
@@ -211,12 +211,11 @@ SUITE["intervalize"]["dense"] = @benchmarkable load(CTX,
 # The same ~1000 ticks, each summarizing a trailing 5000 time units (about
 # 20,000 rows, five tick spacings, so windows overlap five-fold). Entries per
 # window tier: the running tier slides per-key states once per row (Min/Max
-# through their windowed deques in "tracking"); the monoid tier (Product is only
-# a monoid; the entry keeps its old name, "tree") folds rows into a two-stack
-# queue and combines its front and back at the tick; the re-fold baseline folds
-# every window at its tick, paying the overlap. "mixed" is an OHLC-style set
-# spanning the running tier and dependents, at a look-back shorter than the tick
-# spacing and at 5000.
+# through their windowed deques in "tracking"); the tree tier (Product is only
+# a monoid) appends rows to a segment tree and recombines them at the tick; the
+# re-fold baseline folds every window at its tick, paying the overlap. "mixed"
+# is an OHLC-style set spanning the running tier and dependents, at a look-back
+# shorter than the tick spacing and at 5000.
 SUITE["windows"] = BenchmarkGroup()
 SUITE["windows"]["running"] = @benchmarkable load(CTX,
     SRC |> summarizewindows(clock(1000), 5000, [Count(), Sum(:qty), Mean(:qty)]))
@@ -249,7 +248,7 @@ SUITE["windows"]["refold"] = @benchmarkable load(CTX,
 
 # Entries per window tier, as for the windows group (see src/tiers.jl), plus
 # the mixed set at windows of about 4, 24 and 1000 rows (keyless); the small
-# ones are where a running+monoid split could lose to the monoid tier alone.
+# ones are where a running+tree split could lose to a tree alone.
 SUITE["rolling"] = BenchmarkGroup()
 SUITE["rolling"]["running"] = @benchmarkable load(RCTX,
     RSRC |> addrollingcolumns((; w25 = 25), [Sum(:qty), Mean(:qty)]))

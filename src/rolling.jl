@@ -1,8 +1,8 @@
 # The rolling-window summarization transform. The augmented stream drives a
 # chunkmap and pulls the summarized stream on demand. Each accumulator's window
 # algorithm follows its structure (tiers.jl): groups slide per-key running
-# states in O(1) amortized per row, other monoids query per-key two-stack
-# queues in O(1) amortized, and the rest re-fold the window's buffered rows in
+# states in O(1) amortized per row, other monoids query a per-key segment tree
+# in O(log window), and the rest re-fold the window's buffered rows in
 # O(window). One kernel drives all three tiers, emitting each window from their
 # states merged back into dependency order. Type-unstable setup runs once per
 # chunk; the kernel takes concretely typed arguments. A `Bars` window counts
@@ -255,26 +255,24 @@ end
 # A `Bars` window's head sits past the buffer's end, so it never holds rows
 # there. Instead each key keeps a ring of its newest `barcap` rows (one more
 # than the longest bar count, so the row leaving is still there to downdate),
-# from which the running tier downdates and the refold tier folds. The monoid
-# queues own their rows, so a call with only monoid and derived states keeps no
-# buffer and no rings (`nothing`), nor does a call without time windows keep a
-# buffer.
-struct RollTiers{R,B,RG,G,MQ,TG<:Tiering}
+# from which the running tier downdates and the refold tier folds. Trees own
+# their rows, so a call with only tree and derived states keeps no buffer and
+# no rings (`nothing`), nor does a call without time windows keep a buffer.
+struct RollTiers{R,B,RG,G,TR,TG<:Tiering}
     buffer::B              # Vector{R}, or nothing
     winheads::Vector{Int}  # per window, the first buffered row inside it
     rings::RG              # Dict{K,RowRing{R}}, or nothing
     barcap::Int            # the rings' capacity
     running::G             # NTuple{W,RunningTable{K,SR}}, or nothing
-    monoids::MQ            # Dict{K,MonoidQueues{ST,R,T}}, or nothing
+    trees::TR              # Dict{K,SegTree{ST,R,T}}, or nothing
     tg::TG                 # the partition of the states into tiers
 end
 
 # Build the tiers for the realized types, from scratch or, after a widening,
-# from the previous tiers' live rows (`rebuildbuffer`, `rebuildmonoids`). A
+# from the previous tiers' live rows (`rebuildbuffer`, `rebuildtrees`). A
 # widening always rebuilds rather than widening in place: rare, O(live), and
 # correct for every transition, including one that demotes an accumulator from
-# the running tier to the monoid tier. Type-unstable, once per run and per
-# widening.
+# the running tier to the tree. Type-unstable, once per run and per widening.
 rolltiers(tg::Tiering, types::NamedTuple, keynames::Val, lookbacks::Tuple, old) =
     rolltiers(tg, storekeytype(types, keynames), storerowtype(types), types.time,
         keynames, lookbacks, old)
@@ -305,17 +303,16 @@ function rolltiers(tg::Tiering, ::Type{K}, ::Type{R}, ::Type{T}, keynames::Val,
             w -> replaywindow!(RunningTable{K,typeof(tg.running)}(), lookbacks[w],
                 buffer, buffer === nothing ? 1 : winheads[w], rings, tg.running,
                 keynames), Val(nwindows))
-    monoids =
+    trees =
         suffixes === nothing ?
-        rebuildmonoids(tg, K, R, T, old, oldhead, keynames, lookbacks) :
-        suffixmonoids(tg, K, R, T, suffixes, keynames, lookbacks)
-    return RollTiers{R}(buffer, winheads, rings, barcap, running, monoids, tg)
+        rebuildtrees(tg, K, R, T, old, oldhead, keynames) :
+        suffixtrees(tg, K, R, T, suffixes, keynames)
+    return RollTiers{R}(buffer, winheads, rings, barcap, running, trees, tg)
 end
 
 RollTiers{R}(buffer::B, winheads::Vector{Int}, rings::RG, barcap::Int,
-    running::G, monoids::MQ, tg::TG) where {R,B,RG,G,MQ,TG} =
-    RollTiers{R,B,RG,G,MQ,TG}(buffer, winheads, rings, barcap, running, monoids,
-        tg)
+    running::G, trees::TR, tg::TG) where {R,B,RG,G,TR,TG} =
+    RollTiers{R,B,RG,G,TR,TG}(buffer, winheads, rings, barcap, running, trees, tg)
 
 # A window's running table, replayed from the rows the window holds: a time
 # window's from the buffer (from its head), a Bars window's from each key's
@@ -332,9 +329,8 @@ function replaywindow!(rt::RunningTable, lb::Bars, buffer, head::Int,
 end
 
 # Every key's live rows, oldest first, for a rebuild with Bars windows. Each of
-# the old tiers holds a suffix of every key's stream (its ring, its queues'
-# live rows, its rows in the buffer from `head`), so the longest one holds them
-# all.
+# the old tiers holds a suffix of every key's stream (its ring, its tree's live
+# rows, its rows in the buffer from `head`), so the longest one holds them all.
 function barsuffixes(::Type{K}, ::Type{R}, old, head::Int,
     keynames::Val) where {K,R}
     suffixes = Dict{K,Vector{R}}()
@@ -348,9 +344,9 @@ function barsuffixes(::Type{K}, ::Type{R}, old, head::Int,
             offer!(k, R[ringback(ring, j) for j in length(ring):-1:1])
         end
     end
-    if old.monoids !== nothing
-        for (k, mq) in old.monoids
-            offer!(k, convert(Vector{R}, liverows(mq)))
+    if old.trees !== nothing
+        for (k, tr) in old.trees
+            offer!(k, convert(Vector{R}, tr.rows[tr.head:end]))
         end
     end
     if old.buffer !== nothing
@@ -380,16 +376,15 @@ function rebuildrings(::Type{K}, ::Type{R}, cap::Int, suffixes) where {K,R}
     return rings
 end
 
-# The monoid tier, replayed from every key's live rows.
-function suffixmonoids(tg::Tiering, ::Type{K}, ::Type{R}, ::Type{T}, suffixes,
-    keynames::Val, lookbacks::Tuple) where {K,R,T}
-    isempty(tg.monoid) && return nothing
-    monoids =
-        Dict{K,queuestype(tg.monoid, R, T)}()
+# The tree tier, replayed from every key's live rows.
+function suffixtrees(tg::Tiering, ::Type{K}, ::Type{R}, ::Type{T}, suffixes,
+    keynames::Val) where {K,R,T}
+    isempty(tg.tree) && return nothing
+    trees = Dict{K,SegTree{typeof(tg.tree),R,T}}()
     for (_, rows) in suffixes
-        replaymonoids!(monoids, rows, 1, tg.monoid, keynames, lookbacks)
+        replaytrees!(trees, rows, 1, tg.tree, keynames)
     end
-    return monoids
+    return trees
 end
 
 # Pull the next summarized chunk (type-unstable, once per chunk), building the
@@ -553,8 +548,10 @@ function rollsegment!(wins::Tuple, tiers::RollTiers{R}, lnt::NamedTuple, i::Int,
         # chunk's.
         compactbuffer!(tiers.buffer, tiers.winheads)
         k = keyat(lnt, i, keynames)
-        scratch = emitroll!(i, t, k, tiers, keyqueues(tiers.monoids, k),
-            scratch, keynames, outs, 1, wins...)
+        tr = keytree(tiers.trees, k)
+        scratch, minlo = emitroll!(i, t, k, tiers, tr, scratch, keynames,
+            outs, typemax(Int), 1, wins...)
+        advancetree!(tr, minlo)
         i += 1
     end
     return (i, spos, false)
@@ -562,31 +559,38 @@ end
 
 # The lead-in's kernel: admits the summarized rows before `start` from spos.
 # Every later row is at or after the newest one admitted, at τ, so each window
-# evicts against τ (the monoid queues expire against their rows' own times on
-# admission). Returns (spos, more): more means the chunk is used up.
+# evicts against τ, and the admitted row's key tree expires its prefix as a
+# query at τ would. Returns (spos, more): more means the chunk is used up.
 function leadinsegment!(tiers::RollTiers{R}, snt::NamedTuple, spos::Int,
     start, lookbacks::Tuple, keynames::Val) where {R}
     slen = length(snt.time)
     while spos <= slen
         τ = @inbounds snt.time[spos]
         τ < start || return (spos, false)
-        admitroll!(tiers, rowat(R, snt, spos), keynames, lookbacks)
+        k = admitroll!(tiers, rowat(R, snt, spos), keynames, lookbacks)
         evictroll!(τ, tiers, tiers.buffer, keynames, 1, lookbacks...)
         compactbuffer!(tiers.buffer, tiers.winheads)
+        expiretree!(keytree(tiers.trees, k), τ, typemax(Int), lookbacks...)
         spos += 1
     end
     return (spos, true)
 end
 
-# Admit the row into every tier.
+# Advance the tree's head to the earliest of its windows' starts at τ.
+@inline expiretree!(tr, τ, minlo::Int, lookbacks...) = nothing
+@inline expiretree!(tr::SegTree, τ, minlo::Int) = advancetree!(tr, minlo)
+@inline expiretree!(tr::SegTree, τ, minlo::Int, lb, rest...) =
+    expiretree!(tr, τ, min(minlo, treestart(tr, τ, lb)), rest...)
+
+# Admit the row into every tier, returning its key.
 @inline function admitroll!(tiers::RollTiers, row, keynames::Val,
     lookbacks::Tuple)
     pushrow!(tiers.buffer, row)
     k = keyvalues(row, keynames)
     admitrunning!(tiers.running, tiers.tg.running, k, row)
-    admitmonoid!(tiers.monoids, tiers.tg.monoid, k, row, lookbacks)
+    admittree!(tiers.trees, tiers.tg.tree, k, row)
     admitrings!(tiers.rings, tiers.running, tiers.barcap, k, row, lookbacks)
-    return nothing
+    return k
 end
 
 # Push the row into its key's ring, then downdate, from each Bars window's
@@ -619,14 +623,11 @@ end
     return nothing
 end
 
-@inline admitmonoid!(::Nothing, stateprotos, k, row, lookbacks) = nothing
-@inline admitmonoid!(monoids::Dict{K,Q}, stateprotos::Tuple, k, row,
-    lookbacks::Tuple) where {K,Q<:MonoidQueues} =
-    queuepush!(
-        get!(() -> newqueues(Q, stateprotos, length(lookbacks)), monoids, k),
-        row,
-        lookbacks,
-    )
+@inline admittree!(::Nothing, stateprotos, k, row) = nothing
+@inline admittree!(trees::Dict{K,SegTree{S,R,T}}, stateprotos::S, k,
+    row) where {K,S,R,T} =
+    treepush!(get!(() -> newsegtree(stateprotos, R, T), trees, k), stateprotos,
+        row)
 
 # One window per recursion step, peeling the (possibly heterogeneous)
 # look-backs with the window index in tow.
@@ -647,10 +648,9 @@ end
     return evictroll!(t, tiers, buffer, keynames, w + 1, rest...)
 end
 
-# The key's queues: `()` without a monoid tier, `nothing` for a key with no
-# rows.
-@inline keyqueues(::Nothing, k) = ()
-@inline keyqueues(monoids::AbstractDict, k) = get(monoids, k, nothing)
+# The key's tree: `()` without a tree tier, `nothing` for a key with no rows.
+@inline keytree(::Nothing, k) = ()
+@inline keytree(trees::AbstractDict, k) = get(trees, k, nothing)
 
 # A tier's states for one window: `()` when the call has no such tier, `nothing`
 # when the window holds no rows of the key, the state tuple otherwise. A Bars
@@ -664,19 +664,32 @@ end
 @inline partialbars(lb, live::Int) = false
 @inline partialbars(lb::Bars, live::Int) = live < lb.n
 
-# Window w's borrowed states from the key's queues (`queuestates`), expired to
-# t first; a Bars window over fewer than n rows is partial.
-@inline monoidstates(::Tuple{}, w::Int, t, lb) = ()
-@inline monoidstates(::Nothing, w::Int, t, lb) = nothing
-@inline function monoidstates(mq::MonoidQueues, w::Int, t, lb)
-    partialbars(lb, nstored(mq)) && return nothing
-    expirequeue!(mq, w, t, lb)
-    return queuestates(mq, w)
+# The borrowed query over the window, and the window's first live row
+# (`windowstart`, the rolling membership predicate verbatim).
+@inline treestates(::Tuple{}, t, lb) = ((), typemax(Int))
+@inline treestates(::Nothing, t, lb) = (nothing, typemax(Int))
+@inline function treestates(tr::SegTree, t, lb)
+    lo = treestart(tr, t, lb)
+    hi = length(tr.rows)
+    return (lo > hi ? nothing : treequery(tr, lo, hi)), lo
+end
+@inline function treestates(tr::SegTree, t, lb::Bars)
+    lo = treestart(tr, t, lb)
+    return lo < 1 ? (nothing, 1) : (treequery(tr, lo, length(tr.rows)), lo)
 end
 
-# A Bars window holds the key's newest n rows, so expiry is by count.
-@inline expirewindow!(mq::MonoidQueues, q::PartialQueue, t, lb::Bars) =
-    keepnewest!(mq, q, lb.n)
+# The window's first row in the key's tree, at t.
+@inline treestart(tr::SegTree, t, lb) = windowstart(tr.times, tr.head, t, lb)
+# Every admitted row is at or before t, so a Bars window is the key's last n
+# (less than 1 for fewer rows). The head never passes it: the earliest window
+# start advances the head, and a rebuild drops only rows before the head, so a
+# key with n rows has them all.
+@inline treestart(tr::SegTree, t, lb::Bars) = length(tr.rows) - lb.n + 1
+
+# The earliest window start advances the tree's head: a row older than every
+# window is expired, and the next rebuild drops it.
+@inline advancetree!(tr, minlo::Int) = nothing
+@inline advancetree!(tr::SegTree, minlo::Int) = (tr.head = max(tr.head, minlo); nothing)
 
 # Fold key k's rows from the window's eviction head into the zeroed scratch
 # (a Bars window: the newest n rows of the key's ring). Returns the states
@@ -713,13 +726,13 @@ end
 # One window per recursion step, each a (look-back, empty row, value vector).
 # A `nothing` from any tier is the empty (or partial) window; otherwise the
 # tiers' states are merged into topological order and summarized.
-@inline emitroll!(i::Int, t, k, tiers::RollTiers, mq, scratch, keynames::Val,
-    outs::Val, w::Int) = scratch
-@inline function emitroll!(i::Int, t, k, tiers::RollTiers, mq, scratch,
-    keynames::Val, outs::Val, w::Int, win::Tuple, rest...)
+@inline emitroll!(i::Int, t, k, tiers::RollTiers, tr, scratch, keynames::Val,
+    outs::Val, minlo::Int, w::Int) = (scratch, minlo)
+@inline function emitroll!(i::Int, t, k, tiers::RollTiers, tr, scratch,
+    keynames::Val, outs::Val, minlo::Int, w::Int, win::Tuple, rest...)
     lb, emptyrow, v = win
     rs = runningstates(tiers.running, w, k, lb)
-    ts = monoidstates(mq, w, t, lb)
+    ts, lo = treestates(tr, t, lb)
     fs, scratch = refoldstates(scratch, tiers, w, k, keynames, lb)
     if rs === nothing || ts === nothing || fs === nothing
         @inbounds v[i] = emptyrow
@@ -727,8 +740,8 @@ end
         @inbounds v[i] = summaryvalues(
             mergestates(tiers.tg.perm, (rs, ts, fs, tiers.tg.derived)), outs)
     end
-    return emitroll!(i, t, k, tiers, mq, scratch, keynames, outs, w + 1,
-        rest...)
+    return emitroll!(i, t, k, tiers, tr, scratch, keynames, outs,
+        min(minlo, lo), w + 1, rest...)
 end
 
 # --- output assembly -------------------------------------------------------

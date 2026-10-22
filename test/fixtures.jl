@@ -80,7 +80,7 @@ CausalFrames.inputcolumns(::Recording{S,C}) where {S,C} = C
 CausalFrames.rowterms(r::Recording) = CausalFrames.rowterms(r.inner)
 
 # Opaque's monoid counterpart: a group hidden down to a monoid, so it takes the
-# monoid tier rather than the running tier, putting a built-in group's `combine!`
+# tree tier rather than the running tier, putting a built-in group's `combine!`
 # under a window.
 struct AsMonoid{S<:Summarizer} <: MonoidSummarizer
     inner::S
@@ -121,7 +121,7 @@ end
 
 # A group summarizer whose state is non-invertible once its column widens to
 # Float64, driving the window transforms' demotion of an accumulator from the
-# running tier to the monoid tier (no built-in does this). The output name is a type
+# running tier to the tree (no built-in does this). The output name is a type
 # parameter so `value` infers.
 struct FragileSum{C} <: GroupSummarizer end
 FragileSum(column::Symbol) = FragileSum{column}()
@@ -147,9 +147,9 @@ CausalFrames.widenstate(st::FragileSumState{C,N}, intypes::NamedTuple) where {C,
 CausalFrames.isinvertible(::FragileSumState{C,N,Float64}) where {C,N} = false
 
 # FragileSum's mirror: non-invertible while its column is Int, invertible once
-# it widens to Float64, so a widening *promotes* it from the monoid tier to the
-# running tier (no built-in does this), which needs a buffer the monoid-only call
-# didn't keep.
+# it widens to Float64, so a widening *promotes* it from the tree to the running
+# tier (no built-in does this), which needs a buffer the tree-only call didn't
+# keep.
 struct LateSum{C} <: GroupSummarizer end
 LateSum(column::Symbol) = LateSum{column}()
 mutable struct LateSumState{C,N,T} <: SummarizerState
@@ -173,7 +173,7 @@ CausalFrames.widenstate(st::LateSumState{C,N}, intypes::NamedTuple) where {C,N} 
 CausalFrames.isinvertible(::LateSumState{C,N,Int}) where {C,N} = false
 
 # A dependent spanning every window tier: its dependencies are a group (Sum,
-# running), a monoid (Product, monoid) and a plain summarizer (Opaque(Sum) under
+# running), a monoid (Product, tree) and a plain summarizer (Opaque(Sum) under
 # its own name, refold), and its fieldless state reads all three at emission.
 struct TierSpan{C} <: Summarizer end
 TierSpan(column::Symbol) = TierSpan{column}()

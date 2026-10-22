@@ -1140,27 +1140,17 @@ so the weakest structure in a call slows only its own summarizers:
   of folding them in (see "Summarizers"), so eviction is clean: a window
   recovers exactly once a `NaN` or `±Inf` row ages out, and finite values carry
   only the compensated round-off rather than the usual sliding-sum drift.
-- **Monoid tier — the other `MonoidSummarizer`s.** Each key keeps its rows
-  and, per look-back, a Two-Stacks Lite queue of `combine!`d partial state
-  tuples (`monoidqueue.jl`). The queue's raw half is the key's stored rows,
-  shared by its windows, and its front is a vector of suffix combines over an
-  older run of them, `front[j]` folding rows `j` through the run's end, with
-  one `back` state folding every row since. A window is `front[lo] ⊕ back`
-  for its oldest live row `lo`: order-preserved for order-sensitive states,
-  since the front's rows all precede the back's. Expiry only advances `lo`,
-  by the kernel's exact membership predicate `t - s <= lookback`, never a
-  rearrangement of it. Once `lo` passes the front, the next query flips the
-  live rows into a new front (one `update!` and one `combine!` per row) and
-  zeroes the back, skipping rows that expired while in the back. Each row is
-  folded into the back once and flipped at most once per window, so the cost
-  is O(1) amortized per row and per query, with no allocation once a front
-  has grown to its window. A query never reads a partial covering a row
-  before `lo`, which is what makes an expired absorbing row (`missing`,
-  `NaN`) harmless. A pushed row also expires the key's windows against its own
-  time: every later query is at or after it, so this only moves expiry
-  earlier, and a key that is never queried keeps only its windows' rows. The
-  dead prefix is dropped once it is half the key's rows. The queues own their
-  rows, so a call mixing the monoid tier with another tier stores its rows
+- **Tree tier — the other `MonoidSummarizer`s.** Rows append to per-key segment
+  trees (`segtree.jl`) whose nodes hold the `combine!` of their children;
+  each output row binary-searches its window's start per look-back — using
+  the kernel's exact membership predicate `t - s <= lookback`, never a
+  rearrangement of it — and folds the window from O(log n) partial
+  combinations, order-preserved for order-sensitive states. Expired rows leave
+  the tree only logically (a head index) and are dropped at the next
+  capacity-triggered rebuild, amortized O(1) per append; a query never
+  touches a node unless its whole range is in the window, which is also
+  what makes an expired absorbing leaf (`missing`, `NaN`) harmless. The trees
+  own their rows, so a call mixing the tree with another tier stores its rows
   twice, once there and once in the shared buffer.
 - **Re-fold tier — everything else.** Each output row folds *fresh* states
   over its window's buffered rows, from that window's eviction head: one
@@ -1174,24 +1164,23 @@ A `Bars` window reuses every tier; only membership changes. Each key keeps a
 ring (`RowRing`) of its newest `n + 1` rows for the longest bar count, and a
 row leaves a `Bars` window on **admission**, when a push takes it `n + 1` rows
 deep: the running tier `downdate!`s it there (still oldest first, since each
-key's ring is in stream order), the monoid tier's queue for the window holds
-the key's last `n` rows (its `lo` is set by count, and the key's rows are
-kept from the earliest `lo` among its windows), and the re-fold tier folds the
-ring's newest `n`. A group's live count, the key's stored row count or the
-ring's length below `n`
+key's ring is in stream order), the tree tier queries the key's last `n` rows
+(the earliest window start among all windows still advances the tree's head,
+so a rebuild never drops them), and the re-fold tier folds the ring's newest
+`n`. A group's live count, the tree's span or the ring's length below `n`
 reports the window as `nothing`, the empty window, and the window's empty row
 is all `missing`. The shared buffer holds rows only for time windows (a `Bars`
 window's eviction head sits at its end, so it never pins rows, and a call with
-only `Bars` windows keeps none). A widening rebuilds the rings and queues from
-each key's longest suffix among the old tiers (its ring, its queues' live
-rows, its buffered rows), since each is a suffix of that key's stream. The windows'
+only `Bars` windows keeps none). A widening rebuilds the rings and trees from
+each key's longest suffix among the old tiers (its ring, its tree's live rows,
+its buffered rows), since each is a suffix of that key's stream. The windows'
 value types now differ, so the kernel peels each window's look-back, empty
 row and value vector together. Measured over the benchmark's source, `Bars(100)`
 costs what the matching `w25` time window does (6.0 against 5.7 ms running,
-3.8 against 4.0 ms on the monoid tier), except keyed on the running tier (10.6
+7.6 against 8.1 ms on the tree), except keyed on the running tier (10.6
 against 8.4 ms), where each row also looks up its key's ring.
 
-At emission, each window takes its running group, its queue's fold and its
+At emission, each window takes its running group, its tree query and its
 re-fold states for the row's key, splices them back into topological order by
 a compile-time permutation (`mergestates`), and runs the ordinary
 `summaryvalues` over the result, so a dependent reads dependencies from any
@@ -1203,28 +1192,22 @@ compiles to the single-algorithm kernel: an absent tier's structure is
 Measured over the benchmark's 100,000 rows (four per time unit, 100 keys),
 choosing per accumulator rather than giving the whole call its weakest
 summarizer's algorithm matters: an OHLC-style `[First, Max, Min, Last, Mean,
-Std]` takes 15 ms at a 250-unit look-back against 52 ms through the monoid
-tier alone (28 ms at 5 units); `[Min, Max]` takes 7.0 ms on the deques against
-14.3 ms on the monoid tier; and `CountDistinct` 7.2 ms against 239 ms with a
-set copied per combine. Those monoid-tier figures predate its two-stack
-queues, when it was a per-key segment tree (O(log window) per query, with
-log₂(window) combines per row to keep its ancestors current); the switch
-halved the tier's own benchmarks (`Product` at a 25-unit look-back, 8.0 →
-4.0 ms; `Bars(100)`, 7.7 → 3.8 ms; a keyed lead-in, 33 → 17 ms with peak
-live memory 12.2 → 8.7 MiB), so the gaps above are now smaller.
+Std]` takes 15 ms at a 250-unit look-back against 52 ms through the tree alone
+(28 ms at 5 units); `[Min, Max]` takes 7.0 ms on the deques against 14.3 ms on
+the tree; and `CountDistinct` 7.2 ms against 239 ms with a set copied per
+combine.
 
 The partition is re-derived from the realized states whenever they are built
 or widened. A widening that produces an accumulator defeating `downdate!`
-(`isinvertible`) moves that accumulator from the running tier to the monoid
-tier mid-stream; the queue recovers a poisoned window once the offending row
+(`isinvertible`) moves that accumulator from the running tier to the tree
+mid-stream; the tree recovers a poisoned window once the offending row
 expires, where such a running state never could. The sum family, though,
 counts `NaN`, `±Inf`, and `missing` terms rather than folding them in (see
 Summarizers), so those widenings stay running and recover on expiry there.
 No built-in accumulator becomes invertible by widening, so built-ins only
-demote; a custom state that promotes gets a buffer gathered from the queues
-(`monoidbuffer`). A widening rebuilds every tier from the live rows (the
-buffer, or the previous queues for a monoid tier that already existed): rare,
-O(live), and
+demote; a custom state that promotes gets a buffer gathered from the trees
+(`treebuffer`). A widening rebuilds every tier from the live rows (the buffer,
+or the previous trees for a tree that already existed): rare, O(live), and
 correct for every transition, and the new types force a rebuild anyway. In
 every tier the type-unstable setup happens once per chunk and the per-row work
 sits behind one concretely typed kernel; only the (possibly heterogeneous)
@@ -1342,25 +1325,31 @@ The window algorithm is chosen per accumulator, by `addrollingcolumns`' tiers
   row (retired to a pool for reuse), so presence means rows in the window.
   Cost: O(1) amortized per row, plus a key sort per tick into a reused scratch
   vector.
-- **Monoid**, for the other `MonoidSummarizer`s: `addrollingcolumns`' per-key
-  two-stack queues (`monoidqueue.jl`), with one window. A row is folded into
-  the key's back state on admission; at each tick every key's queue expires to
-  the window start with the exact membership predicate, a key whose window
-  has emptied is dropped (so presence means rows in the window, as in the
-  running tier), and each survivor's window is its front suffix combined with
-  its back, flipping first when the front is used up. Cost: O(1) amortized
-  per row, about two `update!`s and one `combine!`, plus O(1) per key per
-  tick. The queue holds one state tuple per live row, plus the rows.
+- **Tree**, for the other `MonoidSummarizer`s. Rows append to per-key segment
+  trees (`segtree.jl`, the `addrollingcolumns` structure), and at each tick every
+  tree binary-searches its window start with the exact membership predicate
+  and folds the window from O(log n) partial combinations, order-preserved for
+  order-sensitive states. What differs from `addrollingcolumns` is *when* a tree
+  recombines. There a window is queried after every row, so each append
+  updates its O(log n) ancestors at once. Here nothing reads a tree between
+  ticks, so rows append as bare leaves (`treeappend!`), and at the tick each
+  tree recombines the ancestors of all its new leaves together, level by level
+  (`treesync!`): O(new leaves + log n), about one `combine!` per row. An eager
+  tree would pay log₂(window) combines per row (about sixteen at a 20,000-row
+  window), against re-fold's one update per row per overlapping tick. A tree
+  whose window empties is dropped, so presence means rows in the window, as in
+  the running tier. Cost: O(1) amortized per row plus O(log n) per key per
+  tick. The price is memory, as for rolling's trees: a tree holds between two
+  and eight state tuples per live row, each state its own heap object, where
+  re-fold holds only the rows.
 - **Re-fold** otherwise. At each tick the live rows are folded into per-key
   states drawn from a `GroupTable`'s pool, emitted, and retired back —
   `closecycle!`'s protocol — at O(window) per tick. This is the path `FitModel`
   takes, and the differential-test oracle for the others.
 - **No tier** for stateless (dependent) states, as in `addrollingcolumns`.
 
-Measured over the benchmark's million rows with 1,000-unit ticks (when the
-monoid tier was still a segment tree, rebuilt as windows slid and synced at
-each tick), splitting a mixed call across tiers beats running it all on the
-tree: the OHLC-style set
+Measured over the benchmark's million rows with 1,000-unit ticks, splitting a
+mixed call across tiers beats running it all on the tree: the OHLC-style set
 above takes 100 ms keyless and 159 ms keyed at a 5,000-unit look-back, against
 127 ms and 267 ms, and 96 ms against 238 ms keyless at a 20-unit look-back
 (shorter than the tick spacing, where a tree rebuilds at every tick); `Last`
@@ -1371,28 +1360,22 @@ deque's `update!` and `downdate!` cost 8.6–10.2 ns per tracker and row (a
 leaf and its share of the tick's recombination cost 3.1–3.6 ns, and the tree's
 rebuilds and window-start searches win back only part of that. Keyed, the
 deque wins (about 99 ms against 106 ms), since a hundred trees each rebuild
-and search, so no heuristic chooses between them. The two-stack queues that
-replaced the trees cost what a lazily synced tree did here (`Product` alone,
-26.5 against 25.8 ms, within noise: about two `update!`s and one `combine!`
-per row against one of each, with no rebuilds or searches) while allocating
-an eighth as often (21,000 allocations against 176,000), so these
-comparisons stand. Keeping the deque's values
+and search, so no heuristic chooses between them. Keeping the deque's values
 and sequence numbers in one vector for isbits values, halving its pushes and
 pops, is the obvious next optimization. The buffer is compacted at every
 tick's eviction (and rolling's after every row), so it stays near the window's
 size rather than growing through a whole chunk.
 
 Presence means rows in the window in every tier, so the first tier present
-(running, then monoid, then re-fold) supplies the keys a tick emits, and the
+(running, then tree, then re-fold) supplies the keys a tick emits, and the
 others are looked up by key; each emitted row merges the tiers' states back
 into topological order, as `addrollingcolumns` does. The row buffer is kept
 only when the running or re-fold tier is present.
 
-A widening that defeats `isinvertible` moves only that accumulator to the
-monoid tier mid-stream, as in `addrollingcolumns`. Every widening rebuilds the
-tiers from the live rows: running groups replay the buffer, queues replay the
-previous queues' rows (or the buffer, if there were none), and the re-fold
-table starts
+A widening that defeats `isinvertible` moves only that accumulator to the tree
+mid-stream, as in `addrollingcolumns`. Every widening rebuilds the tiers from
+the live rows: running groups replay the buffer, trees replay the previous
+trees' rows (or the buffer, if there were none), and the re-fold table starts
 empty, since it is filled only at ticks.
 
 `summarizewindows` is **causal**: a row emitted at `τ` folds only rows with time
@@ -1444,8 +1427,8 @@ the slots that emits them all and zeroes only the folded ones — no sort, no
 table churn, no pool. `summarizewindows` keeps its tiers' structures, whose
 presence-means-rows-in-the-window invariant is exactly what the dense emission
 reads (`emitdense!`, a lookup per declared key per tick in the first tier
-present). When that primary tier is the running or the monoid tier, the
-declaration is checked only where a key's group or queue is made, so a key's
+present). When that primary tier is the running or the tree tier, the
+declaration is checked only where a key's group or tree is made, so a key's
 later rows pay nothing for it; re-fold groups only at ticks, so when it is the
 primary it checks each admitted row. The undeclared paths pass `nothing` for
 the key set, and the checks dispatch away.
@@ -1822,8 +1805,7 @@ The interface, extended by concrete subtypes (unexported — extend
   accumulator type. The sum family keeps `NaN`, `±Inf`, and `missing` terms
   out of the running total and counts them, so they stay invertible; a state
   that folds an absorbing value past recovery returns `false`, and the window
-  transforms fold that summarizer through the monoid tier's two-stack queues
-  instead.
+  transforms fold that summarizer through a segment tree instead.
 
 Beside the interface, `barwindow(s, n, intypes)` builds a state over the last
 `n` rows for a summarizer whose own state needs a trailing window,
@@ -1989,7 +1971,7 @@ and every test of it compiles away).
 reconstructed total otherwise, at the declared element type `Union{Missing, A}`.
 The count subtracts away under `downdate!`, so the accumulator stays invertible
 and a rolling window recovers on the running path once the missing row expires
-(no demotion to the monoid tier).
+(no tree demotion).
 The accumulation field is never itself `Union{Missing, …}`; only the `value`
 return is. `widenstate` carries the whole representation across schema
 promotions — plain→compensated storage (an `Int` column promoted to float),
@@ -2045,9 +2027,8 @@ It is a group through its windowed state. The ordinary state's `Set` combines
 still appears elsewhere in the window is unknowable from the set. The windowed
 state counts the rows per distinct value in a `Dict{T,Int}` instead and drops a
 value when its count reaches zero, so a sliding window costs O(1) per row where
-the monoid tier would copy a set on every combine (7.2 ms against 239 ms over
-the benchmark's 100,000 rows at a 25-unit look-back, measured on its former
-segment tree). The two stay separate
+a segment tree would copy a set on every combine (7.2 ms against 239 ms over the
+benchmark's 100,000 rows at a 25-unit look-back). The two stay separate
 because the count costs the folds that never remove a row: incrementing a count
 through the public `Dict` API hashes twice per row, which measured 1.4–1.7×
 slower than `push!` on a Set over a million-row fold (1.62× for 100 distinct
@@ -2077,7 +2058,7 @@ single-threaded:
 The memmove only dominates past about ten thousand rows, where a tree would pay
 off; that is unmeasured, since indicator windows are far shorter.
 
-Its value is the state itself, *borrowed* as `queuestates`' scratch is:
+Its value is the state itself, *borrowed* as `treequery`'s scratch is:
 dependents read it within the emission
 and the projection drops it, so emitting allocates nothing — and requesting it
 as an output column would alias one state across every row, which its
@@ -2214,19 +2195,20 @@ per row is a heap allocation per summarizer on the hottest paths there are:
 boundary, and `addrollingcolumns` queries a window per row per window. `fresh!`
 is what makes that free, and the four places that use it are `foldcycles!`,
 `closedense!` (the declared-key cycle and interval close, the keyless interval
-grid's too, which zeroes only the slots that folded rows), the monoid tier's
-queues, and the re-fold window kernel.
+grid's too, which zeroes only the slots that folded rows), the segment tree,
+and the re-fold window kernel.
 
 Three structures own reusable scratch rather than allocating it per use:
 
-- a monoid-tier queue (`PartialQueue`) holds the scratch state tuple its
-  query combines into, so `queuestates`' result is **borrowed**: valid until
-  that window's next query, which is all its callers need, since they read it
-  straight through `summaryvalues` (when the back is empty the result is the
-  front's own suffix, equally borrowed). Its front vector grows only when a
-  flip needs more slots, and every later flip zeroes and refills the same
-  state tuples, so a steady window allocates nothing; the key's rows are
-  compacted in place once the dead prefix is half of them;
+- a `SegTree` holds the two order-preserving accumulators its range queries
+  fold into, so `treequery`'s result is **borrowed**: valid until that tree's
+  next query, which is all its callers need, since they read it straight
+  through `summaryvalues`. It also compacts its row buffers in place across
+  rebuilds and, at an unchanged capacity, keeps its node vector by moving the
+  live leaves' state tuples to the front by reference (nothing is re-zeroed or
+  re-folded; a swapped-out tuple is zeroed by the append that claims its slot).
+  That matters because a window short enough to expire rows as fast as they
+  arrive keeps the capacity at its floor and rebuilds every few appends;
 - the re-fold window kernel threads one state tuple through its window
   recursion for a whole segment;
 - a `GroupTable` — the per-key state tuples of the keyed transforms — carries a
@@ -2670,8 +2652,8 @@ state holding `s`'s states over the last `n` rows folded into it.
   types (a group that stops inverting moves to the queue) and replays the ring.
 
 Measured per row (admit and read the value) against a segment tree over the
-same states (the monoid tier's structure at the time, with the head advanced
-per row), with 100,000 rows:
+same states (the tree tier's structure, with the head advanced per row), with
+100,000 rows:
 
 | states | n | queue | segment tree |
 |---|---|---|---|
@@ -2679,9 +2661,7 @@ per row), with 100,000 rows:
 | `Max` (as a monoid) | 5 / 20 / 200 | 8.8 / 9.5 / 9.0 ns | 36 / 44 / 118 ns |
 | `Std` (as a monoid) | 5 / 20 / 200 | 42 / 44 / 45 ns | 113 / 144 / 228 ns |
 
-The queue is flat in `n` and 3–13 times faster, and neither allocates. That
-measurement is why the transforms' monoid tier moved to the same algorithm
-(`monoidqueue.jl`, over the transforms' own folds).
+The queue is flat in `n` and 3–13 times faster, and neither allocates.
 
 ## Interval semantics
 
@@ -2799,7 +2779,7 @@ the second.
 | `src/sortcycles.jl` | the within-timestamp stable sort (`sortcycles`) and its `cycleperm!` barrier |
 | `src/fill.jl` | the missing-value fills: the stateful `forwardfill` and the row-wise `fillmissing` |
 | `src/ring.jl` | `RowRing`, the fixed-capacity row ring behind `barwindow` and `Bars` windows |
-| `src/monoidqueue.jl` | the per-key two-stack queues behind the rolling and window monoid tiers |
+| `src/segtree.jl` | the monoid segment tree behind the rolling and window tree tiers |
 | `src/tiers.jl` | the per-accumulator window tiers shared by `addrollingcolumns` and `summarizewindows`: partitioning, running groups, state merging |
 | `src/barwindow.jl` | the count-window state (`barwindow`, extension API): groups slid over a ring, other monoids in a two-stack queue |
 | `src/rolling.jl` | the rolling-window summarization transform (`addrollingcolumns`) and its bar-count look-back (`Bars`) |

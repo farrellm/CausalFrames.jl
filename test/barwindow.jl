@@ -76,9 +76,9 @@ end
                 CF.prototypes(CF.Summarizer[s], Symbol[])[1], (x = MF,)),
         )
         # The groups slide; the queue is exercised by the non-group monoids.
-        @test all(!=(:monoid), tiers(Std(:x)))
-        @test tiers(Product(:x)) == (:monoid,)
-        @test tiers(AsMonoid(Max(:x))) == (:monoid,)
+        @test all(!=(:tree), tiers(Std(:x)))
+        @test tiers(Product(:x)) == (:tree,)
+        @test tiers(AsMonoid(Max(:x))) == (:tree,)
     end
 
     @testset "missing until n rows, then Union{Missing, T}" begin

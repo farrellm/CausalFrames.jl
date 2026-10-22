@@ -262,9 +262,9 @@ from the input: `Min`, `Max`, `First` and `Last` keep it, and `Sum` widens as
 
 The structure column sets each summarizer's window algorithm in
 `addrollingcolumns` and `summarizewindows`: a group slides in O(1) per row, a
-monoid slides a two-stack queue of partial states in O(1) amortized, and
-anything else re-folds each window. It is chosen per summarizer, so one slow
-summarizer does not slow the rest of a call. See
+monoid folds a segment tree in O(log window), and anything else re-folds each
+window. It is chosen per summarizer, so one slow summarizer does not slow the
+rest of a call. See
 [DESIGN.md](https://github.com/farrellm/CausalFrames.jl/blob/master/DESIGN.md) for the interface a custom summarizer implements.
 
 ## Causality

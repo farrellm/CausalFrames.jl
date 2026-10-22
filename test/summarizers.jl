@@ -1363,7 +1363,7 @@ end
     @test isequal(CausalFrames.value(st), (x_sum = 5.0,))
 
     # combine! adds the counts and reads before writing, so dest may alias and
-    # a fresh state is the identity (this is what the monoid tier relies on)
+    # a fresh state is the identity (this is what the tree mode relies on)
     a = foldm(Sum(:x), mint, [1, missing])
     b = foldm(Sum(:x), mint, [missing, 4])
     dest = CausalFrames.fresh(a)
@@ -1635,7 +1635,7 @@ end
     end
 
     # The combined summarizer is the two single ones side by side, on the
-    # running, monoid and re-fold paths of every window transform; and a NaN or
+    # running, tree and re-fold paths of every window transform; and a NaN or
     # missing is the extreme until it leaves the window, then the window
     # recovers.
     df = DataFrame(time = 1:10,

@@ -183,21 +183,20 @@ end
     end
 end
 
-@testset "monoid queues" begin
+@testset "segment tree" begin
     protos, _ = CausalFrames.prototypes(
         CausalFrames.tosummarizers([Min(:x), Max(:x)]), Symbol[])
     states = CausalFrames.newstates(protos, (time = Int, x = Float64))
     row = (time = 1, x = 1.0)
-    Q = CausalFrames.queuestype(states, typeof(row), Int)
-    mq = CausalFrames.newqueues(Q, states, 2)
-    lookbacks = (3, Bars(2))
-    JET.@test_opt CausalFrames.queuepush!(mq, row, lookbacks)
-    CausalFrames.queuepush!(mq, row, lookbacks)
-    JET.@test_opt CausalFrames.queueexpire!(mq, 2, 1, lookbacks...)
-    CausalFrames.queueexpire!(mq, 2, 1, lookbacks...)
-    JET.@test_opt CausalFrames.queuestates(mq, 1)
-    CausalFrames.queuestates(mq, 1)
-    JET.@test_opt CausalFrames.flipqueue!(mq.queues[2], mq.rows, mq.dropped, 1)
+    tr = CausalFrames.newsegtree(states, typeof(row), Int)
+    JET.@test_opt CausalFrames.treepush!(tr, states, row)
+    CausalFrames.treepush!(tr, states, row)
+    JET.@test_opt CausalFrames.treeappend!(tr, states, row)
+    CausalFrames.treeappend!(tr, states, row)
+    JET.@test_opt CausalFrames.treesync!(tr)
+    CausalFrames.treesync!(tr)
+    JET.@test_opt CausalFrames.treequery(tr, 1, 1)
+    JET.@test_opt CausalFrames.windowstart(tr.times, tr.head, 1, 0)
 end
 
 @testset "intervalize kernels" begin
@@ -376,7 +375,7 @@ end
     end
     st = CausalFrames.fresh(AgeWeightedSum(:x), (time = Int, x = Float64))
     JET.@test_opt CausalFrames.combine!(st, st, st)
-    # the arg-extremes' ordinary state, which the plain folds and the queues use
+    # the arg-extremes' ordinary state, which the plain folds and the tree use
     for T in (Float64, Union{Missing,Float64}), s in (MaxIndex(:x), MinWithIndex(:x))
         st = CausalFrames.fresh(s, (time = Int, x = T))
         row = (time = 1, x = one(nonmissingtype(T)))

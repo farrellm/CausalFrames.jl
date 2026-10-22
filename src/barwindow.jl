@@ -286,7 +286,7 @@ function newbarwindow(@nospecialize(protos::Tuple), @nospecialize(outs::Val),
     end
     R = storerowtype(types)
     V = barsvaluetype(tg, outs)
-    queue = isempty(tg.monoid) ? nothing : BarQueue(tg.monoid, n)
+    queue = isempty(tg.tree) ? nothing : BarQueue(tg.tree, n)
     return BarWindowState{R,storerowtype(rowtypes),O,V}(n, RowRing{R}(n + 1),
         map(fresh, tg.running), queue, tg.derived, tg.perm, protos, terms)
 end

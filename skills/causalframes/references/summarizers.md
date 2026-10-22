@@ -763,8 +763,7 @@ unlock faster window algorithms.
 
 A summarizer whose states `combine!` associatively, with a
 `fresh` state as identity. Window transforms answer each window from a
-two-stack queue of partial states — O(1) amortized per row — instead of
-re-folding it.
+segment tree of partial states — O(log window) — instead of re-folding it.
 
 ---
 
@@ -924,8 +923,7 @@ separately, so those remove exactly and finite terms leave only small round-off.
 Whether `downdate!` inverts `update!` for this windowed
 state's actual accumulator type. Defaults to `true`; a state that folds an
 absorbing value it cannot recover from returns `false`, and window transforms
-then fold that summarizer through a two-stack queue of partial states
-instead.
+then fold that summarizer through a segment tree instead.
 
 ---
 
