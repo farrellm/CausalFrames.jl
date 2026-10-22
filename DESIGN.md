@@ -2008,6 +2008,20 @@ evicted infinity leaves `Inf - Inf = NaN` behind. BigFloat is excluded because
 compensation buys nothing at arbitrary precision and a non-isbits compensated
 pair would allocate on every row.
 
+Compensation has a limit under a window, though: the compensation term is a
+plain float, so once it holds the round-off of a term far larger than the
+rest, it loses whatever lies far below that, and the loss stays after the term
+has gone (issue #97; pandas GH#52407's `3e-16` among values down to `1e-73`
+left a `Bars(3)` sum off by 4e-4, and the windows that should have read
+`2e-51` read `0`). So the *windowed* float sum state (`freshwindowed`) stores
+a `Tracked` instead, the `Compensated` plus `peak`, its largest finite
+`|term|`, and `mag`, a plain `Σ|term|` over the live finite terms (the sum
+itself may cancel to near zero), and asks to be refolded from the window's
+live rows once `peak` exceeds `2^10 · mag`, as the co-moment does (see
+"Dependent summarizers", which describes the refold). Only the windowed state
+tracks: on every path, it cost `summarize` 8-24% and the running sums 11%,
+for folds that never remove a row.
+
 A `Missing`-admitting column gets the same treatment for `missing` that the
 compensated storage gives nonfinites: a type flag `M` on the state holds the
 accumulation at the *non-missing* type and counts the `missing` terms in an
@@ -2438,8 +2452,10 @@ it is removed under a later shift it rounds differently; and a compensation
 term holding a `1e16`-scale error loses what lies below it. Sliding can't
 undo either, so the state asks to be **refolded** instead:
 
-- a float state keeps `peak`, the largest `|d_a·d_b|` folded since its sums
-  restarted, and after each `downdate!` asks (the internal `needsrefold`) once
+- the windowed float state (`freshwindowed`, a type flag `W`; the ordinary
+  state never downdates, and tracking there cost `summarize` 8%) keeps
+  `peak`, the largest `|d_a·d_b|` folded since its sums restarted, and after
+  each `downdate!` asks (the internal `needsrefold`) once
   `peak` exceeds `2^10` times the window's own scale: `Σd²` for a variance,
   and `√(Σd_a²·Σd_b²)` for a covariance, from two plain (uncompensated) sums
   kept for this alone, since the co-moment itself may be near zero. A live
@@ -2457,7 +2473,11 @@ undo either, so the state asks to be **refolded** instead:
 - ordinary data rarely asks: over 10⁶ rows of a random walk, at most 35
   times at `Bars(5)` (its levels; 5 for its steps) and never at `Bars(20)` or
   `Bars(100)`. Cauchy-tailed steps ask on 1.4% of rows at `Bars(5)` and 0.06%
-  at `Bars(100)`, each refold costing a window's `update!`s.
+  at `Bars(100)`, each refold costing a window's `update!`s;
+- the sum family (`Sum`, `SumPower`, `DotProduct`) asks the same way, against
+  a plain `Σ|term|` (see "Summarizers"), and never on that random walk;
+  `SumPower(x, 2)` asks as often as the variance on Cauchy steps, `Sum` 20 to
+  200 times less often.
 
 `Variance`, `Std`, and `Covariance` follow `Statistics`: a `corrected::Bool`
 keyword (default `true`) selects the divisor `n − Int(corrected)`, so the

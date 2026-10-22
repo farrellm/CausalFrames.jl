@@ -62,14 +62,15 @@ mutable struct AccumState{N,A,T,M,S} <: SummarizerState
     missings::Int
 end
 
-# The sum family's constructor, from the accumulator type. An all-Missing
-# column (accumulator type `Missing`) has no non-missing type to fold at, so it
-# gets a `MissingState` (below).
-function accumfresh(term, N::Symbol, ::Type{A}) where {A}
+# The sum family's constructor, from the accumulator type, with the storage
+# `accstorage` picks, or for the windowed state `trackedstorage`. An
+# all-Missing column (accumulator type `Missing`) has no non-missing type to
+# fold at, so it gets a `MissingState` (below).
+function accumfresh(term, N::Symbol, ::Type{A}, storage = accstorage) where {A}
     A === Missing && return MissingState{N}(term)
     M = Missing <: A
     An = nonmissingtype(A)
-    S = accstorage(An)
+    S = storage(An)
     return AccumState{N,An,typeof(term),M,S}(term, acczero(S), 0)
 end
 
@@ -97,6 +98,8 @@ end
     end
     return nothing
 end
+# The windowed state's ask for a refold (`Tracked`).
+@inline needsrefold(st::AccumState) = accrefold(st.acc)
 function combine!(dest::AccumState{N,A,T,M,S}, a::AccumState{N,A,T,M,S},
     b::AccumState{N,A,T,M,S}) where {N,A,T,M,S}
     dest.acc = accmerge(a.acc, b.acc)
@@ -288,6 +291,9 @@ Sum(column::ColumnSpec) = withterms(Sum{colname(column)}(), column)
 emptyvalue(::Sum{C}) where {C} = NamedTuple{(Symbol(C, :_sum),)}((0,))
 fresh(::Sum{C}, intypes::NamedTuple) where {C} =
     accumfresh(ColumnTerm{C}(), Symbol(C, :_sum), sumtype(intypes[C]))
+freshwindowed(::Sum{C}, intypes::NamedTuple) where {C} =
+    accumfresh(ColumnTerm{C}(), Symbol(C, :_sum), sumtype(intypes[C]),
+        trackedstorage)
 
 """
     SumPower(column::ColumnSpec, n::Integer) -> Summarizer
@@ -337,6 +343,9 @@ end
 fresh(s::SumPower{C}, intypes::NamedTuple) where {C} =
     accumfresh(powerterm(Val{C}, s.power), Symbol(C, :_sumpower_, s.power),
         powertype(intypes[C], s.power))
+freshwindowed(s::SumPower{C}, intypes::NamedTuple) where {C} =
+    accumfresh(powerterm(Val{C}, s.power), Symbol(C, :_sumpower_, s.power),
+        powertype(intypes[C], s.power), trackedstorage)
 
 # A monoid but not a group: dividing a row back out fails at zero and
 # truncates for integers.
@@ -444,3 +453,7 @@ fresh(::DotProduct{A,B}, intypes::NamedTuple) where {A,B} =
     isless(B, A) ? AliasState{dotname(A, B),dotname(B, A)}() :
     accumfresh(PairProductTerm{A,B}(), dotname(A, B),
         dottype(intypes[A], intypes[B]))
+freshwindowed(::DotProduct{A,B}, intypes::NamedTuple) where {A,B} =
+    isless(B, A) ? AliasState{dotname(A, B),dotname(B, A)}() :
+    accumfresh(PairProductTerm{A,B}(), dotname(A, B),
+        dottype(intypes[A], intypes[B]), trackedstorage)

@@ -17,6 +17,8 @@ canonicalcomoment(a::Symbol, b::Symbol) =
 emptyvalue(::CoMoment{A,B}) where {A,B} = NamedTuple{(comomentname(A, B),)}((0,))
 fresh(s::CoMoment{A,B}, intypes::NamedTuple) where {A,B} =
     comomentfresh(s, dottype(intypes[A], intypes[B]))
+freshwindowed(s::CoMoment{A,B}, intypes::NamedTuple) where {A,B} =
+    comomentfresh(s, dottype(intypes[A], intypes[B]), Val(true))
 
 # Only rows whose two values are present and finite are folded (`n` of them),
 # so every sum runs over the same rows and the shift can be moved as a whole. A
@@ -39,16 +41,18 @@ fresh(s::CoMoment{A,B}, intypes::NamedTuple) where {A,B} =
 # #97): its deviation is rounded at its own scale, and removed under a later
 # shift it rounds differently, and a compensation term holding its round-off
 # loses what is far below it. Either leaves a residue of about eps times the
-# largest product folded, which stays once the row has gone. So a float state
-# keeps that largest product (`peak`, since the sums last restarted) and asks
+# largest product folded, which stays once the row has gone. So the windowed
+# float state (`freshwindowed`, flag W) keeps that largest product (`peak`,
+# since the sums last restarted) and asks
 # the running tiers to refold it from the live rows (`needsrefold`) once peak
 # exceeds `REFOLDRATIO` times the window's own scale: Σd² for a variance, and
 # for a covariance (a ≠ b) √(Σda²·Σdb²), from plain sums kept for this alone
 # (`qa`, `qb`), since the co-moment itself may be near 0. While the dominant
 # row is live it is part of that scale, so a refold happens only once it has
 # left, and the residue left behind otherwise is at most ~eps·REFOLDRATIO of
-# the scale.
-mutable struct CoMomentState{N,A,B,T,M,S} <: SummarizerState
+# the scale. Only the windowed state tracks (W false leaves peak, qa and qb at
+# 0): the ordinary one never downdates, and tracking cost `summarize` 8%.
+mutable struct CoMomentState{N,A,B,T,M,S,W} <: SummarizerState
     n::Int
     age::Int
     ka::T
@@ -58,22 +62,24 @@ mutable struct CoMomentState{N,A,B,T,M,S} <: SummarizerState
     sab::S  # Σ(a - ka)(b - kb)
     peak::T # the largest |(a - ka)(b - kb)| folded since the sums restarted
     qa::T   # Σ(a - ka)², plain; kept for A !== B only
-    qb::T   # Σ(b - kb)², plain; kept for A !== B only
+    qb::T   # Σ(b - kb)², plain; kept for A !== B only (all three: W only)
     nonfinite::Int
     missings::Int
 end
 
-# The state for accumulator type T, chosen as `accumfresh` chooses.
-function comomentfresh(s::CoMoment{A,B}, ::Type{T}) where {A,B,T}
+# The state for accumulator type T, chosen as `accumfresh` chooses; the
+# windowed one (`Val(true)`) tracks what decides a refold, for a float.
+function comomentfresh(s::CoMoment{A,B}, ::Type{T},
+    ::Val{windowed} = Val(false)) where {A,B,T,windowed}
     N = comomentname(A, B)
     T === Missing && return MissingState{N}(s)
     M = Missing <: T
     Tn = nonmissingtype(T)
-    return CoMomentState{N,A,B,Tn,M,accstorage(Tn)}()
+    return CoMomentState{N,A,B,Tn,M,accstorage(Tn),windowed && compensable(Tn)}()
 end
 
-CoMomentState{N,A,B,T,M,S}() where {N,A,B,T,M,S} =
-    CoMomentState{N,A,B,T,M,S}(0, 0, convert(T, 0), convert(T, 0), acczero(S),
+CoMomentState{N,A,B,T,M,S,W}() where {N,A,B,T,M,S,W} =
+    CoMomentState{N,A,B,T,M,S,W}(0, 0, convert(T, 0), convert(T, 0), acczero(S),
         acczero(S), acczero(S), convert(T, 0), convert(T, 0), convert(T, 0), 0, 0)
 
 # The co-moment from the shifted sums, with one rounding: the numerator is
@@ -115,7 +121,8 @@ fresh(::S) where {S<:CoMomentState} = S()
     return st
 end
 
-@inline function update!(st::CoMomentState{N,A,B,T,M}, row) where {N,A,B,T,M}
+@inline function update!(st::CoMomentState{N,A,B,T,M,S,W},
+    row) where {N,A,B,T,M,S,W}
     va = getproperty(row, A)
     vb = getproperty(row, B)
     if M && (ismissing(va) || ismissing(vb))
@@ -139,7 +146,7 @@ end
     st.sa = accadd(st.sa, da)
     A === B || (st.sb = accadd(st.sb, db))
     st.sab = accaddprod(st.sab, da, db)
-    if compensable(T)
+    if W
         st.peak = max(st.peak, abs(da * db))
         A === B || (st.qa += da * da; st.qb += db * db)
     end
@@ -148,7 +155,8 @@ end
     return nothing
 end
 
-@inline function downdate!(st::CoMomentState{N,A,B,T,M,S}, row) where {N,A,B,T,M,S}
+@inline function downdate!(st::CoMomentState{N,A,B,T,M,S,W},
+    row) where {N,A,B,T,M,S,W}
     va = getproperty(row, A)
     vb = getproperty(row, B)
     if M && (ismissing(va) || ismissing(vb))
@@ -174,7 +182,7 @@ end
         st.sa = accsub(st.sa, da)
         A === B || (st.sb = accsub(st.sb, db))
         st.sab = accsubprod(st.sab, da, db)
-        compensable(T) && A !== B && (st.qa -= da * da; st.qb -= db * db)
+        W && A !== B && (st.qa -= da * da; st.qb -= db * db)
     end
     return nothing
 end
@@ -183,9 +191,8 @@ end
 # squared for a covariance. A scale gone negative or to zero under round-off
 # asks too; a NaN one (an overflowed sum) doesn't, since refolding would not
 # change it. Read on every eviction, so the compensated pair is read as is.
-const REFOLDRATIO = 2.0^10
-@inline function needsrefold(st::CoMomentState{N,A,B,T}) where {N,A,B,T}
-    compensable(T) || return false
+@inline function needsrefold(st::CoMomentState{N,A,B,T,M,S,W}) where {N,A,B,T,M,S,W}
+    W || return false
     r = convert(T, REFOLDRATIO)
     A === B && return st.peak > r * (st.sab.total + st.sab.comp)
     return st.peak * st.peak > r * r * max(st.qa * st.qb, zero(T))
@@ -194,14 +201,15 @@ end
 # Move the shifts to (ka, kb). With δ the move,
 # Σ(a - ka - δa)(b - kb - δb) = Σab - δb·Σa - δa·Σb + n·δa·δb, each term folded
 # into the compensated sums exactly (to eps² of the term).
-@inline function recentre!(st::CoMomentState{N,A,B,T}, ka::T, kb::T) where {N,A,B,T}
+@inline function recentre!(st::CoMomentState{N,A,B,T,M,S,W}, ka::T,
+    kb::T) where {N,A,B,T,M,S,W}
     n = convert(T, st.n)
     sa = st.sa
     sb = A === B ? sa : st.sb
     δa = ka - st.ka
     δb = kb - st.kb
     # Σ(d - δ)² = Σd² - 2δ·Σd + n·δ², from the sums before the move.
-    if A !== B
+    if W && A !== B
         st.qa += δa * (n * δa - 2 * accvalue(sa))
         st.qb += δb * (n * δb - 2 * accvalue(sb))
     end
@@ -218,8 +226,9 @@ end
 # Reads every input before writing, since `dest` may alias either. b's sums
 # are re-expressed at a's shifts (δ = b's shift - a's) by the same expansion as
 # `recentre!`; an empty side contributes only its counts.
-function combine!(dest::CoMomentState{N,A,B,T,M,S}, a::CoMomentState{N,A,B,T,M,S},
-    b::CoMomentState{N,A,B,T,M,S}) where {N,A,B,T,M,S}
+function combine!(dest::CoMomentState{N,A,B,T,M,S,W},
+    a::CoMomentState{N,A,B,T,M,S,W},
+    b::CoMomentState{N,A,B,T,M,S,W}) where {N,A,B,T,M,S,W}
     nonfinite = a.nonfinite + b.nonfinite
     missings = a.missings + b.missings
     if b.n == 0
@@ -243,7 +252,7 @@ function combine!(dest::CoMomentState{N,A,B,T,M,S}, a::CoMomentState{N,A,B,T,M,S
         # b's plain squares at a's shifts: Σ(d + δ)² = Σd² + δ·(2Σd + n·δ).
         peak = max(a.peak, b.peak)
         qa = qb = zero(T)
-        if compensable(T) && A !== B
+        if W && A !== B
             qa = a.qa + (b.qa + δa * (2 * accvalue(b.sa) + nb * δa))
             qb = a.qb + (b.qb + δb * (2 * accvalue(b.sb) + nb * δb))
         end

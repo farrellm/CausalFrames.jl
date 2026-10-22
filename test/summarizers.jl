@@ -1136,12 +1136,13 @@ end
     @test c[10] ≈ exactcor(10) rtol = 1e-14
     @test c[11] ≈ exactcor(11) rtol = 1e-14
 
-    # the ask itself: none on ordinary data, one once the spike has left
+    # the ask itself, by the windowed state only: none on ordinary data, one
+    # once the spike has left
     intypes = (time = Int, x = Float64, y = Float64)
     rows = [(time = i, x = 1e3 * sin(i), y = cos(1.3i)) for i in 1:40]
     rows[30] = (time = 30, x = 1e12, y = 1e12)
     for s in (CausalFrames.CoMoment{:x,:x}(), CausalFrames.CoMoment{:x,:y}())
-        st = CausalFrames.fresh(s, intypes)
+        st = CausalFrames.freshwindowed(s, intypes)
         asks = map(eachindex(rows)) do i
             CausalFrames.update!(st, rows[i])
             i > 5 && CausalFrames.downdate!(st, rows[i-5])
@@ -1149,10 +1150,14 @@ end
         end
         # (nothing refolds it here, so it keeps asking after)
         @test !any(asks[1:34]) && asks[35]
+        # the ordinary state, which never downdates in a window, tracks nothing
+        st = CausalFrames.fresh(s, intypes)
+        foreach(row -> CausalFrames.update!(st, row), rows)
+        @test st.peak == 0 && !CausalFrames.needsrefold(st)
     end
     # combine! re-expresses the covariance's plain squares at the left shift
     s = CausalFrames.CoMoment{:x,:y}()
-    l, r = CausalFrames.fresh(s, intypes), CausalFrames.fresh(s, intypes)
+    l, r = CausalFrames.freshwindowed(s, intypes), CausalFrames.freshwindowed(s, intypes)
     shifted = [(time = i, x = 1e6 + sin(i), y = 2e6 + cos(i)) for i in 21:40]
     foreach(row -> CausalFrames.update!(l, row), rows[1:20])
     foreach(row -> CausalFrames.update!(r, row), shifted)
@@ -1162,6 +1167,72 @@ end
     @test l.qa ≈ sum(row -> (row.x - l.ka)^2, both) rtol = 1e-12
     @test l.qb ≈ sum(row -> (row.y - l.kb)^2, both) rtol = 1e-12
     @test l.peak == peak
+end
+
+@testset "sum refold after a dominant term leaves" begin
+    # The compensated sums lost what lay far below a large term's round-off,
+    # and kept the loss after it had gone (issue #97, pandas GH#52407): they
+    # now ask to be refolded from the live rows, as the co-moment does.
+    x = [0.0, 0.0, 3.16188252e-18, 2.95781651e-16, 2.23153542e-51, 0.0, 0.0,
+        5.39943432e-48, 1.3820626e-73, 0.0]
+    y = reverse(x)
+    q(v) = Rational{BigInt}.(v)
+    exact = (
+        w_x_sum = w -> sum(q(w.x)),
+        w_x_sumpower_2 = w -> sum(q(w.x) .^ 2),
+        w_x_sumpower_3 = w -> sum(q(w.x) .^ 3),
+        w_x_y_dotproduct = w -> sum(q(w.x) .* q(w.y)),
+    )
+    ss = [Sum(:x), SumPower(:x, 2), SumPower(:x, 3), DotProduct(:x, :y)]
+    src = readtable((time = collect(1:10), k = [isodd(i) ? "a" : "b" for i in 1:10],
+        x = x, y = y))
+    # the windows holding the 2e-51 and 5e-48 values, after the 3e-16 one
+    bars = DataFrame(load(Context(0, 11), src |> addrollingcolumns((w = Bars(3),), ss)))
+    for (c, f) in pairs(exact), i in 7:10
+        @test bars[i, c] ≈ Float64(f((x = x[(i-2):i], y = y[(i-2):i]))) rtol = 1e-14
+    end
+    # keyed, over a time window: each key's rows within 4 time units
+    keyed = DataFrame(
+        load(Context(0, 11), src |> addrollingcolumns((w = 4,), ss; key = :k)))
+    for (c, f) in pairs(exact), i in 7:10
+        @test keyed[i, c] ≈ Float64(f((x = x[(i-4):2:i], y = y[(i-4):2:i]))) rtol = 1e-14
+    end
+    # summarizewindows, at ticks t over [t - 3, t)
+    out = DataFrame(
+        load(Context(0, 12), src |> summarizewindows(clock(1), 3, Sum(:x))))
+    byt = Dict(zip(out.time, out.x_sum))
+    @test all(t -> isapprox(byt[t], Float64(sum(q(x[(t-3):(t-1)]))); rtol = 1e-14), 8:11)
+    # barwindow
+    st = CausalFrames.barwindow(SumPower(:x, 2), 3, (x = Float64,))
+    bw = map(
+        v -> (CausalFrames.update!(st, (; x = v)); CausalFrames.value(st).x_sumpower_2),
+        x,
+    )
+    @test all(i -> isapprox(bw[i], Float64(sum(q(x[(i-2):i]) .^ 2)); rtol = 1e-14), 7:10)
+
+    # the ask itself, by the windowed state only: none on ordinary data, one
+    # once the dominant term has left (nothing refolds it here, so it keeps
+    # asking after)
+    intypes = (time = Int, x = Float64)
+    rows = [(time = i, x = sin(i)) for i in 1:40]
+    rows[30] = (time = 30, x = 1e8)
+    for s in (Sum(:x), SumPower(:x, 2))
+        st = CausalFrames.freshwindowed(s, intypes)
+        asks = map(eachindex(rows)) do i
+            CausalFrames.update!(st, rows[i])
+            i > 5 && CausalFrames.downdate!(st, rows[i-5])
+            CausalFrames.needsrefold(st)
+        end
+        @test !any(asks[1:34]) && asks[35]
+        # the ordinary state, which never downdates in a window, tracks nothing
+        @test CausalFrames.fresh(s, intypes).acc isa CausalFrames.Compensated
+    end
+    # integers never ask
+    st = CausalFrames.freshwindowed(Sum(:x), (time = Int, x = Int))
+    CausalFrames.update!(st, (time = 1, x = 10^9))
+    CausalFrames.update!(st, (time = 2, x = 1))
+    CausalFrames.downdate!(st, (time = 1, x = 10^9))
+    @test !CausalFrames.needsrefold(st)
 end
 
 @testset "SumPower term specialization" begin

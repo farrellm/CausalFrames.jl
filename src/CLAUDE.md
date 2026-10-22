@@ -213,8 +213,9 @@ design rationale and performance constraints behind each module.
     sums sit at the scale of the squared distance to the shift and the
     co-moment at the spread's (issue #91). `combine!` re-expresses one side at
     the other's shift. Sliding still kept a residue at the scale of a dominant
-    row once it had left (issue #97), so a float state tracks its largest
-    product (`peak`) and, past `REFOLDRATIO` times the window's scale (`Σd²`,
+    row once it had left (issue #97), so the windowed float state
+    (`freshwindowed`, flag `W`; tracking on the ordinary state cost
+    `summarize` 8%) tracks its largest product (`peak`) and, past `REFOLDRATIO` times the window's scale (`Σd²`,
     or `√(qa·qb)` from plain squares kept only for a covariance), asks to be
     refolded (`needsrefold`, internal, `false` for every other state; the
     generated `anyrefold` reads a group's asks as straight-line `||`, so a
@@ -239,7 +240,14 @@ design rationale and performance constraints behind each module.
     reconstructing the IEEE result in `value`, which lets a rolling window
     evict a nonfinite row cleanly and stay on the running path. `BigFloat` is
     excluded: compensation buys nothing at arbitrary precision, and a
-    non-isbits `Compensated` would allocate per row
+    non-isbits `Compensated` would allocate per row. The compensation is a
+    plain float and loses what lies far below a dominant term's round-off
+    (issue #97, pandas GH#52407), so the windowed state (`freshwindowed`,
+    storage `Tracked` from `trackedstorage`) also keeps its largest finite
+    `|term|` (`peak`) and a plain live `Σ|term|` (`mag`) and asks for a
+    refold, as the co-moment does, once `peak > REFOLDRATIO · mag`
+    (`REFOLDRATIO` lives in `compensated.jl`, shared by both). Only the
+    windowed state tracks: on every path it cost `summarize` up to 24%
   - a `Missing`-admitting accumulator type sets the flag `M` and folds at the
     non-missing type, counting `missing` terms as the compensated storage
     counts nonfinites, so the accumulator stays invertible. `Union{Missing,_}`

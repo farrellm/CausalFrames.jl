@@ -215,8 +215,8 @@ against a true `Σd²` of 0.005. Two mechanisms, either enough alone:
    plain float. Once it holds a `1e16`-scale term's rounding, anything about
    1e-16 below that is lost. This alone gives the GH#52407 and `±3e37`
    failures, and it also reaches the plain sums: on GH#52407, `Sum` keeps a
-   lasting 4e-4 relative error and `SumPower(:x, 2)` 2e-7 (not fixed here,
-   since they had no report; the same ask would serve them).
+   lasting 4e-4 relative error and `SumPower(:x, 2)` 2e-7 (fixed the same
+   way; see "The sums" below).
 
 ### The fix: ask to be refolded
 
@@ -296,3 +296,53 @@ from 9.05-9.24 s to 9.39-9.55 s over four runs each. The timed test suite's
 included files compiled in 641.8 s on master and 649.1 s on the branch, the
 difference being this issue's own new testset (about 10 s); `rolling.jl` and
 `windows.jl` were unchanged within noise.
+
+### The sums
+
+The sum family (`Sum`, `SumPower`, `DotProduct`, and `Mean` through `Sum`) has
+only the second mechanism, having no shift. Its windowed state stores a
+`Tracked` (the `Compensated` plus `peak`, the largest finite `|term|`, and
+`mag`, a plain live `Σ|term|`) and asks once `peak > 2^10 · mag`. `Σ|term|`
+rather than the sum itself, which may cancel to near zero: against `|Σ|`,
+alternating data would refold on every eviction.
+
+On GH#52407 under `Bars(3)`, the windows that read `0` for `2.2e-51` (relative
+error 1.0) on the previous commit are now exact for `Sum`, `SumPower(x, 2)`,
+`SumPower(x, 3)` and `DotProduct`, on rolling, keyed time windows,
+`summarizewindows` and `barwindow`.
+
+Asks per 10⁶ rows (the same data as the co-moment table):
+
+| data | `Sum` / `SumPower(x, 2)` at `Bars(5)` | `Bars(20)` | `Bars(100)` |
+|---|---|---|---|
+| random-walk levels and steps | 0 / 0 | 0 / 0 | 0 / 0 |
+| Cauchy steps | 617 / 13,924 | 46 / 3,051 | 3 / 595 |
+
+**Only the windowed state tracks.** The first version tracked in every
+`AccumState`. On the folds that never downdate it cost `summarize/keyless`
+24%, `summarize/cycles` and `summarize/running` 11-12% and
+`summarize/powersum` 8% (`ab_bench.sh`, against the co-moment commit), so
+the tracking moved to the `freshwindowed` storage, and the co-moment's to its
+windowed state (a flag `W`) for the same reason: `powersum`'s 8% was partly
+its `Variance`. Afterwards, against master, `summarize/keyless` read 1.010 and
+`powersum` 1.003.
+
+The windowed sums still pay. In a scratch benchmark of rolling `Sum` + `Mean`
+over 400k rows, with matched environments, ns/row:
+
+| case | master | branch | branch, no check |
+|---|---|---|---|
+| `Bars(100)` | 48.7-51.2 | 52.7-53.3 | 50.9-51.8 |
+| time window 25 | 42.9-44.8 | 46.0-46.7 | 45.8-45.9 |
+| `summarizewindows` | 38.7-39.7 | 40.8-41.6 | 40.0-40.5 |
+
+That's 3-5%, about half of it the per-eviction check. `ab_bench.sh` read
+8-14% on the `SUITE` window-sum leaves, but it carries the ~5% bias recorded
+in `notes/compile-time.md` (repo against worktree environments). Folding the
+tracking into `compadd`'s finite branch, to test `isfinite` once, measured
+within noise and was not kept.
+
+Compile time: splitting the windowed states from the ordinary ones means a
+window call compiles both types where they used to be one. The co-moment
+harness went from +3% (tracking everywhere) to +4-5% over master (9.73-9.98 s
+against 9.12-9.47 s).
