@@ -433,7 +433,10 @@ design rationale and performance constraints behind each module.
   expires every window against the row's own time (sound because every later
   query is at or after it, and it bounds an unqueried key's rows, so the
   lead-in needs no expiry of its own); `expirewindow!` advances `lo` by the
-  kernels' membership test verbatim (rolling.jl adds the `Bars` method);
+  kernels' membership test verbatim (rolling.jl adds the `Bars` method, over
+  `keepnewest!`). Callers name a window by its index (`expirequeue!`,
+  `hasrows`, `queuestates`, `livestates`), never reaching into a
+  `PartialQueue`;
   `queuestates` flips the live rows into the front once `lo` passes it and
   returns the window's fold, **borrowed** (the front's suffix or the `out`
   scratch), valid until that window's next query; `livestates` is its form

@@ -259,13 +259,13 @@ end
 # queues own their rows, so a call with only monoid and derived states keeps no
 # buffer and no rings (`nothing`), nor does a call without time windows keep a
 # buffer.
-struct RollTiers{R,B,RG,G,TR,TG<:Tiering}
+struct RollTiers{R,B,RG,G,MQ,TG<:Tiering}
     buffer::B              # Vector{R}, or nothing
     winheads::Vector{Int}  # per window, the first buffered row inside it
     rings::RG              # Dict{K,RowRing{R}}, or nothing
     barcap::Int            # the rings' capacity
     running::G             # NTuple{W,RunningTable{K,SR}}, or nothing
-    monoids::TR            # Dict{K,MonoidQueues{ST,R,T}}, or nothing
+    monoids::MQ            # Dict{K,MonoidQueues{ST,R,T}}, or nothing
     tg::TG                 # the partition of the states into tiers
 end
 
@@ -313,8 +313,8 @@ function rolltiers(tg::Tiering, ::Type{K}, ::Type{R}, ::Type{T}, keynames::Val,
 end
 
 RollTiers{R}(buffer::B, winheads::Vector{Int}, rings::RG, barcap::Int,
-    running::G, monoids::TR, tg::TG) where {R,B,RG,G,TR,TG} =
-    RollTiers{R,B,RG,G,TR,TG}(buffer, winheads, rings, barcap, running, monoids,
+    running::G, monoids::MQ, tg::TG) where {R,B,RG,G,MQ,TG} =
+    RollTiers{R,B,RG,G,MQ,TG}(buffer, winheads, rings, barcap, running, monoids,
         tg)
 
 # A window's running table, replayed from the rows the window holds: a time
@@ -665,23 +665,18 @@ end
 @inline partialbars(lb::Bars, live::Int) = live < lb.n
 
 # Window w's borrowed states from the key's queues (`queuestates`), expired to
-# t first.
+# t first; a Bars window over fewer than n rows is partial.
 @inline monoidstates(::Tuple{}, w::Int, t, lb) = ()
 @inline monoidstates(::Nothing, w::Int, t, lb) = nothing
 @inline function monoidstates(mq::MonoidQueues, w::Int, t, lb)
-    expirewindow!(mq, @inbounds(mq.queues[w]), t, lb)
+    partialbars(lb, nstored(mq)) && return nothing
+    expirequeue!(mq, w, t, lb)
     return queuestates(mq, w)
 end
-# Every admitted row is at or before t, and admission already expired a Bars
-# window to the key's newest n rows; fewer is partial.
-@inline monoidstates(mq::MonoidQueues, w::Int, t, lb::Bars) =
-    nstored(mq) < lb.n ? nothing : queuestates(mq, w)
 
 # A Bars window holds the key's newest n rows, so expiry is by count.
-@inline function expirewindow!(mq::MonoidQueues, q::PartialQueue, t, lb::Bars)
-    q.lo = max(q.lo, nstored(mq) - lb.n + 1)
-    return nothing
-end
+@inline expirewindow!(mq::MonoidQueues, q::PartialQueue, t, lb::Bars) =
+    keepnewest!(mq, q, lb.n)
 
 # Fold key k's rows from the window's eviction head into the zeroed scratch
 # (a Bars window: the newest n rows of the key's ring). Returns the states

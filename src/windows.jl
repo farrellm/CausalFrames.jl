@@ -109,18 +109,18 @@ end
 # with its last row, an emptied key's queue is dropped, the refold table is
 # filled at the tick from the live rows), so the first tier present, the
 # primary, gives the keys to emit.
-struct WindowTiers{R,B,G,TR,GT,TG<:Tiering,SC}
+struct WindowTiers{R,B,G,MQ,GT,TG<:Tiering,SC}
     buffer::B        # Vector{R}, or nothing
     running::G       # RunningTable{K,SR}, or nothing
-    monoids::TR      # Dict{K,MonoidQueues{ST,R,T}}, or nothing
+    monoids::MQ      # Dict{K,MonoidQueues{ST,R,T}}, or nothing
     refold::GT       # GroupTable{K,SF}, or nothing
     tg::TG           # the partition of the states into tiers
     scratch::SC      # Vector{Pair{K,V}} over the primary's dict: the sort buffer
 end
 
-WindowTiers{R}(buffer::B, running::G, monoids::TR, refold::GT, tg::TG,
-    scratch::SC) where {R,B,G,TR,GT,TG,SC} =
-    WindowTiers{R,B,G,TR,GT,TG,SC}(buffer, running, monoids, refold, tg, scratch)
+WindowTiers{R}(buffer::B, running::G, monoids::MQ, refold::GT, tg::TG,
+    scratch::SC) where {R,B,G,MQ,GT,TG,SC} =
+    WindowTiers{R,B,G,MQ,GT,TG,SC}(buffer, running, monoids, refold, tg, scratch)
 
 @inline primarygroups(t::WindowTiers) =
     primarygroups(t.running, t.monoids, t.refold)
@@ -314,9 +314,8 @@ end
 @inline closemonoids!(::Nothing, τ, lookback) = nothing
 @inline function closemonoids!(monoids::AbstractDict, τ, lookback)
     filter!(monoids) do (_, mq)
-        q = @inbounds mq.queues[1]
-        expirewindow!(mq, q, τ, lookback)
-        return q.lo <= nstored(mq)
+        expirequeue!(mq, 1, τ, lookback)
+        return hasrows(mq, 1)
     end
     return nothing
 end
@@ -343,7 +342,7 @@ end
 @inline tierstates(::RunningTable{K,S}, k, g::RunningGroup{S}) where {K,S<:Tuple} =
     g.states
 @inline tierstates(::Dict{K,V}, k, mq::V) where {K,V<:MonoidQueues} =
-    livestates(mq, @inbounds mq.queues[1])
+    livestates(mq, 1)
 @inline tierstates(monoids::Dict{K,V}, k, g) where {K,V<:MonoidQueues} =
     tierstates(monoids, k, monoids[k])
 @inline tierstates(::GroupTable{K,S}, k, states::S) where {K,S<:Tuple} = states

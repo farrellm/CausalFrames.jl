@@ -121,7 +121,7 @@ end
 
 # A group summarizer whose state is non-invertible once its column widens to
 # Float64, driving the window transforms' demotion of an accumulator from the
-# running tier to the tree (no built-in does this). The output name is a type
+# running tier to the monoid tier (no built-in does this). The output name is a type
 # parameter so `value` infers.
 struct FragileSum{C} <: GroupSummarizer end
 FragileSum(column::Symbol) = FragileSum{column}()
@@ -147,9 +147,9 @@ CausalFrames.widenstate(st::FragileSumState{C,N}, intypes::NamedTuple) where {C,
 CausalFrames.isinvertible(::FragileSumState{C,N,Float64}) where {C,N} = false
 
 # FragileSum's mirror: non-invertible while its column is Int, invertible once
-# it widens to Float64, so a widening *promotes* it from the tree to the running
-# tier (no built-in does this), which needs a buffer the tree-only call didn't
-# keep.
+# it widens to Float64, so a widening *promotes* it from the monoid tier to the
+# running tier (no built-in does this), which needs a buffer the monoid-only call
+# didn't keep.
 struct LateSum{C} <: GroupSummarizer end
 LateSum(column::Symbol) = LateSum{column}()
 mutable struct LateSumState{C,N,T} <: SummarizerState

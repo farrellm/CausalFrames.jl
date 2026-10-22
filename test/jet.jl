@@ -376,7 +376,7 @@ end
     end
     st = CausalFrames.fresh(AgeWeightedSum(:x), (time = Int, x = Float64))
     JET.@test_opt CausalFrames.combine!(st, st, st)
-    # the arg-extremes' ordinary state, which the plain folds and the tree use
+    # the arg-extremes' ordinary state, which the plain folds and the queues use
     for T in (Float64, Union{Missing,Float64}), s in (MaxIndex(:x), MinWithIndex(:x))
         st = CausalFrames.fresh(s, (time = Int, x = T))
         row = (time = 1, x = one(nonmissingtype(T)))

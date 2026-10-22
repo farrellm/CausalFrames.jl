@@ -458,7 +458,7 @@ end
     # the arg-extremes slide the same deque; the small integer pools tie often
     indexset = [MinIndex(:x), MaxIndex(:x), MinWithIndex(:y), MaxWithIndex(:y)]
     monoidset = [Product(:x), MinMax(:y)]                 # the monoid tier alone
-    mixedset = [Sum(:x), Min(:x), MinMax(:y), Product(:x)] # running + tree
+    mixedset = [Sum(:x), Min(:x), MinMax(:y), Product(:x)] # running + monoid
     plainset = [Sum(:x), TestVar(:x), PlainSum(:y)]       # running + re-fold
     spanset = [TierSpan(:x), Mean(:y), Last(:y)]          # every tier at once
     # the sorted accumulator and its dependents, PercentRank through Last
@@ -658,8 +658,8 @@ end
         end
 
         # the demotion mid-stream, beside each other tier: x turns Float64 in
-        # the second chunk, so FragileSum rebuilds into the tree from the
-        # buffer (beside a running Sum), from the previous trees (beside
+        # the second chunk, so FragileSum rebuilds into the monoid tier from the
+        # buffer (beside a running Sum), from the previous queues (beside
         # Product), or beside a refold PlainSum
         widening = CausalPipeline(
             ctx -> [
@@ -667,8 +667,8 @@ end
                     x = r == 1:100 ? xs[r] : Float64.(xs[r]) ./ 4, y = ys[r])
                 for r in ranges
             ])
-        # LateSum goes the other way, promoted from a tree-only call that kept
-        # no buffer, so the running tier gathers one from the previous trees
+        # LateSum goes the other way, promoted from a monoid-only call that kept
+        # no buffer, so the running tier gathers one from the previous queues
         @test tiers([LateSum(:x)], it) == (:monoid,)
         @test tiers([LateSum(:x)], merge(it, (; x = Float64))) == (:running,)
         for ss in ([FragileSum(:x), Sum(:y), Last(:x)],
@@ -682,10 +682,10 @@ end
 
     @testset "allocations do not grow with rows" begin
         # Per tier and mixed: running groups are pooled, windowed states and
-        # trees reuse their storage, and the refold tier threads one scratch
+        # queues reuse their storage, and the refold tier threads one scratch
         # tuple, so quadrupling the rows adds only logarithmic buffer growth.
-        # (Not MinMax: its `fresh!` is the allocating default, which a tree
-        # query calls per window.)
+        # (Not MinMax: its `fresh!` is the allocating default, which a queue
+        # flip calls per row.)
         function rollallocs(ss, n, windows = (w5 = 5, w50 = 50))
             src = DataFrame(time = 1:n, k = repeat(["a", "b"], n ÷ 2),
                 x = mod.(1:n, 7), y = mod.(1:n, 5))

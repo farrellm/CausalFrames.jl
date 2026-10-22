@@ -68,9 +68,12 @@ queuestype(::S, ::Type{R}, ::Type{T}) where {S<:Tuple,R,T} = MonoidQueues{S,R,T}
 # The number of rows the key has stored: the newest row's sequence number.
 @inline nstored(mq::MonoidQueues) = mq.dropped + length(mq.rows)
 
+# The oldest row any window still holds; the rows before it are dead.
+@inline oldestlo(mq::MonoidQueues) = minimum(q -> q.lo, mq.queues)
+
 # The live rows, oldest first: from the earliest window's `lo`.
 liverows(mq::MonoidQueues) =
-    view(mq.rows, (minimum(q->q.lo, mq.queues)-mq.dropped):length(mq.rows))
+    view(mq.rows, (oldestlo(mq)-mq.dropped):length(mq.rows))
 
 # Peeled explicitly: the three-argument `foreach` goes through a `zip` and
 # doesn't unroll for tuples (a runtime dispatch per state), and `map` would
@@ -106,9 +109,14 @@ end
     return queueexpire!(mq, t, w + 1, rest...)
 end
 
+# Expire window w against t.
+@inline expirequeue!(mq::MonoidQueues, w::Int, t, lb) =
+    expirewindow!(mq, @inbounds(mq.queues[w]), t, lb)
+
 # Advance the window's `lo` past the rows outside it at t, by the kernels'
 # membership test verbatim (rearranging it to time >= t - lb could disagree in
-# the last ulp for float times). rolling.jl adds the Bars method.
+# the last ulp for float times). rolling.jl adds the Bars method, over
+# `keepnewest!`.
 @inline function expirewindow!(mq::MonoidQueues, q::PartialQueue, t, lb)
     lo = q.lo
     n = nstored(mq)
@@ -121,30 +129,40 @@ end
     return nothing
 end
 
-# Drop the rows no window still holds once they are at least half the rows:
-# amortized O(1) per row.
+# Expire the window to the key's newest n rows.
+@inline function keepnewest!(mq::MonoidQueues, q::PartialQueue, n::Int)
+    q.lo = max(q.lo, nstored(mq) - n + 1)
+    return nothing
+end
+
+# Drop the rows no window still holds once they are at least half the rows
+# (`compactdead!`'s rule, which needs 128 rows, tested first so most pushes
+# skip the scan over the windows): amortized O(1) per row.
 @inline function compactqueues!(mq::MonoidQueues)
-    dead = minimum(q -> q.lo, mq.queues) - mq.dropped - 1
-    (dead >= 64 && 2 * dead >= length(mq.rows)) || return nothing
-    deleteat!(mq.rows, 1:dead)
+    length(mq.rows) >= 128 || return nothing
+    dead = compactdead!(mq.rows, oldestlo(mq) - mq.dropped - 1)
+    dead == 0 && return nothing
     deleteat!(mq.times, 1:dead)
     mq.dropped += dead
     return nothing
 end
 
+# Whether window w, as expired so far, holds rows.
+@inline hasrows(mq::MonoidQueues, w::Int) =
+    @inbounds(mq.queues[w]).lo <= nstored(mq)
+
 # Window w's states, as expired so far: `nothing` for an empty window, else
 # the window's fold, **borrowed** (the queue's own front or scratch): valid
 # only until the next query on this window. Callers read it straight through
 # `summaryvalues`.
-@inline function queuestates(mq::MonoidQueues, w::Int)
-    q = @inbounds mq.queues[w]
-    q.lo > nstored(mq) && return nothing
-    return livestates(mq, q)
-end
+@inline queuestates(mq::MonoidQueues, w::Int) =
+    hasrows(mq, w) ? livestates(mq, w) : nothing
 
 # The fold of a window known to hold rows, so that a caller that knows it
 # (summarizewindows, whose emptied keys are dropped) gets a concrete tuple,
 # not a Union with Nothing that would make emission dispatch.
+@inline livestates(mq::MonoidQueues, w::Int) =
+    livestates(mq, @inbounds mq.queues[w])
 function livestates(mq::MonoidQueues, q::PartialQueue)
     n = nstored(mq)
     q.lo > q.fhi && flipqueue!(q, mq.rows, mq.dropped, n)

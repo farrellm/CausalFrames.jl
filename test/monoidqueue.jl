@@ -15,10 +15,9 @@
     end
     # the states are borrowed scratch, valid only until the next query, so they
     # are read straight through summaryvalues, as the window kernels do
-    queryvals(mq, w) = begin
-        sts = CausalFrames.queuestates(mq, w)
+    statevals(sts) =
         sts === nothing ? nothing : CausalFrames.summaryvalues(sts, names)
-    end
+    queryvals(mq, w) = statevals(CausalFrames.queuestates(mq, w))
     # a window's rows at t, by the kernels' membership test, or (Bars) the
     # newest n, nothing until n have arrived
     inwindow(rows, t, lb) = filter(r -> t - r.time <= lb, rows)
@@ -52,19 +51,14 @@
         # arrive at or after every query's time
         τ = t + (skips[i] == 2 && i < 600 && steps[i+1] > 0)
         for (w, lb) in enumerate(lookbacks)
-            lb isa Bars ||
-                CausalFrames.expirewindow!(mq, mq.queues[w], τ, lb)
-            got =
-                lb isa Bars && CausalFrames.nstored(mq) < lb.n ? nothing :
-                queryvals(mq, w)
+            got = statevals(CausalFrames.monoidstates(mq, w, τ, lb))
             isequal(got, expected(rows, τ, lb)) || push!(bad, (i, w))
         end
     end
     @test isempty(bad)
     # the dead prefix was dropped, and every window's live rows are still there
     @test mq.dropped > 0
-    @test CausalFrames.liverows(mq) ==
-          rows[(minimum(q->q.lo, mq.queues)):end]
+    @test CausalFrames.liverows(mq) == rows[CausalFrames.oldestlo(mq):end]
     @test @inferred(Union{Nothing,Tuple}, CausalFrames.queuestates(mq, 2)) isa Tuple
 
     # Pushes alone expire each window against the pushed row's time, so a key
@@ -90,9 +84,9 @@
         s = 0
         for t in t0:(t0+n-1)
             CausalFrames.queuepush!(mq, (time = t, x = 1), (10,))
-            CausalFrames.expirewindow!(mq, mq.queues[1], t, 10)
+            CausalFrames.expirequeue!(mq, 1, t, 10)
             s += CausalFrames.summaryvalues(
-                CausalFrames.livestates(mq, mq.queues[1]), names).x_sum
+                CausalFrames.livestates(mq, 1), names).x_sum
         end
         return s
     end
@@ -108,7 +102,7 @@
         CausalFrames.queuepush!(edge, (time = t, x = x), (100,))
     end
     for (τ, lb, lo) in ((5, 100, 1), (5, 3, 2), (5, 2, 4), (6, 0, 6))
-        CausalFrames.expirewindow!(edge, edge.queues[1], τ, lb)
+        CausalFrames.expirequeue!(edge, 1, τ, lb)
         @test edge.queues[1].lo == lo
     end
     @test CausalFrames.queuestates(edge, 1) === nothing
@@ -120,6 +114,6 @@
     for ft in ftimes
         CausalFrames.queuepush!(fq, (time = ft, x = 1), (1.0,))
     end
-    CausalFrames.expirewindow!(fq, fq.queues[1], 0.3, 0.3 - 0.2)
+    CausalFrames.expirequeue!(fq, 1, 0.3, 0.3 - 0.2)
     @test fq.queues[1].lo == findfirst(s -> 0.3 - s <= 0.3 - 0.2, ftimes)
 end

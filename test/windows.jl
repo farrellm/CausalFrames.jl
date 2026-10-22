@@ -110,7 +110,7 @@ end
 
     @testset "rows past the clock's last tick are released" begin
         # the clock ends at 10 while the data runs on: the second chunk falls in
-        # no window and is dropped, in the running and the tree modes alike
+        # no window and is dropped, in the running and the monoid tiers alike
         p = CausalPipeline(
             ctx -> [DataFrame(time = [2, 7, 12], x = [1, 2, 3]),
                 DataFrame(time = [20, 30], x = [4, 5])],
@@ -233,7 +233,7 @@ end
         AgeWeightedSum(:x), LinearRegression(:x, :y; name = :m1)]
     trackset = [Min(:x), Max(:x), First(:x), Last(:x), CountDistinct(:x)]
     monoidset = [Product(:y), MinMax(:x)]                 # the monoid tier alone
-    mixedset = [Sum(:x), Min(:x), MinMax(:y), Product(:y)] # running + tree
+    mixedset = [Sum(:x), Min(:x), MinMax(:y), Product(:y)] # running + monoid
     plainset = [Sum(:x), TestVar(:x), PlainSum(:y)]       # running + re-fold
     spanset = [TierSpan(:y), Mean(:x), Last(:x)]          # every tier at once
     orderset = [Quantile(:x, [0.1, 0.5]), Median(:y), PercentRank(:x), MeanAbsDev(:y),
@@ -265,8 +265,8 @@ end
         @test all(==((:time, :k, :x, :y, :z)), undeclared.seen)
     end
 
-    @testset "tree and mixed tiers agree with re-fold" begin
-        # L = 40 spans eight ticks, so trees grow, rebuild and slide; the
+    @testset "monoid and mixed tiers agree with re-fold" begin
+        # L = 40 spans eight ticks, so queues flip and slide; the
         # oracle differential already covers every set at L = 3 and 11
         for x in (intx, floatx), ss in (monoidset, mixedset, plainset, spanset),
             opts in layouts
@@ -274,14 +274,14 @@ end
             windowsagree(windowed(mkdata(x), 40, ss; opts...),
                 windowed(mkdata(x), 40, map(Opaque, ss); opts...))
         end
-        # the sorted accumulator merged through the tree
+        # the sorted accumulator merged through the queues
         for x in (intx, floatx), opts in layouts
             windowsagree(windowed(mkdata(x), 40, orderset; opts...),
                 windowed(mkdata(x), 40, map(AsMonoid, orderset); opts...))
         end
     end
 
-    @testset "widening, and demotion from running to tree" begin
+    @testset "widening, and demotion from running to monoid" begin
         # x arrives Int in the first chunk and Float64 afterwards
         mixed = CausalPipeline(
             ctx -> [
@@ -291,7 +291,7 @@ end
             ])
         whole = frame(Float64.(xs))
         # running stays running; FragileSum alone demotes to the monoid tier, rebuilt
-        # from the buffer beside a running Count, from the previous trees beside
+        # from the buffer beside a running Count, from the previous queues beside
         # Product, and beside a refold PlainSum; monoid and refold states widen
         # within their tiers
         for ss in ([Sum(:x), Mean(:x)], [FragileSum(:x), Count()],
@@ -317,7 +317,7 @@ end
 
     @testset "allocations do not grow with rows" begin
         # as in the rolling tests: with pooled running groups, reused windowed
-        # states and trees, and one refold table pool, quadrupling the rows
+        # states and queues, and one refold table pool, quadrupling the rows
         # (and ticks) adds only logarithmic buffer growth and the emitted rows
         function windowallocs(ss, n; opts...)
             src = DataFrame(time = 1:n, k = repeat(["a", "b"], n ÷ 2),
