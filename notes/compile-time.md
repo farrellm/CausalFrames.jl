@@ -402,3 +402,39 @@ from 10.1 to 13.6 s (an addrollingcolumns over `Variance` and `Quantile` from
 wasn't traced; the co-moment state calls these several times per row, so a
 larger inlined body at each subtraction site is the likely suspect. Kept
 written out.
+
+## The monoid tier's two-stack queues (2026-10-22)
+
+The monoid tier moved from per-key segment trees to Two-Stacks Lite queues
+(`src/monoidqueue.jl`). This is a runtime change, gated on compile time. Julia
+1.13.2, 4 threads for the test files, `-t1` for the harness.
+
+| | `master` | branch |
+|---|---|---|
+| `rolling.jl` + `windows.jl` + `barwindow.jl` + `jet.jl` + the structure's own test file, compile (two runs each, alternating) | 381.7, 374.0 s | 378.6 s (final) |
+| `rolling.jl` alone | 242.2, 235.9 s | 239.1 s |
+| Harness (8 fresh monoid-tier calls: `Product` keyless, keyed with 3 windows, mixed, lead-in, `Bars`; `summarizewindows` keyless, keyed, dense), compile | 9.9–10.2 s | 10.2–10.5 s |
+
+The harness spread overlaps, and its `--trace-compile-timing` totals matched
+exactly (11.7 s over 465 entries on both sides), so this is noise. Outputs
+agreed with `master`'s apart from `Product` over floats, which differed by at
+most 1.4e-15 relative: the queue associates the product differently from the
+tree.
+
+Two things mattered for compile time:
+
+- With the window count `W` as a type parameter (`NTuple{W,PartialQueue}`),
+  the harness's lead-in case compiled 0.2 s slower than `master`. It shares
+  its key and row type with a three-window case, and `SegTree{S,R,T}` let it
+  reuse that case's methods, while `MonoidQueues{S,R,T,W}` didn't. Holding the
+  queues in a `Vector` removed the gap.
+- `@inline` on `queuepush!` or `livestates` made no measurable difference
+  either way.
+
+At runtime (two worktrees, 4 alternating rounds, `rolling` and `windows`
+groups, minimums), the `rolling` monoid-tier entries halved: `tree` 8.0 →
+4.0 ms, `bars-tree` 7.7 → 3.8 ms, `leadin-wide-tree-keyed` 33.3 → 16.8 ms
+(`-tworuns` 34.5 → 20.0 ms). `windows/tree` came out at ×1.027, with
+overlapping ranges, while allocating 21,141 times against 175,905. The other
+39 benchmarks were flat (geomean 0.942 over all 41). The peak live heap of
+`leadin-wide-tree-keyed` (`benchmark/peakmemory.jl`) fell from 12.2 to 8.7 MiB.
