@@ -31,7 +31,8 @@ abstract type Summarizer end
 
 A summarizer whose states [`combine!`](@ref) associatively, with a
 [`fresh`](@ref) state as identity. Window transforms answer each window from a
-segment tree of partial states — O(log window) — instead of re-folding it.
+two-stack queue of partial states — O(1) amortized per row — instead of
+re-folding it.
 """
 abstract type MonoidSummarizer <: Summarizer end
 
@@ -375,7 +376,8 @@ function downdate! end
 Whether [`downdate!`](@ref) inverts [`update!`](@ref) for this windowed
 state's actual accumulator type. Defaults to `true`; a state that folds an
 absorbing value it cannot recover from returns `false`, and window transforms
-then fold that summarizer through a segment tree instead.
+then fold that summarizer through a two-stack queue of partial states
+instead.
 """
 isinvertible(::SummarizerState) = true
 
