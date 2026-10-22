@@ -103,10 +103,13 @@ end
 
 trackedstorage(::Type{A}) where {A} = compensable(A) ? Tracked{A} : A
 acczero(::Type{Tracked{A}}) where {A} = Tracked{A}(compzero(A), zero(A), zero(A))
+# `peak` and the term are finite and non-negative, so a plain comparison
+# stands in for `max`, which also orders NaN and signed zeros.
 @inline function accadd(s::Tracked{A}, x::A) where {A}
     f = isfinite(x)
-    return Tracked{A}(compadd(s.sum, x), ifelse(f, max(s.peak, abs(x)), s.peak),
-        ifelse(f, s.mag + abs(x), s.mag))
+    a = abs(x)
+    return Tracked{A}(compadd(s.sum, x), ifelse(f & (a > s.peak), a, s.peak),
+        ifelse(f, s.mag + a, s.mag))
 end
 @inline accsub(s::Tracked{A}, x::A) where {A} =
     Tracked{A}(compsub(s.sum, x), s.peak, ifelse(isfinite(x), s.mag - abs(x), s.mag))

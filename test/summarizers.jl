@@ -1227,6 +1227,38 @@ end
         # the ordinary state, which never downdates in a window, tracks nothing
         @test CausalFrames.fresh(s, intypes).acc isa CausalFrames.Compensated
     end
+    # AgeWeightedSum likewise: S2 adds S1 every row, so S1's loss was folded
+    # in again row after row (a 1e16 spike left a 76% error)
+    eage(w) = sum((length(w) - j) * q(w)[j] for j in eachindex(w))
+    xs = [x; 1e-60; 0.0]
+    agesum = AgeWeightedSum(:x)
+    a = DataFrame(
+        load(Context(0, 13),
+            readtable((time = collect(1:12), x = xs)) |>
+            addrollingcolumns((w = Bars(3),), agesum)),
+    ).w_x_ageweightedsum
+    @test all(i -> isapprox(a[i], Float64(eage(xs[(i-2):i])); rtol = 1e-14), 7:12)
+    z = [1.0 + ((i * 37) % 11) * 1e-3 for i in 0:99]
+    z[60] = 1e16
+    for w in (Bars(5), 4)
+        a = DataFrame(
+            load(Context(0, 101),
+                readtable((time = collect(1:100), x = z)) |>
+                addrollingcolumns((w = w,), agesum)),
+        ).w_x_ageweightedsum
+        @test all(i -> isapprox(a[i], Float64(eage(z[(i-4):i])); rtol = 1e-14), 65:100)
+    end
+    st = CausalFrames.barwindow(agesum, 3, (x = Float64,))
+    bw = map(
+        v -> (CausalFrames.update!(st, (; x = v)); CausalFrames.value(st).x_ageweightedsum),
+        xs,
+    )
+    @test all(i -> isapprox(bw[i], Float64(eage(xs[(i-2):i])); rtol = 1e-14), 7:12)
+    @test !CausalFrames.needsrefold(
+        foldl((st, r) -> (CausalFrames.update!(st, r); st),
+            rows; init = CausalFrames.fresh(agesum, intypes)),
+    )
+
     # integers never ask
     st = CausalFrames.freshwindowed(Sum(:x), (time = Int, x = Int))
     CausalFrames.update!(st, (time = 1, x = 10^9))

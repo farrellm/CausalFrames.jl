@@ -147,7 +147,8 @@ end
     A === B || (st.sb = accadd(st.sb, db))
     st.sab = accaddprod(st.sab, da, db)
     if W
-        st.peak = max(st.peak, abs(da * db))
+        p = abs(da * db)
+        st.peak = ifelse(p > st.peak, p, st.peak)
         A === B || (st.qa += da * da; st.qb += db * db)
     end
     st.n += 1

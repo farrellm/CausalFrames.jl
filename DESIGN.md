@@ -2070,6 +2070,16 @@ value contributes nothing until a later row ages it (a weight of zero is exact,
 not IEEE's `0·Inf = NaN`), and a window recovers once it leaves. A `missing` input is counted as the sum
 family's state counts it, through the same type flag `M`.
 
+A dominant finite row is another matter (issue #97). `S₁`'s compensation
+loses what lies far below that row's round-off, as the sum family's does, and
+`S₂` adds `S₁` on every row, folding the loss in again each time: a `1e16`
+spike left a `Bars(5)` age-weighted sum 76% wrong after it had gone, and
+GH#52407's tiny values read `0`. So the windowed state (`freshwindowed`, a
+type flag `W`) keeps the largest finite `|y|` and a plain live `Σ|y|` and asks
+to be refolded once the first exceeds `2^10` times the second, as the sums do.
+That costs the windowed state about 7% (`Bars(100)`, 55 against 59 ns/row) and
+the ordinary one nothing.
+
 `CountDistinct` is the one summarizer that departs from both of the rules
 above, and the one whose state is not O(1). It holds a `Set` of the values it
 has seen, so folding `n` rows costs O(distinct) memory rather than a few fields
@@ -2477,7 +2487,8 @@ undo either, so the state asks to be **refolded** instead:
 - the sum family (`Sum`, `SumPower`, `DotProduct`) asks the same way, against
   a plain `Σ|term|` (see "Summarizers"), and never on that random walk;
   `SumPower(x, 2)` asks as often as the variance on Cauchy steps, `Sum` 20 to
-  200 times less often.
+  200 times less often. `AgeWeightedSum` asks on `Sum`'s test, so as often as
+  `Sum`.
 
 `Variance`, `Std`, and `Covariance` follow `Statistics`: a `corrected::Bool`
 keyword (default `true`) selects the divisor `n − Int(corrected)`, so the

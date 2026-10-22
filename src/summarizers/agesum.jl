@@ -54,10 +54,20 @@ end
 # and ±Inf input. S2 keeps only the finite pair (zero counters) and takes its
 # nonfinite classification from S1's, minus the newest row's, whose weight is 0
 # (`newest`: 0 finite or missing, 1 NaN, 2 +Inf, 3 -Inf).
-mutable struct CompensatedAgeSumState{N,C,A<:AbstractFloat,M} <: SummarizerState
+#
+# As in the sum family (issue #97), a compensated S1 loses what lies far below
+# a dominant row's round-off, and S2, which adds S1 on every row, folds the
+# loss in again row after row, so it stays after the row has gone. So the
+# windowed state (`freshwindowed`, flag W) keeps the largest finite |y|
+# folded (`peak`) and a plain live Σ|y| (`mag`), and asks to be refolded once
+# peak exceeds REFOLDRATIO times mag. The ordinary state never downdates, so
+# it tracks nothing (both stay 0).
+mutable struct CompensatedAgeSumState{N,C,A<:AbstractFloat,M,W} <: SummarizerState
     n::Int
     s1::Compensated{A}
     s2::Compensated{A}
+    peak::A
+    mag::A
     newest::Int8
     missings::Int
 end
@@ -67,23 +77,27 @@ agesumname(C::Symbol) = Symbol(C, :_ageweightedsum)
 emptyvalue(::AgeWeightedSum{C}) where {C} = NamedTuple{(agesumname(C),)}((0,))
 fresh(::AgeWeightedSum{C}, intypes::NamedTuple) where {C} =
     agesumfresh(Val(agesumname(C)), Val(C), sumtype(intypes[C]))
+freshwindowed(::AgeWeightedSum{C}, intypes::NamedTuple) where {C} =
+    agesumfresh(Val(agesumname(C)), Val(C), sumtype(intypes[C]), Val(true))
 
 # The state for accumulator type A, chosen as `accumfresh` chooses: the fold is
-# at the non-missing type, compensated for a fixed-precision float, and an
-# all-Missing column gets a `MissingState`.
-function agesumfresh(::Val{N}, ::Val{C}, ::Type{A}) where {N,C,A}
+# at the non-missing type, compensated for a fixed-precision float (tracking
+# for a refold when windowed), and an all-Missing column gets a `MissingState`.
+function agesumfresh(::Val{N}, ::Val{C}, ::Type{A},
+    ::Val{W} = Val(false)) where {N,C,A,W}
     A === Missing &&
         return MissingState{N}(AgeWeightedSum{C}())
     M = Missing <: A
     An = nonmissingtype(A)
-    compensable(An) && return CompensatedAgeSumState{N,C,An,M}()
+    compensable(An) && return CompensatedAgeSumState{N,C,An,M,W}()
     return AgeSumState{N,C,An,M}()
 end
 
 AgeSumState{N,C,A,M}() where {N,C,A,M} =
     AgeSumState{N,C,A,M}(0, convert(A, 0), convert(A, 0), 0)
-CompensatedAgeSumState{N,C,A,M}() where {N,C,A,M} =
-    CompensatedAgeSumState{N,C,A,M}(0, compzero(A), compzero(A), Int8(0), 0)
+CompensatedAgeSumState{N,C,A,M,W}() where {N,C,A,M,W} =
+    CompensatedAgeSumState{N,C,A,M,W}(0, compzero(A), compzero(A), zero(A), zero(A),
+        Int8(0), 0)
 fresh(::S) where {S<:Union{AgeSumState,CompensatedAgeSumState}} = S()
 @inline function fresh!(st::AgeSumState{N,C,A}) where {N,C,A}
     st.n = 0
@@ -128,10 +142,10 @@ value(st::AgeSumState{N,C,A,M}) where {N,C,A,M} =
 function agesumfrom(w::AgeSumState{N,C,A,M}, n, s1, s2, missings) where {N,C,A,M}
     return AgeSumState{N,C,A,M}(n, convert(A, s1), convert(A, s2), missings)
 end
-function agesumfrom(w::CompensatedAgeSumState{N,C,A,M}, n, s1, s2,
-    missings) where {N,C,A,M}
-    return CompensatedAgeSumState{N,C,A,M}(n, widenacc(Compensated{A}, s1),
-        widenacc(Compensated{A}, s2), Int8(0), missings)
+function agesumfrom(w::CompensatedAgeSumState{N,C,A,M,W}, n, s1, s2,
+    missings) where {N,C,A,M,W}
+    return CompensatedAgeSumState{N,C,A,M,W}(n, widenacc(Compensated{A}, s1),
+        widenacc(Compensated{A}, s2), zero(A), zero(A), Int8(0), missings)
 end
 
 @inline agesumclass(x::AbstractFloat) =
@@ -141,11 +155,13 @@ end
     st.n = 0
     st.s1 = compzero(A)
     st.s2 = compzero(A)
+    st.peak = st.mag = zero(A)
     st.newest = Int8(0)
     st.missings = 0
     return st
 end
-@inline function update!(st::CompensatedAgeSumState{N,C,A}, row) where {N,C,A}
+@inline function update!(st::CompensatedAgeSumState{N,C,A,M,W},
+    row) where {N,C,A,M,W}
     v = getproperty(row, C)
     st.s2 = pairadd(st.s2, st.s1.total, st.s1.comp)
     st.n += 1
@@ -156,10 +172,16 @@ end
         x = convert(A, v)
         st.s1 = compadd(st.s1, x)
         st.newest = agesumclass(x)
+        if W && isfinite(x)
+            a = abs(x)
+            st.peak = ifelse(a > st.peak, a, st.peak)  # finite: no NaN to order
+            st.mag += a
+        end
     end
     return nothing
 end
-@inline function downdate!(st::CompensatedAgeSumState{N,C,A}, row) where {N,C,A}
+@inline function downdate!(st::CompensatedAgeSumState{N,C,A,M,W},
+    row) where {N,C,A,M,W}
     v = getproperty(row, C)
     if ismissing(v)
         st.missings -= 1
@@ -167,14 +189,18 @@ end
         x = convert(A, v)
         isfinite(x) && (st.s2 = pairsubprod(st.s2, convert(A, st.n - 1), x))
         st.s1 = compsub(st.s1, x)
+        W && isfinite(x) && (st.mag -= abs(x))
     end
     st.n -= 1
     st.n == 0 && (st.newest = Int8(0))
     return nothing
 end
-function combine!(dest::CompensatedAgeSumState{N,C,A,M},
-    a::CompensatedAgeSumState{N,C,A,M},
-    b::CompensatedAgeSumState{N,C,A,M}) where {N,C,A,M}
+# A mag gone negative or to zero under round-off asks too.
+@inline needsrefold(st::CompensatedAgeSumState{N,C,A,M,W}) where {N,C,A,M,W} =
+    W && st.peak > convert(A, REFOLDRATIO) * st.mag
+function combine!(dest::CompensatedAgeSumState{N,C,A,M,W},
+    a::CompensatedAgeSumState{N,C,A,M,W},
+    b::CompensatedAgeSumState{N,C,A,M,W}) where {N,C,A,M,W}
     k = convert(A, b.n)
     p, e = twoprod(a.s1.total, k)
     s2 = pairadd(pairadd(a.s2, p, e + a.s1.comp * k), b.s2.total, b.s2.comp)
@@ -183,6 +209,7 @@ function combine!(dest::CompensatedAgeSumState{N,C,A,M},
     n = a.n + b.n
     missings = a.missings + b.missings
     dest.n, dest.s1, dest.s2, dest.newest, dest.missings = n, s1, s2, newest, missings
+    dest.peak, dest.mag = max(a.peak, b.peak), a.mag + b.mag
     return nothing
 end
 # S2's nonfinite terms are S1's less the newest row's, whose weight is 0: a NaN
@@ -205,10 +232,11 @@ function widenstate(st::Union{AgeSumState{N,C},CompensatedAgeSumState{N,C}},
     return agesumwiden(w, st)
 end
 agesumwiden(w, st::AgeSumState) = agesumfrom(w, st.n, st.s1, st.s2, st.missings)
-function agesumwiden(w::CompensatedAgeSumState{N,C,A2,M2},
-    st::CompensatedAgeSumState) where {N,C,A2,M2}
-    return CompensatedAgeSumState{N,C,A2,M2}(st.n, widencomp(A2, st.s1),
-        widencomp(A2, st.s2), st.newest, st.missings)
+function agesumwiden(w::CompensatedAgeSumState{N,C,A2,M2,W},
+    st::CompensatedAgeSumState) where {N,C,A2,M2,W}
+    return CompensatedAgeSumState{N,C,A2,M2,W}(st.n, widencomp(A2, st.s1),
+        widencomp(A2, st.s2), convert(A2, st.peak), convert(A2, st.mag),
+        st.newest, st.missings)
 end
 # To an arbitrary-precision float: the plain state, from the IEEE values.
 agesumwiden(w::AgeSumState, st::CompensatedAgeSumState) =

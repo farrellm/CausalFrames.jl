@@ -346,3 +346,29 @@ Compile time: splitting the windowed states from the ordinary ones means a
 window call compiles both types where they used to be one. The co-moment
 harness went from +3% (tracking everywhere) to +4-5% over master (9.73-9.98 s
 against 9.12-9.47 s).
+
+### AgeWeightedSum
+
+The same compensation loss hit `AgeWeightedSum` harder: `S₂` adds `S₁` on
+every row, so what `S₁` lost is folded in again row after row. On the previous
+commit a `1e16` spike left a `Bars(5)`/time-window result up to 76% wrong
+after it had left (the plain sums were exact on that sweep), and GH#52407 read
+`0` for `2e-51` windows and kept a 1.4% error. Its windowed compensated state
+now has the sums' tracking (a flag `W`, a peak `|y|`, a plain live `Σ|y|`) and
+every case is exact.
+
+The tracking cost the windowed state more than the sums' relative to its own
+time, though about the same per row (3-4 ns). Rolling `AgeWeightedSum` over
+400k rows, ns/row, matched environments:
+
+| case | previous commit | tracked | no check |
+|---|---|---|---|
+| `Bars(100)` | 54.8-55.5 | 58.6-59.4 | 59.0-59.3 |
+| time window 25 | 47.6-47.8 | 51.4-51.8 | 49.6-51.3 |
+| `addsummarycolumns` (not windowed) | 19.8-19.9 | 19.7-19.9 | |
+
+Nearly all of it is the per-row tracking; the check is minor. A branch-free
+form (`ifelse` on `isfinite`) was slower (60.9-61.6). Replacing `max` with a
+plain comparison (both sides are finite and non-negative, so `max`'s NaN and
+signed-zero handling is wasted) saved about 1 ns, and was applied to the sums'
+`Tracked` and the co-moment too.

@@ -230,7 +230,11 @@ design rationale and performance constraints behind each module.
     the flag `M`. `S₂`'s nonfinite classification is `S₁`'s minus the newest
     row's (`newest`), whose weight is exactly 0. The weight products in
     `downdate!` and `combine!` are error-free (`twoprod`), as the co-moments'
-    are: a rounded `(n - 1)·y` drifted linearly on a flat series (issue #94)
+    are: a rounded `(n - 1)·y` drifted linearly on a flat series (issue #94).
+    Its windowed compensated state (`freshwindowed`, flag `W`) tracks a peak
+    `|y|` and plain live `Σ|y|` and asks for a refold as the sums do (issue
+    #97): `S₂` re-adds `S₁`'s lost compensation every row, so a spike left a
+    76% error
   - the sum family `Sum`/`SumPower`/`DotProduct` shares one state,
     `AccumState{N,A,T,M,S}`, over a term functor `T` (`ColumnTerm`/`PowerTerm`/
     `PairProductTerm`, terms formed at accumulator width). Its storage `S` is
