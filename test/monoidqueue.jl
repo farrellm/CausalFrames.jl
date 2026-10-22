@@ -54,8 +54,9 @@
         for (w, lb) in enumerate(lookbacks)
             lb isa Bars ||
                 CausalFrames.expirewindow!(mq, mq.queues[w], τ, lb)
-            got = lb isa Bars && CausalFrames.nstored(mq) < lb.n ? nothing :
-                  queryvals(mq, w)
+            got =
+                lb isa Bars && CausalFrames.nstored(mq) < lb.n ? nothing :
+                queryvals(mq, w)
             isequal(got, expected(rows, τ, lb)) || push!(bad, (i, w))
         end
     end
@@ -63,7 +64,7 @@
     # the dead prefix was dropped, and every window's live rows are still there
     @test mq.dropped > 0
     @test CausalFrames.liverows(mq) ==
-          rows[(minimum(q -> q.lo, mq.queues)):end]
+          rows[(minimum(q->q.lo, mq.queues)):end]
     @test @inferred(Union{Nothing,Tuple}, CausalFrames.queuestates(mq, 2)) isa Tuple
 
     # Pushes alone expire each window against the pushed row's time, so a key
@@ -79,14 +80,19 @@
     # the front's state tuples. Asserted as a slope rather than
     # `@allocated(one call) == 0`, since a lone `@allocated` puts a function
     # boundary around the call, where Julia 1.10 materializes the returned
-    # tuple that it elides once the query is inlined into its caller.
+    # tuple that it elides once the query is inlined into its caller. The
+    # window always holds rows here, so it is read through `livestates`, as
+    # summarizewindows reads it: on Julia 1.10, passing `queuestates`'
+    # `Union{Nothing,…}` straight to `summaryvalues` allocates 48 bytes per
+    # query (the kernels test for `nothing` first, or use `livestates`). When
+    # 1.10 support is dropped, `queuestates` may be read here directly.
     function steady(mq, t0, n)
         s = 0
         for t in t0:(t0+n-1)
             CausalFrames.queuepush!(mq, (time = t, x = 1), (10,))
             CausalFrames.expirewindow!(mq, mq.queues[1], t, 10)
-            s += CausalFrames.summaryvalues(CausalFrames.queuestates(mq, 1),
-                names).x_sum
+            s += CausalFrames.summaryvalues(
+                CausalFrames.livestates(mq, mq.queues[1]), names).x_sum
         end
         return s
     end
