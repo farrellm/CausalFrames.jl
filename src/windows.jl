@@ -8,10 +8,8 @@
 # has emptied.
 #
 # The tiers are rolling.jl's (tiers.jl): running groups (O(1) amortized per
-# row), segment trees queried at each tick (O(log window)), and refolds
-# (O(window) per tick). Nothing reads a tree between ticks, so a tick's rows
-# are appended as bare leaves and recombined together at the tick
-# (`treesync!`), about one combine per row. Type-unstable setup runs once per
+# row), two-stack queues expired and queried at each tick (O(1) amortized per
+# row), and refolds (O(window) per tick). Type-unstable setup runs once per
 # chunk; the kernels take concretely typed arguments.
 
 """
@@ -46,7 +44,7 @@ windows may overlap or leave gaps.
   declared order.
 
 Each summarizer's window slides in O(1) per row when it is a
-[`GroupSummarizer`](@ref), in O(log window) per key per tick when it is another
+[`GroupSummarizer`](@ref), in O(1) amortized per row when it is another
 [`MonoidSummarizer`](@ref), and is re-folded in O(window) otherwise.
 """
 function summarizewindows(clk::CausalPipeline, lookback, summarizers;
@@ -105,33 +103,35 @@ end
 
 # The window structures for one tiering (tiers.jl), R being the stored row type.
 # The buffer holds the admitted rows not yet evicted, in time order, for the
-# running tier's eviction and the refold tier's folds; trees own their rows, so
-# a tree-only call keeps no buffer. In every tier a key is present exactly when
-# its window has rows (the running table deletes a group with its last row, an
-# emptied tree is dropped, the refold table is filled at the tick from the live
-# rows), so the first tier present, the primary, gives the keys to emit.
+# running tier's eviction and the refold tier's folds; the monoid queues own
+# their rows, so a monoid-only call keeps no buffer. In every tier a key is
+# present exactly when its window has rows (the running table deletes a group
+# with its last row, an emptied key's queue is dropped, the refold table is
+# filled at the tick from the live rows), so the first tier present, the
+# primary, gives the keys to emit.
 struct WindowTiers{R,B,G,TR,GT,TG<:Tiering,SC}
     buffer::B        # Vector{R}, or nothing
     running::G       # RunningTable{K,SR}, or nothing
-    trees::TR        # Dict{K,SegTree{ST,R,T}}, or nothing
+    monoids::TR      # Dict{K,MonoidQueues{ST,R,T}}, or nothing
     refold::GT       # GroupTable{K,SF}, or nothing
     tg::TG           # the partition of the states into tiers
     scratch::SC      # Vector{Pair{K,V}} over the primary's dict: the sort buffer
 end
 
-WindowTiers{R}(buffer::B, running::G, trees::TR, refold::GT, tg::TG,
+WindowTiers{R}(buffer::B, running::G, monoids::TR, refold::GT, tg::TG,
     scratch::SC) where {R,B,G,TR,GT,TG,SC} =
-    WindowTiers{R,B,G,TR,GT,TG,SC}(buffer, running, trees, refold, tg, scratch)
+    WindowTiers{R,B,G,TR,GT,TG,SC}(buffer, running, monoids, refold, tg, scratch)
 
-@inline primarygroups(t::WindowTiers) = primarygroups(t.running, t.trees, t.refold)
-@inline primarygroups(rt::RunningTable, trees, refold) = rt.groups
-@inline primarygroups(::Nothing, trees::AbstractDict, refold) = trees
+@inline primarygroups(t::WindowTiers) =
+    primarygroups(t.running, t.monoids, t.refold)
+@inline primarygroups(rt::RunningTable, monoids, refold) = rt.groups
+@inline primarygroups(::Nothing, monoids::AbstractDict, refold) = monoids
 @inline primarygroups(::Nothing, ::Nothing, gt::GroupTable) = gt.table
 
 # Build the tiers for the first realized schema, or rebuild them from the live
-# rows for a widened one (`rebuildbuffer`, `rebuildtrees`), which is correct
+# rows for a widened one (`rebuildbuffer`, `rebuildmonoids`), which is correct
 # for every transition, including one that demotes an accumulator from the
-# running tier to the tree. The refold table is filled only at ticks, so it
+# running tier to the monoid tier. The refold table is filled only at ticks, so it
 # starts empty.
 function preparewindows!(st::WindowState, @nospecialize(cfg::WindowConfig),
     types::NamedTuple)
@@ -148,11 +148,12 @@ function preparewindows!(st::WindowState, @nospecialize(cfg::WindowConfig),
         isempty(tg.running) ? nothing :
         replayrunning!(RunningTable{K,typeof(tg.running)}(), buffer, oldhead,
             tg.running, cfg.keynames)
-    trees = rebuildtrees(tg, K, R, types.time, old, oldhead, cfg.keynames)
+    monoids = rebuildmonoids(tg, K, R, types.time, old, oldhead, cfg.keynames,
+        (cfg.lookback,))
     refold = isempty(tg.refold) ? nothing : GroupTable{K,typeof(tg.refold)}()
     st.head = buffer === nothing ? 1 : oldhead
-    groups = primarygroups(running, trees, refold)
-    st.tiers = WindowTiers{R}(buffer, running, trees, refold, tg,
+    groups = primarygroups(running, monoids, refold)
+    st.tiers = WindowTiers{R}(buffer, running, monoids, refold, tg,
         Pair{K,valtype(groups)}[])
     st.valtype = tieredvaluetype(tg, cfg.protos, cfg.outs)
     return nothing
@@ -196,13 +197,13 @@ compacthead!(::Nothing, head::Int) = head
 compacthead!(buffer::Vector, head::Int) = head - compactdead!(buffer, head - 1)
 
 # After the last tick nothing more is emitted, so the live rows (the buffer,
-# groups and trees) are released rather than held to the end of the stream.
+# groups and queues) are released rather than held to the end of the stream.
 function releasewindows!(st::WindowState)
     t = st.tiers
     t.buffer === nothing || empty!(t.buffer)
     st.head = 1
     t.running === nothing || empty!(t.running.groups)
-    t.trees === nothing || empty!(t.trees)
+    t.monoids === nothing || empty!(t.monoids)
     return nothing
 end
 
@@ -242,7 +243,7 @@ function windowrows!(rows::Vector{RT}, tiers::WindowTiers{R}, head::Int,
                 prevkeys, lookback, keynames, outs, emptyrow, ks)
             bi += 1
         end
-        admitwindow!(tiers, rowat(R, nt, i), keynames, admitks)
+        admitwindow!(tiers, rowat(R, nt, i), keynames, admitks, (lookback,))
     end
     return head, bi - 1
 end
@@ -260,17 +261,16 @@ end
 # Admit one row into every tier. A row may already be outside the next tick's
 # window (a look-back shorter than the tick spacing); that tick's eviction
 # downdates it right back out. A declared keyset (`admissionkeys`) is checked
-# when the primary tier makes a key's group or tree, or on every admission when
-# the primary is the refold table, which is filled only at ticks. Trees get a
-# bare leaf, synced at the tick.
+# when the primary tier makes a key's group or queue, or on every admission
+# when the primary is the refold table, which is filled only at ticks.
 @inline function admitwindow!(tiers::WindowTiers, row, keynames::Val,
-    ks::Union{Nothing,KeySet})
+    ks::Union{Nothing,KeySet}, lookbacks::Tuple)
     pushrow!(tiers.buffer, row)
     k = keyvalues(row, keynames)
     admitwinrunning!(tiers.running, tiers.tg.running, k, row, ks, keynames)
-    admitwintree!(tiers.trees, tiers.tg.monoid, k, row,
-        tiers.running === nothing ? ks : nothing, keynames)
-    tiers.running === nothing && tiers.trees === nothing &&
+    admitwinmonoid!(tiers.monoids, tiers.tg.monoid, k, row,
+        tiers.running === nothing ? ks : nothing, keynames, lookbacks)
+    tiers.running === nothing && tiers.monoids === nothing &&
         checkdeclared(ks, row, keynames)
     return nothing
 end
@@ -280,28 +280,28 @@ end
 @inline admitwinrunning!(rt::RunningTable, stateprotos::Tuple, k, row, ks,
     keynames::Val) = admitgroup!(rt, stateprotos, k, row, ks, keynames)
 
-@inline admitwintree!(::Nothing, stateprotos, k, row, ks, keynames::Val) =
-    nothing
-@inline function admitwintree!(trees::Dict{K,SegTree{S,R,T}}, stateprotos::S,
-    k, row, ks, keynames::Val) where {K,S,R,T}
-    tr = get!(trees, k) do
+@inline admitwinmonoid!(::Nothing, stateprotos, k, row, ks, keynames::Val,
+    lookbacks) = nothing
+@inline function admitwinmonoid!(monoids::Dict{K,Q}, stateprotos::Tuple, k,
+    row, ks, keynames::Val, lookbacks::Tuple) where {K,Q<:MonoidQueues}
+    mq = get!(monoids, k) do
         checkdeclared(ks, row, keynames)
-        newsegtree(stateprotos, R, T)
+        newqueues(Q, stateprotos, length(lookbacks))
     end
-    treeappend!(tr, stateprotos, row)
+    queuepush!(mq, row, lookbacks)
     return nothing
 end
 
 # Close tick τ: evict the rows that have left its window, downdating them out of
-# the running tier; move each tree's head to the window start, dropping emptied
-# trees and syncing the rest; fold the live rows into the refold table; emit;
-# then retire the refold states to the pool.
+# the running tier; expire each key's queue to the window start, dropping
+# emptied ones; fold the live rows into the refold table; emit; then retire the
+# refold states to the pool.
 @noinline function closewindow!(rows::Vector, τ, tiers::WindowTiers, head::Int,
     prevkeys::Vector, lookback, keynames::Val, outs::Val, emptyrow,
     ks::Union{Nothing,KeySet})
     head = evicthead!(tiers.buffer, head, τ, lookback, tiers.running, keynames)
     head = compacthead!(tiers.buffer, head)
-    closetrees!(tiers.trees, τ, lookback)
+    closemonoids!(tiers.monoids, τ, lookback)
     foldrefold!(tiers.refold, tiers.buffer, head, tiers.tg.refold, keynames)
     emitgroups!(rows, τ, primarygroups(tiers), tiers.scratch, prevkeys, tiers,
         outs, emptyrow, ks)
@@ -309,16 +309,14 @@ end
     return head
 end
 
-# Every admitted row is before τ, so a tree's window is head:length(rows). An
-# emptied tree is dropped, since ticks only advance. The survivors sync once,
-# before their one query.
-@inline closetrees!(::Nothing, τ, lookback) = nothing
-@inline function closetrees!(trees::AbstractDict, τ, lookback)
-    filter!(trees) do (_, tr)
-        tr.head = windowstart(tr.times, tr.head, τ, lookback)
-        live = tr.head <= length(tr.rows)
-        live && treesync!(tr)
-        return live
+# Every admitted row is before τ, so a queue's window is its rows from `lo`. An
+# emptied key's queue is dropped, since ticks only advance.
+@inline closemonoids!(::Nothing, τ, lookback) = nothing
+@inline function closemonoids!(monoids::AbstractDict, τ, lookback)
+    filter!(monoids) do (_, mq)
+        q = @inbounds mq.queues[1]
+        expirewindow!(mq, q, τ, lookback)
+        return q.lo <= nstored(mq)
     end
     return nothing
 end
@@ -339,21 +337,21 @@ end
 
 # One tier's states for key k, whose entry in the primary tier is g: `()` for
 # an absent tier, g itself for the primary, a lookup by key for the others,
-# and for a tree its borrowed query (`treequery`). The running tier, when
-# present, is always the primary.
+# and for a queue its borrowed states (`livestates`, since a present key's
+# window holds rows). The running tier, when present, is always the primary.
 @inline tierstates(::Nothing, k, g) = ()
 @inline tierstates(::RunningTable{K,S}, k, g::RunningGroup{S}) where {K,S<:Tuple} =
     g.states
-@inline tierstates(::Dict{K,V}, k, tr::V) where {K,V<:SegTree} =
-    treequery(tr, tr.head, length(tr.rows))
-@inline tierstates(trees::Dict{K,V}, k, g) where {K,V<:SegTree} =
-    tierstates(trees, k, trees[k])
+@inline tierstates(::Dict{K,V}, k, mq::V) where {K,V<:MonoidQueues} =
+    livestates(mq, @inbounds mq.queues[1])
+@inline tierstates(monoids::Dict{K,V}, k, g) where {K,V<:MonoidQueues} =
+    tierstates(monoids, k, monoids[k])
 @inline tierstates(::GroupTable{K,S}, k, states::S) where {K,S<:Tuple} = states
 @inline tierstates(gt::GroupTable, k, g) = gt.table[k]
 
 @inline tiervalues(tiers::WindowTiers, k, g, outs::Val) = summaryvalues(
     mergestates(tiers.tg.perm,
-        (tierstates(tiers.running, k, g), tierstates(tiers.trees, k, g),
+        (tierstates(tiers.running, k, g), tierstates(tiers.monoids, k, g),
             tierstates(tiers.refold, k, g), tiers.tg.derived)), outs)
 
 # Emit one tick from the primary tier's groups: without a declared keyset, the

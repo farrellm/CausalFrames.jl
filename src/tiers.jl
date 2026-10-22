@@ -6,7 +6,8 @@
 #   invertible. Per-key running states, update!d as rows arrive and downdate!d,
 #   oldest first, as they leave: O(1) amortized per row.
 # - monoid: the other MonoidSummarizers, plus any group whose realized state
-#   defeats `isinvertible`. Per-key segment trees (segtree.jl): O(log window).
+#   defeats `isinvertible`. Per-key two-stack queues (monoidqueue.jl): O(1)
+#   amortized per row.
 # - refold: everything else. Fresh states folded over the window's buffered
 #   rows: O(window).
 # - derived: states with no fields (the dependent summarizers). They fold
@@ -197,64 +198,67 @@ function replayrunning!(rt::RunningTable{K,S}, rows::Vector, head::Int,
     return rt
 end
 
-# Push the live rows (from head on) into per-key trees, converting each to the
-# trees' row type; a function barrier like replayrunning!.
-function replaytrees!(trees::Dict{K,SegTree{S,R,T}}, rows::Vector, head::Int,
-    stateprotos::S, keynames::Val) where {K,S<:Tuple,R,T}
+# Push the live rows (from head on) into per-key queues, converting each to
+# the queues' row type; a function barrier like replayrunning!.
+function replaymonoids!(monoids::Dict{K,Q}, rows::AbstractVector, head::Int,
+    stateprotos::S, keynames::Val,
+    lookbacks::Tuple) where {K,S<:Tuple,R,Q<:MonoidQueues{S,R}}
     for j in head:length(rows)
         row = convert(R, @inbounds rows[j])
-        tr = get!(() -> newsegtree(stateprotos, R, T), trees,
+        mq = get!(() -> newqueues(Q, stateprotos, length(lookbacks)), monoids,
             keyvalues(row, keynames))
-        treepush!(tr, stateprotos, row)
+        queuepush!(mq, row, lookbacks)
     end
-    return trees
+    return monoids
 end
 
-# The trees' live rows as one time-ordered buffer, for a rebuild that needs a
+# The queues' live rows as one time-ordered buffer, for a rebuild that needs a
 # buffer where the previous tiers kept none. Built-in states only demote, so
 # only a custom state that becomes invertible on widening gets here. The stable
 # sort keeps each key's rows in stream order.
-function treebuffer(::Type{R}, trees::AbstractDict) where {R}
+function monoidbuffer(::Type{R}, monoids::AbstractDict) where {R}
     rows = R[]
-    for (_, tr) in trees, j in tr.head:length(tr.rows)
-        push!(rows, convert(R, @inbounds tr.rows[j]))
+    for (_, mq) in monoids, row in liverows(mq)
+        push!(rows, convert(R, row))
     end
     return sort!(rows; by = r -> r.time, alg = Base.Sort.DEFAULT_STABLE)
 end
 
 # The shared row buffer of a tiering being built: `nothing` when neither the
-# running nor the refold tier needs one (trees own their rows); empty on a first
-# build; after a widening, the previous buffer converted to the new row type,
-# or gathered from the previous trees (`treebuffer`) if there was none.
+# running nor the refold tier needs one (the queues own their rows); empty on a
+# first build; after a widening, the previous buffer converted to the new row
+# type, or gathered from the previous queues (`monoidbuffer`) if there was none.
 function rebuildbuffer(tg::Tiering, ::Type{R}, old) where {R}
     isempty(tg.running) && isempty(tg.refold) && return nothing
     old === nothing && return R[]
-    old.buffer === nothing && return treebuffer(R, old.trees)
+    old.buffer === nothing && return monoidbuffer(R, old.monoids)
     return convert(Vector{R}, old.buffer)
 end
 
-# The monoid tier of a tiering being built: `nothing` without tree states, else
-# per-key trees replayed from the previous trees' rows if any, else from the
-# previous buffer's live rows (from `head`), else (a first build) empty.
-function rebuildtrees(tg::Tiering, ::Type{K}, ::Type{R}, ::Type{T}, old,
-    head::Int, keynames::Val) where {K,R,T}
+# The monoid tier of a tiering being built: `nothing` without monoid states,
+# else per-key queues (one per look-back) replayed from the previous queues'
+# live rows if any, else from the previous buffer's live rows (from `head`),
+# else (a first build) empty.
+function rebuildmonoids(tg::Tiering, ::Type{K}, ::Type{R}, ::Type{T}, old,
+    head::Int, keynames::Val, lookbacks::Tuple) where {K,R,T}
     isempty(tg.monoid) && return nothing
-    trees = Dict{K,SegTree{typeof(tg.monoid),R,T}}()
-    if old !== nothing && old.trees !== nothing
-        replayoldtrees!(trees, old.trees, tg.monoid, keynames)
+    monoids =
+        Dict{K,queuestype(tg.monoid, R, T)}()
+    if old !== nothing && old.monoids !== nothing
+        replayoldmonoids!(monoids, old.monoids, tg.monoid, keynames, lookbacks)
     elseif old !== nothing && old.buffer !== nothing
-        replaytrees!(trees, old.buffer, head, tg.monoid, keynames)
+        replaymonoids!(monoids, old.buffer, head, tg.monoid, keynames, lookbacks)
     end
-    return trees
+    return monoids
 end
 
-# Replay every live row of the previous trees, which own their rows.
-function replayoldtrees!(trees::Dict{K,SegTree{S,R,T}}, old::AbstractDict,
-    stateprotos::S, keynames::Val) where {K,S<:Tuple,R,T}
-    for (_, tr) in old
-        replaytrees!(trees, tr.rows, tr.head, stateprotos, keynames)
+# Replay every live row of the previous queues, which own their rows.
+function replayoldmonoids!(monoids::Dict, old::AbstractDict, stateprotos::Tuple,
+    keynames::Val, lookbacks::Tuple)
+    for (_, mq) in old
+        replaymonoids!(monoids, liverows(mq), 1, stateprotos, keynames, lookbacks)
     end
-    return trees
+    return monoids
 end
 
 # Drop a row buffer's `dead` prefix, the rows no window still holds, once it is
