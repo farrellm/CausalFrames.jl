@@ -268,7 +268,7 @@ end
     pushrow!(tiers.buffer, row)
     k = keyvalues(row, keynames)
     admitwinrunning!(tiers.running, tiers.tg.running, k, row, ks, keynames)
-    admitwintree!(tiers.trees, tiers.tg.tree, k, row,
+    admitwintree!(tiers.trees, tiers.tg.monoid, k, row,
         tiers.running === nothing ? ks : nothing, keynames)
     tiers.running === nothing && tiers.trees === nothing &&
         checkdeclared(ks, row, keynames)

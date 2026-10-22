@@ -191,7 +191,7 @@ end
         @test df.count == zeros(Int, 6)
         @test all(ismissing, df.x_mean)
 
-        # an undeclared key throws whichever tier is primary: running, tree,
+        # an undeclared key throws whichever tier is primary: running, monoid,
         # refold
         for ss in ([Count(), Sum(:x)], Product(:x), Opaque(Sum(:x)))
             @test_throws ArgumentError load(Context(5, 25),
@@ -232,7 +232,7 @@ end
     groupset = [Count(), Sum(:x), Mean(:x), Variance(:x), Correlation(:x, :y),
         AgeWeightedSum(:x), LinearRegression(:x, :y; name = :m1)]
     trackset = [Min(:x), Max(:x), First(:x), Last(:x), CountDistinct(:x)]
-    monoidset = [Product(:y), MinMax(:x)]                 # the tree alone
+    monoidset = [Product(:y), MinMax(:x)]                 # the monoid tier alone
     mixedset = [Sum(:x), Min(:x), MinMax(:y), Product(:y)] # running + tree
     plainset = [Sum(:x), TestVar(:x), PlainSum(:y)]       # running + re-fold
     spanset = [TierSpan(:y), Mean(:x), Last(:x)]          # every tier at once
@@ -290,9 +290,9 @@ end
                 for r in ranges
             ])
         whole = frame(Float64.(xs))
-        # running stays running; FragileSum alone demotes to the tree, rebuilt
+        # running stays running; FragileSum alone demotes to the monoid tier, rebuilt
         # from the buffer beside a running Count, from the previous trees beside
-        # Product, and beside a refold PlainSum; tree and refold states widen
+        # Product, and beside a refold PlainSum; monoid and refold states widen
         # within their tiers
         for ss in ([Sum(:x), Mean(:x)], [FragileSum(:x), Count()],
                 [FragileSum(:x), Product(:y)], [FragileSum(:x), PlainSum(:y)],

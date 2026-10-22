@@ -67,7 +67,7 @@
             key = :sym))
         # the running window tier keyless; then keyed, which also takes the
         # vanish-row path, with windowed trackers in the running tier beside
-        # the tree tier (Product is only a monoid) and a fieldless dependent
+        # the monoid tier (Product is only a monoid) and a fieldless dependent
         ld(p |> summarizewindows(clock(2), 3,
             [Count(), Sum(:v), Mean(:v)]))
         ld(
