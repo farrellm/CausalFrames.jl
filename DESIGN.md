@@ -1161,7 +1161,14 @@ so the weakest structure in a call slows only its own summarizers:
   earlier, and a key that is never queried keeps only its windows' rows. The
   dead prefix is dropped once it is half the key's rows. The queues own their
   rows, so a call mixing the monoid tier with another tier stores its rows
-  twice, once there and once in the shared buffer.
+  twice, once there and once in the shared buffer. Each front slot is a whole
+  suffix's combined state, so a state that grows with its rows (a sorted
+  vector, a set) takes O(window²) memory and flip work, where the segment tree
+  took O(window · log window). No built-in pays this: the only built-in on this
+  tier is `Product`, whose state is one scalar (a `BigInt` column excepted, its
+  suffix products growing in bits), and every built-in group is invertible, so
+  it slides on the running tier. Only a custom monoid, or a custom group
+  reporting `isinvertible == false`, with a growing state can hit it.
 - **Re-fold tier — everything else.** Each output row folds *fresh* states
   over its window's buffered rows, from that window's eviction head: one
   `update!` per in-window row per window. The always-correct baseline, and the

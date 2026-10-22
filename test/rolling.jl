@@ -490,7 +490,7 @@ end
 
     @testset "the monoid tier agrees with the running one" begin
         # AsMonoid hides the groups down to monoids, so the sorted accumulator
-        # and the arg-extremes merge through the segment tree's combine!
+        # and the arg-extremes merge through the monoid queues' combine!
         # instead of sliding
         for p in (intdata, floatdata, missingfloatdata), key in (nothing, :k),
             ss in (orderset, indexset)
