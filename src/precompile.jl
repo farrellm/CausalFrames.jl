@@ -84,7 +84,7 @@
                 key = :sym, keyset = ["a", "b"]),
         )
         ld(p |> addsummarycolumns([First(:v), Last(:v)]))
-        # group summarizers take the running tier and other monoids the tree
+        # group summarizers take the running tier and other monoids the monoid
         # tier; only user summarizers without that structure reach the refold
         # tier, which specializes at first call
         ld(

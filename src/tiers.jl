@@ -200,7 +200,7 @@ end
 
 # Push the live rows (from head on) into per-key queues, converting each to
 # the queues' row type; a function barrier like replayrunning!.
-function replaymonoids!(monoids::Dict{K,Q}, rows::AbstractVector, head::Int,
+function replaymonoids!(monoids::Dict{K,Q}, rows::Vector, head::Int,
     stateprotos::S, keynames::Val,
     lookbacks::Tuple) where {K,S<:Tuple,R,Q<:MonoidQueues{S,R}}
     for j in head:length(rows)
@@ -256,7 +256,8 @@ end
 function replayoldmonoids!(monoids::Dict, old::AbstractDict, stateprotos::Tuple,
     keynames::Val, lookbacks::Tuple)
     for (_, mq) in old
-        replaymonoids!(monoids, liverows(mq), 1, stateprotos, keynames, lookbacks)
+        replaymonoids!(monoids, mq.rows, oldestlo(mq) - mq.dropped, stateprotos,
+            keynames, lookbacks)
     end
     return monoids
 end

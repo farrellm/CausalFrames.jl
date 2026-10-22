@@ -213,9 +213,10 @@ SUITE["intervalize"]["dense"] = @benchmarkable load(CTX,
 # window tier: the running tier slides per-key states once per row (Min/Max
 # through their windowed deques in "tracking"); the monoid tier (Product is only
 # a monoid; the entry keeps its old name, "tree") folds rows into a two-stack
-# queue and combines its front and back at the tick; the re-fold baseline folds every window at its tick, paying the overlap. "mixed"
-# is an OHLC-style set spanning the running tier and dependents, at a look-back
-# shorter than the tick spacing and at 5000.
+# queue and combines its front and back at the tick; the re-fold baseline folds
+# every window at its tick, paying the overlap. "mixed" is an OHLC-style set
+# spanning the running tier and dependents, at a look-back shorter than the tick
+# spacing and at 5000.
 SUITE["windows"] = BenchmarkGroup()
 SUITE["windows"]["running"] = @benchmarkable load(CTX,
     SRC |> summarizewindows(clock(1000), 5000, [Count(), Sum(:qty), Mean(:qty)]))
