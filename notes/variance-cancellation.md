@@ -194,8 +194,9 @@ print among prices near 100 kept a `Bars(5)` variance 500-600 times too large
 for the rest of the stream (300 bars and counting), pandas GH#52407's tiny
 values under `Bars(3)` read `3.3e-48` for `1e-102` to `6.5e-96`, and pandas'
 `±3e37` case gave a `NaN` correlation after both extremes had left. Time
-windows, `summarizewindows` and `barwindow` showed it too; the tree and
-refold tiers never did, since they don't downdate.
+windows, `summarizewindows` and `barwindow` showed it too; the monoid (then a
+segment tree, now two-stack queues) and refold tiers never did, since they
+don't downdate.
 
 ### Where the residue comes from
 
@@ -253,6 +254,14 @@ otherwise stay. Even there the extra work is about
 
 ### Alternatives rejected
 
+- **The monoid tier** (reporting the float windowed states non-invertible, so
+  they fold through the two-stack queues and never downdate): no residue by
+  construction (a `Bars(5)` variance after the `1e8` spike: worst relative
+  error 2.7e-16 against 941), and about ten lines in place of this mechanism,
+  but 1.5-2.4x on every windowed row (`Std` 104 → 176 ns/row at `Bars(20)`,
+  `Correlation` 149 → 355, `LinearRegression` 290 → 487, `Sum` + `Mean`
+  130 → 159), against this design's 3-7%. `notes/extremes-monoid-tier.md` has
+  the full survey.
 - **Exact deviations** (`TwoDiff` for `x − K`, the shift carried as a pair):
   removes mechanism 1 but not 2, at a cost on every row.
 - **TA-Lib's trigger**, comparing the leaving term to what remains: misses a
