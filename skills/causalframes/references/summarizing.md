@@ -111,7 +111,7 @@ windows may overlap or leave gaps.
   declared order.
 
 Each summarizer's window slides in O(1) per row when it is a
-`GroupSummarizer`, in O(log window) per key per tick when it is another
+`GroupSummarizer`, in O(1) amortized per row when it is another
 `MonoidSummarizer`, and is re-folded in O(window) otherwise.
 
 ## `addsummarycolumns`

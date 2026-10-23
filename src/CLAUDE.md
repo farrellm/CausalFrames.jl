@@ -160,7 +160,10 @@ design rationale and performance constraints behind each module.
     (`WindowTrackState`, a monotonic deque under the same combiner; First keeps
     the whole window), except Last, whose windowed state is a count plus the
     newest value (`WindowLastState`), measured 3-4x cheaper per row than the
-    deque. `CountDistinct` folds a `Set` but slides a `Dict{T,Int}` of counts,
+    deque. The deque extremes run alone 0–30% faster on the monoid queue, but
+    stay groups: a mixed call (OHLC) would then compile two tiers, +9–17% for
+    little runtime (`notes/extremes-monoid-tier.md`). `CountDistinct` folds a
+    `Set` but slides a `Dict{T,Int}` of counts,
     because a count increment hashes twice and is 1.4-1.7x slower than `push!`
     on the non-window folds (DESIGN.md has the table). A windowed state is
     never combined or widened. `MinIndex`/`MaxIndex` and
@@ -248,7 +251,7 @@ design rationale and performance constraints behind each module.
     `Vector` (binary search plus memmove: under 300 ns per row to a 1,000-row
     window, growing linearly past ~10,000; DESIGN.md has the table) with
     `missing` and NaN counted, not stored, so it stays a group and every window
-    slides it. Its value is the state itself, *borrowed* like `treequery`'s
+    slides it. Its value is the state itself, *borrowed* like `queuestates`'
     scratch: dependents read it within the emission and the projection drops
     it, so emission allocates nothing. `combine!` merges into `scratch` and
     swaps, which tolerates `dest` aliasing an input. `linearquantile` copies
@@ -424,27 +427,37 @@ design rationale and performance constraints behind each module.
   overwriting its oldest row when full, with `ringback(r, j)` reading the j-th
   newest. A caller that downdates the row leaving sizes it one past its window
   and reads that row back after the push
-- `src/segtree.jl` — the monoid segment tree behind the rolling and window
-  tree tiers: an implicit array tree of `combine!`d partial state tuples,
-  append-only rows, logical front expiry (`head`), amortized rebuilds, and
-  order-preserving two-accumulator range queries (`treequery`,
-  `windowstart`). Appending (`treeappend!`, a bare leaf) and recombining
-  (`treesync!`, the ancestors of every leaf since the last sync) are separate,
-  so a per-tick caller pays about one combine per row; `treepush!` does both,
-  for rolling's per-row queries. Only nodes over appended leaves are
-  maintained: the sync combines the right edge with the tree's `ident`, so
-  nothing past the end needs zeroing. The tree owns its two query
-  accumulators and its node vector: `treequery` returns **borrowed** scratch,
-  valid only until that tree's next query, and `rebuild!` at an unchanged
-  capacity swaps the live leaves' tuples to the front by reference. That is
-  the steady state under a short window, where rebuilds fire every few
-  appends rather than amortizing away
+- `src/monoidqueue.jl` — the monoid tier behind `addrollingcolumns` and
+  `summarizewindows`: per key, `MonoidQueues` holds the key's rows and one
+  Two-Stacks Lite `PartialQueue` per look-back (a front vector of suffix
+  combines, a back state, the window's `lo`). Rows are addressed by sequence
+  number, so compacting the dead prefix (once it is half the rows) never
+  shifts a window's indices. `queuepush!` folds a row into every back and
+  expires every window against the row's own time (sound because every later
+  query is at or after it, and it bounds an unqueried key's rows, so the
+  lead-in needs no expiry of its own); `expirewindow!` advances `lo` by the
+  kernels' membership test verbatim (rolling.jl adds the `Bars` method, over
+  `keepnewest!`). Callers name a window by its index (`expirequeue!`,
+  `hasrows`, `queuestates`, `livestates`), never reaching into a
+  `PartialQueue`;
+  `queuestates` flips the live rows into the front once `lo` passes it and
+  returns the window's fold, **borrowed** (the front's suffix or the `out`
+  scratch), valid until that window's next query; `livestates` is its form
+  for a window known to hold rows, which keeps `summarizewindows`' emission
+  free of a `Union{Nothing,…}`, whose dispatch allocated per key per tick.
+  Everything goes through the transforms' tuple folds (`freshall!`,
+  `updateall!`, `combinenodes!`), never a new generated fold. The queues are a
+  `Vector`, not an `NTuple{W}`: with `W` a type parameter, every window count
+  recompiled the queue methods (a harness's lead-in case, sharing a key and
+  row type with a three-window case, compiled 0.2 s slower). `BarQueue` is
+  the same algorithm over `barwindow`'s own folds and stays separate (see
+  `barwindow.jl`)
 - `src/tiers.jl` — the per-accumulator window tiers shared by
   `addrollingcolumns` and `summarizewindows`. `tiering` partitions the realized
   states once per run and per widening (each tier's templates picked by the
   generated `tierpick` past a `Val` of the permutation: a tuple generator there
   compiled a widening `grow_to!` chain per state type): running (a group whose `freshwindowed`
-  state is `isinvertible`), tree (another monoid), refold (anything else), and
+  state is `isinvertible`), monoid (another monoid), refold (anything else), and
   no tier for a singleton-typed (fieldless, dependent) state, unless every
   state is one, when they keep their structural tier so something tracks
   membership. `mergestates` splices the tiers' tuples back into topological
@@ -452,18 +465,19 @@ design rationale and performance constraints behind each module.
   `summaryvalues` and dependents read across tiers. An absent tier is
   `nothing`/`()`, so a single-tier call compiles to a single-algorithm kernel.
   `RunningTable` pools retired groups (windowed trackers own vectors).
-  `rebuildbuffer` and `rebuildtrees` choose a rebuild's buffer and trees for
-  both transforms, and `replayrunning!`, `replaytrees!` and `replayoldtrees!`
-  rebuild from the live rows. Built-in states only demote, so the buffer a
-  rebuild needs already exists; `treebuffer` gathers one from the trees for a
-  custom state that promotes
+  `rebuildbuffer` and `rebuildmonoids` choose a rebuild's buffer and queues
+  for both transforms, and `replayrunning!`, `replaymonoids!` and
+  `replayoldmonoids!` rebuild from the live rows. Built-in states only demote,
+  so the buffer a rebuild needs already exists; `monoidbuffer` gathers one
+  from the queues for a custom state that promotes
 - `src/barwindow.jl` — `barwindow`, the count-window state (unexported
   extension API for recursive states needing their own trailing n rows). It
   reuses `prototypes` and `tiering`: groups slide windowed states over a
   `RowRing` of `n + 1` stored rows (row terms evaluated on admission, their
   types inferred from `intypes`), the other monoids sit in `BarQueue`, a
-  preallocated two-stack queue (measured 3-13x faster than a segment tree and
-  flat in `n`; DESIGN.md has the table), and a plain summarizer is rejected.
+  preallocated two-stack queue (the algorithm of `monoidqueue.jl`, over its
+  own folds; measured 3-13x faster than a segment tree and flat in `n`;
+  DESIGN.md has the table), and a plain summarizer is rejected.
   `newbarwindow` builds it unspecialized (its type is decided at runtime
   anyway), once per state and per widening; a key's new state is `fresh(st)`,
   a copy.
@@ -490,8 +504,8 @@ design rationale and performance constraints behind each module.
   made a chain of d stages run its source 2^d times (issue #98). Before the
   output side's first pull (`afterleadin`), `admitleadin!` reads the whole
   lead-in through the summarized side with its own kernel,
-  `leadinsegment!`, evicting against the newest admitted time and expiring
-  that row's key tree (`expiretree!`); an output pull first would queue the
+  `leadinsegment!`, evicting against the newest admitted time (the monoid
+  queues expire on admission anyway); an output pull first would queue the
   lead-in at full input width. `afterleadin`'s `LeadInGate` keeps abstract
   fields on purpose: a wrapper capturing its input's iterator type nests every
   earlier stage's type in a chain's, and `chain8-keyed` then took inference
@@ -506,8 +520,8 @@ design rationale and performance constraints behind each module.
   (`notes/compile-time.md`). `sharedrun = false` keeps
   the second run over `ctx` when a time look-back widens the context. One
   kernel, `rollsegment!`, over a `RollTiers` (a shared row buffer with
-  per-window eviction heads, per-window running tables, per-key trees owning
-  their rows, refold templates). Per row:
+  per-window eviction heads, per-window running tables, per-key monoid queues
+  owning their rows, refold templates). Per row:
   admit into every tier, advance each window's head (downdating running
   groups), then emit each window from the tiers' states for the key; a
   `nothing` from any tier is the empty window. The refold tier folds from the
@@ -517,13 +531,14 @@ design rationale and performance constraints behind each module.
   evict NaN/±Inf rows cleanly. `Bars(n)` windows change membership only: each
   key keeps a `RowRing` of its newest rows (sized for the longest count, plus
   one), a row leaves on admission when pushed `n + 1` deep (`admitrings!`
-  downdates it), the tree queries the key's last `n` rows, the refold tier
+  downdates it), the window's queue holds the key's last `n` rows, the refold
+  tier
   folds the ring, and a tier seeing fewer than `n` rows returns `nothing`,
   whose empty row is all `missing`. The shared buffer serves only time windows;
   a Bars window's head sits at its end. Windows now differ in value type, so
   `wins` peels each window's (look-back, empty row, value vector) together:
   never index the value vectors by a runtime window number. A widening with
-  Bars windows rebuilds rings and trees from each key's longest live suffix
+  Bars windows rebuilds rings and queues from each key's longest live suffix
   (`barsuffixes`). Every admitted row passes through `join.jl`'s `rowat`, which
   is generated to write each field straight into the row type: Base's tuple
   `map` stops unrolling at 32 columns, a 10x cliff on a wide input (issue
@@ -552,11 +567,9 @@ design rationale and performance constraints behind each module.
   and `pullpast!`, a concrete tick vector per chunk) over `addrollingcolumns`'
   row buffer, eviction head and tiers. One admission kernel (`windowrows!`)
   and one tick close (`closewindow!`): evict (downdating the running table),
-  move tree heads and drop emptied trees, sync the rest once per tick (windows
-  are queried per tick, not per row, so rolling's per-append ancestor update
-  would waste log₂(window) combines per row), fold the refold `GroupTable`
+  expire each key's queue and drop emptied ones, fold the refold `GroupTable`
   from the live rows, emit, retire. A key is present in a tier exactly when
-  its window has rows, so the first tier present (running, tree, refold) gives
+  its window has rows, so the first tier present (running, monoid, refold) gives
   the keys to emit and the others are looked up by key (`tiervalues`). Keyed
   output is sparse, plus one *vanish* row of empty values when a key's window
   empties, decided against the previous tick's *emitted* keys; that row stops
@@ -565,7 +578,7 @@ design rationale and performance constraints behind each module.
   replaces the sort and vanish merge with `emitdense!`, a lookup per declared
   key per tick; keyless output is `emitdense!` over `nokeyset`, as in
   `intervalize`, and `admissionkeys` skips its admission check. The
-  declaration is checked where the primary tier makes a group or tree (a key's
+  declaration is checked where the primary tier makes a group or queue (a key's
   first row); a refold primary groups only at ticks, so it checks on admission
   instead. As in `addrollingcolumns`, the chunk step and flush read `cfg`
   through `WindowState`'s abstract field and the per-chunk driver takes it

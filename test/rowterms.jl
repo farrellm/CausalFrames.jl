@@ -196,7 +196,7 @@
 
     @testset "every column summarizer takes row terms" begin
         # Each form over a term must equal the same summarizer over the column
-        # an `addcolumns` step made, across the running, tree and refold tiers.
+        # an `addcolumns` step made, across the running, monoid and refold tiers.
         mid = r -> (r.high + r.low) / 2
         addedmid = src |> addcolumns(r -> (; range = rng(r), mid = mid(r)))
         forms = [
