@@ -162,4 +162,4 @@ running tier. For the float sums and co-moments, the queue does remove issue
 #97's residue by construction: a `Bars(5)` variance after a `1e8` spike leaves
 had a worst relative error of 2.7e-16 on the queue, against 941 on the running
 tier without #123's refold. But that costs 1.5–2.4× on every row, against
-#123's 3–7%.
+#123's 0–13%.

@@ -1139,7 +1139,10 @@ so the weakest structure in a call slows only its own summarizers:
   sum accumulators use compensated summation and count nonfinite terms instead
   of folding them in (see "Summarizers"), so eviction is clean: a window
   recovers exactly once a `NaN` or `±Inf` row ages out, and finite values carry
-  only the compensated round-off rather than the usual sliding-sum drift.
+  only the compensated round-off rather than the usual sliding-sum drift. A
+  state may still ask, after a `downdate!`, to be refolded from the window's
+  live rows (the co-moment does once a dominant row has left; see "Dependent
+  summarizers"), and the tier then rebuilds that key's group from them.
 - **Monoid tier — the other `MonoidSummarizer`s.** Each key keeps its rows
   and, per look-back, a Two-Stacks Lite queue of `combine!`d partial state
   tuples (`monoidqueue.jl`). The queue's raw half is the key's stored rows,
@@ -2005,6 +2008,20 @@ evicted infinity leaves `Inf - Inf = NaN` behind. BigFloat is excluded because
 compensation buys nothing at arbitrary precision and a non-isbits compensated
 pair would allocate on every row.
 
+Compensation has a limit under a window, though: the compensation term is a
+plain float, so once it holds the round-off of a term far larger than the
+rest, it loses whatever lies far below that, and the loss stays after the term
+has gone (issue #97; pandas GH#52407's `3e-16` among values down to `1e-73`
+left a `Bars(3)` sum off by 4e-4, and the windows that should have read
+`2e-51` read `0`). So the *windowed* float sum state (`freshwindowed`) stores
+a `Tracked` instead, the `Compensated` plus `peak`, its largest finite
+`|term|`, and `mag`, a plain `Σ|term|` over the live finite terms (the sum
+itself may cancel to near zero), and asks to be refolded from the window's
+live rows once `peak` exceeds `2^10 · mag`, as the co-moment does (see
+"Dependent summarizers", which describes the refold). Only the windowed state
+tracks: on every path, it cost `summarize` 8-24% and the running sums 11%,
+for folds that never remove a row.
+
 A `Missing`-admitting column gets the same treatment for `missing` that the
 compensated storage gives nonfinites: a type flag `M` on the state holds the
 accumulation at the *non-missing* type and counts the `missing` terms in an
@@ -2052,6 +2069,16 @@ terms are `S₁`'s less the newest row's, whose weight is `0`, so a nonfinite
 value contributes nothing until a later row ages it (a weight of zero is exact,
 not IEEE's `0·Inf = NaN`), and a window recovers once it leaves. A `missing` input is counted as the sum
 family's state counts it, through the same type flag `M`.
+
+A dominant finite row is another matter (issue #97). `S₁`'s compensation
+loses what lies far below that row's round-off, as the sum family's does, and
+`S₂` adds `S₁` on every row, folding the loss in again each time: a `1e16`
+spike left a `Bars(5)` age-weighted sum 76% wrong after it had gone, and
+GH#52407's tiny values read `0`. So the windowed state (`freshwindowed`, a
+type flag `W`) keeps the largest finite `|y|` and a plain live `Σ|y|` and asks
+to be refolded once the first exceeds `2^10` times the second, as the sums do.
+That costs the windowed state about 7% (`Bars(100)`, 55 against 59 ns/row) and
+the ordinary one nothing.
 
 `CountDistinct` is the one summarizer that departs from both of the rules
 above, and the one whose state is not O(1). It holds a `Set` of the values it
@@ -2425,6 +2452,43 @@ does not help: the rewrite is exact now, but the shift still lags the window.
 `notes/variance-cancellation.md` records the measurements and the alternatives
 rejected (Welford/Chan updates, error-free squares on the shared raw sums,
 recentring on every row).
+
+That rounding, and the compensation's own, are at the scale of the largest
+product folded, so under a window a row far larger than the rest left a
+residue once it had gone (issue #97): a `1e8` print among prices near `100`
+kept a `Bars(5)` variance 500 times too large for as long as the stream ran.
+The row's deviation is rounded at its own distance from the shift, and when
+it is removed under a later shift it rounds differently; and a compensation
+term holding a `1e16`-scale error loses what lies below it. Sliding can't
+undo either, so the state asks to be **refolded** instead:
+
+- the windowed float state (`freshwindowed`, a type flag `W`; the ordinary
+  state never downdates, and tracking there cost `summarize` 8%) keeps
+  `peak`, the largest `|d_a·d_b|` folded since its sums restarted, and after
+  each `downdate!` asks (the internal `needsrefold`) once
+  `peak` exceeds `2^10` times the window's own scale: `Σd²` for a variance,
+  and `√(Σd_a²·Σd_b²)` for a covariance, from two plain (uncompensated) sums
+  kept for this alone, since the co-moment itself may be near zero. A live
+  row's product is part of that scale, so the state asks only once a dominant
+  row has left, and what is left behind short of the ratio is at most about
+  `eps · 2^10` of the scale;
+- every caller that downdates — the running tier of `addrollingcolumns`
+  (`Bars` and time windows) and `summarizewindows`, and `barwindow` — refolds
+  the key's group from its live rows when one of its states asks, behind a
+  barrier off the per-row path. The whole group is refolded, not just the
+  asking state: its `freshall!`/`updateall!` are already compiled for
+  admission, and folds over only the asking states measured several times the
+  kernels' compile time. A group whose states never ask (`needsrefold` is the
+  constant `false` for them) compiles the check away;
+- ordinary data rarely asks: over 10⁶ rows of a random walk, at most 35
+  times at `Bars(5)` (its levels; 5 for its steps) and never at `Bars(20)` or
+  `Bars(100)`. Cauchy-tailed steps ask on 1.4% of rows at `Bars(5)` and 0.06%
+  at `Bars(100)`, each refold costing a window's `update!`s;
+- the sum family (`Sum`, `SumPower`, `DotProduct`) asks the same way, against
+  a plain `Σ|term|` (see "Summarizers"), and never on that random walk;
+  `SumPower(x, 2)` asks as often as the variance on Cauchy steps, `Sum` 20 to
+  200 times less often. `AgeWeightedSum` asks on `Sum`'s test, so as often as
+  `Sum`.
 
 `Variance`, `Std`, and `Covariance` follow `Statistics`: a `corrected::Bool`
 keyword (default `true`) selects the divisor `n − Int(corrected)`, so the

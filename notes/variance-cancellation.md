@@ -185,3 +185,241 @@ alternative for regressions, one multivariate co-moment accumulator per fit
 (one shift per column, as many sums as before), would recover most of the
 regression overhead but lose the sharing with `Variance`/`Covariance`; at
 20-26% it wasn't judged worth a second state type.
+
+## Refolding after a dominant row leaves (issue #97)
+
+Under a window, a row much larger than the rest left a residue once it had
+gone. CausalIndicators' port of TA-Lib's `test_reference.c` found it: a `1e8`
+print among prices near 100 kept a `Bars(5)` variance 500-600 times too large
+for the rest of the stream (300 bars and counting), pandas GH#52407's tiny
+values under `Bars(3)` read `3.3e-48` for `1e-102` to `6.5e-96`, and pandas'
+`±3e37` case gave a `NaN` correlation after both extremes had left. Time
+windows, `summarizewindows` and `barwindow` showed it too; the monoid (then a
+segment tree, now two-stack queues) and refold tiers never did, since they
+don't downdate.
+
+### Where the residue comes from
+
+Stepping a `CoMomentState` through the spike case: while the spike is in the
+window the value is exact to 1e-16. The shift then moves (rows 102 and 105),
+and when the spike leaves at 106, `Σd` is off by 3.5e-8 and `Σd²` by 2.15,
+against a true `Σd²` of 0.005. Two mechanisms, either enough alone:
+
+1. **A row's deviation is rounded at its own scale and removed under another
+   shift.** `1e8 - K` rounds at about `eps·1e8 ≈ 1.5e-8`. Folded under one
+   `K` and removed under a later one, it rounds differently, and the
+   difference times `2·d ≈ 2e8` (about 2) stays in `Σd²`. The recentring
+   rewrite is exact, so it carries the rounding along unchanged. This is the
+   `eps·D/s` cost the error-free-products section above left in place, at a
+   `D` it didn't anticipate: a single row, not a level.
+2. **Compensation can't hold what is far below it.** The Neumaier `comp` is a
+   plain float. Once it holds a `1e16`-scale term's rounding, anything about
+   1e-16 below that is lost. This alone gives the GH#52407 and `±3e37`
+   failures, and it also reaches the plain sums: on GH#52407, `Sum` keeps a
+   lasting 4e-4 relative error and `SumPower(:x, 2)` 2e-7 (fixed the same
+   way; see "The sums" below).
+
+### The fix: ask to be refolded
+
+Only a refold from the live rows removes both, since sliding has already lost
+the information. The design is in DESIGN.md's "Dependent summarizers": a
+float state keeps `peak`, the largest `|d_a·d_b|` folded since its sums
+restarted, and asks after a `downdate!` once `peak > 2^10 · scale`, with the
+scale `Σd²` for a variance and `√(Σd_a²·Σd_b²)` for a covariance. The two
+plain sums are kept for the covariance alone, since a covariance near zero is
+legitimate and comparing against it would refold on every eviction. A live
+row's product is at most the scale, so the state asks only once a dominant
+row has left, and the residue that stays short of the trigger is at most
+about `eps · 2^10` of the scale (about 2e-13).
+
+After the fix every path is exact to 2e-16 on the spike (master: 607 on
+`Bars(5)`, 375 on a time window, 607 on `summarizewindows` and `barwindow`).
+GH#52407 and the `±3e37` correlation match the exact values. A sweep shaped
+like CausalIndicators' `test_beta.c` outlier transit (spikes of 1e3 to 1e12,
+1e-3 and 1e-9, on either column, at periods 5, 14 and 30) has a worst error of
+2.2e-16 of the scale after the spike leaves, against 6.5e13 on master.
+
+How often it asks, per 10⁶ rows of `refoldrate.jl`'s data:
+
+| data | `Bars(5)` var / cov | `Bars(20)` | `Bars(100)` |
+|---|---|---|---|
+| random-walk levels | 35 / 0 | 0 / 0 | 0 / 0 |
+| its steps | 5 / 0 | 0 / 0 | 0 / 0 |
+| Cauchy steps | 14,234 / 7,245 | 2,811 / 1,365 | 554 / 253 |
+
+The Cauchy refolds are warranted: each follows the departure of a product
+more than `2^10` times what the window still holds, whose rounding would
+otherwise stay. Even there the extra work is about
+0.06-0.07 row folds per row.
+
+### Alternatives rejected
+
+- **The monoid tier** (reporting the float windowed states non-invertible, so
+  they fold through the two-stack queues and never downdate): no residue by
+  construction (a `Bars(5)` variance after the `1e8` spike: worst relative
+  error 2.7e-16 against 941), and about ten lines in place of this mechanism,
+  but 1.5-2.4x on every windowed row (`Std` 104 → 176 ns/row at `Bars(20)`,
+  `Correlation` 149 → 355, `LinearRegression` 290 → 487, `Sum` + `Mean`
+  130 → 159), against this design's 0-13%. `notes/extremes-monoid-tier.md` has
+  the full survey.
+- **Exact deviations** (`TwoDiff` for `x − K`, the shift carried as a pair):
+  removes mechanism 1 but not 2, at a cost on every row.
+- **TA-Lib's trigger**, comparing the leaving term to what remains: misses a
+  slow decline, where no single leaving term is large against the rest but
+  the residue of all of them is. A high-water mark sees it. TA-Lib's
+  fixed-interval rebuild is unnecessary with the mark.
+- **A ratio near 1**: ordinary data at short windows would refold often. At
+  `2^10` the bound is about 2e-13 of the scale, and ordinary data rarely
+  asks.
+- **Refolding only the asking states** (a generated fold over the states that
+  can ask, the others kept): far worse to compile. The keyed `leadinsegment!`
+  went from 387 ms to 3,056 ms and `windowrows!` from 471 to 2,390 ms, the
+  compile harness from 9.2 to 15.7-22 s. Refolding the whole group through
+  `freshall!`/`updateall!`, which admission has already compiled, brought the
+  harness back to 9.5-9.6 s.
+- **An unspecialized refold** (dispatched per row, compiled only if a refold
+  happens): would cost no compile time up front, but `test/jet.jl`'s tier sets
+  include `Std`, so `@test_opt` would report the dispatch.
+
+### Cost
+
+Runtime, 200,000 rows of a correlated random walk, single-threaded, ns/row,
+minimum over four alternating rounds of two identically built worktrees
+(master and the branch). Allocations are unchanged in every case.
+
+| case | master | refold |
+|---|---|---|
+| `Sum`, `Bars(20)` (control) | 40.6 | 40.7 |
+| `Std`, `Bars(20)` | 72.5 | 70.6 |
+| `Std`, `Bars(20)`, 10 keys | 147.7 | 149.0 |
+| `Std`, time window 50 | 64.8 | 67.4 |
+| `Covariance`, `Bars(20)` | 73.7 | 76.6 |
+| `Correlation`, `Bars(20)` | 127.6 | 133.2 |
+| `LinearRegression` K = 1, `Bars(20)` | 179.7 | 184.9 |
+| `summarizewindows`, `Std` + `Correlation` | 75.8 | 80.4 |
+| `barwindow` `Std(20)` | 40.7 | 41.3 |
+
+Compile time: a harness of seven first calls with co-moments (rolling `Bars`
+and time windows, keyed, a regression, `summarizewindows`, `barwindow`) went
+from 9.05-9.24 s to 9.39-9.55 s over four runs each. The timed test suite's
+included files compiled in 641.8 s on master and 649.1 s on the branch, the
+difference being this issue's own new testset (about 10 s); `rolling.jl` and
+`windows.jl` were unchanged within noise.
+
+### The sums
+
+The sum family (`Sum`, `SumPower`, `DotProduct`, and `Mean` through `Sum`) has
+only the second mechanism, having no shift. Its windowed state stores a
+`Tracked` (the `Compensated` plus `peak`, the largest finite `|term|`, and
+`mag`, a plain live `Σ|term|`) and asks once `peak > 2^10 · mag`. `Σ|term|`
+rather than the sum itself, which may cancel to near zero: against `|Σ|`,
+alternating data would refold on every eviction.
+
+On GH#52407 under `Bars(3)`, the windows that read `0` for `2.2e-51` (relative
+error 1.0) on the previous commit are now exact for `Sum`, `SumPower(x, 2)`,
+`SumPower(x, 3)` and `DotProduct`, on rolling, keyed time windows,
+`summarizewindows` and `barwindow`.
+
+Asks per 10⁶ rows (the same data as the co-moment table):
+
+| data | `Sum` / `SumPower(x, 2)` at `Bars(5)` | `Bars(20)` | `Bars(100)` |
+|---|---|---|---|
+| random-walk levels and steps | 0 / 0 | 0 / 0 | 0 / 0 |
+| Cauchy steps | 617 / 13,924 | 46 / 3,051 | 3 / 595 |
+
+**Only the windowed state tracks.** The first version tracked in every
+`AccumState`. On the folds that never downdate it cost `summarize/keyless`
+24%, `summarize/cycles` and `summarize/running` 11-12% and
+`summarize/powersum` 8% (`ab_bench.sh`, against the co-moment commit), so
+the tracking moved to the `freshwindowed` storage, and the co-moment's to its
+windowed state (a flag `W`) for the same reason: `powersum`'s 8% was partly
+its `Variance`. Afterwards, against master, `summarize/keyless` read 1.010 and
+`powersum` 1.003.
+
+The windowed sums still pay. In a scratch benchmark of rolling `Sum` + `Mean`
+over 400k rows, with matched environments, ns/row:
+
+| case | master | branch | branch, no check |
+|---|---|---|---|
+| `Bars(100)` | 48.7-51.2 | 52.7-53.3 | 50.9-51.8 |
+| time window 25 | 42.9-44.8 | 46.0-46.7 | 45.8-45.9 |
+| `summarizewindows` | 38.7-39.7 | 40.8-41.6 | 40.0-40.5 |
+
+That's 3-5%, about half of it the per-eviction check. `ab_bench.sh` read
+8-14% on the `SUITE` window-sum leaves, but it carries the ~5% bias recorded
+in `notes/compile-time.md` (repo against worktree environments). Folding the
+tracking into `compadd`'s finite branch, to test `isfinite` once, measured
+within noise and was not kept.
+
+Compile time: splitting the windowed states from the ordinary ones means a
+window call compiles both types where they used to be one. The co-moment
+harness went from +3% (tracking everywhere) to +4-5% over master (9.73-9.98 s
+against 9.12-9.47 s).
+
+### AgeWeightedSum
+
+The same compensation loss hit `AgeWeightedSum` harder: `S₂` adds `S₁` on
+every row, so what `S₁` lost is folded in again row after row. On the previous
+commit a `1e16` spike left a `Bars(5)`/time-window result up to 76% wrong
+after it had left (the plain sums were exact on that sweep), and GH#52407 read
+`0` for `2e-51` windows and kept a 1.4% error. Its windowed compensated state
+now has the sums' tracking (a flag `W`, a peak `|y|`, a plain live `Σ|y|`) and
+every case is exact.
+
+The tracking cost the windowed state more than the sums' relative to its own
+time, though about the same per row (3-4 ns). Rolling `AgeWeightedSum` over
+400k rows, ns/row, matched environments:
+
+| case | previous commit | tracked | no check |
+|---|---|---|---|
+| `Bars(100)` | 54.8-55.5 | 58.6-59.4 | 59.0-59.3 |
+| time window 25 | 47.6-47.8 | 51.4-51.8 | 49.6-51.3 |
+| `addsummarycolumns` (not windowed) | 19.8-19.9 | 19.7-19.9 | |
+
+Nearly all of it is the per-row tracking; the check is minor. A branch-free
+form (`ifelse` on `isfinite`) was slower (60.9-61.6). Replacing `max` with a
+plain comparison (both sides are finite and non-negative, so `max`'s NaN and
+signed-zero handling is wasted) saved about 1 ns, and was applied to the sums'
+`Tracked` and the co-moment too.
+
+### Re-measured after the rebase onto #127
+
+The figures above predate #127's monoid queues. Re-run on the rebased branch
+(Julia 1.13.2, `-t1`, 200,000 rows for the co-moments, 400,000 for the sums,
+eight rounds alternating two identically built worktrees, minimum ratio and
+median ratio). The machine was loaded, so read about ±5% as noise.
+
+| case | min | median |
+|---|---|---|
+| `Sum`, `Bars(20)` (control) | 1.03 | 0.98 |
+| `Std`, `Bars(20)` / 10 keys / time window 50 | 1.00 / 1.04 / 1.02 | 1.01 / 1.03 / 0.91 |
+| `Covariance` / `Correlation`, `Bars(20)` | 1.07 / 1.04 | 0.97 / 1.01 |
+| `LinearRegression` K = 1, `Bars(20)` | 0.98 | 1.00 |
+| `summarizewindows`, `Std` + `Correlation` | 1.05 | 0.98 |
+| `barwindow` `Std(20)` | 1.01 | 1.01 |
+| `Sum` + `Mean`, `Bars(100)` / time window 25 / `summarizewindows` | 1.00 / 1.09 / 1.01 | 1.07 / 1.11 / 0.98 |
+| `AgeWeightedSum`, `Bars(100)` / time window 25 | 1.11 / 1.13 | 1.08 / 1.07 |
+| non-window folds (`summarize`, `summarizecycles`, `addsummarycolumns`) | 0.97-1.00 | 0.97-1.03 |
+
+So co-moments 0-7%, windowed sums 0-9%, `AgeWeightedSum` 7-13%, non-window
+paths unchanged. Allocations differ by a fixed 32-384 bytes per call (the
+larger tracked states), not per row.
+
+Compile time: the seven-call co-moment harness went from 10.36-10.69 s to
+10.84-10.97 s (+3-5%). The timed suite's included files went from 663.1/666.2 s
+to 690.0/690.4 s over two pairs: `summarizers.jl` +14.3 s (the new testsets),
+`rolling.jl` +5.2, `rowterms.jl` +2.1, `barwindow.jl` +0.7. Untraced,
+`rolling.jl` alone swings ±5 s between runs here; its compile trace puts the
+real delta at about +2.3 s (1%). Code with identical signatures compiled in the
+same time on both sides (172.25 against 172.28 s), and the whole delta sits in
+the kernels over the windowed float states (`rollsegment!`, `leadinsegment!`,
+`rolltiers`: 47.9 → 49.8 s).
+
+All of that is the refold path. A harness of 60 first calls over tracked
+states read 26.1-26.6 s on master and 27.4-27.5 s on the branch; with
+`anyrefold` stubbed to `false` it read 26.2-26.4 s. Each `refoldbuffer!`/
+`refoldring!` is a new method per group type whose states can ask, compiled
+with `freshall!`/`updateall!` inlined into it, so reusing admission's folds
+still leaves about 4-5% on those kernels. The tracked state types
+and the per-row tracking cost nothing measurable. A 72-call harness over
+states that never ask differed by under 1%.

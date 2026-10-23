@@ -8,6 +8,12 @@
 # Compensated{BigFloat} would allocate per row.
 compensable(::Type{T}) where {T} = T <: AbstractFloat && T !== BigFloat
 
+# How far a float state's largest folded term may exceed its window's own
+# scale before it asks the running tiers to refold it (`needsrefold`; the sum
+# family and the co-moment, issue #97): what sliding leaves behind short of a
+# refold is then at most about eps·REFOLDRATIO of that scale.
+const REFOLDRATIO = 2.0^10
+
 struct Compensated{A<:AbstractFloat}
     total::A     # Neumaier sum of the finite terms only
     comp::A      # running compensation
@@ -78,6 +84,41 @@ acczero(::Type{Compensated{A}}) where {A} = compzero(A)
 @inline accmerge(a::Compensated, b::Compensated) = compmerge(a, b)
 @inline accvalue(s) = s
 @inline accvalue(s::Compensated) = compvalue(s)
+
+# The windowed sums' storage (`freshwindowed`, for the running tiers): a
+# Compensated plus what decides when to refold it (issue #97). The compensation
+# is a plain float, so once it holds the round-off of a term far larger than
+# the rest it loses whatever lies far below that, and the loss stays after the
+# term has gone (pandas GH#52407). So this keeps the largest finite |term|
+# folded (`peak`) and a plain Σ|term| over the live finite terms (`mag`, since
+# the sum itself may cancel to near 0); the state asks to be refolded once
+# peak exceeds REFOLDRATIO times mag. A live term is part of mag, so it asks
+# only once a dominant term has left. Only the windowed state carries it: on
+# the folds that never downdate it cost up to a quarter of `summarize`'s time.
+struct Tracked{A<:AbstractFloat}
+    sum::Compensated{A}
+    peak::A
+    mag::A
+end
+
+trackedstorage(::Type{A}) where {A} = compensable(A) ? Tracked{A} : A
+acczero(::Type{Tracked{A}}) where {A} = Tracked{A}(compzero(A), zero(A), zero(A))
+# `peak` and the term are finite and non-negative, so a plain comparison
+# stands in for `max`, which also orders NaN and signed zeros.
+@inline function accadd(s::Tracked{A}, x::A) where {A}
+    f = isfinite(x)
+    a = abs(x)
+    return Tracked{A}(compadd(s.sum, x), ifelse(f & (a > s.peak), a, s.peak),
+        ifelse(f, s.mag + a, s.mag))
+end
+@inline accsub(s::Tracked{A}, x::A) where {A} =
+    Tracked{A}(compsub(s.sum, x), s.peak, ifelse(isfinite(x), s.mag - abs(x), s.mag))
+@inline accmerge(a::Tracked{A}, b::Tracked{A}) where {A} =
+    Tracked{A}(compmerge(a.sum, b.sum), max(a.peak, b.peak), a.mag + b.mag)
+@inline accvalue(s::Tracked) = compvalue(s.sum)
+# A mag gone negative or to zero under round-off asks too.
+@inline accrefold(s) = false
+@inline accrefold(s::Tracked{A}) where {A} = s.peak > convert(A, REFOLDRATIO) * s.mag
 
 # Carry an accumulator into a wider storage. A plain total enters a compensated
 # storage as one term; a compensated one keeps its pair and counters.
