@@ -260,7 +260,7 @@ otherwise stay. Even there the extra work is about
   error 2.7e-16 against 941), and about ten lines in place of this mechanism,
   but 1.5-2.4x on every windowed row (`Std` 104 → 176 ns/row at `Bars(20)`,
   `Correlation` 149 → 355, `LinearRegression` 290 → 487, `Sum` + `Mean`
-  130 → 159), against this design's 3-7%. `notes/extremes-monoid-tier.md` has
+  130 → 159), against this design's 0-13%. `notes/extremes-monoid-tier.md` has
   the full survey.
 - **Exact deviations** (`TwoDiff` for `x − K`, the shift carried as a pair):
   removes mechanism 1 but not 2, at a cost on every row.
@@ -381,3 +381,45 @@ form (`ifelse` on `isfinite`) was slower (60.9-61.6). Replacing `max` with a
 plain comparison (both sides are finite and non-negative, so `max`'s NaN and
 signed-zero handling is wasted) saved about 1 ns, and was applied to the sums'
 `Tracked` and the co-moment too.
+
+### Re-measured after the rebase onto #127
+
+The figures above predate #127's monoid queues. Re-run on the rebased branch
+(Julia 1.13.2, `-t1`, 200,000 rows for the co-moments, 400,000 for the sums,
+eight rounds alternating two identically built worktrees, minimum ratio and
+median ratio). The machine was loaded, so read about ±5% as noise.
+
+| case | min | median |
+|---|---|---|
+| `Sum`, `Bars(20)` (control) | 1.03 | 0.98 |
+| `Std`, `Bars(20)` / 10 keys / time window 50 | 1.00 / 1.04 / 1.02 | 1.01 / 1.03 / 0.91 |
+| `Covariance` / `Correlation`, `Bars(20)` | 1.07 / 1.04 | 0.97 / 1.01 |
+| `LinearRegression` K = 1, `Bars(20)` | 0.98 | 1.00 |
+| `summarizewindows`, `Std` + `Correlation` | 1.05 | 0.98 |
+| `barwindow` `Std(20)` | 1.01 | 1.01 |
+| `Sum` + `Mean`, `Bars(100)` / time window 25 / `summarizewindows` | 1.00 / 1.09 / 1.01 | 1.07 / 1.11 / 0.98 |
+| `AgeWeightedSum`, `Bars(100)` / time window 25 | 1.11 / 1.13 | 1.08 / 1.07 |
+| non-window folds (`summarize`, `summarizecycles`, `addsummarycolumns`) | 0.97-1.00 | 0.97-1.03 |
+
+So co-moments 0-7%, windowed sums 0-9%, `AgeWeightedSum` 7-13%, non-window
+paths unchanged. Allocations differ by a fixed 32-384 bytes per call (the
+larger tracked states), not per row.
+
+Compile time: the seven-call co-moment harness went from 10.36-10.69 s to
+10.84-10.97 s (+3-5%). The timed suite's included files went from 663.1/666.2 s
+to 690.0/690.4 s over two pairs: `summarizers.jl` +14.3 s (the new testsets),
+`rolling.jl` +5.2, `rowterms.jl` +2.1, `barwindow.jl` +0.7. Untraced,
+`rolling.jl` alone swings ±5 s between runs here; its compile trace puts the
+real delta at about +2.3 s (1%). Code with identical signatures compiled in the
+same time on both sides (172.25 against 172.28 s), and the whole delta sits in
+the kernels over the windowed float states (`rollsegment!`, `leadinsegment!`,
+`rolltiers`: 47.9 → 49.8 s).
+
+All of that is the refold path. A harness of 60 first calls over tracked
+states read 26.1-26.6 s on master and 27.4-27.5 s on the branch; with
+`anyrefold` stubbed to `false` it read 26.2-26.4 s. Each `refoldbuffer!`/
+`refoldring!` is a new method per group type whose states can ask, compiled
+with `freshall!`/`updateall!` inlined into it, so reusing admission's folds
+still leaves about 4-5% on those kernels. The tracked state types
+and the per-row tracking cost nothing measurable. A 72-call harness over
+states that never ask differed by under 1%.
