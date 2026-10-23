@@ -160,7 +160,10 @@ design rationale and performance constraints behind each module.
     (`WindowTrackState`, a monotonic deque under the same combiner; First keeps
     the whole window), except Last, whose windowed state is a count plus the
     newest value (`WindowLastState`), measured 3-4x cheaper per row than the
-    deque. `CountDistinct` folds a `Set` but slides a `Dict{T,Int}` of counts,
+    deque. The deque extremes run alone 0–30% faster on the monoid queue, but
+    stay groups: a mixed call (OHLC) would then compile two tiers, +9–17% for
+    little runtime (`notes/extremes-monoid-tier.md`). `CountDistinct` folds a
+    `Set` but slides a `Dict{T,Int}` of counts,
     because a count increment hashes twice and is 1.4-1.7x slower than `push!`
     on the non-window folds (DESIGN.md has the table). A windowed state is
     never combined or widened. `MinIndex`/`MaxIndex` and

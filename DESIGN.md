@@ -1211,14 +1211,28 @@ Measured over the benchmark's 100,000 rows (four per time unit, 100 keys),
 choosing per accumulator rather than giving the whole call its weakest
 summarizer's algorithm matters: an OHLC-style `[First, Max, Min, Last, Mean,
 Std]` takes 15 ms at a 250-unit look-back against 52 ms through the monoid
-tier alone (28 ms at 5 units); `[Min, Max]` takes 7.0 ms on the deques against
-14.3 ms on the monoid tier; and `CountDistinct` 7.2 ms against 239 ms with a
-set copied per combine. Those monoid-tier figures predate its two-stack
+tier alone (28 ms at 5 units). That figure predates the tier's two-stack
 queues, when it was a per-key segment tree (O(log window) per query, with
-log₂(window) combines per row to keep its ancestors current); the switch
+log₂(window) combines per row to keep its ancestors current). The switch
 halved the tier's own benchmarks (`Product` at a 25-unit look-back, 8.0 →
 4.0 ms; `Bars(100)`, 7.7 → 3.8 ms; a keyed lead-in, 33 → 17 ms with peak
-live memory 12.2 → 8.7 MiB), so the gaps above are now smaller.
+live memory 12.2 → 8.7 MiB).
+
+On the queues, forcing each group onto the monoid tier still loses at
+runtime, with one exception (`notes/extremes-monoid-tier.md`, 200,000–300,000
+rows, ns per row end to end):
+
+- **`CountDistinct`:** 8–42× slower, its set copied into every front slot.
+- **The order statistics and `MeanAbsDev`:** 1.4–3.7× slower.
+- **The co-moments:** `Std` about 1.7×, `Correlation` 2.4×.
+- **The sums:** 10–60% slower.
+- **The exception, the deque extremes** (`Min`, `Max`, `First` and the
+  arg-extremes): 0–30% *faster* on the queue when they run alone, with
+  identical output. They keep their deques anyway. In the common mixed call
+  (OHLC above) the queue gains only 0–15% at runtime, and the call compiles
+  both tiers' per-type machinery instead of one, which costs 9–17% of its
+  first-call compile time. A queue-only call compiles what a running-only one
+  does.
 
 The partition is re-derived from the realized states whenever they are built
 or widened. A widening that produces an accumulator defeating `downdate!`
@@ -1382,8 +1396,12 @@ and search, so no heuristic chooses between them. The two-stack queues that
 replaced the trees cost what a lazily synced tree did here (`Product` alone,
 26.5 against 25.8 ms, within noise: about two `update!`s and one `combine!`
 per row against one of each, with no rebuilds or searches) while allocating
-an eighth as often (21,000 allocations against 176,000), so these
-comparisons stand. Keeping the deque's values
+an eighth as often (21,000 allocations against 176,000), so the mixed-call
+comparisons stand. The `[Min, Max]` exception has grown. A keyless `Max`
+alone on the queue takes 0.69–0.88 of its deque time at 50- and 1,000-unit
+look-backs over `clock(10)` (`notes/extremes-monoid-tier.md`). It still
+keeps the deque, because moving it would make the mixed calls compile two
+tiers (see `addrollingcolumns` above). Keeping the deque's values
 and sequence numbers in one vector for isbits values, halving its pushes and
 pops, is the obvious next optimization. The buffer is compacted at every
 tick's eviction (and rolling's after every row), so it stays near the window's
@@ -2054,7 +2072,8 @@ state counts the rows per distinct value in a `Dict{T,Int}` instead and drops a
 value when its count reaches zero, so a sliding window costs O(1) per row where
 the monoid tier would copy a set on every combine (7.2 ms against 239 ms over
 the benchmark's 100,000 rows at a 25-unit look-back, measured on its former
-segment tree). The two stay separate
+segment tree. On the two-stack queues it is still 8–42× slower:
+`notes/extremes-monoid-tier.md`). The two stay separate
 because the count costs the folds that never remove a row: incrementing a count
 through the public `Dict` API hashes twice per row, which measured 1.4–1.7×
 slower than `push!` on a Set over a million-row fold (1.62× for 100 distinct
@@ -2557,6 +2576,11 @@ this structure (see "Rolling windows" and "Window summarization"). The classific
   the `Min`/`Max` deque and report the front's rows-since, the newest row's
   sequence number less the front's; a tie pops the older value, so the most
   recent extreme is reported, as their ordinary state's `combine!` has it.
+  Demoting the deque extremes to the monoid tier would delete
+  `WindowTrackState` and runs them alone 0–30% faster. But it makes a
+  mixed call like OHLC compile two tiers, at 9–17% more first-call compile
+  time for 0–15% at runtime, so they stay groups
+  (`notes/extremes-monoid-tier.md`).
 - **Groups through a sorted multiset**: `SortedValues`, and so `Quantile`,
   `Median` and `PercentRank` (with `Last`). One ordinary state serves every
   tier: insertion and one-copy deletion invert, and a merge combines.
