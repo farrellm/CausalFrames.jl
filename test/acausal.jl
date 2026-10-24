@@ -238,27 +238,27 @@ using CausalFrames.Acausal
     end
 
     @testset "buffer compacts in place" begin
-        b = CausalFrames.Acausal.KeyBuffer{Int}(collect(1:100), 1)
+        KB = CausalFrames.Acausal.KeyBuffer
+        bufpop! = CausalFrames.Acausal.bufpop!
+        bufpush! = CausalFrames.Acausal.bufpush!
+        b = KB{Int}(collect(1:100), 1)
         function popn!(b, k)
             for _ in 1:k
-                CausalFrames.Acausal.bufpop!(b)
+                bufpop!(b)
             end
         end
         popn!(b, 1)
+        p = pointer(b.rows)
         # the 51st pop leaves 49 live rows behind a 51-row dead prefix,
         # which compacts without allocating
         @test @allocated(popn!(b, 50)) == 0
         @test b.head == 1
         @test b.rows == 52:100
-        function pushrange!(b, lo, hi)
-            for i in lo:hi
-                CausalFrames.Acausal.bufpush!(b, i)
-            end
-        end
-        pushrange!(CausalFrames.Acausal.KeyBuffer{Int}(), 1, 1)
-        # the compacted buffer kept its capacity, so refilling it to its old
-        # length reuses the freed slots
-        @test @allocated(pushrange!(b, 101, 151)) == 0
+        # the live rows moved to the front of the same storage, rather than
+        # the vector's start advancing past the dead prefix, so later pushes
+        # reuse the freed slots
+        @test pointer(b.rows) == p
+        foreach(i -> bufpush!(b, i), 101:151)
         @test b.rows == 52:151
     end
 

@@ -65,11 +65,13 @@ struct Forward end
 
 # A per-key FIFO of buffered future right rows: append on pull, pop by
 # advancing `head`, with amortized compaction that moves the live rows to the
-# front in place, so the backing vector keeps its capacity (bounded by the most
-# rows the key buffers at once) and later pushes reuse it. `deleteat!` of the
+# front in place, so later pushes reuse the freed slots. `deleteat!` of the
 # prefix would only advance the vector's memory offset, leaving the dead slots
-# allocated and making the next push past the end reallocate. `matches` holds
-# copied rows, not indices, so compaction never invalidates a match.
+# allocated and making the next push past the end reallocate. The cost is that
+# a key's buffer never releases capacity: it keeps what its busiest moment grew
+# it to, which `push!`'s over-allocation can put above that moment's row count.
+# `matches` holds copied rows, not indices, so compaction never invalidates a
+# match.
 mutable struct KeyBuffer{V}
     rows::Vector{V}
     head::Int
