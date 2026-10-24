@@ -510,7 +510,7 @@ newvals(::Type{V}, emptyrow, n::Int) where {V} =
 # only once they dominate the buffer: amortized O(1) per row.
 @inline compactbuffer!(::Nothing, winheads::Vector{Int}) = nothing
 @inline function compactbuffer!(buffer::Vector, winheads::Vector{Int})
-    dropped = compactdead!(buffer, minimum(winheads) - 1)
+    dropped = compactdead!(buffer, minimum(winheads) - 1, 64)
     dropped > 0 && (winheads .-= dropped)
     return nothing
 end

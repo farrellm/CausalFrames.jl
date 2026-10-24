@@ -140,9 +140,9 @@ end
 # fewer skips the scan over the windows): amortized O(1) per row.
 @inline function compactqueues!(mq::MonoidQueues)
     length(mq.rows) >= 128 || return nothing
-    dead = compactdead!(mq.rows, oldestlo(mq) - mq.dropped - 1)
+    dead = compactdead!(mq.rows, oldestlo(mq) - mq.dropped - 1, 64)
     dead == 0 && return nothing
-    deleteat!(mq.times, 1:dead)
+    dropfront!(mq.times, dead)
     mq.dropped += dead
     return nothing
 end

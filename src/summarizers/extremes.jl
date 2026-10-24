@@ -95,14 +95,9 @@ end
     seqs = st.seqs
     if st.front <= length(seqs) && @inbounds(seqs[st.front]) == st.popped
         st.front += 1
-        dead = st.front - 1
-        if dead == length(seqs)
-            empty!(st.vals)
-            empty!(seqs)
-            st.front = 1
-        elseif dead >= 32 && 2 * dead >= length(seqs)
-            deleteat!(st.vals, 1:dead)
-            deleteat!(seqs, 1:dead)
+        dead = compactdead!(seqs, st.front - 1, 32)
+        if dead > 0
+            dropfront!(st.vals, dead)
             st.front = 1
         end
     end

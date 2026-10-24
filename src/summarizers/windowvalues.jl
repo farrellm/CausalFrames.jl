@@ -94,14 +94,8 @@ end
     elseif isnanvalue(v)
         st.nans -= 1
     else
-        h = st.head += 1
-        vals = st.vals
-        if h > 32 && 2 * (h - 1) >= length(vals)
-            n = length(vals) - h + 1
-            copyto!(vals, 1, vals, h, n)
-            resize!(vals, n)
-            st.head = 1
-        end
+        h = st.head + 1
+        st.head = h - compactdead!(st.vals, h - 1, 32)
     end
     return nothing
 end

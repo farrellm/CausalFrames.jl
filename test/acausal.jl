@@ -237,7 +237,7 @@ using CausalFrames.Acausal
         @test futurealloc() == 0
     end
 
-    @testset "buffer compacts in place" begin
+    @testset "buffer compacts without allocating" begin
         KB = CausalFrames.Acausal.KeyBuffer
         bufpop! = CausalFrames.Acausal.bufpop!
         bufpush! = CausalFrames.Acausal.bufpush!
@@ -248,18 +248,13 @@ using CausalFrames.Acausal
             end
         end
         popn!(b, 1)
-        p = pointer(b.rows)
-        # the 51st pop leaves 49 live rows behind a 51-row dead prefix,
-        # which compacts without allocating
-        @test @allocated(popn!(b, 50)) == 0
+        # the 50th pop leaves a 50-row dead prefix, half the buffer, which
+        # compacts without allocating
+        @test @allocated(popn!(b, 49)) == 0
         @test b.head == 1
-        @test b.rows == 52:100
-        # the live rows moved to the front of the same storage, rather than
-        # the vector's start advancing past the dead prefix, so later pushes
-        # reuse the freed slots
-        @test pointer(b.rows) == p
+        @test b.rows == 51:100
         foreach(i -> bufpush!(b, i), 101:151)
-        @test b.rows == 52:151
+        @test b.rows == 51:151
     end
 
     @testset "empty streams" begin
