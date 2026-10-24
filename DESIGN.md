@@ -755,7 +755,8 @@ barrier — with three inversions:
   (mirror of `asofjoin` near `start`).
 - **Buffering.** Because the match is the *earliest* qualifying right row,
   the store is a `Dict{K, KeyBuffer{V}}` of per-key FIFOs (append on pull,
-  logical pop-front by advancing a `head`, amortized in-place compaction)
+  logical pop-front by advancing a `head`, amortized in-place compaction that
+  moves the live rows to the front, so a key's buffer keeps its peak capacity)
   rather than one row per key. Rows are held until a left
   row consumes or outruns them, and confirming that a key has no future match
   drains the right stream, so worst-case memory is O(number of right rows) —

@@ -250,8 +250,16 @@ using CausalFrames.Acausal
         @test @allocated(popn!(b, 50)) == 0
         @test b.head == 1
         @test b.rows == 52:100
-        foreach(i -> CausalFrames.Acausal.bufpush!(b, i), 101:110)
-        @test b.rows == 52:110
+        function pushrange!(b, lo, hi)
+            for i in lo:hi
+                CausalFrames.Acausal.bufpush!(b, i)
+            end
+        end
+        pushrange!(CausalFrames.Acausal.KeyBuffer{Int}(), 1, 1)
+        # the compacted buffer kept its capacity, so refilling it to its old
+        # length reuses the freed slots
+        @test @allocated(pushrange!(b, 101, 151)) == 0
+        @test b.rows == 52:151
     end
 
     @testset "empty streams" begin
