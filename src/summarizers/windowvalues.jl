@@ -95,7 +95,7 @@ end
         st.nans -= 1
     else
         h = st.head + 1
-        st.head = h - compactdead!(st.vals, h - 1, 32)
+        st.head = h - compactdead!(st.vals, h - 1)
     end
     return nothing
 end

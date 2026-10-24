@@ -135,12 +135,12 @@ end
     return nothing
 end
 
-# Drop the rows no window still holds once they are at least half the rows
-# (`compactdead!`'s rule, which needs 128 rows, tested first so a key holding
-# fewer skips the scan over the windows): amortized O(1) per row.
+# Drop the rows no window still holds by `compactdead!`'s rule, which needs
+# `COMPACTMIN` rows, tested first so a key holding fewer skips the scan over
+# the windows: amortized O(1) per row.
 @inline function compactqueues!(mq::MonoidQueues)
-    length(mq.rows) >= 128 || return nothing
-    dead = compactdead!(mq.rows, oldestlo(mq) - mq.dropped - 1, 64)
+    length(mq.rows) >= COMPACTMIN || return nothing
+    dead = compactdead!(mq.rows, oldestlo(mq) - mq.dropped - 1)
     dead == 0 && return nothing
     dropfront!(mq.times, dead)
     mq.dropped += dead

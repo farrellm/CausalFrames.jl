@@ -194,7 +194,7 @@ end
 # amortized O(1) per row. Called at each tick, so the buffer stays near the
 # window's size.
 compacthead!(::Nothing, head::Int) = head
-compacthead!(buffer::Vector, head::Int) = head - compactdead!(buffer, head - 1, 64)
+compacthead!(buffer::Vector, head::Int) = head - compactdead!(buffer, head - 1)
 
 # After the last tick nothing more is emitted, so the live rows (the buffer,
 # groups and queues) are released rather than held to the end of the stream.

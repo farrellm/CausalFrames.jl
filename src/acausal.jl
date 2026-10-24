@@ -77,7 +77,7 @@ KeyBuffer{V}() where {V} = KeyBuffer{V}(V[], 1)
 @inline bufpush!(b::KeyBuffer, v) = (push!(b.rows, v); nothing)
 function bufpop!(b::KeyBuffer)
     h = b.head + 1
-    b.head = h - compactdead!(b.rows, h - 1, 1)
+    b.head = h - compactdead!(b.rows, h - 1)
     return nothing
 end
 
