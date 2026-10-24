@@ -82,7 +82,7 @@ function bufpop!(b::KeyBuffer)
         empty!(b.rows)
         b.head = 1
     elseif 2 * (b.head - 1) > length(b.rows)
-        b.rows = b.rows[b.head:end]
+        deleteat!(b.rows, 1:(b.head-1))
         b.head = 1
     end
     return nothing
