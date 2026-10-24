@@ -8,7 +8,7 @@ module Acausal
 
 using ..CausalFrames: CausalPipeline, Context, pipetransform, chunkmap, shiftchunk!,
     settimechunk!, SetTimeState, checktimespec, timetype, rowat, keyat,
-    jointransform, widenstop
+    jointransform, widenstop, compactdead!
 import ..CausalFrames: newstore, widenstore, segment!, joincmp, rightcontext
 
 export futurejoin, lead
@@ -64,9 +64,8 @@ futurejoin(left::CausalPipeline, right::CausalPipeline; kwargs...) =
 struct Forward end
 
 # A per-key FIFO of buffered future right rows: append on pull, pop by
-# advancing `head`, with amortized compaction so the backing vector stays
-# bounded. `matches` holds copied rows, not indices, so compaction never
-# invalidates a match.
+# advancing `head`, with `compactdead!`'s amortized compaction. `matches` holds
+# copied rows, not indices, so compaction never invalidates a match.
 mutable struct KeyBuffer{V}
     rows::Vector{V}
     head::Int
@@ -77,14 +76,8 @@ KeyBuffer{V}() where {V} = KeyBuffer{V}(V[], 1)
 @inline buffront(b::KeyBuffer) = @inbounds b.rows[b.head]
 @inline bufpush!(b::KeyBuffer, v) = (push!(b.rows, v); nothing)
 function bufpop!(b::KeyBuffer)
-    b.head += 1
-    if b.head > length(b.rows)
-        empty!(b.rows)
-        b.head = 1
-    elseif 2 * (b.head - 1) > length(b.rows)
-        b.rows = b.rows[b.head:end]
-        b.head = 1
-    end
+    h = b.head + 1
+    b.head = h - compactdead!(b.rows, h - 1)
     return nothing
 end
 

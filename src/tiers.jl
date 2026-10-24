@@ -306,12 +306,3 @@ function replayoldmonoids!(monoids::Dict, old::AbstractDict, stateprotos::Tuple,
     end
     return monoids
 end
-
-# Drop a row buffer's `dead` prefix, the rows no window still holds, once it is
-# at least half the buffer: amortized O(1) per row. Returns how many rows were
-# dropped.
-@inline function compactdead!(buffer::Vector, dead::Int)
-    (dead >= 64 && 2 * dead >= length(buffer)) || return 0
-    deleteat!(buffer, 1:dead)
-    return dead
-end

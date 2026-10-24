@@ -22,6 +22,18 @@ design rationale and performance constraints behind each module.
   the second side's view of every chunk (whole, sliced or skipped), so the
   first side can read ahead through rows the second never sees without
   queueing them
+- `src/compaction.jl` — `compactdead!`, the one dead-prefix rule for every
+  FIFO that pops by advancing a head (the window transforms' row buffer, the
+  monoid queues' rows, the windowed extremes' deque, `WindowValues`,
+  `futurejoin`'s `KeyBuffer`): drop the prefix when it is everything, or past
+  `COMPACTMIN` (32) rows and half the vector. Below 8, a steady 1-row FIFO paid
+  3-5x per row in compactions, and from 32 up the cost is flat; the buffers
+  are mostly per key, each holding up to `COMPACTMIN` dead rows, so don't raise
+  it per site. It drops with a prefix `deleteat!`, which only
+  advances the vector's start and lets a later push reuse the freed front;
+  moving the live rows down with `copyto!` measured 7-14% slower on
+  `futurejoin`, for the same allocations, so don't "fix" it into an in-place
+  move
 - `src/frame.jl` — `CausalFrame{T}`: opaque, backed by a vector of
   time-ordered DataFrame chunks. The public inner constructor checks the
   invariants; `load`/`stream` build through a `Trusted`-token constructor that

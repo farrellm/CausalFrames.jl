@@ -237,6 +237,26 @@ using CausalFrames.Acausal
         @test futurealloc() == 0
     end
 
+    @testset "buffer compacts without allocating" begin
+        KB = CausalFrames.Acausal.KeyBuffer
+        bufpop! = CausalFrames.Acausal.bufpop!
+        bufpush! = CausalFrames.Acausal.bufpush!
+        b = KB{Int}(collect(1:100), 1)
+        function popn!(b, k)
+            for _ in 1:k
+                bufpop!(b)
+            end
+        end
+        popn!(b, 1)
+        # the 50th pop leaves a 50-row dead prefix, half the buffer, which
+        # compacts without allocating
+        @test @allocated(popn!(b, 49)) == 0
+        @test b.head == 1
+        @test b.rows == 51:100
+        foreach(i -> bufpush!(b, i), 101:151)
+        @test b.rows == 51:151
+    end
+
     @testset "empty streams" begin
         left = onechunk(time = [1, 2], px = [1.0, 2.0])
         # empty right: passthrough, leftprefix still applied

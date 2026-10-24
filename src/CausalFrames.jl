@@ -28,6 +28,7 @@ export Context, CausalFrame, CausalPipeline, load, stream, scan, context,
 include("context.jl")
 include("frame.jl")
 include("chunks.jl")
+include("compaction.jl")
 include("pipeline.jl")
 include("sources.jl")
 include("sourceclip.jl")
