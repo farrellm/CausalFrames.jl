@@ -64,9 +64,16 @@ Public access:
 
 A lazy description of how to produce data: conceptually a function
 `Context -> single-pass lazy iterator of DataFrame chunks`, time non-decreasing
-within and across chunks and no chunk empty. The run function's type is a
-parameter (`CausalPipeline{F}`), never an abstract `Function` field. Nothing
-runs until the iterator is consumed, by one of:
+within and across chunks and no chunk empty. Concretely it is a node of a DAG:
+its run function (`(ctx, inputs) -> iterator`, its type a parameter,
+`CausalPipeline{F}`, never an abstract `Function` field), the pipelines it
+reads, the context it reads each one over, and two flags saying whether its
+rows depend on where the context starts or stops. Evaluation plans the whole
+DAG first, so one upstream read by several operators runs once for all of
+them when that is exact (see "Shared runs"). The public constructor,
+`CausalPipeline(run; startfree, stopfree)` with `run(ctx)`, builds a source;
+nothing outside the package reaches a pipeline's inputs. Nothing runs until
+the iterator is consumed, by one of:
 
 - `load(ctx, p) -> CausalFrame`: drains the iterator into a frame wrapping the
   chunks without copying. An empty result gives a zero-row frame with only
@@ -111,7 +118,7 @@ boundaries.
 | `intervalize(clock, ss; key, keyset, closelast)` | transform | each interval `[bₖ, bₖ₊₁)` between clock ticks, at `bₖ₊₁` (see "Interval summarization") |
 | `summarizewindows(clock, lookback, ss; key, keyset)` | transform | `[τ - lookback, τ)` at each clock tick `τ` (see "Window summarization") |
 | `addsummarycolumns(ss; key)` | transform | append the running summary after each row |
-| `addrollingcolumns(windows, ss; key, from, sharedrun)` | transform | append summaries over named trailing windows (see "Rolling windows") |
+| `addrollingcolumns(windows, ss; key, from)` | transform | append summaries over named trailing windows (see "Rolling windows") |
 | `asofjoin(right; key, tolerance, strict, leftprefix, rightprefix, righttime)` | transform | append the latest right row at or before each row (see "As-of join") |
 | `lookupjoin(table; key, unmatched, leftprefix, rightprefix)` | transform | append the row with the same key from a table without time (see "Lookup join") |
 | `lag(offset)` | transform | move every row `offset` later (see "Lead and lag") |
@@ -124,6 +131,7 @@ boundaries.
 | `applymodels(models; column, key, tolerance, strict, name, operation)` | transform | append predictions from the latest fitted model (see "Model fitting (MLJ)") |
 | `addpredictions(clock, lookback, model, predictors, response; key, name, operation, verbosity)` | transform | refit on a trailing window at each tick and predict (see "Model fitting (MLJ)") |
 | `modelreports(; column, name)` | transform | replace each fitted model with its report (see "Model fitting (MLJ)") |
+| `sharing(force)` | transform | pass through, forcing the readers of the result to share one run (`true`) or each run their own (`false`); see "Shared runs" |
 
 Row functions (`pred`, `f`) receive a row supporting `row.name` and
 `row[:name]`, including `row.time`. Transforms iterate the concretely typed
@@ -240,8 +248,8 @@ resolution is one dynamic call per run, handing a `Val` to `parquetproducer` /
 `parquetsink`, whose per-backend methods live in the extensions.
 
 One in-memory DuckDB database is created lazily per process and a connection
-opened per `run(ctx)` — a connection is single-consumer, and a pipeline may be
-run more than once (a self-join reads its file twice).
+opened per run — a connection is single-consumer, and a pipeline may be run
+more than once (a self-join over different contexts of a `closed` read).
 
 Both sinks reuse the CSV sink's `ChunkSink` (bounded `Channel{DataFrame}`,
 background task, `bind`ed so a writer failure surfaces at the next `put!`, the
@@ -756,9 +764,9 @@ receive the matched row's time.
   prefixing — checked once, when both schemas are first known — so a
   no-prefix self join fails deterministically.
 - **Self join.** `p |> asofjoin(p; rightprefix = "prev", strict = true)`
-  gives previous-row semantics. It works because pipelines are lazy: each
-  `run(ctx)` builds fresh iterators (a readcsv-backed self join reads the
-  file twice).
+  gives previous-row semantics. Both sides read `p`, which runs once for both
+  (see "Shared runs"): over the same context without a tolerance, over the
+  widened one with it when `p` is `startfree`, and twice otherwise.
 - **Empty right stream.** A right stream producing no chunks over the
   (widened) window passes left chunks through unchanged apart from the
   `leftprefix` rename: no right columns, no `righttime`. Schemas are
@@ -1073,7 +1081,7 @@ behave differently from `settime(r -> r.time)`.
 
 ## Rolling windows
 
-`addrollingcolumns(windows, ss; key, from, sharedrun)` is the second binary operator:
+`addrollingcolumns(windows, ss; key, from)` is the second binary operator:
 it keeps every input row and column and appends, for each named window, each
 summarizer's value columns computed over that row's trailing window.
 `windows` maps window names to look-backs — a NamedTuple
@@ -1086,38 +1094,35 @@ convention, not the sources' half-open one) — so under self-summarization
 the row itself, and every row sharing its timestamp, is in its own window.
 
 - **The summarized stream.** By default the summaries are computed over the
-  pipeline being augmented itself, which runs **once**, over the widened
-  context (below): its chunks are teed (`teesides` in `chunks.jl`) to the
-  summarized side and to the output side, which drops the rows before
+  pipeline being augmented itself: the transform is a node reading its input
+  twice, once over the widened context (below) for the summaries and once
+  over `ctx` for the output rows. The plan shares the two (see "Shared runs")
+  whenever that is exact: always without a time look-back, and with one when
+  the input is `startfree`, the output side then dropping the rows before
   `start` as `warmup` does. A run per side would compound under chaining —
-  each stage running its input twice makes a chain of d stages run its
-  source 2^d times (issue #98: 14 stages over a 24k-row input took 11.5
-  minutes). The cost is a semantic choice: the output rows are the widened
-  run's, so a stateful input (an earlier `Bars` stage, `forwardfill`) shows
-  values that saw pre-`start` history — the same values its summaries were
-  computed over. An input anchored to its run's start changes its rows, not
-  just their values: `clock` ticks and an `intervalize` grid shift with the
-  widened start unless the look-back is a whole number of ticks, and `head`
-  spends its count on the lead-in, possibly leaving no rows at all.
-  `sharedrun = false` keeps the output rows a run over `ctx`
-  itself, the input as it would load without this transform; a time
-  look-back then costs a second run (the self-join precedent: pipelines are
-  lazy, so each `run(ctx)` builds fresh iterators, and a readcsv-backed
-  pipeline reads its file twice). Without a time look-back the two
-  contexts are equal, and the run is teed either way. The tee's queue holds
-  only the chunks one side is ahead by, and the lead-in is not among them:
-  before the output side pulls at all, the summarized side reads the whole
-  lead-in, admitting each row into the windows and evicting against the
-  newest admitted time (every output row is at or after it). The tee drops
-  the lead-in from the output side's view as it passes, so the queue holds at
-  most the chunk straddling `start`, and the lead-in costs only the rows the
-  windows keep, at their stored width. Pulling an output chunk first would
-  have the tee queue the whole lead-in, a look-back of chunks at the input's
-  full width, before the windows could drop any of it.
-  `benchmark/peakmemory.jl` measures it. `from` names a different
-  pipeline to summarize instead, and `sharedrun` is then ignored. Either way
-  summarized rows relate to output rows by time (and key) only, never by row
-  identity.
+  each stage running its input twice makes a chain of d stages run its source
+  2^d times (issue #98: 14 stages over a 24k-row input took 11.5 minutes).
+  An input whose rows depend on where its run starts (an earlier `Bars`
+  stage, a `forwardfill` without tolerance, a `clock` or `head`) runs once
+  per side, so the output rows are exactly the input's over `ctx`;
+  `sharing(true)` on the input shares the widened run anyway, and the output
+  then shows the values that saw pre-`start` history (#99's former default).
+  A shared run's tee queues only the chunks one side is ahead by, and the
+  lead-in is not among them: before the output side pulls at all, the
+  summarized side reads the whole lead-in (whenever the context widens,
+  shared or not), admitting each row into the windows and evicting against
+  the newest admitted time (every output row is at or after it). The tee
+  drops the lead-in from the output side's view as it passes, so the queue
+  holds at most the chunk straddling `start`, and the lead-in costs only the
+  rows the windows keep, at their stored width. Pulling an output chunk first
+  would have the tee queue the whole lead-in, a look-back of chunks at the
+  input's full width, before the windows could drop any of it.
+  `benchmark/peakmemory.jl` measures it. `from` names a different pipeline to
+  summarize instead, often one built from the input, which the plan shares
+  the same way. Either way summarized rows relate to output rows by time (and
+  key) only, never by row identity. A `Bars` window makes the output depend
+  on where the run starts (it counts rows back from it), so such a stage is
+  not `startfree`.
 - **Context extension.** The summarized pipeline runs over the widened
   context `[minimum over windows of start - lookback, stop)`, so the first
   output row already sees a full look-back of history. Look-backs are never
@@ -1608,8 +1613,10 @@ latest window is predicted `missing` rather than by a stale model; keyless, an
 empty window's `missing` summary does the same. One thing causality cannot
 check: the response must be observable at its row's time. A response built by
 looking ahead (`Acausal.lead`) makes the whole construction look ahead, and is
-the caller's explicit opt-in. The pipeline runs twice, once to fit and once to
-predict, as a self-join does.
+the caller's explicit opt-in. Both the fitting and the predicting side read the
+input, a diamond the plan shares (see "Shared runs"): one run over the
+look-back's widened context, the predicting side dropping the lead-in, unless
+the input depends on where its run starts, when each side gets its own.
 
 **`modelreports`** replaces the model column with each fit's report. It is the
 third value `MMI.fit` returns, normalized as MLJBase's `report(mach)`
@@ -2918,6 +2925,85 @@ property, for the different reason [Retiming](#retiming) gives — a row retimed
 across a split boundary is clipped by the first evaluation and never offered to
 the second.
 
+## Shared runs
+
+A pipeline is a DAG, not a tree: `asofjoin(p, p |> f)`, `merge(p, p)`, a
+clock derived from the input, `addrollingcolumns` summarizing its own input
+and `addpredictions` (fitting and predicting over one input) all read one
+upstream through two inputs of a stage. Run per input, the upstream runs once
+per path to it, and d chained diamonds run their source 2^d times (issues #98
+and #105). So evaluation plans before it runs.
+
+- **Nodes.** Every pipeline names its inputs, the context it reads each one
+  over as a function of its own (`contexts`: a `lag`'s shifted window, a
+  `tolerance`'s or look-back's widened start, `futurejoin`'s widened stop),
+  and two flags. `startfree`: running over an earlier start and dropping the
+  rows before `start` gives the rows a run from `start` gives. `stopfree`:
+  likewise for a later stop and the rows at or after `stop`, so a node that
+  emits at `stop` never is. An operator states whether it keeps its inputs'
+  freedom, and the node's flags are that and-ed with its inputs'. The run
+  function reaches input `i` only through `openinput(ins, i)`, so an operator
+  cannot run a node the plan doesn't know of.
+- **Planning.** `planrun` visits the nodes after everything reading them, so
+  a node's requests (a context each, one per reading input) are complete when
+  it is planned. Requests group into *run instances* by key: the time type
+  (a source converts its rows to it), then the start unless `startfree` and
+  the stop unless `stopfree`. Each instance runs once over the union of its
+  requests' contexts and passes its own input contexts down as requests. So
+  equal contexts always share, and a dependent node asked for two contexts
+  runs twice, each run then requesting its own inputs, which may share again
+  below.
+- **Clipping.** A lone request reads its instance's run directly. Several
+  read it through a `ChunkTee`: each side's `SideClip` drops the rows before
+  its start (the `warmup` lead-in drop) and from its stop on, so a side sees
+  exactly the rows of a run over its own context. That is what the flags
+  promise.
+- **Queueing.** A side reading behind the others gets its rows from a queue,
+  of `copycols = false` indexes over the pulled chunks (the `writecsv`
+  hand-off argument), holding only its own kept rows: a side starting later
+  queues none of the lead-in. The cost of a share is the chunks one side is
+  ahead by; unshared, it is a second run. `sharing(false)` picks the run for
+  readers that drift far apart (each reader then runs its whole upstream on
+  its own: requests made under different `sharing(false)` runs never group),
+  and `sharing(true)` shares among requests that would not otherwise (a
+  dependent node's widened run, its rows then as that run gives them).
+- **Abandoning.** A reader that stops early (`head` once its budget is spent,
+  a join once its left input ends, `concatenate` for the inputs it never
+  reaches) calls `abandon!` on what it holds, forwarded through `chunkmap`
+  (with an `abandon` hook for an operator's other inputs), `PullCursor` and the
+  producers. The tee then empties that side's queue and stops queueing for it,
+  and abandons the run once no side is live. Without it, `merge(p |> head(2),
+  p)` would queue all of `p` for the `head` side.
+
+| Operator | `startfree` | `stopfree` |
+|---|---|---|
+| file and table sources, `emptyframe` | yes | unless `closed` (`readtable(frame)`'s automatic rule keeps it) |
+| `concatenate`, `merge`, row-wise and column transforms, `fillmissing`, `sortcycles`, `lookupjoin`, `modelreports`, the writers, `lag`, `Acausal.lead`, `summarizecycles`, `sharing` | inherited | inherited |
+| `clock`, `head`, `addsummarycolumns`, `settime` | no | inherited |
+| `summarize`, `lastrow`, `Acausal.settime` | no | no |
+| `intervalize` | no | inherited, unless `closelast` |
+| `forwardfill` | inherited with a `tolerance`, else no | inherited |
+| `warmup(L, f)` | as `f(p)` | as `f(p)` |
+| `summarizewindows` | inherited, unless keyed without a `keyset` (vanish rows read the previous tick) | inherited |
+| `addrollingcolumns` | inherited, unless a window is `Bars` | inherited |
+| `asofjoin`, `applymodels` | inherited with a `tolerance`, else no | inherited |
+| `Acausal.futurejoin` | inherited | inherited with a `tolerance`, else no |
+
+A custom source (`CausalPipeline(run)`) is neither unless it says so. The flags
+are tested as a property (`test/sharing.jl`): over random nested contexts, a
+free pipeline's narrow load equals its wide load clipped. The promise is about
+rows, not schemas, which stay data-driven: an input with no rows in a reader's
+window (an as-of join's right side, a `merge` input) contributes no columns to
+a run of its own, but does to a wider shared one, where the reader then sees
+those columns, all `missing`.
+
+The plan also makes the DAG's independent runs explicit. A parallel executor
+could run some instances on tasks behind bounded channels without operators
+changing: inputs come only through `openinput`, a run's state lives in its
+instances and tees (no globals, nodes immutable), chunks may cross tasks by the
+hand-off argument, `abandon!` is the cancellation hook, and pulling order
+(lazy opens, the rolling lead-in) affects memory, never rows.
+
 ## Module layout
 
 | File | Content |
@@ -2925,9 +3011,10 @@ the second.
 | `src/CausalFrames.jl` | module, includes, exports |
 | `src/context.jl` | `Context{T}`, and `widenstart`, the input context of every operator that reads before `start` |
 | `src/frame.jl` | `CausalFrame{T}`, invariants, Tables.jl interface |
-| `src/chunks.jl` | internal chunk-iterator machinery (`ChunkSource`, `chunkmap`, `PullCursor`, `teesides`) and the clock cursor (`IntervalCursor`, `pullpast!`) that `intervalize` and `summarizewindows` pull boundaries with |
+| `src/chunks.jl` | internal chunk-iterator machinery (`ChunkSource`, `chunkmap`, `PullCursor`) and the clock cursor (`IntervalCursor`, `pullpast!`) that `intervalize` and `summarizewindows` pull boundaries with |
 | `src/compaction.jl` | `compactdead!`, the dead-prefix rule every head-advancing FIFO buffer shares |
-| `src/pipeline.jl` | `CausalPipeline{F}`, `load`, `stream`, `scan` |
+| `src/share.jl` | the `CausalPipeline{F}` node and its builders (`pipesource`, `pipenode`, `pipetransform`), `sharing`, the planner (`planrun`: requests, run instances) and the n-sided `ChunkTee` that shares a run, with `abandon!` |
+| `src/pipeline.jl` | `CausalPipeline`'s public constructor, `load`, `stream`, `scan` |
 | `src/sources.jl` | the stateless sources: `emptyframe`, the n-ary `concatenate`, `clock` |
 | `src/sourceclip.jl` | `SourceClip` and `clipchunk!`/`gatherchunk!`, the clip every file source shares (rename, `:time` resolution, order checks, window clip) |
 | `src/sinks.jl` | `ChunkSink`, the background writer every file sink shares, and `sinktransform` |

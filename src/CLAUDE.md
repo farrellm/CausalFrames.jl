@@ -15,13 +15,38 @@ design rationale and performance constraints behind each module.
   producer draining its input, a binary transform pulling its second stream):
   sticky `pull!`, state in fields, touched per chunk only. Not
   `Iterators.Stateful`, which on Julia 1.10 prefetches and would break
-  `head`'s early exit. `teesides` splits one run into two `ChunkSource`s over
-  a shared `PullCursor`, queueing for the side that is behind a
-  `copycols = false` index of each chunk (the `writecsv` hand-off argument),
-  for a transform reading the same stream at two paces. Its `keep` function is
-  the second side's view of every chunk (whole, sliced or skipped), so the
-  first side can read ahead through rows the second never sees without
-  queueing them
+  `head`'s early exit. `chunkmap`'s `abandon` hook is how an operator holding
+  other inputs in its step's state (a join's right side) passes `abandon!` on
+  to them (see `share.jl`)
+- `src/share.jl` — the `CausalPipeline{F}` node and the plan of one
+  evaluation (issue #105). A node is immutable (a `mutable struct` of `const`
+  fields, for cheap identity): its run function `(ctx, ins) -> iterator`, its
+  inputs (an erased `Vector{CausalPipeline}`, so a pipeline's type never nests
+  its inputs'), `contexts` (each input's context from its own) and the
+  `startfree`/`stopfree` flags; build it with `pipesource`, `pipenode` or
+  `pipetransform() do upstream, ctx … end`, each and-ing the operator's own
+  flags with its inputs'. Operators reach inputs only through
+  `openinput(ins, i)` (each at most once; `abandoninput` for one never
+  opened), never another node's `run`: that is what lets `planrun` see every
+  request before anything runs, and it is the seam a parallel executor would
+  use. `planrun` visits nodes in reverse postorder and groups each node's
+  requests (`RunSlot`s) into `RunInstance`s by `sharekey` (time type, then
+  start unless startfree, stop unless stopfree, and the isolating
+  `sharing(false)` run if any), each over the union of its slots' contexts. A
+  lone slot reads its run directly; several read a `ChunkTee`, which queues
+  per side only the rows that side's `SideClip` keeps (`copycols = false`
+  indexes, the `writecsv` hand-off argument), so a side starting later queues
+  none of the lead-in. `abandon!` (no-op by default; `PullCursor`,
+  `ChunkSource`, `ChunkMap` and the producers forward it) stops queueing for a
+  reader that won't pull again, and abandons a run no side needs. The flags'
+  per-operator table is in DESIGN.md's "Shared runs"; a wrong `true` is a
+  silent wrong answer, so every flag is covered by `test/sharing.jl`'s
+  property test. Everything that takes a pipeline once per build or per
+  evaluation (the builders, `UnaryTransform`, the curried operators' closures,
+  the planner, `load`/`scan`/`stream`) takes it `@nospecialize`: specialized
+  on each `CausalPipeline{F}`, the planner alone compiled ~80 ms per node
+  type, and `operators.jl` + `join.jl` went from 37 to 56 s; erased, they take
+  35 s, since a run function no longer captures (and nests) its inputs' types
 - `src/compaction.jl` — `compactdead!`, the one dead-prefix rule for every
   FIFO that pops by advancing a head (the window transforms' row buffer, the
   monoid queues' rows, the windowed extremes' deque, `WindowValues`,
@@ -40,9 +65,8 @@ design rationale and performance constraints behind each module.
   skips the O(n) scans, keeping `checkchunk`'s O(1) boundary and bounds
   guards. Column-access Tables.jl interface with a cheap `Tables.schema`;
   `DataFrame(frame)` is the copy point
-- `src/pipeline.jl` — `CausalPipeline{F}` (lazy `Context -> iterator of
-  DataFrame chunks`; the run function's type is a parameter, not an abstract
-  `Function` field), `load` (drains into one frame without copying, the only
+- `src/pipeline.jl` — `CausalPipeline`'s public constructor (a source,
+  dependent unless it declares `startfree`/`stopfree`), `load` (drains into one frame without copying, the only
   operation that materializes the whole window), `stream` (one frame per
   chunk) and `scan` (drains for side effects such as `writecsv`, with `load`'s
   guards but no frame)
@@ -52,8 +76,8 @@ design rationale and performance constraints behind each module.
   `src/rowwise.jl` (`filterrows`, `addcolumns`), `src/retime.jl` (`lag`,
   `warmup`, `head`, `settime`) and `src/columns.jl`. Sources return a
   `CausalPipeline`; transforms are curried (`filterrows(pred)` returns
-  `CausalPipeline -> CausalPipeline`, built by `pipeline.jl`'s
-  `pipetransform() do p, ctx … end`) so both chain with `|>`. Row functions
+  `CausalPipeline -> CausalPipeline`, built by `share.jl`'s
+  `pipetransform() do upstream, ctx … end`) so both chain with `|>`. Row functions
   run over concretely typed column-table rows behind a per-chunk function
   barrier, never `DataFrameRow`s.
   - shared with the parquet and JLS operators: `SourceClip` (a file source's
@@ -395,8 +419,11 @@ design rationale and performance constraints behind each module.
   direction singleton, `Backward` here), `JoinState`, `pullright!`,
   `matchchunk!` and `joinchunk!`, built by `jointransform`, with the store,
   kernel, comparison and right window picked by dispatch
-  (`newstore`/`widenstore`/`segment!`/`joincmp`/`rightcontext`). A new join
-  direction adds those five methods, never a second driver. The store is a
+  (`newstore`/`widenstore`/`segment!`/`joincmp`/`rightcontext`, and
+  `joinfreedom`, its flags). A new join direction adds those six methods,
+  never a second driver. Once the left input ends (or is abandoned) the join
+  abandons its right one (`rightdone`), so a run the right side shares stops
+  queueing for it. The store is a
   `SlotStore` (a `Dict{K,Int}` of slot numbers over a `Vector{V}` of rows,
   shared with `lastrow` through `admitslot!`), and a match is a `Vector{V}`
   plus a `Vector{Bool}` mask (unmatched slots left undefined, hence
@@ -546,11 +573,14 @@ design rationale and performance constraints behind each module.
   Never key a hoisted term by its own name: a wrapper that drops `rowterms`
   would then have the window read a real input column of that name as the
   term, silently
-- `src/rolling.jl` — `addrollingcolumns`. Summarizing its own input it runs it
-  once (`rollinginputs`), teed to both sides, the tee's `keep` dropping the
-  lead-in from the output side with `warmup`'s `dropleadin!`: a run per side
-  made a chain of d stages run its source 2^d times (issue #98). Before the
-  output side's first pull (`afterleadin`), `admitleadin!` reads the whole
+- `src/rolling.jl` — `addrollingcolumns`, a node over `(summarized, p)`,
+  the summarized side `p` itself unless `from` names another, read over the
+  widened context and `ctx`: the plan shares them as for any diamond (a run
+  per side made a chain of d stages run its source 2^d times, issue #98), and
+  the tee drops the lead-in from the output side. A `Bars` window counts back
+  from the run's start, so it makes the stage not `startfree`. Whenever the
+  context widens (shared or not), before the output side's first pull
+  (`afterleadin`), `admitleadin!` reads the whole
   lead-in through the summarized side with its own kernel,
   `leadinsegment!`, evicting against the newest admitted time (the monoid
   queues expire on admission anyway); an output pull first would queue the
@@ -565,8 +595,8 @@ design rationale and performance constraints behind each module.
   typed half (past the schema's type values) specialize. The kernels' inlining
   is load-bearing: a `@noinline` barrier around `emitroll!`'s `summaryvalues`
   saved 5% of their compile time and cost the refold benchmark 12% at runtime
-  (`notes/compile-time.md`). `sharedrun = false` keeps
-  the second run over `ctx` when a time look-back widens the context. One
+  (`notes/compile-time.md`). Summarizing its own input (`LeadInGate.self`),
+  the lead-in's first chunk takes the augmented side's checks. One
   kernel, `rollsegment!`, over a `RollTiers` (a shared row buffer with
   per-window eviction heads, per-window running tables, per-key monoid queues
   owning their rows, refold templates). Per row:
@@ -642,6 +672,8 @@ design rationale and performance constraints behind each module.
     results are scattered into one promoted `Union{Missing,E}` column.
   - `addpredictions` is pure composition: `summarizewindows` into
     `applymodels(strict = false)`, sound because the windows are half-open.
+    Both read the input, a diamond the plan shares (issue #105), so it has no
+    sharing code of its own.
   - `FittedModel`'s custom serializer routes fitresults through MLJ's
     save/restore.
 - `src/acausal.jl` — the `Acausal` submodule (`futurejoin`, `lead`,

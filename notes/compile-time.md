@@ -438,3 +438,32 @@ groups, minimums), the `rolling` monoid-tier entries halved: `tree` 8.0 →
 overlapping ranges, while allocating 21,141 times against 175,905. The other
 39 benchmarks were flat (geomean 0.942 over all 41). The peak live heap of
 `leadin-wide-tree-keyed` (`benchmark/peakmemory.jl`) fell from 12.2 to 8.7 MiB.
+
+## Shared runs (issue #105), 2026-10-25
+
+Pipelines became DAG nodes (`src/share.jl`): a run function no longer
+captures its inputs, which are an erased `Vector{CausalPipeline}`, and the
+planner opens each input through `openinput`, inferred `Any`. The first cut
+specialized everything that takes a pipeline (the builders, the planner's
+`instances`/`postorder!`, `load`) on each node's `CausalPipeline{F}`: about
+80 ms of compile per node type, `|>` included. `operators.jl` + `join.jl`
+went from 37 s to 56 s, and the included files from 797 s to about 890 s (the
+new `sharing.jl` aside). A `--trace-compile-timing` of one five-stage chain
+showed it: five `instances` entries at 80 ms each, against a single 220 ms
+`load` on master.
+
+Taking pipelines `@nospecialize` throughout that setup code (and replacing the
+builders' closures with small callable structs: `SourceRun`, `UnaryRun`,
+`UnaryTransform`, `PassRun`) fixed it. The chunk iteration still compiles per
+iterator type, as before, but each operator's iterator is now built behind
+a dynamic `openinput`, so no evaluation infers the whole chain at once.
+
+| | master | branch |
+|---|---|---|
+| 8-call harness (fresh pipelines), compile | 4.35 s | 3.87 s |
+| `operators.jl` + `join.jl`, wall | 37.1 s | 35.0 s |
+| included test files, wall (compile) | 797.0 s (747.3) | 747.8 s (700.6), with the new `sharing.jl` (20.5 s) |
+| `rolling.jl` | 283.7 s | 253.0 s |
+
+Julia 1.13.2, 4 threads, the per-file table from `timed_runtests.jl`; the
+harness outputs were identical, element types included.
