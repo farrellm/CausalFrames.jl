@@ -93,7 +93,7 @@ Base.length(pc::MergePiece) = pc.hi - pc.lo + 1
 
 # The stateful producer behind merge's ChunkSource.
 mutable struct MergeProducer{T}
-    const ins::RunInputs
+    const ins::PipelineInputs
     const n::Int                       # the number of pipelines
     const batchsize::Int
     const cursors::Vector{MergeCursor{T}}
@@ -103,7 +103,7 @@ mutable struct MergeProducer{T}
     initialized::Bool
 end
 
-MergeProducer(ins::RunInputs, n::Int, ::Context{T}, batchsize::Int) where {T} =
+MergeProducer(ins::PipelineInputs, n::Int, ::Context{T}, batchsize::Int) where {T} =
     MergeProducer{T}(ins, n, batchsize, MergeCursor{T}[], MergePiece[], [:time],
         0, false)
 

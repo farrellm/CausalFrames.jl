@@ -2953,6 +2953,11 @@ and #105). So evaluation plans before it runs.
   equal contexts always share, and a dependent node asked for two contexts
   runs twice, each run then requesting its own inputs, which may share again
   below.
+- **Trees.** A pipeline in which no node is reached twice has nothing to
+  share: each node gets one request. `runchunks` checks that first
+  (`istree`) and then runs it directly (`DirectInputs`), so the common case
+  pays none of the plan's allocations, a fixed few microseconds that
+  dominated evaluations of a single small chunk.
 - **Clipping.** A lone request reads its instance's run directly. Several
   read it through a `ChunkTee`: each side's `SideClip` drops the rows before
   its start (the `warmup` lead-in drop) and from its stop on, so a side sees

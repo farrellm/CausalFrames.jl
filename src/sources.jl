@@ -57,14 +57,14 @@ concatenate(ps::CausalPipeline...) =
 # rather than captured locals, which would be boxed when reassigned. The untyped
 # fields are touched once per chunk or per pipeline, never per row.
 mutable struct ConcatProducer
-    const ins::RunInputs
+    const ins::PipelineInputs
     const n::Int        # the number of pipelines
     index::Int          # the pipeline currently being drained
     cursor::Any         # a PullCursor over its chunks; nothing until reached
     names::Union{Nothing,Vector{String}}  # column names of the first chunk
     prevtime::Any       # last time emitted, for cross-pipeline ordering
     previndex::Int      # which pipeline emitted it, for the error message
-    ConcatProducer(ins::RunInputs, n::Int) =
+    ConcatProducer(ins::PipelineInputs, n::Int) =
         new(ins, n, 1, nothing, nothing, nothing, 0)
 end
 

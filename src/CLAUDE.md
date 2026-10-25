@@ -32,7 +32,10 @@ design rationale and performance constraints behind each module.
   use. `planrun` visits nodes in reverse postorder and groups each node's
   requests (`RunSlot`s) into `RunInstance`s by `sharekey` (time type, then
   start unless startfree, stop unless stopfree, and the isolating
-  `sharing(false)` run if any), each over the union of its slots' contexts. A
+  `sharing(false)` run if any), each over the union of its slots' contexts.
+  A pipeline with no node reached twice skips the plan (`istree`,
+  `DirectInputs`): it cost 4-6 µs per evaluation, +20-90% on the
+  sub-millisecond benchmarks. A
   lone slot reads its run directly; several read a `ChunkTee`, which queues
   per side only the rows that side's `SideClip` keeps (`copycols = false`
   indexes, the `writecsv` hand-off argument), so a side starting later queues

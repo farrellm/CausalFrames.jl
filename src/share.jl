@@ -165,8 +165,11 @@ mutable struct RunInstance
     tee::Any           # its ChunkTee once a slot opens; one slot needs none
 end
 
-# What an operator's `run` reaches its inputs through.
-struct RunInputs
+# What an operator's `run` reaches its inputs through: `openinput` and
+# `abandoninput`, over a planned run (`RunInputs`) or a direct one.
+abstract type PipelineInputs end
+
+struct RunInputs <: PipelineInputs
     instance::RunInstance
 end
 
@@ -179,7 +182,38 @@ openinput(ins::RunInputs, i::Int) = openslot!(ins.instance.inputs[i])
 abandoninput(ins::RunInputs, i::Int) = abandonslot!(ins.instance.inputs[i])
 
 # The chunks of `p` over `ctx`: plan the evaluation and open its root.
-runchunks(ctx::Context, @nospecialize(p::CausalPipeline)) = openslot!(planrun(p, ctx))
+runchunks(ctx::Context, @nospecialize(p::CausalPipeline)) =
+    istree(p) ? opendirect(p, ctx) : openslot!(planrun(p, ctx))
+
+# Without a node reached twice there is nothing to share: each node is asked
+# for one context, by one reader, so it runs directly, saving the plan's
+# allocations (a few microseconds per evaluation, all of a tiny one's cost).
+# The visited nodes are kept in a vector: pipelines are small, and a
+# `Set` costs more than the scans it saves.
+istree(@nospecialize(p::CausalPipeline)) = istree!(CausalPipeline[], p)
+function istree!(seen::Vector{CausalPipeline}, @nospecialize(p::CausalPipeline))
+    any(q -> q === p, seen) && return false
+    push!(seen, p)
+    for q in p.inputs
+        istree!(seen, q) || return false
+    end
+    return true
+end
+
+# What an operator's `run` reaches its inputs through, run directly.
+struct DirectInputs <: PipelineInputs
+    node::CausalPipeline
+    ctx::Context
+end
+
+function openinput(ins::DirectInputs, i::Int)
+    cs = ins.node.contexts(ins.ctx)
+    return opendirect(ins.node.inputs[i], cs isa Context ? cs : cs[i])
+end
+abandoninput(::DirectInputs, ::Int) = nothing   # never opened, never run
+
+opendirect(@nospecialize(p::CausalPipeline), ctx::Context) =
+    p.run(ctx, DirectInputs(p, ctx))
 
 # Visits the nodes after everything reading them (reverse postorder), so a
 # node's requests are all known when it is planned, and passes each instance's
