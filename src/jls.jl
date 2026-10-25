@@ -72,7 +72,7 @@ first time past the window; there is no index, so a read costs the file up to
 - `closed = false`: clip to `[start, stop]` instead, keeping rows at `stop`.
 """
 function readjls(path::AbstractString; closed::Bool = false)
-    return CausalPipeline() do ctx::Context
+    return pipesource(; stopfree = !closed) do ctx::Context
         # a written stream's times are resolved and never missing
         clip = SourceClip(ctx, path, "jls file", nothing, nothing, closed, false)
         return ChunkSource(JLSProducer(clip))

@@ -31,9 +31,11 @@ end
 # Consumers own their chunks and may mutate a chunk's column *index*, so each
 # run gets a private index over the same column vectors, O(ncols) per chunk.
 # Column vectors are never mutated in place (see DESIGN.md, "CSV output"), so
-# sharing them is sound.
+# sharing them is sound. The rows are the same for every context, which the
+# source declares so that the operators reading it twice share one run.
 tradesource(chunks) =
-    CausalPipeline(ctx -> (DataFrame(c; copycols = false) for c in chunks))
+    CausalPipeline(ctx -> (DataFrame(c; copycols = false) for c in chunks);
+        startfree = true, stopfree = true)
 
 const N = 1_000_000
 const CTX = Context(0, N)
@@ -331,10 +333,11 @@ SUITE["rolling"]["chain8-keyed"] = @benchmarkable load(RCTX, CHAIN8)
 # of rows the windows read but the output drops. A file-like source copies each
 # in-window chunk, as a reader decodes it, so a chunk held is memory held, and
 # forty unread columns make a held chunk far wider than a stored row. Each case
-# runs shared (the default) and as two runs (`sharedrun = false`), whose
-# summarized side reads the lead-in lazily; benchmark/peakmemory.jl measures
-# the peak live heap of the same cases, which allocation totals don't show.
-filesource(chunks) = CausalPipeline() do ctx
+# runs shared (the default for this context-free source) and as two runs
+# (`sharing(false)`), whose summarized side reads the lead-in lazily;
+# benchmark/peakmemory.jl measures the peak live heap of the same cases, which
+# allocation totals don't show.
+filesource(chunks) = CausalPipeline(; startfree = true, stopfree = true) do ctx
     (
         c[ctx.start .<= c.time .< ctx.stop, :] for c in chunks
         if last(c.time) >= ctx.start && first(c.time) < ctx.stop
@@ -351,16 +354,18 @@ const LEADLB = RN ÷ 8                     # half of the rows are lead-in
 const LEADCASES = (
     "leadin-wide" =>
         (p, sh) ->
-            p |> addrollingcolumns((; w = LEADLB),
-                [Sum(:qty), Mean(:qty)]; sharedrun = sh),
+            p |> sharing(sh) |> addrollingcolumns((; w = LEADLB),
+                [Sum(:qty), Mean(:qty)]),
     "leadin-wide-tree-keyed" =>
         (p, sh) ->
-            p |> addrollingcolumns(
-                (; w = LEADLB), [Product(:qty)]; key = :sym, sharedrun = sh),
+            p |> sharing(sh) |>
+            addrollingcolumns(
+                (; w = LEADLB), [Product(:qty)]; key = :sym),
     "leadin-chain4-keyed" =>
         (p, sh) -> foldl(1:4; init = p) do q, n
-            q |> addrollingcolumns(NamedTuple{(Symbol(:w, n),)}((LEADLB ÷ n,)),
-                [Sum(:qty)]; key = :sym, sharedrun = sh)
+            q |> sharing(sh) |>
+            addrollingcolumns(NamedTuple{(Symbol(:w, n),)}((LEADLB ÷ n,)),
+                [Sum(:qty)]; key = :sym)
         end,
 )
 for (name, f) in LEADCASES, sh in (true, false)
@@ -380,6 +385,14 @@ SUITE["join"]["asof-keyed"] = @benchmarkable load(CTX,
     SRC |> asofjoin(SRC2; key = :sym, rightprefix = "r"))
 SUITE["join"]["future-keyed"] = @benchmarkable load(CTX,
     SRC |> futurejoin(SRC2; key = :sym, rightprefix = "r"))
+# Diamonds: each stage joins its input onto a lagged copy of itself, over a
+# tolerance that widens the right side. The plan runs the source once, not
+# 2^4 times (#105), so this should cost about four single joins.
+const DIAMOND4 = foldl(1:4; init = RSRC) do p, n
+    asofjoin(p, p |> selectcolumns(:time, :sym, :qty) |> lag(3);
+        key = :sym, tolerance = 8, rightprefix = "d$n")
+end
+SUITE["join"]["diamond4-keyed"] = @benchmarkable load(RCTX, DIAMOND4)
 
 # The timeless lookup, against the keyed as-of join above: a static index, one
 # Int per row and a gather per column. "lookup-drop" lists half the keys, so

@@ -18,8 +18,8 @@ fills the whole window.
   [`Acausal.lead`](@ref CausalFrames.Acausal.lead).
 """
 function lag(offset)
-    return pipetransform() do p, ctx
-        return chunkmap(c -> shiftchunk!(c, offset), p.run(lagcontext(ctx, offset)))
+    return pipetransform(; contexts = ctx -> lagcontext(ctx, offset)) do upstream, ctx
+        return chunkmap(c -> shiftchunk!(c, offset), upstream)
     end
 end
 lag(p::CausalPipeline, offset) = lag(offset)(p)
@@ -83,14 +83,15 @@ DataFrame(load(Context(3, 10), p))
 ```
 """
 function warmup(lookback, f)
-    return function (p::CausalPipeline)
+    return function (@nospecialize(p::CausalPipeline),)
         q = f(p)
         q isa CausalPipeline || throw(ArgumentError(
             "warmup f must return a CausalPipeline, got $(typeof(q))"))
-        return CausalPipeline() do ctx::Context
+        # As free of the context as `q` is: dropping the lead-in is.
+        return pipenode((q,);
+            contexts = ctx -> widenstart(ctx, lookback, "warmup lookback")) do ctx, ins
             st = LeadInDrop(ctx.start)
-            return chunkmap(c -> dropleadin!(st, c),
-                q.run(widenstart(ctx, lookback, "warmup lookback")))
+            return chunkmap(c -> dropleadin!(st, c), openinput(ins, 1))
         end
     end
 end
@@ -130,7 +131,9 @@ chunk.
   pulls its input.
 
 `head` counts rows over the whole window, so `head(n)` over `[a, b)` and over
-`[b, c)` can yield `2n` rows where `[a, c)` yields `n`.
+`[b, c)` can yield `2n` rows where `[a, c)` yields `n`. For the same reason a
+pipeline ending in `head` read over two contexts with different starts runs
+once for each (see [`sharing`](@ref)).
 
 Put writers downstream of `head`, never upstream (`p |> head(n) |>
 writecsv(path)`): a writer finalizes its file only when its input is exhausted,
@@ -139,8 +142,9 @@ which `head` prevents.
 function head(n::Integer)
     checknonnegative(n, "head n")
     limit = Int(n)
-    return pipetransform() do p, ctx
-        return ChunkSource(HeadProducer(p.run(ctx), limit))
+    # The count starts at the run's start.
+    return pipetransform(; startfree = false) do upstream, ctx
+        return ChunkSource(HeadProducer(upstream, limit))
     end
 end
 head(p::CausalPipeline, n::Integer) = head(n)(p)
@@ -155,7 +159,10 @@ end
 HeadProducer(upstream, n::Int) = HeadProducer(PullCursor(upstream), n)
 
 function (p::HeadProducer)()
-    p.remaining > 0 || return nothing
+    if p.remaining <= 0
+        abandon!(p.upstream)
+        return nothing
+    end
     chunk = pull!(p.upstream)
     if chunk === nothing
         p.remaining = 0     # ChunkSource requires nothing to be sticky
@@ -176,8 +183,11 @@ function takerows!(p::HeadProducer, c::DataFrame)
     end
     k = p.remaining
     p.remaining = 0
+    abandon!(p.upstream)
     return c[1:k, :]
 end
+
+abandon!(p::HeadProducer) = abandon!(p.upstream)
 
 """
     settime(spec) -> (CausalPipeline -> CausalPipeline)
@@ -204,11 +214,12 @@ no values, but still drops rows at `stop`.
 """
 function settime(spec)
     checktimespec(spec, "settime")
-    return pipetransform() do p, ctx
+    # A row before `start` moved into the window is never seen.
+    return pipetransform(; startfree = false) do upstream, ctx
         st = SetTimeState{timetype(ctx)}()
         return chunkmap(
             c -> settimechunk!(st, spec, c, ctx.start, ctx.stop, true, "settime"),
-            p.run(ctx),
+            upstream,
         )
     end
 end

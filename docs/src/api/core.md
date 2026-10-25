@@ -17,6 +17,7 @@ CausalPipeline
 load
 stream
 scan
+sharing
 ```
 
 ## Internals

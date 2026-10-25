@@ -55,8 +55,8 @@ struct Bars
 end
 
 """
-    addrollingcolumns(windows, summarizers; key = nothing, from = nothing,
-                      sharedrun = true) -> (CausalPipeline -> CausalPipeline)
+    addrollingcolumns(windows, summarizers; key = nothing,
+                      from = nothing) -> (CausalPipeline -> CausalPipeline)
     addrollingcolumns(p::CausalPipeline, windows, summarizers;
                       ...) -> CausalPipeline
 
@@ -81,42 +81,17 @@ longest time look-back, so the first row already sees a full window.
 - `from = nothing`: a pipeline to summarize instead of the input itself. Its
   rows relate to the output rows by time and key only. By default the input is
   summarized.
-- `sharedrun = true`: without `from`, run the input once, over the widened
-  context, and drop the rows before `start` from the output, so the output
-  rows are the rows summarized. `false` takes the output rows from a run over
-  the window itself, as a pipeline without this transform would give them; a
-  time look-back then runs the input twice, once per context. The two agree
-  without a time look-back, and on an input whose rows at or after `start`
-  depend neither on earlier rows nor on where its run starts. They differ in
-  the rows themselves under an input anchored to its run's start, such as
-  [`clock`](@ref) ticks, an [`intervalize`](@ref) grid or [`head`](@ref): pass
-  `false` there. Ignored with `from`.
 
-A running count depends on where its run starts. The `w2` look-back widens
-the context to start at 1, so by default the output shows the counts from
-there, the ones summed:
+The summarized pipeline (the input itself, or one built from it) and the input
+run once for both sides when the rows don't depend on where the run starts,
+the output side dropping the rows before `start`; see [`sharing`](@ref). A
+running count does depend on it. The `w2` look-back widens the summarized
+context to start at 1, so the summaries sum the counts from there, while the
+output rows come from their own run over `[3, 6)`, whose counts restart at 1:
 
-```jldoctest sharedrun
+```jldoctest
 p = clock(1) |> addsummarycolumns(Count())
 t = addrollingcolumns((w2 = 2,), Sum(:count))
-DataFrame(load(Context(3, 6), p |> t))
-
-# output
-
-3×3 DataFrame
- Row │ time   count  w2_count_sum
-     │ Int64  Int64  Int64
-─────┼────────────────────────────
-   1 │     3      3             6
-   2 │     4      4             9
-   3 │     5      5            12
-```
-
-With `sharedrun = false` the output rows come from a run starting at 3, so
-their counts restart at 1, while the summaries still sum the widened run's:
-
-```jldoctest sharedrun
-t = addrollingcolumns((w2 = 2,), Sum(:count); sharedrun = false)
 DataFrame(load(Context(3, 6), p |> t))
 
 # output
@@ -135,7 +110,7 @@ empty values, so a column's type may widen (`Min` gives `Union{Missing, T}`).
 A `Bars` window holding fewer than `n` rows gives `missing` instead.
 """
 function addrollingcolumns(windows, summarizers; key = nothing,
-    from::Union{Nothing,CausalPipeline} = nothing, sharedrun::Bool = true)
+    from::Union{Nothing,CausalPipeline} = nothing)
     windownames, lookbacks = towindows(windows)
     isempty(windownames) &&
         throw(ArgumentError("addrollingcolumns requires at least one window"))
@@ -156,38 +131,34 @@ function addrollingcolumns(windows, summarizers; key = nothing,
     cfg = RollingConfig(windownames, lookbacks, keycols, Val(Tuple(keycols)),
         protos, Val(requested), prefixednames, terms,
         storedcolumns(protos, keycols))
-    return pipetransform() do p, ctx
-        summarized, augmented, leadin = rollinginputs(p, from, sharedrun,
-            ctx, rollingcontext(ctx, lookbacks))
-        gate = LeadInGate(RollingState(summarized), cfg, PullCursor(augmented),
-            leadin)
-        # Through the gate, whose `cfg` is erased, so the iterator's type and
-        # the per-chunk driver are the same for every summarizer set.
-        return chunkmap(c -> rollchunk!(gate.rs, gate.cfg, c), afterleadin(gate))
+    # A `Bars` window counts rows back from the run's start.
+    startfree = !any(isbars, lookbacks)
+    contexts = ctx -> (rollingcontext(ctx, lookbacks), ctx)
+    return function (@nospecialize(p::CausalPipeline),)
+        # Summarizing its own input, both sides read `p`, which the plan runs
+        # once when it may (issue #105): a run per side made a chain of d
+        # stages run its source 2^d times (issue #98).
+        summarized = from === nothing ? p : from
+        return pipenode((summarized, p); contexts, startfree) do ctx, ins
+            sctx = rollingcontext(ctx, lookbacks)
+            leadin = sctx.start < ctx.start ? ctx.start : nothing
+            gate = LeadInGate(RollingState(openinput(ins, 1)), cfg,
+                PullCursor(openinput(ins, 2)), from === nothing, leadin)
+            # Through the gate, whose `cfg` is erased, so the iterator's type
+            # and the per-chunk driver are the same for every summarizer set.
+            # Once the output side ends the summarized one isn't needed.
+            return chunkmap(c -> rollchunk!(gate.rs, gate.cfg, c), afterleadin(gate);
+                flush = () -> (abandon!(gate.rs.summarized); nothing),
+                abandon = () -> abandon!(gate.rs.summarized))
+        end
     end
 end
 addrollingcolumns(p::CausalPipeline, windows, summarizers; kwargs...) =
     addrollingcolumns(windows, summarizers; kwargs...)(p)
 
-# The summarized and augmented chunk streams, and the start of the shared
-# run's output rows (`nothing` without one). Summarizing its own input, the
-# transform runs it once and tees it, since a run per side would make a chain
-# of d stages run its source 2^d times (issue #98). Over a widened context the
-# augmented side drops the lead-in, as `warmup` does, unless `sharedrun` is
-# off, when it keeps its own run over `ctx`. The tee drops it, so the
-# summarized side can read the lead-in without queueing it for the other.
-function rollinginputs(p::CausalPipeline, from, sharedrun::Bool, ctx::Context,
-    sctx::Context)
-    from === nothing || return from.run(sctx), p.run(ctx), nothing
-    sctx.start == ctx.start && return teesides(p.run(sctx))..., nothing
-    sharedrun || return p.run(sctx), p.run(ctx), nothing
-    drop = LeadInDrop(ctx.start)
-    return teesides(p.run(sctx), c -> dropleadin!(drop, c))..., ctx.start
-end
-
 # The augmented chunks, pulled only once the lead-in is admitted: pulling one
-# first would have the tee queue the whole lead-in for the summarized side, at
-# full width, before the windows could drop any of it.
+# first would have a run shared by both sides queue the whole lead-in for the
+# summarized side, at full width, before the windows could drop any of it.
 afterleadin(gate) = ChunkSource(() -> pullafterleadin!(gate))
 
 # A window's output column for the summary `n`.
@@ -393,9 +364,10 @@ function suffixmonoids(tg::Tiering, ::Type{K}, ::Type{R}, ::Type{T}, suffixes,
 end
 
 # Pull the next summarized chunk (type-unstable, once per chunk), building the
-# tiers on the first and rebuilding them when the promoted schema changes. A
-# shared run's first chunk is the augmented input's too, and is pulled before
-# any augmented chunk, so it takes the augmented side's checks.
+# tiers on the first and rebuilding them when the promoted schema changes.
+# Summarizing its own input, the lead-in's first chunk has the augmented
+# input's columns and is pulled before any augmented chunk, so it takes the
+# augmented side's checks.
 function pullsummarized!(rs::RollingState, @nospecialize(cfg::RollingConfig),
     shared::Bool = false)
     chunk = pull!(rs.summarized)
@@ -474,8 +446,8 @@ end
 # evicting as it goes, so the windows hold only the rows a row at or after
 # `start` can still see. Type-unstable, once per chunk of the lead-in.
 function admitleadin!(rs::RollingState, @nospecialize(cfg::RollingConfig),
-    start)
-    rs.snt === nothing && pullsummarized!(rs, cfg, true)
+    start, self::Bool)
+    rs.snt === nothing && pullsummarized!(rs, cfg, self)
     while rs.snt !== nothing
         rs.spos, more = leadinsegment!(rs.tiers, rs.snt, rs.spos, start,
             cfg.lookbacks, cfg.keynames)
@@ -492,13 +464,14 @@ mutable struct LeadInGate
     const rs::RollingState
     const cfg::RollingConfig
     const cursor::PullCursor
-    start::Any  # the shared run's output start, until its lead-in is admitted
+    const self::Bool  # summarizing its own input, not `from`
+    start::Any  # the output's start, until the summarized lead-in is admitted
 end
 
 function pullafterleadin!(g::LeadInGate)
     if g.start !== nothing
         start, g.start = g.start, nothing
-        admitleadin!(g.rs, g.cfg, start)
+        admitleadin!(g.rs, g.cfg, start, g.self)
     end
     return pull!(g.cursor)
 end

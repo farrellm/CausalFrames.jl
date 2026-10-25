@@ -54,7 +54,8 @@ with `key`); each row is then predicted by the model of the latest tick at or
 before it, so training rows always precede the rows they predict. Rows before
 the first tick, or whose latest window was empty, get `missing`. It is
 `summarizewindows` over `FitModel` feeding
-`applymodels`, and the input runs twice.
+`applymodels`, both reading the input, which runs once for both unless
+its rows depend on where the run starts (see `sharing`).
 
 #### Arguments
 - `clock`: a pipeline whose `:time` column gives the refit times, such as

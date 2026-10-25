@@ -59,14 +59,21 @@ function summarizewindows(clk::CausalPipeline, lookback, summarizers;
         summaryspec(summarizers, key, "summarizewindows"; keyset, grid = true)
     cfg = WindowConfig(keycols, keynames, lookback, protos, outs, ks, terms,
         storedcolumns(protos, keycols))
-    return pipetransform() do p, ctx
-        T = timetype(ctx)
-        st = WindowState{T}(IntervalCursor{T}(clk.run(ctx)), cfg)
-        # Through `st`, whose `cfg` is erased, so the iterator's type and the
-        # per-chunk driver are the same for every summarizer set.
-        return chunkmap(c -> windowchunk!(st, st.cfg, c),
-            p.run(widenstart(ctx, lookback, "summarizewindows lookback"));
-            flush = () -> windowflush!(st, st.cfg))
+    contexts = ctx -> (widenstart(ctx, lookback, "summarizewindows lookback"), ctx)
+    # Each tick's window lies within the widened run, but a keyed tick's
+    # vanish rows are decided against the tick before it, which a run from a
+    # later start never saw.
+    startfree = ks !== nothing   # keyless runs as the declared `nokeyset`
+    return function (@nospecialize(p::CausalPipeline),)
+        return pipenode((p, clk); contexts, startfree) do ctx, ins
+            T = timetype(ctx)
+            st = WindowState{T}(IntervalCursor{T}(openinput(ins, 2)), cfg)
+            # Through `st`, whose `cfg` is erased, so the iterator's type and
+            # the per-chunk driver are the same for every summarizer set.
+            return chunkmap(c -> windowchunk!(st, st.cfg, c), openinput(ins, 1);
+                flush = () -> windowflush!(st, st.cfg),
+                abandon = () -> abandon!(st.cur.chunks))
+        end
     end
 end
 summarizewindows(p::CausalPipeline, clk::CausalPipeline, lookback, summarizers;

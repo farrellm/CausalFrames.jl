@@ -133,8 +133,8 @@ so far, itself included.
 
 ## `addrollingcolumns`
 
-    addrollingcolumns(windows, summarizers; key = nothing, from = nothing,
-                      sharedrun = true) -> (CausalPipeline -> CausalPipeline)
+    addrollingcolumns(windows, summarizers; key = nothing,
+                      from = nothing) -> (CausalPipeline -> CausalPipeline)
     addrollingcolumns(p::CausalPipeline, windows, summarizers;
                       ...) -> CausalPipeline
 
@@ -159,42 +159,17 @@ longest time look-back, so the first row already sees a full window.
 - `from = nothing`: a pipeline to summarize instead of the input itself. Its
   rows relate to the output rows by time and key only. By default the input is
   summarized.
-- `sharedrun = true`: without `from`, run the input once, over the widened
-  context, and drop the rows before `start` from the output, so the output
-  rows are the rows summarized. `false` takes the output rows from a run over
-  the window itself, as a pipeline without this transform would give them; a
-  time look-back then runs the input twice, once per context. The two agree
-  without a time look-back, and on an input whose rows at or after `start`
-  depend neither on earlier rows nor on where its run starts. They differ in
-  the rows themselves under an input anchored to its run's start, such as
-  `clock` ticks, an `intervalize` grid or `head`: pass
-  `false` there. Ignored with `from`.
 
-A running count depends on where its run starts. The `w2` look-back widens
-the context to start at 1, so by default the output shows the counts from
-there, the ones summed:
+The summarized pipeline (the input itself, or one built from it) and the input
+run once for both sides when the rows don't depend on where the run starts,
+the output side dropping the rows before `start`; see `sharing`. A
+running count does depend on it. The `w2` look-back widens the summarized
+context to start at 1, so the summaries sum the counts from there, while the
+output rows come from their own run over `[3, 6)`, whose counts restart at 1:
 
 ```julia
 p = clock(1) |> addsummarycolumns(Count())
 t = addrollingcolumns((w2 = 2,), Sum(:count))
-DataFrame(load(Context(3, 6), p |> t))
-
-# output
-
-3×3 DataFrame
- Row │ time   count  w2_count_sum
-     │ Int64  Int64  Int64
-─────┼────────────────────────────
-   1 │     3      3             6
-   2 │     4      4             9
-   3 │     5      5            12
-```
-
-With `sharedrun = false` the output rows come from a run starting at 3, so
-their counts restart at 1, while the summaries still sum the widened run's:
-
-```julia
-t = addrollingcolumns((w2 = 2,), Sum(:count); sharedrun = false)
 DataFrame(load(Context(3, 6), p |> t))
 
 # output

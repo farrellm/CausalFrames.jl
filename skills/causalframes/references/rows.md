@@ -58,7 +58,9 @@ chunk.
   pulls its input.
 
 `head` counts rows over the whole window, so `head(n)` over `[a, b)` and over
-`[b, c)` can yield `2n` rows where `[a, c)` yields `n`.
+`[b, c)` can yield `2n` rows where `[a, c)` yields `n`. For the same reason a
+pipeline ending in `head` read over two contexts with different starts runs
+once for each (see `sharing`).
 
 Put writers downstream of `head`, never upstream (`p |> head(n) |>
 writecsv(path)`): a writer finalizes its file only when its input is exhausted,

@@ -119,19 +119,23 @@
         @test df.a_count == [0]
         @test df.b_count == [1]
 
-        # self-summarization runs the pipeline once, over the widened
-        # context; without `sharedrun`, a second time as is for the rows
+        # self-summarization runs a context-free pipeline once, over the
+        # widened context; one depending on its start, once per context,
+        # unless `sharing(true)` shares the widened run
         ctxs = []
-        selfrec = CausalPipeline() do ctx
+        rec(; kw...) = CausalPipeline(; kw...) do ctx
             push!(ctxs, ctx)
             [DataFrame(time = [max(ctx.start, 3)], x = [1])]
         end
-        load(Context(3, 10), selfrec |> addrollingcolumns((w2 = 2,), Count()))
+        t = addrollingcolumns((w2 = 2,), Count())
+        load(Context(3, 10), rec(; startfree = true) |> t)
         @test ctxs == [Context(1, 10)]
         empty!(ctxs)
-        load(Context(3, 10),
-            selfrec |> addrollingcolumns((w2 = 2,), Count(); sharedrun = false))
+        load(Context(3, 10), rec() |> t)
         @test sort(ctxs; by = c -> c.start) == [Context(1, 10), Context(3, 10)]
+        empty!(ctxs)
+        load(Context(3, 10), rec() |> sharing(true) |> t)
+        @test ctxs == [Context(1, 10)]
     end
 
     @testset "stored rows keep only the columns read" begin
@@ -170,10 +174,14 @@
         df = DataFrame(time = repeat(1:30, inner = 2),
             k = repeat(["a", "b"], 30), x = Float64.(mod.(1:60, 7)))
         runs = Ref(0)
-        counted = CausalPipeline(ctx -> (runs[] += 1; readtable(df).run(ctx)))
-        chain(lb, depth; kw...) = foldl(1:depth; init = counted) do p, n
-            p |> addrollingcolumns(NamedTuple{(Symbol(:w, n),)}((lb(n),)),
-                Sum(:x); key = :k, kw...)
+        counted = CausalPipeline(; startfree = true, stopfree = true) do ctx
+            runs[] += 1
+            return CausalFrames.runchunks(ctx, readtable(df))
+        end
+        chain(lb, depth; share = nothing) = foldl(1:depth; init = counted) do p, n
+            q = share === nothing ? p : p |> sharing(share)
+            q |> addrollingcolumns(NamedTuple{(Symbol(:w, n),)}((lb(n),)),
+                Sum(:x); key = :k)
         end
         ctx = Context(5, 100)
         for lb in (Bars, identity), depth in 1:4
@@ -181,22 +189,22 @@
             shared = DataFrame(load(ctx, chain(lb, depth)))
             @test runs[] == 1
             runs[] = 0
-            unshared = DataFrame(load(ctx, chain(lb, depth; sharedrun = false)))
-            # Without a time look-back the contexts agree, so the run is
-            # shared either way; otherwise each stage runs its input twice.
-            @test runs[] == (lb === Bars ? 1 : 2^depth)
+            unshared = DataFrame(load(ctx, chain(lb, depth; share = false)))
+            # Unshared, each stage runs its input once per side.
+            @test runs[] == 2^depth
             # Sum(:x) over the source's own column doesn't depend on history
             # before the window, so the two settings agree.
             @test isequal(shared, unshared)
             @test minimum(shared.time) == 5
         end
 
-        # An input whose rows depend on history (a Bars stage) differs: shared,
-        # the output shows the widened run the summaries were computed over.
+        # An input whose rows depend on history (a Bars stage) differs, so it
+        # runs once per side by default. Shared, the output shows the widened
+        # run the summaries were computed over.
         p = readtable(df) |> addrollingcolumns((b2 = Bars(2),), Sum(:x); key = :k)
-        t(sr) = addrollingcolumns((w1 = 1,), Count(); key = :k, sharedrun = sr)
-        shared = DataFrame(load(ctx, p |> t(true)))
-        unshared = DataFrame(load(ctx, p |> t(false)))
+        t = addrollingcolumns((w1 = 1,), Count(); key = :k)
+        shared = DataFrame(load(ctx, p |> sharing(true) |> t))
+        unshared = DataFrame(load(ctx, p |> t))
         @test all(ismissing, unshared.b2_x_sum[1:2])
         @test !any(ismissing, shared.b2_x_sum)
         @test shared.b2_x_sum ==
@@ -205,14 +213,15 @@
 
         # one chunk per row: a timestamp straddling chunks still has its
         # later rows in the earlier row's window, and lead-in chunks are dropped
-        rowchunks = CausalPipeline(
-            ctx -> (
-                c for c in
-                (df[i:i, :] for i in 1:nrow(df))
+        rowchunks = CausalPipeline(;
+            startfree = true, stopfree = true) do ctx
+            return (
+                c for c in (df[i:i, :] for i in 1:nrow(df))
                 if ctx.start <= c.time[1] < ctx.stop
-            ),
-        )
-        whole = CausalPipeline(ctx -> [df[ctx.start .<= df.time .< ctx.stop, :]])
+            )
+        end
+        whole = CausalPipeline(ctx -> [df[ctx.start .<= df.time .< ctx.stop, :]];
+            startfree = true, stopfree = true)
         rt = addrollingcolumns((w3 = 3, b2 = Bars(2)), Sum(:x))
         @test isequal(DataFrame(load(ctx, rowchunks |> rt)),
             DataFrame(load(ctx, whole |> rt)))
@@ -226,7 +235,7 @@
         seq = DataFrame(time = 1:400, x = Float64.(1:400))
         leadin = WeakRef[]
         alive = Int[]
-        tracked = CausalPipeline() do ctx
+        tracked = CausalPipeline(; startfree = true) do ctx
             rows = findall(ctx.start .<= seq.time .< ctx.stop)
             return (
                 begin

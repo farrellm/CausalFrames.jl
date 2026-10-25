@@ -59,13 +59,23 @@ function jointransform(right::CausalPipeline, direction, op::String; key,
         righttime $(repr(righttime)) collides with a key column"))
     cfg = JoinConfig(direction, op, keycols; tolerance, strict, leftprefix,
         rightprefix, righttime)
-    return pipetransform() do left, ctx
-        js = JoinState(right, cfg, ctx)
-        # Through `js`, whose `cfg` is erased, so the iterator's type and the
-        # per-chunk driver are the same for every key and tolerance.
-        return chunkmap(c -> joinchunk!(js, js.cfg, c), left.run(ctx))
+    contexts = ctx -> (ctx, rightcontext(direction, ctx, tolerance, op))
+    startfree, stopfree = joinfreedom(direction, tolerance)
+    return function (@nospecialize(left::CausalPipeline),)
+        return pipenode((left, right); contexts, startfree, stopfree) do ctx, ins
+            js = JoinState(openinput(ins, 2), cfg)
+            # Through `js`, whose `cfg` is erased, so the iterator's type and
+            # the per-chunk driver are the same for every key and tolerance.
+            return chunkmap(c -> joinchunk!(js, js.cfg, c), openinput(ins, 1);
+                rightdone(js)...)
+        end
     end
 end
+
+# Once the left input ends, or is abandoned, the right one is never pulled
+# again: a run it shares holds nothing more back for it.
+rightdone(js) = (; flush = () -> (abandon!(js.right); nothing),
+    abandon = () -> abandon!(js.right))
 
 normprefix(::Nothing) = nothing
 normprefix(p::Union{Symbol,AbstractString}) = String(p)
@@ -120,10 +130,6 @@ mutable struct JoinState
             nothing, nothing, nothing, Bool[], false, false, false)
 end
 
-# A run's state, over the right input run on the direction's window.
-JoinState(right::CausalPipeline, cfg::JoinConfig, ctx::Context) =
-    JoinState(right.run(rightcontext(cfg.direction, ctx, cfg.tolerance, cfg.op)),
-        cfg)
 
 # The backward store, shared with `lastrow`: a `Dict{K,Int}` of slot numbers
 # over a `Vector{V}` of rows. A Dict of rows answers a lookup as
@@ -142,6 +148,9 @@ newstore(::Backward, ::Type{K}, ::Type{V}) where {K,V} = SlotStore{K,V}()
 joincmp(::Backward, strict::Bool) = strict ? (<) : (<=)
 rightcontext(::Backward, ctx::Context, tolerance, op::String) =
     widenstart(ctx, tolerance, "$op tolerance")
+# Whether the join keeps its inputs' freedom of start and stop: only a
+# tolerance bounds how far back a match may come from.
+joinfreedom(::Backward, tolerance) = (tolerance !== nothing, true)
 
 # Slot numbers don't move, so only the keys are rebuilt; every slot is
 # occupied, so the vector converts wholesale.

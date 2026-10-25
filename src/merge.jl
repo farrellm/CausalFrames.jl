@@ -55,7 +55,9 @@ function Base.merge(p::CausalPipeline, ps::CausalPipeline...;
     checkpositive(batchsize, "merge batchsize")
     pipelines = (p, ps...)
     n = Int(batchsize)
-    return CausalPipeline(ctx::Context -> ChunkSource(MergeProducer(pipelines, ctx, n)))
+    return pipenode(pipelines) do ctx, ins
+        return ChunkSource(MergeProducer(ins, length(pipelines), ctx, n))
+    end
 end
 
 # One input's read head: the buffered chunk, the next row in it, and the
@@ -90,9 +92,9 @@ end
 Base.length(pc::MergePiece) = pc.hi - pc.lo + 1
 
 # The stateful producer behind merge's ChunkSource.
-mutable struct MergeProducer{P<:Tuple,T}
-    const pipelines::P
-    const ctx::Context{T}
+mutable struct MergeProducer{T}
+    const ins::RunInputs
+    const n::Int                       # the number of pipelines
     const batchsize::Int
     const cursors::Vector{MergeCursor{T}}
     const pending::Vector{MergePiece}  # claimed rows, until batchsize of them
@@ -101,8 +103,8 @@ mutable struct MergeProducer{P<:Tuple,T}
     initialized::Bool
 end
 
-MergeProducer(ps::P, ctx::Context{T}, batchsize::Int) where {P<:Tuple,T} =
-    MergeProducer{P,T}(ps, ctx, batchsize, MergeCursor{T}[], MergePiece[], [:time],
+MergeProducer(ins::RunInputs, n::Int, ::Context{T}, batchsize::Int) where {T} =
+    MergeProducer{T}(ins, n, batchsize, MergeCursor{T}[], MergePiece[], [:time],
         0, false)
 
 function (p::MergeProducer)()
@@ -118,12 +120,22 @@ function (p::MergeProducer)()
     end
 end
 
+function abandon!(p::MergeProducer)
+    if p.initialized
+        foreach(cur -> abandon!(cur.input), p.cursors)
+    else
+        foreach(i -> abandoninput(p.ins, i), 1:p.n)
+        p.initialized = true
+    end
+    return nothing
+end
+
 # Run every pipeline and buffer its first chunk, fixing the union schema before
 # any output (every output chunk must carry the same names). The first claim
 # needs every head row anyway, so this pulls nothing extra.
-function initcursors!(p::MergeProducer{P,T}) where {P,T}
-    for i in 1:length(p.pipelines)
-        cur = MergeCursor{T}(i, p.pipelines[i].run(p.ctx))
+function initcursors!(p::MergeProducer{T}) where {T}
+    for i in 1:p.n
+        cur = MergeCursor{T}(i, openinput(p.ins, i))
         refill!(cur)
         push!(p.cursors, cur)
     end

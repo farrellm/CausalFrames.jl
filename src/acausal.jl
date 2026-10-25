@@ -9,7 +9,8 @@ module Acausal
 using ..CausalFrames: CausalPipeline, Context, pipetransform, chunkmap, shiftchunk!,
     settimechunk!, SetTimeState, checktimespec, timetype, rowat, keyat,
     jointransform, widenstop, compactdead!
-import ..CausalFrames: newstore, widenstore, segment!, joincmp, rightcontext
+import ..CausalFrames: newstore, widenstore, segment!, joincmp, rightcontext,
+    joinfreedom
 
 export futurejoin, lead
 
@@ -91,6 +92,7 @@ newstore(::Forward, ::Type{K}, ::Type{V}) where {K,V} = Dict{K,KeyBuffer{V}}()
 joincmp(::Forward, strict::Bool) = strict ? (>) : (>=)
 rightcontext(::Forward, ctx::Context, tolerance, op::String) =
     widenstop(ctx, tolerance, "$op tolerance")
+joinfreedom(::Forward, tolerance) = (true, tolerance !== nothing)
 widenstore(store::Dict{<:Any,<:KeyBuffer}, ::Type{K}, ::Type{V}) where {K,V} =
     Dict{K,KeyBuffer{V}}(
         convert(K, k) => KeyBuffer{V}(convert(Vector{V}, b.rows), b.head)
@@ -167,8 +169,8 @@ Available after `using CausalFrames.Acausal`.
   identity.
 """
 function lead(offset)
-    return pipetransform() do p, ctx
-        return chunkmap(c -> shiftchunk!(c, -offset), p.run(leadcontext(ctx, offset)))
+    return pipetransform(; contexts = ctx -> leadcontext(ctx, offset)) do upstream, ctx
+        return chunkmap(c -> shiftchunk!(c, -offset), upstream)
     end
 end
 lead(p::CausalPipeline, offset) = lead(offset)(p)
@@ -202,12 +204,13 @@ The input is not widened, so a row at or after `stop` is never seen, even if
 """
 function settime(spec)
     checktimespec(spec, "Acausal.settime")
-    return pipetransform() do p, ctx
+    # Rows from outside the window, moved into it, are never seen.
+    return pipetransform(; startfree = false, stopfree = false) do upstream, ctx
         st = SetTimeState{timetype(ctx)}()
         return chunkmap(
             c -> settimechunk!(st, spec, c, ctx.start, ctx.stop, false,
                 "Acausal.settime"),
-            p.run(ctx),
+            upstream,
         )
     end
 end

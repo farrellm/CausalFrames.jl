@@ -10,7 +10,7 @@ functions receive a row supporting `row.name` and `row[:name]`.
 
 | Category | Operators |
 |---|---|
-| [Frames and pipelines](core.md) | [`Context`](@ref), [`CausalFrame`](@ref), [`CausalPipeline`](@ref), [`load`](@ref), [`stream`](@ref), [`scan`](@ref) |
+| [Frames and pipelines](core.md) | [`Context`](@ref), [`CausalFrame`](@ref), [`CausalPipeline`](@ref), [`load`](@ref), [`stream`](@ref), [`scan`](@ref), [`sharing`](@ref) |
 | [Sources](sources.md) | [`emptyframe`](@ref "emptyframe"), [`concatenate`](@ref "concatenate"), [`merge`](@ref "merge"), [`clock`](@ref "clock"), [`readtable`](@ref "readtable") |
 | [File I/O](io.md) | [`readcsv`](@ref "readcsv"), [`readparquet`](@ref "readparquet"), [`readjls`](@ref "readjls"), [`writecsv`](@ref "writecsv"), [`writeparquet`](@ref "writeparquet"), [`writejls`](@ref "writejls") |
 | [Row transformations](rows.md) | [`filterrows`](@ref "filterrows"), [`addcolumns`](@ref "addcolumns"), [`head`](@ref "head"), [`lastrow`](@ref "lastrow"), [`sortcycles`](@ref "sortcycles"), [`lag`](@ref "lag"), [`warmup`](@ref "warmup"), [`Acausal.lead`](@ref "Acausal.lead"), [`settime`](@ref "settime"), [`Acausal.settime`](@ref "Acausal.settime") |

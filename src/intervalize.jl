@@ -42,12 +42,18 @@ function intervalize(clk::CausalPipeline, summarizers; key = nothing,
     keyset = nothing, closelast::Bool = false)
     (; keycols, terms, cfg) =
         summaryspec(summarizers, key, "intervalize"; keyset, grid = true)
-    return pipetransform() do p, ctx
-        T = timetype(ctx)
-        st = IntervalizeState{T}(IntervalCursor{T}(clk.run(ctx)), T[], 2,
-            SummaryFold(cfg, keycols, terms, "intervalize"), closelast)
-        return chunkmap(c -> intervalchunk!(st, c), p.run(ctx);
-            flush = () -> intervalflush!(st, ctx.stop))
+    # The first interval closes at the first boundary of the run, and
+    # `closelast` emits at its stop.
+    return function (@nospecialize(p::CausalPipeline),)
+        return pipenode((p, clk); startfree = false,
+            stopfree = !closelast) do ctx, ins
+            T = timetype(ctx)
+            st = IntervalizeState{T}(IntervalCursor{T}(openinput(ins, 2)), T[], 2,
+                SummaryFold(cfg, keycols, terms, "intervalize"), closelast)
+            return chunkmap(c -> intervalchunk!(st, c), openinput(ins, 1);
+                flush = () -> intervalflush!(st, ctx.stop),
+                abandon = () -> abandon!(st.cur.chunks))
+        end
     end
 end
 intervalize(p::CausalPipeline, clk::CausalPipeline, summarizers; kwargs...) =

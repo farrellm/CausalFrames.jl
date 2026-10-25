@@ -52,20 +52,30 @@ end
 struct Flushed end
 
 """
-    chunkmap(step, upstream; flush = () -> nothing)
+    chunkmap(step, upstream; flush = () -> nothing, abandon = nothing)
 
 Internal lazy chunk transformer. Applies `step(chunk::DataFrame) ->
 Union{Nothing, DataFrame}` to each upstream chunk, skipping `nothing` and empty
 results, then calls `flush() -> Union{Nothing, DataFrame}` once after upstream
 ends and yields its result if non-empty. Single-pass, so `step` and `flush` may
-close over mutable per-run state.
+close over mutable per-run state. Abandoning it (`abandon!`) abandons
+`upstream`, then calls `abandon()` if given, for the other inputs `step`
+reads.
 """
-chunkmap(step, upstream; flush = () -> nothing) = ChunkMap(step, flush, upstream)
+chunkmap(step, upstream; flush = () -> nothing, abandon = nothing) =
+    ChunkMap(step, flush, upstream, abandon)
 
-struct ChunkMap{S,F,U}
+struct ChunkMap{S,F,U,A}
     step::S
     flush::F
     upstream::U
+    abandon::A
+end
+
+function abandon!(it::ChunkMap)
+    abandon!(it.upstream)
+    it.abandon === nothing || it.abandon()
+    return nothing
 end
 
 Base.IteratorSize(::Type{<:ChunkMap}) = Base.SizeUnknown()
@@ -89,46 +99,7 @@ function advance(it::ChunkMap, next)
     return nothing
 end
 
-# Splits one single-pass chunk iterator into two, for a consumer reading the
-# same stream twice at different paces (`addrollingcolumns` summarizing its own
-# input). A side with queued chunks reads its queue; otherwise it pulls
-# upstream and queues the chunk for the other side as a private index over the
-# same vectors (sound by the `writecsv` hand-off argument), so each side owns
-# what it is given. A queue holds only the chunks the other side is ahead by.
-# `keep` is the second side's view of a chunk (the chunk, a slice of it, or
-# `nothing` to skip it), applied to every chunk that side gets: the first side
-# can then run ahead through rows the second never reads without queueing them.
-struct ChunkTee{I,F}
-    upstream::PullCursor{I}
-    queues::NTuple{2,Vector{DataFrame}}
-    keep::F
-end
-
-function teesides(iter, keep = identity)
-    tee = ChunkTee(PullCursor(iter), (DataFrame[], DataFrame[]), keep)
-    return (ChunkSource(() -> teepull!(tee, 1)),
-        ChunkSource(() -> teepull!(tee, 2)))
-end
-
-function teepull!(tee::ChunkTee, side::Int)
-    q = tee.queues[side]
-    isempty(q) || return popfirst!(q)
-    while true
-        c = pull!(tee.upstream)
-        c === nothing && return nothing
-        c = c::DataFrame
-        if side == 1
-            k = tee.keep(c)
-            k === nothing || push!(tee.queues[2], DataFrame(k; copycols = false))
-            return c
-        end
-        push!(tee.queues[1], DataFrame(c; copycols = false))
-        k = tee.keep(c)
-        k === nothing || return k
-    end
-end
-
-# The clock cursor: one boundary time at a time over clk.run(ctx), pulling
+# The clock cursor: one boundary time at a time over the clock's chunks, pulling
 # clock chunks lazily. The type-unstable pull is confined here; reading
 # boundaries from the concrete `times` is typed. Clock order is trusted to the
 # chunk protocol.

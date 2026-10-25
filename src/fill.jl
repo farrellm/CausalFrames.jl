@@ -57,7 +57,9 @@ DataFrame(load(Context(t0, t0 + Hour(1)), p))
 function forwardfill(selectors...; key = nothing, tolerance = nothing)
     checkselectors(selectors, "forwardfill")
     keycols = keycolumns(key, "forwardfill")
-    return pipetransform() do p, ctx
+    # Without a tolerance a value carries from anywhere since the run's start.
+    contexts = ctx -> widenstart(ctx, tolerance, "forwardfill tolerance")
+    return pipetransform(; contexts, startfree = tolerance !== nothing) do upstream, ctx
         st = ForwardFillState(keycols, selectors, tolerance)
         # With `tolerance` the input runs over a widened context: rows
         # before `ctx.start` fill the cells and are then dropped.
@@ -65,10 +67,7 @@ function forwardfill(selectors...; key = nothing, tolerance = nothing)
         # The key names and tolerance reach the kernels through `st`, erased,
         # so the iterator's type and the driver are the same for every key.
         step = c -> dropleadin!(drop, fillchunk!(st, c))
-        return chunkmap(
-            step,
-            p.run(widenstart(ctx, tolerance, "forwardfill tolerance")),
-        )
+        return chunkmap(step, upstream)
     end
 end
 forwardfill(p::CausalPipeline, selectors...; kwargs...) =
@@ -299,8 +298,8 @@ function fillmissing(specs...)
         throw(ArgumentError("fillmissing column names must be unique"))
     :time in fillnames &&
         throw(ArgumentError("fillmissing may not fill the time column"))
-    return pipetransform() do p, ctx
-        return chunkmap(c -> fillmissingchunk!(c, fillnames, vals), p.run(ctx))
+    return pipetransform() do upstream, ctx
+        return chunkmap(c -> fillmissingchunk!(c, fillnames, vals), upstream)
     end
 end
 fillmissing(p::CausalPipeline, specs...) = fillmissing(specs...)(p)

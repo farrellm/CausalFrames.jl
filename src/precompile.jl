@@ -55,6 +55,12 @@
         DataFrame(load(Context(2, 5), pm |> warmup(1, forwardfill(:m))))
         ld(concatenate(p |> filterrows(r -> r.time <= 2),
             p |> filterrows(r -> r.time > 2)))
+        # a diamond the plan shares over a widened context, and one unshared
+        ld(
+            asofjoin(p, p |> selectcolumns(:time, :qty) |> lag(1);
+                rightprefix = "prev", tolerance = 2),
+        )
+        ld(merge(p |> sharing(false), p |> sharing(false) |> head(1)))
         ld(
             merge(p |> filterrows(r -> r.time <= 2) |> dropcolumns(:sym),
                 p |> filterrows(r -> r.time > 1)),

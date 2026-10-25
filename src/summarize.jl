@@ -751,9 +751,10 @@ A transform summarizing the whole window, emitted at `stop`, with columns
 """
 function summarize(summarizers; key = nothing)
     (; keycols, terms, cfg) = summaryspec(summarizers, key, "summarize")
-    return pipetransform() do p, ctx
+    # Folds the whole run and emits at its stop.
+    return pipetransform(; startfree = false, stopfree = false) do upstream, ctx
         fold = SummaryFold(cfg, keycols, terms, "summarize")
-        return chunkmap(c -> summarizechunk!(fold, c), p.run(ctx);
+        return chunkmap(c -> summarizechunk!(fold, c), upstream;
             flush = () -> summarizeflush(fold, ctx.stop))
     end
 end
@@ -805,9 +806,9 @@ then the summaries; the input columns are dropped.
 function summarizecycles(summarizers; key = nothing, keyset = nothing)
     (; keycols, terms, cfg) =
         summaryspec(summarizers, key, "summarizecycles"; keyset)
-    return pipetransform() do p, ctx
+    return pipetransform() do upstream, ctx
         fold = SummaryFold(cfg, keycols, terms, "summarizecycles")
-        return chunkmap(c -> cyclechunk!(fold, c), p.run(ctx);
+        return chunkmap(c -> cyclechunk!(fold, c), upstream;
             flush = () -> cycleflush(fold))
     end
 end
@@ -850,12 +851,13 @@ so far, itself included.
 function addsummarycolumns(summarizers; key = nothing)
     (; keycols, requested, terms, cfg) =
         summaryspec(summarizers, key, "addsummarycolumns")
-    return pipetransform() do p, ctx
+    # Cumulative from the run's start.
+    return pipetransform(; startfree = false) do upstream, ctx
         # hidden dependencies are never added, so only the requested outputs
         # are checked as new columns
         fold = SummaryFold(cfg, keycols, terms, "addsummarycolumns";
             newcols = requested)
-        return chunkmap(c -> runningchunk!(fold, c), p.run(ctx))
+        return chunkmap(c -> runningchunk!(fold, c), upstream)
     end
 end
 addsummarycolumns(p::CausalPipeline, summarizers; kwargs...) =

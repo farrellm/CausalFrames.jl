@@ -14,8 +14,8 @@ include("benchmarks.jl")
 
 function peaklive(ctx::Context, build)
     peak = Ref(0)
-    probe(q) = CausalPipeline() do c
-        CausalFrames.chunkmap(q.run(c)) do chunk
+    probe(q) = CausalPipeline(; startfree = true, stopfree = true) do c
+        CausalFrames.chunkmap(CausalFrames.runchunks(c, q)) do chunk
             GC.gc()
             peak[] = max(peak[], Base.gc_live_bytes())
             return chunk
