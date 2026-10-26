@@ -359,7 +359,11 @@ The time column is always read: `:time`, or the column `time` names. Listing
 `:time` names the output's time column, so `sourcecolumns` drops it from the
 list rather than letting it pull in a file `:time` that would clash with
 `time = :ts`. A `time` function sees only the columns read, so it must list
-what it reads. The columns keep the file's order; reordering is
+what it reads. With nothing listed it reads no file column at all, yet must
+still see every row, and a zero-column DataFrame has none: so the readers read
+the file's first column anyway (`needscarrier`), the chunk's rows are counted
+before `keepcolumns!` drops it, and the function is mapped over that many
+empty rows. The columns keep the file's order; reordering is
 `reordercolumns`' job.
 
 ## Missing times

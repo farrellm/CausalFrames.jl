@@ -347,6 +347,11 @@ function testcolumns(loadwith, source::String, c::Vector)
     df = readwith(; time = row -> row.a * 10, columns = [:a])
     @test df.time == [10, 20, 30]
     @test sort!(names(df)) == ["a", "time"]
+    # or none, and still sees every row
+    df = readwith(; time = row -> 7, columns = ())
+    @test names(df) == ["time"]
+    @test df.time == [7, 7, 7]
+    @test readwith(; time = row -> length(row), columns = [:time]).time == [0, 0, 0]
     @test_throws "$source has no column :nope" readwith(; time = :ts,
         columns = [:a, :nope])
     return nothing

@@ -118,7 +118,8 @@ end
 struct ColumnSelect <: Function
     clip::SourceClip
 end
-(s::ColumnSelect)(i, name) = readscolumn(s.clip, String(name))
+(s::ColumnSelect)(i, name) =
+    readscolumn(s.clip, String(name)) || (i == 1 && needscarrier(s.clip))
 
 # The file's chunks. A file that fits in one chunk, or that CSV.Chunks refuses
 # to split, is read whole. `delim = nothing` is CSV.jl's own default.

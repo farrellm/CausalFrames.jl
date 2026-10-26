@@ -157,8 +157,8 @@ slicebound(::Type{T}, b) where {T} = convert(T, b)
 slicebound(::Type{T}, b::AbstractFloat) where {T<:Integer} = floor(T, b)
 
 # The SELECT list: the file columns a `columns` read keeps (`readcolumns`),
-# else `*`. SQL can't select nothing, so with none matching it is `*` too, and
-# the clip reports the missing ones.
+# else `*`. SQL can't select nothing, so with none matching (a listed column
+# the file lacks) it is `*` too, and the clip reports the missing ones.
 function selectlist(filenames::Vector{String}, clip::SourceClip)
     clip.columns === nothing && return "*"
     keep = readcolumns(clip, filenames)

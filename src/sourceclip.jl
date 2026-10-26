@@ -48,8 +48,17 @@ end
 readscolumn(clip::SourceClip, name::String) =
     clip.columns === nothing ||
     keepscolumn(clip, Symbol(renamedto(name, clip.rename)))
-readcolumns(clip::SourceClip, filenames::Vector{String}) =
-    filter(n -> readscolumn(clip, n), filenames)
+function readcolumns(clip::SourceClip, filenames::Vector{String})
+    keep = filter(n -> readscolumn(clip, n), filenames)
+    return isempty(keep) && needscarrier(clip) ? first(filenames, 1) : keep
+end
+
+# Whether a read keeps no file column: a `time` function over an empty
+# `columns` (listed names must exist, and a Symbol `time` names one). A
+# zero-column DataFrame has no rows, so the readers read the first column
+# anyway, to carry the row count until the time is materialized.
+needscarrier(clip::SourceClip) =
+    clip.time isa Function && clip.columns !== nothing && isempty(clip.columns)
 keepscolumn(clip::SourceClip, name::Symbol) =
     name in clip.columns || name === timetarget(clip.time)
 timetarget(time::Symbol) = time
@@ -73,11 +82,13 @@ end
 
 # The first steps of every chunk, sorted or not: rename the columns, keep
 # `columns`, materialize `:time`, and find the rows whose time is present
-# (`nothing` for all), refusing a missing one unless `skipmissing`.
+# (`nothing` for all), refusing a missing one unless `skipmissing`. The rows
+# are counted first, since `columns` may keep no file column (`needscarrier`).
 function resolvechunk!(clip::SourceClip, df::DataFrame)
     renamecolumns!(df, clip.rename)
+    n = nrow(df)
     keepcolumns!(df, clip)
-    resolvetime!(df, clip.time, clip.path, clip.what)
+    resolvetime!(df, clip.time, clip.path, clip.what, n)
     return presentrows(df.time, clip.skipmissing, clip.what, clip.path)
 end
 
@@ -228,10 +239,11 @@ function renamedto(n::String, m::AbstractDict)
 end
 
 # Materialize `:time`, from a column or a function, and reject it if textual.
-function resolvetime!(df::DataFrame, time, path::String, what::String)
+# `n` is the chunk's row count, which a zero-column `df` no longer has.
+function resolvetime!(df::DataFrame, time, path::String, what::String, n::Int)
     if time isa Function
-        df[!, :time] =
-            checktimes(maptime(time, Tables.columntable(df)), true, what, path)
+        times = ncol(df) == 0 ? maptime(time, n) : maptime(time, Tables.columntable(df))
+        df[!, :time] = checktimes(times, true, what, path)
     else
         name = timecolumn(df, time, what, path)
         name === :time || rename!(df, name => :time)
@@ -292,3 +304,5 @@ timeclash(
 # Function barrier: computes the time column by applying `f` to the concretely
 # typed rows of the column table, so `f` specializes and the eltype is inferred.
 maptime(f, nt::NamedTuple) = map(f, Tables.rows(nt))
+# Over `n` rows of no columns, each an empty NamedTuple.
+maptime(f, n::Int) = map(_ -> f((;)), 1:n)
