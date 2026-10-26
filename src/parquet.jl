@@ -36,12 +36,13 @@ function resolvebackend(request::Symbol, preferred::Symbol, hint::String)
 end
 
 # Backend hooks. These fallbacks run only when the backend is not loaded.
-parquetproducer(::Val, ::Any, ::Any) = throw(ArgumentError(READHINT))
+parquetproducer(::Val, ::Any, ::Any, ::Any) = throw(ArgumentError(READHINT))
 parquetsink(::Val, ::Any, ::Any, ::Any, ::Any) = throw(ArgumentError(WRITEHINT))
 
 """
     readparquet(path; time = nothing, rename = nothing, sort = false,
-                closed = false, skipmissing = false, backend = :auto)
+                sortrows = 1_000_000, closed = false, skipmissing = false,
+                backend = :auto)
         -> CausalPipeline
 
 A source reading the parquet file at `path`, clipped to `[start, stop)`. Column
@@ -68,6 +69,11 @@ window.
   it cannot compare with the column) reads every in-window row and emits them
   as one sorted chunk. Without it, a decreasing time is an
   `ArgumentError`.
+- `sortrows = 1_000_000`: under `sort`, DuckDB sorts the window in time slices
+  of about this many rows, one query each, so it holds one slice rather than
+  the window. Slices are cut at approximate quantiles of the time, and rows
+  sharing a time are never split, so a slice can run larger. Each slice is a
+  scan of the file's time column. Unused by Parquet2. Must be positive.
 - `closed = false`: clip to `[start, stop]` instead, keeping rows at `stop`.
 - `skipmissing = false`: drop rows whose time is `missing` (a null, or a `time`
   function returning `missing`). Without it such a row is an `ArgumentError`,
@@ -78,16 +84,17 @@ window.
 Order and missing-time errors are raised only for the rows actually read.
 """
 function readparquet(path::AbstractString; time = nothing, rename = nothing,
-    sort::Bool = false, closed::Bool = false, skipmissing::Bool = false,
-    backend::Symbol = :auto)
+    sort::Bool = false, sortrows::Integer = 1_000_000, closed::Bool = false,
+    skipmissing::Bool = false, backend::Symbol = :auto)
     checksourcetimespec(time, "readparquet")
+    checkpositive(sortrows, "readparquet sortrows")
     resolvebackend(backend, :duckdb, READHINT)   # eager: fail at the call site
     return CausalPipeline() do ctx::Context
         clip = SourceClip(ctx, path, "parquet file", time, rename, closed,
             skipmissing)
         return ChunkSource(
             parquetproducer(resolvebackend(backend, :duckdb, READHINT), clip,
-                sort),
+                sort, Int(sortrows)),
         )
     end
 end

@@ -16,10 +16,12 @@ fallbacks in `src/parquet.jl` throw the `READHINT`/`WRITEHINT` message:
   discovers the extension. It runs eagerly at operator construction *and*
   again per run, so a missing backend is reported where the user typed the
   operator, while one loaded afterwards still counts
-- `parquetproducer(::Val{:name}, clip::SourceClip, sort)` → a zero-argument
-  callable returning the next chunk, or `nothing` at the end. The clip carries
-  the path, the context window and every clip option (`time`, `rename`,
-  `closed`, `skipmissing`), plus the running `prevtime` and `done`
+- `parquetproducer(::Val{:name}, clip::SourceClip, sort, sortrows)` → a
+  zero-argument callable returning the next chunk, or `nothing` at the end. The
+  clip carries the path, the context window and every clip option (`time`,
+  `rename`, `closed`, `skipmissing`), plus the running `prevtime` and `done`.
+  `sortrows` is only the producer's (DuckDB slices its sort by it; Parquet2
+  ignores it), so it is an argument rather than a clip field
 - `parquetsink(::Val{:name}, path, queue, rowgroupsize, opts)` → a `ChunkSink`
   wrapping a `chan -> writeloop(chan, ...)`. Translate options *here*, on the
   pipeline's own task, so an unsupported one is reported when the run starts
@@ -62,6 +64,11 @@ fallbacks in `src/parquet.jl` throw the `READHINT`/`WRITEHINT` message:
   and gathers only when that is impossible (a `time` function, an untraceable
   `rename`, a real column shadowing `file_row_number`, or a window it cannot
   bind, whose unfiltered re-run must not sort the whole file)
+- DuckDB's SQL sort is cut into time slices of about `sortrows` rows
+  (`sliceboundaries`), since one `ORDER BY` holds the whole window in DuckDB's
+  memory. The first slice's query runs eagerly, inside the bind fallback's
+  `try`, which is where an unbindable window fails; the rest run lazily, each
+  once the previous result is drained, so one connection serves them all
 
 ## Skipping never fails a read
 

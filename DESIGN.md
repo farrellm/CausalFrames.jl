@@ -98,7 +98,7 @@ boundaries.
 | `clock(interval; batchsize)` | source | rows at `start, start + interval, …` before `stop`, only `:time`, in chunks of `batchsize` |
 | `readtable(table; time, checkorder, sort, closed, skipmissing)` / `readtable(frame; closed, checkcontext)` | source | an in-memory table or frame (see "Tables as sources") |
 | `readcsv(path; types, time, rename, delim, sort, chunkbytes, closed, skipmissing)` | source | a CSV file, `String` columns unless typed, read in chunks of about `chunkbytes` bytes (see "Resolving the time column", "Missing times", "Sorting a file source") |
-| `readparquet(path; time, rename, sort, closed, skipmissing, backend)` | source | a parquet file through DuckDB or Parquet2, skipping data outside the window (see "Parquet I/O") |
+| `readparquet(path; time, rename, sort, sortrows, closed, skipmissing, backend)` | source | a parquet file through DuckDB or Parquet2, skipping data outside the window (see "Parquet I/O") |
 | `readjls(path; closed)` | source | a file written by `writejls` (see "JLS I/O") |
 | `writecsv(path; queue, ...)` | transform | pass-through CSV sink (see "CSV output") |
 | `writeparquet(path; queue, rowgroupsize, backend, ...)` | transform | pass-through parquet sink (see "Parquet I/O") |
@@ -288,8 +288,19 @@ are gathered in file order, so stability across them is file order too.
 
 Where a reader can do better, it does. DuckDB takes the sort into the query as
 `ORDER BY <time>, file_row_number` beside the window's `WHERE`, and the sorted
-result streams through the ordinary `clipchunk!` loop, early stop included;
-DuckDB spills a large sort to disk itself. `file_row_number` is there because
+result streams through the ordinary `clipchunk!` loop, early stop included.
+One sort over the window would hold every row in it, every column: on a file
+stored by key, not time, the window is the whole file, and an 81.7M-row file
+(10 columns, four of them wide strings) was OOM-killed at 7 GB, DuckDB's
+`memory_limit` notwithstanding. So a window holding more than `sortrows` rows
+(a `count(*)` under the window's `WHERE` decides, scanning only the time
+column) is cut at DuckDB's `approx_quantile`s of the time into slices of about
+`sortrows` rows, each its own `WHERE … ORDER BY` query, run lazily once the
+previous one is drained. DuckDB then holds one slice at a time; the same file
+read in 1 GB, one scan of its time column per slice. Slices are half-open, so
+rows sharing a time never straddle a boundary and the order stays stable;
+quantiles that collapse onto one time, or that DuckDB cannot take or the
+context's time type cannot hold, just leave fewer slices. `file_row_number` is there because
 DuckDB's `ORDER BY` is not stable: it is the reader's virtual column, left out of
 `*`, and the tiebreak that makes the order the file's. Pushdown needs a nameable
 time column and that tiebreak, so a `time` function, an untraceable `rename`, or

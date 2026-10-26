@@ -289,6 +289,34 @@ end
             sort = true))),
     ) == 1
 
+    # DuckDB sorts a window larger than `sortrows` in time slices, which leaves
+    # the result as one whole sort would, ties included, even when a tie
+    # outgrows a slice or the window starts inside one
+    duck = Base.get_extension(CausalFrames, :CausalFramesDuckDBExt)
+    function sliceclip(ctx; closed = false)
+        clip = CausalFrames.SourceClip(ctx, big, "parquet file", nothing, nothing,
+            closed, false)
+        return duck.sliceboundaries(duck.connection(), clip, "\"time\"", 1_000)
+    end
+    @test length(sliceclip(ctx)) > 1
+    @test all(b -> 2 < b < 11, sliceclip(ctx))
+    @test isempty(sliceclip(Context(2, 3)))       # ~1.5k rows, one time: no split
+    for c in (ctx, Context(0, 13), Context(5, 6)), closed in (false, true),
+        sortrows in (100, 1_000, 5_000)
+
+        one = DataFrame(load(c, readparquet(big; backend = :duckdb, sort = true,
+            closed)))
+        @test isequal(
+            DataFrame(
+                load(c, readparquet(big; backend = :duckdb,
+                    sort = true, closed, sortrows)),
+            ), one)
+        lo, hi = c.start, c.stop
+        @test one.x == filter(i -> lo <= ts[i] && (closed ? ts[i] <= hi : ts[i] < hi),
+            perm)
+    end
+    @test_throws ArgumentError readparquet(big; sort = true, sortrows = 0)
+
     # a window DuckDB can't bind (a Rational) is clipped and sorted in Julia,
     # in one gathered chunk, rather than by sorting the whole file in SQL
     qctx = Context(2 // 1, 11 // 1)
@@ -337,8 +365,11 @@ end
     dt = ingroups(joinpath(dir, "dt.parquet"),
         [DataFrame(ts = stamps, x = 1:5)]; stats = ["ts"])
     dtctx = Context(DateTime(2026, 1, 1, 1), DateTime(2026, 1, 1, 9))
-    for backend in (:duckdb, :parquet2)
-        got = DataFrame(load(dtctx, readparquet(dt; backend, time = :ts, sort = true)))
+    for backend in (:duckdb, :parquet2), sortrows in (1, 1_000_000)
+        got = DataFrame(
+            load(dtctx,
+                readparquet(dt; backend, time = :ts, sort = true, sortrows)),
+        )
         @test got.x == [2, 4, 1]
     end
 end

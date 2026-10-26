@@ -34,14 +34,15 @@ end
 mutable struct QueryProducer{T}
     const clip::SourceClip{T}
     const sort::Bool
+    const sortrows::Int # rows a sorted read sorts at a time, roughly
     gather::Bool        # sort in Julia, the query being unable to
     con::Any            # DuckDB connection, opened on first pull
     parts::Any          # PullCursor over the result chunks, as DataFrames
 end
 
 CausalFrames.parquetproducer(::Val{:duckdb}, clip::SourceClip{T},
-    sort::Bool) where {T} =
-    QueryProducer{T}(clip, sort, false, nothing, nothing)
+    sort::Bool, sortrows::Int) where {T} =
+    QueryProducer{T}(clip, sort, sortrows, false, nothing, nothing)
 
 function (p::QueryProducer)()
     p.parts === nothing && startquery!(p)
@@ -65,30 +66,78 @@ function startquery!(p::QueryProducer)
     p.gather =
         p.sort &&
         (src === nothing || any(n -> lowercase(n) == "file_row_number", filenames))
-    res = if src === nothing
-        execstream(p.con, "SELECT * FROM read_parquet(?)", Any[clip.path])
+    results = if src === nothing
+        (execstream(p.con, "SELECT * FROM read_parquet(?)", Any[clip.path]),)
     else
         col = "\"" * replace(src, "\"" => "\"\"") * "\""
-        order = p.sort && !p.gather ? " ORDER BY $col, file_row_number" : ""
-        upper = clip.closed ? "<=" : "<"
-        # The WHERE also drops null times, so without `skipmissing` they go
-        # unreported here; `OR $col IS NULL` would cost the row-group skip
-        # (see notes/duckdb-null-pushdown.md).
         try
-            execstream(p.con,
-                "SELECT * FROM read_parquet(?) WHERE $col >= ? AND $col $upper ?$order",
-                Any[clip.path, clip.start, clip.stop])
+            windowresults(p, col)
         catch
             # A time type DuckDB can't bind or compare with this column: read
             # the whole file and let the clip do the work, gathering under a
             # sort so DuckDB never sorts (and holds) the whole file. An
             # unreadable file fails again here with its own error.
             p.gather = p.sort
-            execstream(p.con, "SELECT * FROM read_parquet(?)", Any[clip.path])
+            (execstream(p.con, "SELECT * FROM read_parquet(?)", Any[clip.path]),)
         end
     end
-    p.parts = PullCursor(Iterators.map(DataFrame, Tables.partitions(res)))
+    p.parts = PullCursor(
+        Iterators.map(
+            DataFrame,
+            Iterators.flatten(Iterators.map(Tables.partitions, results)),
+        ))
     return nothing
+end
+
+# The streaming results of the window's query, in order. A sorted read is cut
+# into time slices of about `sortrows` rows, each its own `ORDER BY` query, so
+# DuckDB holds one slice's rows at a time rather than the window's. Ties never
+# straddle a half-open slice boundary, so the order stays stable. The first
+# query runs here, where a window DuckDB can't bind fails; the rest run lazily,
+# each once the previous result is drained.
+#
+# The WHERE also drops null times, so without `skipmissing` they go unreported
+# here; `OR $col IS NULL` would cost the row-group skip (see
+# notes/duckdb-null-pushdown.md).
+function windowresults(p::QueryProducer, col::String)
+    clip = p.clip
+    upper = clip.closed ? "<=" : "<"
+    p.sort && !p.gather || return (
+        execstream(p.con,
+            "SELECT * FROM read_parquet(?) WHERE $col >= ? AND $col $upper ?",
+            Any[clip.path, clip.start, clip.stop]),
+    )
+    bounds = sliceboundaries(p.con, clip, col, p.sortrows)
+    lows, highs = Any[clip.start; bounds], Any[bounds; clip.stop]
+    slice(i) = execstream(p.con,
+        "SELECT * FROM read_parquet(?) WHERE $col >= ? AND $col \
+        $(i == length(lows) ? upper : "<") ? ORDER BY $col, file_row_number",
+        Any[clip.path, lows[i], highs[i]])
+    return Iterators.flatten(((slice(1),), Iterators.map(slice, 2:length(lows))))
+end
+
+# The times splitting the window into slices of about `sortrows` rows: none
+# when it holds no more, else DuckDB's approximate quantiles, in the context's
+# time type and strictly inside the window. A window DuckDB can't bind fails
+# the count; a quantile it can't take or convert just leaves one slice.
+function sliceboundaries(con, clip::SourceClip{T}, col::String,
+    sortrows::Int) where {T}
+    from = "FROM read_parquet(?) WHERE $col >= ? AND $col \
+        $(clip.closed ? "<=" : "<") ?"
+    params = Any[clip.path, clip.start, clip.stop]
+    counted = DBInterface.execute(con, "SELECT count(*) AS n $from", params)
+    n = only(Tables.columntable(counted).n)
+    n <= sortrows && return T[]
+    k = cld(n, sortrows)
+    try
+        qs = join((string(i / k) for i in 1:(k-1)), ", ")
+        res = DBInterface.execute(con, "SELECT approx_quantile($col, [$qs]) AS q $from",
+            params)
+        bounds = T[convert(T, b) for b in only(Tables.columntable(res).q) if b !== missing]
+        return filter(b -> clip.start < b < clip.stop, unique!(sort!(bounds)))
+    catch
+        return T[]
+    end
 end
 
 execstream(con, sql::String, params::Vector{Any}) =

@@ -62,7 +62,8 @@ Order and missing-time errors are raised only for the chunks actually read.
 ## `readparquet`
 
     readparquet(path; time = nothing, rename = nothing, sort = false,
-                closed = false, skipmissing = false, backend = :auto)
+                sortrows = 1_000_000, closed = false, skipmissing = false,
+                backend = :auto)
         -> CausalPipeline
 
 A source reading the parquet file at `path`, clipped to `[start, stop)`. Column
@@ -89,6 +90,11 @@ window.
   it cannot compare with the column) reads every in-window row and emits them
   as one sorted chunk. Without it, a decreasing time is an
   `ArgumentError`.
+- `sortrows = 1_000_000`: under `sort`, DuckDB sorts the window in time slices
+  of about this many rows, one query each, so it holds one slice rather than
+  the window. Slices are cut at approximate quantiles of the time, and rows
+  sharing a time are never split, so a slice can run larger. Each slice is a
+  scan of the file's time column. Unused by Parquet2. Must be positive.
 - `closed = false`: clip to `[start, stop]` instead, keeping rows at `stop`.
 - `skipmissing = false`: drop rows whose time is `missing` (a null, or a `time`
   function returning `missing`). Without it such a row is an `ArgumentError`,

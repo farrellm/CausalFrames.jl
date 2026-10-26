@@ -74,8 +74,9 @@ mutable struct RowGroupProducer{T}
     usestats::Bool      # statistics comparable with this context's times
 end
 
+# `sortrows` is DuckDB's: a sorted read here gathers the whole window.
 CausalFrames.parquetproducer(::Val{:parquet2}, clip::SourceClip{T},
-    sort::Bool) where {T} =
+    sort::Bool, ::Int) where {T} =
     RowGroupProducer{T}(clip, sort, nothing, nothing, nothing, true)
 
 function (p::RowGroupProducer)()

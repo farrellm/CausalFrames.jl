@@ -121,7 +121,9 @@ design rationale and performance constraints behind each module.
   `gatherchunk!`/`sortgathered` in `sourceclip.jl` (scan every chunk for
   in-window rows, stable-sort once, emit one chunk), except that DuckDB sorts
   in SQL, tie-broken by its virtual `file_row_number` since its `ORDER BY` is
-  unstable (see DESIGN.md's "Sorting a file source")
+  unstable, and in time slices of about `sortrows` rows, since one sort over a
+  key-ordered file's window holds the whole file (see DESIGN.md's "Sorting a
+  file source")
 - `src/jls.jl` — `writejls`/`readjls`, the untyped persistence pair: a header
   record then one `serialize`d DataFrame per chunk, each its own `serialize`
   call so records are independent. The sink is `ChunkSink` with a serializing
