@@ -48,6 +48,8 @@ end
 readscolumn(clip::SourceClip, name::String) =
     clip.columns === nothing ||
     keepscolumn(clip, Symbol(renamedto(name, clip.rename)))
+readcolumns(clip::SourceClip, filenames::Vector{String}) =
+    filter(n -> readscolumn(clip, n), filenames)
 keepscolumn(clip::SourceClip, name::Symbol) =
     name in clip.columns || name === timetarget(clip.time)
 timetarget(time::Symbol) = time

@@ -9,7 +9,7 @@ using DataFrames
 using Parquet2
 
 using CausalFrames:
-    ChunkSink, PullCursor, SourceClip, pullclipped!, readscolumn, timesourcename,
+    ChunkSink, PullCursor, SourceClip, pullclipped!, readcolumns, timesourcename,
     vcatowned
 
 CausalFrames.backendloaded(::Val{:parquet2}) = true
@@ -93,7 +93,7 @@ function open!(p::RowGroupProducer)
     p.dataset = Parquet2.Dataset(p.clip.path)
     filenames = String[String(n) for n in Base.names(p.dataset)]
     p.timecol = timesourcename(filenames, p.clip.time, p.clip.rename)
-    kept = filter(n -> readscolumn(p.clip, n), filenames)
+    kept = readcolumns(p.clip, filenames)
     placed = Iterators.map(rg -> (rg, rowgroupwindow(p, rg)),
         1:Parquet2.nrowgroups(p.dataset))
     picked =
@@ -106,10 +106,26 @@ function open!(p::RowGroupProducer)
 end
 
 # A row group's columns, all of them or, for a `columns` read, only those it
-# keeps, each decoded on its own.
-rowgroupframe(rg, clip::SourceClip, kept::Vector{String}) =
-    clip.columns === nothing ? DataFrame(rg) :
-    DataFrame(Any[Parquet2.load(rg, n) for n in kept], Symbol.(kept); copycols = false)
+# keeps, each decoded on its own: on a task apiece when threaded, as Parquet2
+# loads a whole row group by default.
+function rowgroupframe(rg, clip::SourceClip, kept::Vector{String})
+    clip.columns === nothing && return DataFrame(rg)
+    cols =
+        Threads.nthreads() > 1 && length(kept) > 1 ?
+        Any[fetchcolumn(t) for t in [Threads.@spawn(Parquet2.load(rg, n)) for n in kept]] :
+        Any[Parquet2.load(rg, n) for n in kept]
+    return DataFrame(cols, Symbol.(kept); copycols = false)
+end
+
+# A decoded column, failing with the decoder's own error rather than the task's.
+function fetchcolumn(t::Task)
+    try
+        return fetch(t)
+    catch e
+        e isa TaskFailedException && throw(e.task.exception)
+        rethrow()
+    end
+end
 
 # Where a row group sits relative to the window, by its statistics: `:before`,
 # `:after` (so are all later ones, in a time-ordered file) or `:overlaps`, the

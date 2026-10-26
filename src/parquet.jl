@@ -83,7 +83,9 @@ window.
 - `backend = :auto`: `:duckdb`, `:parquet2`, or `:auto` (DuckDB if loaded).
   Naming a backend that is not loaded is an `ArgumentError`.
 
-Order and missing-time errors are raised only for the rows actually read.
+Unlike `readcsv`, there is no `types` (column types come from the file) and no
+`delim`. Order and missing-time errors are raised only for the rows actually
+read.
 """
 function readparquet(path::AbstractString; columns = nothing, time = nothing,
     rename = nothing, sort::Bool = false, sortrows::Integer = 1_000_000,

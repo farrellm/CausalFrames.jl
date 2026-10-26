@@ -321,6 +321,19 @@ end
     @test length(sliceclip(ctx)) > 1
     @test all(b -> 2 < b < 11, sliceclip(ctx))
     @test isempty(sliceclip(Context(2, 3)))       # ~1.5k rows, one time: no split
+    # an integer context over a floating time column still slices: the
+    # interpolated quantiles of its integral values are floored, not refused
+    fts = Float64.(ts)
+    fbig = ingroups(joinpath(dir, "fbig.parquet"),
+        [DataFrame(time = fts[r], x = r) for r in Iterators.partition(1:n, 2_000)])
+    fclip = CausalFrames.SourceClip(ctx, fbig, "parquet file", nothing, nothing,
+        false, false)
+    fbounds = duck.sliceboundaries(duck.connection(), fclip, "\"time\"", 1_000)
+    @test length(fbounds) > 1 && all(b -> 2 < b < 11, fbounds)
+    @test DataFrame(
+        load(ctx, readparquet(fbig; backend = :duckdb, sort = true,
+            sortrows = 1_000)),
+    ).x == filter(i -> 2 <= fts[i] < 11, perm)
     for c in (ctx, Context(0, 13), Context(5, 6)), closed in (false, true)
         baseline = DataFrame(load(c, readparquet(big; backend = :duckdb,
             sort = true, closed)))

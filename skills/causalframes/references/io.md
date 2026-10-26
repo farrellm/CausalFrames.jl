@@ -64,7 +64,10 @@ window. Column types are **not** inferred: every column is a `String` unless
   `time` function returning `missing`). Without it such a row is an
   `ArgumentError`.
 
-Order and missing-time errors are raised only for the chunks actually read.
+Unlike `readparquet`, there is no `backend` (CSV.jl reads every file)
+and no `sortrows`: a CSV file can't be queried by time, so a sort gathers the
+window. Order and missing-time errors are raised only for the chunks actually
+read.
 
 ## `readparquet`
 
@@ -111,7 +114,9 @@ window.
 - `backend = :auto`: `:duckdb`, `:parquet2`, or `:auto` (DuckDB if loaded).
   Naming a backend that is not loaded is an `ArgumentError`.
 
-Order and missing-time errors are raised only for the rows actually read.
+Unlike `readcsv`, there is no `types` (column types come from the file) and no
+`delim`. Order and missing-time errors are raised only for the rows actually
+read.
 
 ## `readjls`
 

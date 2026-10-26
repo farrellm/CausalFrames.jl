@@ -47,7 +47,10 @@ window. Column types are **not** inferred: every column is a `String` unless
   `time` function returning `missing`). Without it such a row is an
   `ArgumentError`.
 
-Order and missing-time errors are raised only for the chunks actually read.
+Unlike [`readparquet`](@ref), there is no `backend` (CSV.jl reads every file)
+and no `sortrows`: a CSV file can't be queried by time, so a sort gathers the
+window. Order and missing-time errors are raised only for the chunks actually
+read.
 """
 function readcsv(path::AbstractString; columns = nothing, types = nothing,
     time = nothing, rename = nothing, delim = nothing, sort::Bool = false,

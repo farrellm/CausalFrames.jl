@@ -11,7 +11,7 @@ using DuckDB
 using Tables
 
 using CausalFrames:
-    ChunkSink, PullCursor, SourceClip, pullclipped!, readscolumn, timesourcename
+    ChunkSink, PullCursor, SourceClip, pullclipped!, readcolumns, timesourcename
 
 CausalFrames.backendloaded(::Val{:duckdb}) = true
 
@@ -130,19 +130,26 @@ function sliceboundaries(con, clip::SourceClip{T}, col::String,
         qs = join((string(i / k) for i in 1:(k-1)), ", ")
         res = DBInterface.execute(con, "SELECT approx_quantile($col, [$qs]) AS q $from",
             params)
-        bounds = T[convert(T, b) for b in only(Tables.columntable(res).q) if b !== missing]
+        bounds =
+            T[slicebound(T, b) for b in only(Tables.columntable(res).q) if b !== missing]
         return filter(b -> clip.start < b < clip.stop, unique!(sort!(bounds)))
     catch
         return T[]
     end
 end
 
-# The SELECT list: the file columns a `columns` read keeps (by `readscolumn`),
+# A quantile as a cut time in the context's time type. A cut need only fall
+# inside the window, so a fractional quantile of a floating column is floored
+# into an integer context rather than refused, which would leave one slice.
+slicebound(::Type{T}, b) where {T} = convert(T, b)
+slicebound(::Type{T}, b::AbstractFloat) where {T<:Integer} = floor(T, b)
+
+# The SELECT list: the file columns a `columns` read keeps (`readcolumns`),
 # else `*`. SQL can't select nothing, so with none matching it is `*` too, and
 # the clip reports the missing ones.
 function selectlist(filenames::Vector{String}, clip::SourceClip)
     clip.columns === nothing && return "*"
-    keep = filter(n -> readscolumn(clip, n), filenames)
+    keep = readcolumns(clip, filenames)
     return isempty(keep) ? "*" : join(map(quotename, keep), ", ")
 end
 
