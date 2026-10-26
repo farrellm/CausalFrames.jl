@@ -61,7 +61,7 @@ function readcsv(path::AbstractString; columns = nothing, types = nothing,
     # `rename` (`types` names the file's original columns), can only be judged
     # on the first chunk, in `resolvetime!`.
     if !(time isa Function) && rename === nothing
-        timename = time isa Symbol ? time : :time
+        timename = timetarget(time)
         namekeyed = types isa AbstractDict && keytype(types) <: Union{Symbol,
             AbstractString}
         typedbydict =

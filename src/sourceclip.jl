@@ -69,6 +69,16 @@ function keepcolumns!(df::DataFrame, clip::SourceClip)
     return nothing
 end
 
+# The first steps of every chunk, sorted or not: rename the columns, keep
+# `columns`, materialize `:time`, and find the rows whose time is present
+# (`nothing` for all), refusing a missing one unless `skipmissing`.
+function resolvechunk!(clip::SourceClip, df::DataFrame)
+    renamecolumns!(df, clip.rename)
+    keepcolumns!(df, clip)
+    resolvetime!(df, clip.time, clip.path, clip.what)
+    return presentrows(df.time, clip.skipmissing, clip.what, clip.path)
+end
+
 # Shared by the file sources: rename columns, materialize `:time`, drop (or
 # refuse) missing-time rows, check order within the chunk and against the
 # previous one, clip to the window, and convert `:time` to the context's time
@@ -76,12 +86,9 @@ end
 # marks the clip done, which ends the source.
 function clipchunk!(clip::SourceClip{T}, df::DataFrame) where {T}
     what, path = clip.what, clip.path
-    renamecolumns!(df, clip.rename)
-    keepcolumns!(df, clip)
-    resolvetime!(df, clip.time, path, what)
     # Missing rows are excluded through the row index rather than deleted
     # first, so the chunk is copied once.
-    present = presentrows(df.time, clip.skipmissing, what, path)
+    present = resolvechunk!(clip, df)
     times = present === nothing ? df.time : view(df.time, present)
     issorted(times) || throw(ArgumentError(unordered(what, path)))
     if !isempty(times)
@@ -138,11 +145,7 @@ end
 # in-window rows, found by a scan, are pushed onto `kept` to be sorted once the
 # file is exhausted.
 function gatherchunk!(kept::Vector{DataFrame}, clip::SourceClip, df::DataFrame)
-    what, path = clip.what, clip.path
-    renamecolumns!(df, clip.rename)
-    keepcolumns!(df, clip)
-    resolvetime!(df, clip.time, path, what)
-    present = presentrows(df.time, clip.skipmissing, what, path)
+    present = resolvechunk!(clip, df)
     closed, start, stop = clip.closed, clip.start, clip.stop
     rows =
         present === nothing ? windowrows(df.time, closed, start, stop) :

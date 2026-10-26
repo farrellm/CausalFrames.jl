@@ -58,8 +58,9 @@ design rationale and performance constraints behind each module.
   barrier, never `DataFrameRow`s.
   - shared with the parquet and JLS operators: `SourceClip` (a file source's
     clip options, window, carried `prevtime` and `done` flag), `clipchunk!`
-    (rename, keep `columns`, resolve `:time`, missing times via `table.jl`'s
-    `presentrows`, sortedness, clip, convert). `readscolumn` is the one
+    (`resolvechunk!` — rename, keep `columns`, resolve `:time`, missing times
+    via `table.jl`'s `presentrows`, shared with `gatherchunk!` — then
+    sortedness, clip, convert). `readscolumn` is the one
     predicate every reader pushes `columns` down by (CSV.jl's `select` through
     `ColumnSelect`, a concrete `Function` so CSV.jl's reader compiles once for
     every context type), and `keepcolumns!` holds each chunk to it and the `ChunkSink` background writer, which

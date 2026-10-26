@@ -279,7 +279,8 @@ reading changes.
 A sort cannot stream, so everything that relies on the file's order is dropped
 from that read: the order check, the binary-searched clip and the early stop at
 the first time `>= stop`. `gatherchunk!` is `clipchunk!`'s counterpart for it —
-the same `renamecolumns!`/`resolvetime!`, then a scan (`windowrows`, typed on the
+the same `resolvechunk!` (rename, keep `columns`, resolve `:time`, find
+the present rows), then a scan (`windowrows`, typed on the
 raw time vector) keeping the in-window rows of each file chunk. Once the file is
 exhausted, `sortgathered` concatenates them, applies `stableperm` unless they are
 already in order, and emits the lot as **one chunk**. Memory therefore scales

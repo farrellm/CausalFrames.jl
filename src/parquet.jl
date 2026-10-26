@@ -180,7 +180,7 @@ writeparquet(p::CausalPipeline, path::AbstractString; kwargs...) =
 # scan.
 function timesourcename(filenames::Vector{String}, time, rename)
     time isa Function && return nothing
-    target = time isa Symbol ? String(time) : "time"
+    target = String(timetarget(time))
     matches = [n for n in filenames if renamedto(n, rename) == target]
     return length(matches) == 1 ? only(matches) : nothing
 end

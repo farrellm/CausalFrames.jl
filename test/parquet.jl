@@ -122,28 +122,9 @@ end
         (sort, sortrows) in
         ((false, 1), (true, 1), (true, 1_000_000))
 
-        read(; kw...) =
+        testcolumns("parquet file $path", [1.0, 2.0, 3.0]) do kw
             DataFrame(load(ctx, readparquet(path; backend, sort, sortrows, kw...)))
-        # the file's order, whatever the list's; :time read whether listed or not
-        df = read(; time = :ts, columns = [:c, :a])
-        @test names(df) == ["time", "a", "c"]
-        @test df.time == [1, 2, 3]
-        @test df.c == [1.0, 2.0, 3.0]
-        @test names(read(; time = :ts, columns = ())) == ["time"]
-        @test names(read(; time = :ts, columns = (:time, :b))) == ["time", "b"]
-        # named after `rename`, by a map or a function
-        @test names(read(; rename = Dict("ts" => "time", "b" => "B"),
-            columns = [:B])) == ["time", "B"]
-        @test names(
-            read(; rename = n -> uppercase(String(n)), time = :TS,
-                columns = [:C]),
-        ) == ["time", "C"]
-        # a time function sees only the columns read
-        df = read(; time = row -> row.a * 10, columns = [:a])
-        @test df.time == [10, 20, 30]
-        @test sort!(names(df)) == ["a", "time"]
-        @test_throws "parquet file $path has no column :nope" read(; time = :ts,
-            columns = [:a, :nope])
+        end
     end
     @test_throws "invalid readparquet columns of type Vector{String}" readparquet(path;
         columns = ["a"])
@@ -340,19 +321,22 @@ end
     @test length(sliceclip(ctx)) > 1
     @test all(b -> 2 < b < 11, sliceclip(ctx))
     @test isempty(sliceclip(Context(2, 3)))       # ~1.5k rows, one time: no split
-    for c in (ctx, Context(0, 13), Context(5, 6)), closed in (false, true),
-        sortrows in (100, 1_000, 5_000)
-
-        one = DataFrame(load(c, readparquet(big; backend = :duckdb, sort = true,
-            closed)))
-        @test isequal(
-            DataFrame(
-                load(c, readparquet(big; backend = :duckdb,
-                    sort = true, closed, sortrows)),
-            ), one)
+    for c in (ctx, Context(0, 13), Context(5, 6)), closed in (false, true)
+        baseline = DataFrame(load(c, readparquet(big; backend = :duckdb,
+            sort = true, closed)))
         lo, hi = c.start, c.stop
-        @test one.x == filter(i -> lo <= ts[i] && (closed ? ts[i] <= hi : ts[i] < hi),
-            perm)
+        @test baseline.x ==
+              filter(i -> lo <= ts[i] && (closed ? ts[i] <= hi : ts[i] < hi), perm)
+        for sortrows in (100, 1_000, 5_000)
+            @test isequal(
+                DataFrame(
+                    load(
+                        c,
+                        readparquet(big; backend = :duckdb,
+                            sort = true, closed, sortrows),
+                    ),
+                ), baseline)
+        end
     end
     @test_throws ArgumentError readparquet(big; sort = true, sortrows = 0)
 

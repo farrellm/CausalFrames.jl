@@ -67,55 +67,52 @@ function startquery!(p::QueryProducer)
         p.sort &&
         (src === nothing || any(n -> lowercase(n) == "file_row_number", filenames))
     sel = selectlist(filenames, clip)
-    results = if src === nothing
-        (execstream(p.con, "SELECT $sel FROM read_parquet(?)", Any[clip.path]),)
-    else
-        col = quotename(src)
+    results = nothing
+    if src !== nothing
         try
-            windowresults(p, col, sel)
+            results = windowresults(p, quotename(src), sel)
         catch
             # A time type DuckDB can't bind or compare with this column: read
             # the whole file and let the clip do the work, gathering under a
             # sort so DuckDB never sorts (and holds) the whole file. An
-            # unreadable file fails again here with its own error.
+            # unreadable file fails again below with its own error.
             p.gather = p.sort
-            (execstream(p.con, "SELECT $sel FROM read_parquet(?)", Any[clip.path]),)
         end
     end
-    p.parts = PullCursor(
-        Iterators.map(
-            DataFrame,
-            Iterators.flatten(Iterators.map(Tables.partitions, results)),
-        ))
+    results === nothing && (results =
+        (execstream(p.con, "SELECT $sel FROM read_parquet(?)", Any[clip.path]),))
+    p.parts = PullCursor(DataFrame(t) for r in results for t in Tables.partitions(r))
     return nothing
 end
 
 # The streaming results of the window's query, in order. A sorted read is cut
 # into time slices of about `sortrows` rows, each its own `ORDER BY` query, so
-# DuckDB holds one slice's rows at a time rather than the window's. Ties never
-# straddle a half-open slice boundary, so the order stays stable. The first
-# query runs here, where a window DuckDB can't bind fails; the rest run lazily,
-# each once the previous result is drained.
-#
-# The WHERE also drops null times, so without `skipmissing` they go unreported
-# here; `OR $col IS NULL` would cost the row-group skip (see
-# notes/duckdb-null-pushdown.md).
+# DuckDB holds one slice's rows at a time rather than the window's; any other
+# read is one slice. Ties never straddle a half-open slice boundary, so the
+# order stays stable. The first query runs here, where a window DuckDB can't
+# bind fails; the rest run lazily, each once the previous result is drained.
 function windowresults(p::QueryProducer, col::String, sel::String)
     clip = p.clip
-    upper = clip.closed ? "<=" : "<"
-    p.sort && !p.gather || return (
-        execstream(p.con,
-            "SELECT $sel FROM read_parquet(?) WHERE $col >= ? AND $col $upper ?",
-            Any[clip.path, clip.start, clip.stop]),
-    )
-    bounds = sliceboundaries(p.con, clip, col, p.sortrows)
+    sorted = p.sort && !p.gather
+    bounds = sorted ? sliceboundaries(p.con, clip, col, p.sortrows) : Any[]
     lows, highs = Any[clip.start; bounds], Any[bounds; clip.stop]
+    order = sorted ? " ORDER BY $col, file_row_number" : ""
     slice(i) = execstream(p.con,
-        "SELECT $sel FROM read_parquet(?) WHERE $col >= ? AND $col \
-        $(i == length(lows) ? upper : "<") ? ORDER BY $col, file_row_number",
+        "SELECT $sel FROM read_parquet(?) \
+        $(windowfilter(col, clip.closed && i == length(lows)))$order",
         Any[clip.path, lows[i], highs[i]])
-    return Iterators.flatten(((slice(1),), Iterators.map(slice, 2:length(lows))))
+    head = slice(1)   # eagerly, inside the caller's bind fallback
+    return Iterators.flatten(((head,), (slice(i) for i in 2:length(lows))))
 end
+
+# The WHERE bounding the time column by two parameters, `[lo, hi)` or, closed,
+# `[lo, hi]`. It also drops null times, so without `skipmissing` they go
+# unreported here; `OR $col IS NULL` would cost the row-group skip (see
+# notes/duckdb-null-pushdown.md).
+windowfilter(
+    col::String,
+    closed::Bool,
+) = "WHERE $col >= ? AND $col $(closed ? "<=" : "<") ?"
 
 # The times splitting the window into slices of about `sortrows` rows: none
 # when it holds no more, else DuckDB's approximate quantiles, in the context's
@@ -123,8 +120,7 @@ end
 # the count; a quantile it can't take or convert just leaves one slice.
 function sliceboundaries(con, clip::SourceClip{T}, col::String,
     sortrows::Int) where {T}
-    from = "FROM read_parquet(?) WHERE $col >= ? AND $col \
-        $(clip.closed ? "<=" : "<") ?"
+    from = "FROM read_parquet(?) $(windowfilter(col, clip.closed))"
     params = Any[clip.path, clip.start, clip.stop]
     counted = DBInterface.execute(con, "SELECT count(*) AS n $from", params)
     n = only(Tables.columntable(counted).n)
@@ -142,7 +138,8 @@ function sliceboundaries(con, clip::SourceClip{T}, col::String,
 end
 
 # The SELECT list: the file columns a `columns` read keeps (by `readscolumn`),
-# else `*`. With none matching, `*` leaves the clip to report the missing ones.
+# else `*`. SQL can't select nothing, so with none matching it is `*` too, and
+# the clip reports the missing ones.
 function selectlist(filenames::Vector{String}, clip::SourceClip)
     clip.columns === nothing && return "*"
     keep = filter(n -> readscolumn(clip, n), filenames)
