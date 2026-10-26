@@ -511,6 +511,47 @@ end
     @test reduce(vcat, DataFrame.(stream(ctx, p))) == df
 end
 
+@testset "readcsv columns" begin
+    dir = mktempdir()
+    path = joinpath(dir, "cols.csv")
+    write(path, "ts,a,b,c\n1,1,x,1.5\n2,2,y,2.5\n3,3,z,3.5\n")
+    types = Dict(:ts => Int, :a => Int, :c => Float64)
+    for chunkbytes in (8, 4 * 1024 * 1024), sort in (false, true)
+        read(; kw...) = DataFrame(load(Context(0, 100),
+            readcsv(path; types, chunkbytes, sort, kw...)))
+        # the file's order, whatever the list's; :time read whether listed or not
+        df = read(; time = :ts, columns = [:c, :a])
+        @test names(df) == ["time", "a", "c"]
+        @test df.time == [1, 2, 3]
+        @test df.c == [1.5, 2.5, 3.5]
+        @test names(read(; time = :ts, columns = ())) == ["time"]
+        @test names(read(; time = :ts, columns = (:time, :b))) == ["time", "b"]
+        # named after `rename`, by a map or a function
+        @test names(read(; rename = Dict("ts" => "time", "b" => "B"),
+            columns = [:B])) == ["time", "B"]
+        @test names(
+            read(; rename = n -> uppercase(String(n)), time = :TS,
+                columns = [:C]),
+        ) == ["time", "C"]
+        # a time function sees only the columns read
+        df = read(; time = row -> row.a * 10, columns = [:a])
+        @test df.time == [10, 20, 30]
+        @test sort!(names(df)) == ["a", "time"]
+        @test_throws "CSV file $path has no column :nope" read(; time = :ts,
+            columns = [:a, :nope])
+    end
+    # an unread column is never parsed: typing `b` as Int warns only when read
+    badtypes = Dict(:ts => Int, :b => Int)
+    @test_logs load(Context(0, 100),
+        readcsv(path; types = badtypes, time = :ts, columns = [:a]))
+    @test_logs (:warn,) match_mode = :any load(Context(0, 100),
+        readcsv(path; types = badtypes, time = :ts))
+    @test_throws "invalid readcsv columns of type Vector{String}" readcsv(path;
+        types, time = :ts, columns = ["a"])
+    @test_throws "readcsv columns must be unique" readcsv(path; types, time = :ts,
+        columns = [:a, :a])
+end
+
 @testset "readcsv chunked" begin
     dir = mktempdir()
     path = joinpath(dir, "long.csv")

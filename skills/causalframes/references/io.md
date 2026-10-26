@@ -16,9 +16,10 @@ Readers clip to `[start, stop)` and read incrementally.
 
 ## `readcsv`
 
-    readcsv(path; types = nothing, time = nothing, rename = nothing,
-            delim = nothing, sort = false, chunkbytes = 4 * 1024 * 1024,
-            closed = false, skipmissing = false) -> CausalPipeline
+    readcsv(path; columns = nothing, types = nothing, time = nothing,
+            rename = nothing, delim = nothing, sort = false,
+            chunkbytes = 4 * 1024 * 1024, closed = false, skipmissing = false)
+        -> CausalPipeline
 
 A source reading the CSV file at `path`, clipped to `[start, stop)`. The file is
 read incrementally, in chunks, and reading stops at the first time past the
@@ -30,6 +31,12 @@ window. Column types are **not** inferred: every column is a `String` unless
   empty stream) reads as no rows.
 
 #### Keywords
+- `columns = nothing`: the columns to read, as a vector or tuple of `Symbol`s
+  named after `rename`; the others are never parsed. `:time` (or the column
+  `time` names) is always read and need not be listed, and a `time` function
+  sees only the columns read. The columns keep the file's order. Duplicates, or
+  anything but `Symbol`s, are an `ArgumentError`, as is a listed column the
+  file lacks.
 - `types = nothing`: concrete types for some columns, keyed by the file's own
   column names (before `rename`): a single type for every column, a vector
   indexed by column position (`nothing` entries stay `String`), a `Dict` keyed by
@@ -61,9 +68,9 @@ Order and missing-time errors are raised only for the chunks actually read.
 
 ## `readparquet`
 
-    readparquet(path; time = nothing, rename = nothing, sort = false,
-                sortrows = 1_000_000, closed = false, skipmissing = false,
-                backend = :auto)
+    readparquet(path; columns = nothing, time = nothing, rename = nothing,
+                sort = false, sortrows = 1_000_000, closed = false,
+                skipmissing = false, backend = :auto)
         -> CausalPipeline
 
 A source reading the parquet file at `path`, clipped to `[start, stop)`. Column
@@ -81,6 +88,8 @@ window.
 - `path`: the file.
 
 #### Keywords
+- `columns = nothing`: the columns to read, as for `readcsv`; the
+  others are never decoded.
 - `time = nothing`: where `:time` comes from, as for `readcsv`.
 - `rename = nothing`: a map or a `name -> name` function applied to the column
   names before `time` is resolved, as for `readcsv`.

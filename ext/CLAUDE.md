@@ -51,6 +51,12 @@ fallbacks in `src/parquet.jl` throw the `READHINT`/`WRITEHINT` message:
   `clipchunk!` to judge
 - Every chunk is clipped on arrival whether or not the window was pushed down,
   which is what makes skipping a pure optimization
+- `clip.columns` is pushed down too: read only the file columns
+  `readscolumn(clip, name)` accepts (DuckDB's `selectlist`, Parquet2's
+  per-column `rowgroupframe`). `keepcolumns!` applies the same rule on
+  arrival and reports a listed column the file lacks, so a producer that reads
+  more is only slower, and one that finds none to read should read all
+  (`SELECT *`), leaving that report to the clip
 - Skipping must honour `closed`, the one way it could be *wrong* rather than
   slow: DuckDB's `WHERE` bounds the time with `<=`, and Parquet2's `:after`
   needs a row group's minimum strictly past `stop`, since one starting exactly

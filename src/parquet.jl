@@ -40,9 +40,9 @@ parquetproducer(::Val, ::Any, ::Any, ::Any) = throw(ArgumentError(READHINT))
 parquetsink(::Val, ::Any, ::Any, ::Any, ::Any) = throw(ArgumentError(WRITEHINT))
 
 """
-    readparquet(path; time = nothing, rename = nothing, sort = false,
-                sortrows = 1_000_000, closed = false, skipmissing = false,
-                backend = :auto)
+    readparquet(path; columns = nothing, time = nothing, rename = nothing,
+                sort = false, sortrows = 1_000_000, closed = false,
+                skipmissing = false, backend = :auto)
         -> CausalPipeline
 
 A source reading the parquet file at `path`, clipped to `[start, stop)`. Column
@@ -60,7 +60,9 @@ window.
 - `path`: the file.
 
 # Keywords
-- `time = nothing`: where `:time` comes from, as for [`readcsv`](@ref).
+- `columns = nothing`: the columns to read, as for [`readcsv`](@ref); the
+  others are never decoded.
+- `time = nothing`: where `:time` comes from, as for `readcsv`.
 - `rename = nothing`: a map or a `name -> name` function applied to the column
   names before `time` is resolved, as for `readcsv`.
 - `sort = false`: stably sort the rows by time, for a file not stored in time
@@ -83,15 +85,17 @@ window.
 
 Order and missing-time errors are raised only for the rows actually read.
 """
-function readparquet(path::AbstractString; time = nothing, rename = nothing,
-    sort::Bool = false, sortrows::Integer = 1_000_000, closed::Bool = false,
+function readparquet(path::AbstractString; columns = nothing, time = nothing,
+    rename = nothing, sort::Bool = false, sortrows::Integer = 1_000_000,
+    closed::Bool = false,
     skipmissing::Bool = false, backend::Symbol = :auto)
     checksourcetimespec(time, "readparquet")
+    names = sourcecolumns(columns, "readparquet")
     checkpositive(sortrows, "readparquet sortrows")
     resolvebackend(backend, :duckdb, READHINT)   # eager: fail at the call site
     return CausalPipeline() do ctx::Context
         clip = SourceClip(ctx, path, "parquet file", time, rename, closed,
-            skipmissing)
+            skipmissing, names)
         return ChunkSource(
             parquetproducer(resolvebackend(backend, :duckdb, READHINT), clip,
                 sort, Int(sortrows)),

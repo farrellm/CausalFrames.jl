@@ -11,7 +11,7 @@ using DuckDB
 using Tables
 
 using CausalFrames:
-    ChunkSink, PullCursor, SourceClip, pullclipped!, timesourcename
+    ChunkSink, PullCursor, SourceClip, pullclipped!, readscolumn, timesourcename
 
 CausalFrames.backendloaded(::Val{:duckdb}) = true
 
@@ -66,19 +66,20 @@ function startquery!(p::QueryProducer)
     p.gather =
         p.sort &&
         (src === nothing || any(n -> lowercase(n) == "file_row_number", filenames))
+    sel = selectlist(filenames, clip)
     results = if src === nothing
-        (execstream(p.con, "SELECT * FROM read_parquet(?)", Any[clip.path]),)
+        (execstream(p.con, "SELECT $sel FROM read_parquet(?)", Any[clip.path]),)
     else
-        col = "\"" * replace(src, "\"" => "\"\"") * "\""
+        col = quotename(src)
         try
-            windowresults(p, col)
+            windowresults(p, col, sel)
         catch
             # A time type DuckDB can't bind or compare with this column: read
             # the whole file and let the clip do the work, gathering under a
             # sort so DuckDB never sorts (and holds) the whole file. An
             # unreadable file fails again here with its own error.
             p.gather = p.sort
-            (execstream(p.con, "SELECT * FROM read_parquet(?)", Any[clip.path]),)
+            (execstream(p.con, "SELECT $sel FROM read_parquet(?)", Any[clip.path]),)
         end
     end
     p.parts = PullCursor(
@@ -99,18 +100,18 @@ end
 # The WHERE also drops null times, so without `skipmissing` they go unreported
 # here; `OR $col IS NULL` would cost the row-group skip (see
 # notes/duckdb-null-pushdown.md).
-function windowresults(p::QueryProducer, col::String)
+function windowresults(p::QueryProducer, col::String, sel::String)
     clip = p.clip
     upper = clip.closed ? "<=" : "<"
     p.sort && !p.gather || return (
         execstream(p.con,
-            "SELECT * FROM read_parquet(?) WHERE $col >= ? AND $col $upper ?",
+            "SELECT $sel FROM read_parquet(?) WHERE $col >= ? AND $col $upper ?",
             Any[clip.path, clip.start, clip.stop]),
     )
     bounds = sliceboundaries(p.con, clip, col, p.sortrows)
     lows, highs = Any[clip.start; bounds], Any[bounds; clip.stop]
     slice(i) = execstream(p.con,
-        "SELECT * FROM read_parquet(?) WHERE $col >= ? AND $col \
+        "SELECT $sel FROM read_parquet(?) WHERE $col >= ? AND $col \
         $(i == length(lows) ? upper : "<") ? ORDER BY $col, file_row_number",
         Any[clip.path, lows[i], highs[i]])
     return Iterators.flatten(((slice(1),), Iterators.map(slice, 2:length(lows))))
@@ -139,6 +140,16 @@ function sliceboundaries(con, clip::SourceClip{T}, col::String,
         return T[]
     end
 end
+
+# The SELECT list: the file columns a `columns` read keeps (by `readscolumn`),
+# else `*`. With none matching, `*` leaves the clip to report the missing ones.
+function selectlist(filenames::Vector{String}, clip::SourceClip)
+    clip.columns === nothing && return "*"
+    keep = filter(n -> readscolumn(clip, n), filenames)
+    return isempty(keep) ? "*" : join(map(quotename, keep), ", ")
+end
+
+quotename(name::String) = "\"" * replace(name, "\"" => "\"\"") * "\""
 
 execstream(con, sql::String, params::Vector{Any}) =
     DBInterface.execute(DBInterface.prepare(con, sql, DuckDB.StreamResult), params)

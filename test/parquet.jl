@@ -112,6 +112,45 @@ end
     @test df.time == [1, 2, 3]
 end
 
+@testset "readparquet columns" begin
+    dir = mktempdir()
+    path = writeparquetfile(joinpath(dir, "cols.parquet"),
+        DataFrame(ts = [1, 2, 3], a = [1, 2, 3], b = ["x", "y", "z"],
+            c = [1.0, 2.0, 3.0]))
+    ctx = Context(0, 100)
+    for backend in (:duckdb, :parquet2),
+        (sort, sortrows) in
+        ((false, 1), (true, 1), (true, 1_000_000))
+
+        read(; kw...) =
+            DataFrame(load(ctx, readparquet(path; backend, sort, sortrows, kw...)))
+        # the file's order, whatever the list's; :time read whether listed or not
+        df = read(; time = :ts, columns = [:c, :a])
+        @test names(df) == ["time", "a", "c"]
+        @test df.time == [1, 2, 3]
+        @test df.c == [1.0, 2.0, 3.0]
+        @test names(read(; time = :ts, columns = ())) == ["time"]
+        @test names(read(; time = :ts, columns = (:time, :b))) == ["time", "b"]
+        # named after `rename`, by a map or a function
+        @test names(read(; rename = Dict("ts" => "time", "b" => "B"),
+            columns = [:B])) == ["time", "B"]
+        @test names(
+            read(; rename = n -> uppercase(String(n)), time = :TS,
+                columns = [:C]),
+        ) == ["time", "C"]
+        # a time function sees only the columns read
+        df = read(; time = row -> row.a * 10, columns = [:a])
+        @test df.time == [10, 20, 30]
+        @test sort!(names(df)) == ["a", "time"]
+        @test_throws "parquet file $path has no column :nope" read(; time = :ts,
+            columns = [:a, :nope])
+    end
+    @test_throws "invalid readparquet columns of type Vector{String}" readparquet(path;
+        columns = ["a"])
+    @test_throws "readparquet columns must be unique" readparquet(path;
+        columns = [:a, :a])
+end
+
 @testset "readparquet window pushdown" begin
     dir = mktempdir()
     times = repeat(1:100, inner = 5)

@@ -107,8 +107,8 @@ each chunk as it flows by, on a background task.
 
 | Operator | Semantics |
 |---|---|
-| [`readcsv(path; types, time, rename, delim, sort, chunkbytes, closed, skipmissing)`](references/io.md#readcsv) | a CSV file; columns are `String` unless `types` says otherwise |
-| [`readparquet(path; time, rename, sort, sortrows, closed, skipmissing, backend)`](references/io.md#readparquet) | a parquet file, skipping data outside the window |
+| [`readcsv(path; columns, types, time, rename, delim, sort, chunkbytes, closed, skipmissing)`](references/io.md#readcsv) | a CSV file; columns are `String` unless `types` says otherwise |
+| [`readparquet(path; columns, time, rename, sort, sortrows, closed, skipmissing, backend)`](references/io.md#readparquet) | a parquet file, skipping data outside the window |
 | [`readjls(path; closed)`](references/io.md#readjls) | a file written by `writejls` |
 | [`writecsv(path; queue, ...)`](references/io.md#writecsv) | write a CSV file |
 | [`writeparquet(path; queue, rowgroupsize, backend, ...)`](references/io.md#writeparquet) | write a parquet file, valid once the stream is exhausted |

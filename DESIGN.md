@@ -97,8 +97,8 @@ boundaries.
 | `merge(ps...; batchsize)` | source | the pipelines interleaved by time, with the union of their columns (see "Merging") |
 | `clock(interval; batchsize)` | source | rows at `start, start + interval, …` before `stop`, only `:time`, in chunks of `batchsize` |
 | `readtable(table; time, checkorder, sort, closed, skipmissing)` / `readtable(frame; closed, checkcontext)` | source | an in-memory table or frame (see "Tables as sources") |
-| `readcsv(path; types, time, rename, delim, sort, chunkbytes, closed, skipmissing)` | source | a CSV file, `String` columns unless typed, read in chunks of about `chunkbytes` bytes (see "Resolving the time column", "Missing times", "Sorting a file source") |
-| `readparquet(path; time, rename, sort, sortrows, closed, skipmissing, backend)` | source | a parquet file through DuckDB or Parquet2, skipping data outside the window (see "Parquet I/O") |
+| `readcsv(path; columns, types, time, rename, delim, sort, chunkbytes, closed, skipmissing)` | source | a CSV file, `String` columns unless typed, read in chunks of about `chunkbytes` bytes (see "Resolving the time column", "Missing times", "Sorting a file source") |
+| `readparquet(path; columns, time, rename, sort, sortrows, closed, skipmissing, backend)` | source | a parquet file through DuckDB or Parquet2, skipping data outside the window (see "Parquet I/O") |
 | `readjls(path; closed)` | source | a file written by `writejls` (see "JLS I/O") |
 | `writecsv(path; queue, ...)` | transform | pass-through CSV sink (see "CSV output") |
 | `writeparquet(path; queue, rowgroupsize, backend, ...)` | transform | pass-through parquet sink (see "Parquet I/O") |
@@ -337,6 +337,27 @@ textual times, under both `resolvetime!` (file chunks, resolved in place) and
 - Data errors name their source the same way — "CSV file x.csv", "parquet file
   x.parquet", "jls file x.jls", or "table" — through `sourcename`, and every
   message is built only on the error path, never per chunk.
+
+## Choosing columns
+
+`readcsv` and `readparquet` take `columns`, the columns to read, named after
+`rename`, as `selectcolumns` would name them downstream. The point is the work
+never done: CSV.jl's `select` leaves the others unparsed, DuckDB's `SELECT`
+list leaves them unread and unsorted, and Parquet2 decodes only the kept
+columns of each row group. The motivating file was 81.7M rows whose four wide
+string columns nobody downstream wanted, and every one of them went through a
+sort. One predicate decides for every reader, `readscolumn` (its file name,
+renamed, is listed or is the time column), and `keepcolumns!` applies the same
+rule to every chunk inside `clipchunk!`/`gatherchunk!`, so the result is the
+same whether or not the reader could push it down. `keepcolumns!` is also
+where a listed column the file lacks is refused.
+
+The time column is always read: `:time`, or the column `time` names. Listing
+`:time` names the output's time column, so `sourcecolumns` drops it from the
+list rather than letting it pull in a file `:time` that would clash with
+`time = :ts`. A `time` function sees only the columns read, so it must list
+what it reads. The columns keep the file's order; reordering is
+`reordercolumns`' job.
 
 ## Missing times
 

@@ -73,8 +73,8 @@ each chunk as it flows by, on a background task.
 
 | Operator | Semantics |
 |---|---|
-| [`readcsv(path; types, time, rename, delim, sort, chunkbytes, closed, skipmissing)`](https://farrellm.github.io/CausalFrames.jl/dev/api/io/#readcsv) | a CSV file; columns are `String` unless `types` says otherwise |
-| [`readparquet(path; time, rename, sort, sortrows, closed, skipmissing, backend)`](https://farrellm.github.io/CausalFrames.jl/dev/api/io/#readparquet) | a parquet file, skipping data outside the window |
+| [`readcsv(path; columns, types, time, rename, delim, sort, chunkbytes, closed, skipmissing)`](https://farrellm.github.io/CausalFrames.jl/dev/api/io/#readcsv) | a CSV file; columns are `String` unless `types` says otherwise |
+| [`readparquet(path; columns, time, rename, sort, sortrows, closed, skipmissing, backend)`](https://farrellm.github.io/CausalFrames.jl/dev/api/io/#readparquet) | a parquet file, skipping data outside the window |
 | [`readjls(path; closed)`](https://farrellm.github.io/CausalFrames.jl/dev/api/io/#readjls) | a file written by `writejls` |
 | [`writecsv(path; queue, ...)`](https://farrellm.github.io/CausalFrames.jl/dev/api/io/#writecsv) | write a CSV file |
 | [`writeparquet(path; queue, rowgroupsize, backend, ...)`](https://farrellm.github.io/CausalFrames.jl/dev/api/io/#writeparquet) | write a parquet file, valid once the stream is exhausted |

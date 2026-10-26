@@ -9,7 +9,8 @@ using DataFrames
 using Parquet2
 
 using CausalFrames:
-    ChunkSink, PullCursor, SourceClip, pullclipped!, timesourcename, vcatowned
+    ChunkSink, PullCursor, SourceClip, pullclipped!, readscolumn, timesourcename,
+    vcatowned
 
 CausalFrames.backendloaded(::Val{:parquet2}) = true
 
@@ -90,17 +91,25 @@ end
 # group overlapping the window.
 function open!(p::RowGroupProducer)
     p.dataset = Parquet2.Dataset(p.clip.path)
-    p.timecol = timesourcename(String[String(n) for n in Base.names(p.dataset)],
-        p.clip.time, p.clip.rename)
+    filenames = String[String(n) for n in Base.names(p.dataset)]
+    p.timecol = timesourcename(filenames, p.clip.time, p.clip.rename)
+    read = filter(n -> readscolumn(p.clip, n), filenames)
     placed = Iterators.map(rg -> (rg, rowgroupwindow(p, rg)),
         1:Parquet2.nrowgroups(p.dataset))
     picked =
         p.sort ? Iterators.filter(g -> g[2] === :overlaps, placed) :
         Iterators.filter(g -> g[2] !== :before,
             Iterators.takewhile(g -> g[2] !== :after, placed))
-    p.groups = PullCursor(Iterators.map(g -> DataFrame(p.dataset[g[1]]), picked))
+    p.groups = PullCursor(
+        Iterators.map(g -> rowgroupframe(p.dataset[g[1]], p.clip, read), picked))
     return nothing
 end
+
+# A row group's columns, all of them or, for a `columns` read, only those it
+# keeps, each decoded on its own.
+rowgroupframe(rg, clip::SourceClip, read::Vector{String}) =
+    clip.columns === nothing ? DataFrame(rg) :
+    DataFrame(Any[Parquet2.load(rg, n) for n in read], Symbol.(read); copycols = false)
 
 # Where a row group sits relative to the window, by its statistics: `:before`,
 # `:after` (so are all later ones, in a time-ordered file) or `:overlaps`, the

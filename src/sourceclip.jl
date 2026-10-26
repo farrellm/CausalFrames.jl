@@ -15,6 +15,7 @@ mutable struct SourceClip{T}
     const rename::Any   # Nothing | AbstractDict/map | Function (name -> name)
     const closed::Bool
     const skipmissing::Bool
+    const columns::Union{Nothing,Vector{Symbol}}  # kept besides :time; nothing: all
     const start::T
     const stop::T
     prevtime::Any       # last raw time seen, for cross-chunk sortedness
@@ -22,9 +23,51 @@ mutable struct SourceClip{T}
 end
 
 SourceClip(ctx::Context{T}, path::AbstractString, what::String, time, rename,
-    closed::Bool, skipmissing::Bool) where {T} =
+    closed::Bool, skipmissing::Bool, columns = nothing) where {T} =
     SourceClip{T}(String(path), what, time, rename, closed, skipmissing,
-        ctx.start, ctx.stop, nothing, false)
+        columns, ctx.start, ctx.stop, nothing, false)
+
+# A file source's `columns` keyword, checked eagerly: `nothing` for every
+# column, else the names to keep (after `rename`), as a fresh vector. A listed
+# `:time` is the output's, always kept, so it is dropped here rather than read
+# as a file column clashing with the one `time` names.
+function sourcecolumns(columns, op::String)
+    columns === nothing && return nothing
+    columns isa Union{AbstractVector{Symbol},Tuple{Vararg{Symbol}}} ||
+        throw(ArgumentError("invalid $op columns of type $(typeof(columns)): \
+            expected a vector or tuple of Symbols, or `nothing`"))
+    names = collect(Symbol, columns)
+    allunique(names) || throw(ArgumentError("$op columns must be unique"))
+    return filter!(!=(:time), names)
+end
+
+# Whether a source reads the file column `name`: every column without
+# `columns`, else one that `rename` makes a listed name or the time column
+# (`time` when a Symbol, else `:time`). The readers push this down, so unread
+# columns are never decoded; `keepcolumns!` holds every chunk to it regardless.
+readscolumn(clip::SourceClip, name::String) =
+    clip.columns === nothing ||
+    keepscolumn(clip, Symbol(renamedto(name, clip.rename)))
+keepscolumn(clip::SourceClip, name::Symbol) =
+    name in clip.columns || name === timetarget(clip.time)
+timetarget(time::Symbol) = time
+timetarget(time) = :time
+
+# Drop the columns `columns` leaves out, once renamed, refusing a listed one
+# the file lacks.
+function keepcolumns!(df::DataFrame, clip::SourceClip)
+    names = clip.columns
+    names === nothing && return nothing
+    for name in names
+        hascolumn(df, name) || throw(
+            ArgumentError(
+                "$(sourcename(clip.what, clip.path)) has no column $(repr(name))"),
+        )
+    end
+    keep = filter(n -> keepscolumn(clip, n), propertynames(df))
+    length(keep) == ncol(df) || select!(df, keep)
+    return nothing
+end
 
 # Shared by the file sources: rename columns, materialize `:time`, drop (or
 # refuse) missing-time rows, check order within the chunk and against the
@@ -34,6 +77,7 @@ SourceClip(ctx::Context{T}, path::AbstractString, what::String, time, rename,
 function clipchunk!(clip::SourceClip{T}, df::DataFrame) where {T}
     what, path = clip.what, clip.path
     renamecolumns!(df, clip.rename)
+    keepcolumns!(df, clip)
     resolvetime!(df, clip.time, path, what)
     # Missing rows are excluded through the row index rather than deleted
     # first, so the chunk is copied once.
@@ -96,6 +140,7 @@ end
 function gatherchunk!(kept::Vector{DataFrame}, clip::SourceClip, df::DataFrame)
     what, path = clip.what, clip.path
     renamecolumns!(df, clip.rename)
+    keepcolumns!(df, clip)
     resolvetime!(df, clip.time, path, what)
     present = presentrows(df.time, clip.skipmissing, what, path)
     closed, start, stop = clip.closed, clip.start, clip.stop

@@ -70,15 +70,21 @@ decision, not a taxonomy one; a new family gets its own file, included from
 and `README.md`'s summarizer table, plus the regenerated
 `skills/causalframes/`.
 
-A new keyword on the file sources (as `closed` and `skipmissing` were) is a
-field of the shared `SourceClip` in `src/sourceclip.jl`, used by
+A new keyword on the file sources (as `closed`, `skipmissing` and `columns`
+were) is a field of the shared `SourceClip` in `src/sourceclip.jl`, used by
 `clipchunk!`/`gatherchunk!`: add it there and to the `SourceClip(ctx, …)` call
 in each `read*` source that takes it (`readcsv`, `readparquet`, `readjls`),
 plus `readtable` wherever the option applies. The `parquetproducer` hook takes
 the clip whole, so the `ext/` producers change only if they must act on the
-option themselves (as `closed` bounds the pushed-down window). Then update
-DESIGN.md and the README's source descriptions, and test every parquet
-backend.
+option themselves (as `closed` bounds the pushed-down window and `columns`
+narrows what is read). Then update DESIGN.md and the README's source
+descriptions, and test every parquet backend.
+
+Keep `readcsv` and `readparquet` as consistent as possible: a keyword or
+behaviour one gains, the other gains too wherever it can apply, with the same
+name, meaning and error messages. A difference must be inherent to the format
+or backend (`types` and `delim` are CSV's, `backend` and `sortrows` parquet's)
+and stated in both docstrings.
 
 The `## `name`` header, the overview link and the README link are checked by
 `checkapilinks` in `docs/make.jl`: a missing one, or a README link naming the
