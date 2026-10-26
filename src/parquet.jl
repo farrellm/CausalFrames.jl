@@ -64,8 +64,9 @@ window.
   names before `time` is resolved, as for `readcsv`.
 - `sort = false`: stably sort the rows by time, for a file not stored in time
   order. DuckDB sorts in the query and still streams; Parquet2 (and DuckDB with
-  a `time` function or a `rename` hiding the time column) reads every in-window
-  row and emits them as one sorted chunk. Without it, a decreasing time is an
+  a `time` function, a `rename` hiding the time column, or a context time type
+  it cannot compare with the column) reads every in-window row and emits them
+  as one sorted chunk. Without it, a decreasing time is an
   `ArgumentError`.
 - `closed = false`: clip to `[start, stop]` instead, keeping rows at `stop`.
 - `skipmissing = false`: drop rows whose time is `missing` (a null, or a `time`

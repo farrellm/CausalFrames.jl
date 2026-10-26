@@ -60,7 +60,8 @@ fallbacks in `src/parquet.jl` throw the `READHINT`/`WRITEHINT` message:
   the scan early: Parquet2's `:after` row groups are skipped, not terminal.
   DuckDB instead sorts in SQL, tie-broken by the virtual `file_row_number`,
   and gathers only when that is impossible (a `time` function, an untraceable
-  `rename`, or a real column shadowing `file_row_number`)
+  `rename`, a real column shadowing `file_row_number`, or a window it cannot
+  bind, whose unfiltered re-run must not sort the whole file)
 
 ## Skipping never fails a read
 
@@ -71,8 +72,9 @@ error — a wrong answer is unacceptable, a slower one is fine:
   down (a `time` function, an unmatched name, an ambiguous `rename`), which
   simply disables pushdown
 - DuckDB catches a time type it cannot bind or compare and re-runs the query
-  unfiltered; Parquet2 catches an incomparable statistic and sets
-  `usestats = false` for the rest of the run
+  unfiltered (gathering in Julia under `sort`, never ordering in SQL);
+  Parquet2 catches an incomparable statistic and sets `usestats = false` for
+  the rest of the run
 - Missing or unusable row-group statistics read as `:overlaps`
 
 ## DuckDB specifics

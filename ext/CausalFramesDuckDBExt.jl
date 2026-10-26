@@ -55,8 +55,8 @@ end
 # A `sort` is pushed down too, as an ORDER BY on the time column. DuckDB's sort
 # is unstable, so ties are broken by `file_row_number`, the reader's virtual
 # column (not in `*`), unless a file column of that name (case-insensitively)
-# shadows it. Without a nameable time column or a usable tiebreak, the rows are
-# sorted in Julia.
+# shadows it. Without a nameable time column, a usable tiebreak or a window
+# DuckDB can bind, the rows are sorted in Julia.
 function startquery!(p::QueryProducer)
     clip = p.clip
     p.con = connection()
@@ -80,9 +80,11 @@ function startquery!(p::QueryProducer)
                 Any[clip.path, clip.start, clip.stop])
         catch
             # A time type DuckDB can't bind or compare with this column: read
-            # the whole file and let the clip do the work. An unreadable file
-            # fails again here with its own error.
-            execstream(p.con, "SELECT * FROM read_parquet(?)$order", Any[clip.path])
+            # the whole file and let the clip do the work, gathering under a
+            # sort so DuckDB never sorts (and holds) the whole file. An
+            # unreadable file fails again here with its own error.
+            p.gather = p.sort
+            execstream(p.con, "SELECT * FROM read_parquet(?)", Any[clip.path])
         end
     end
     p.parts = PullCursor(Iterators.map(DataFrame, Tables.partitions(res)))

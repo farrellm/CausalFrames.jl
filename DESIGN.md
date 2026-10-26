@@ -294,7 +294,10 @@ DuckDB's `ORDER BY` is not stable: it is the reader's virtual column, left out o
 `*`, and the tiebreak that makes the order the file's. Pushdown needs a nameable
 time column and that tiebreak, so a `time` function, an untraceable `rename`, or
 a file with a column of its own named `file_row_number` (which shadows the
-virtual one) sends DuckDB down the gather-and-sort path instead. Parquet2 always
+virtual one) sends DuckDB down the gather-and-sort path instead. So does a
+window DuckDB cannot bind or compare with the column (a `Rational` context, say):
+the unfiltered re-run is gathered rather than ordered in SQL, since an `ORDER BY`
+without the window would sort the whole file. Parquet2 always
 gathers; its statistics still skip row groups wholly outside the window, but
 under a sort a group at or past `stop` does not end the scan.
 

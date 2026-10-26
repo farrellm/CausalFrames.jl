@@ -289,6 +289,19 @@ end
             sort = true))),
     ) == 1
 
+    # a window DuckDB can't bind (a Rational) is clipped and sorted in Julia,
+    # in one gathered chunk, rather than by sorting the whole file in SQL
+    qctx = Context(2 // 1, 11 // 1)
+    got = DataFrame(load(qctx, readparquet(big; backend = :duckdb, sort = true)))
+    @test got.time == ts[keep]
+    @test got.x == keep
+    @test length(collect(stream(qctx, readparquet(big; backend = :duckdb,
+        sort = true)))) == 1
+    @test DataFrame(
+        load(Context(0 // 1, 11 // 1),
+            readparquet(path; backend = :duckdb, sort = true)),
+    ).x == [5, 4, 6, 8, 7]
+
     # every way of naming the time column, including a function, which DuckDB
     # cannot sort in SQL and so sorts in Julia
     variants = (
