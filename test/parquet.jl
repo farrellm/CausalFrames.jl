@@ -330,6 +330,17 @@ end
         false, false)
     fbounds = duck.sliceboundaries(duck.connection(), fclip, "\"time\"", 1_000)
     @test length(fbounds) > 1 && all(b -> 2 < b < 11, fbounds)
+    # a tiny `sortrows` gets at most `MAXSLICES` slices, not one per row
+    many = ingroups(joinpath(dir, "many.parquet"),
+        [DataFrame(time = Float64.(r), x = r) for r in Iterators.partition(1:3_000, 1_000)])
+    mclip = CausalFrames.SourceClip(Context(0.0, 4_000.0), many, "parquet file",
+        nothing, nothing, false, false)
+    mbounds = duck.sliceboundaries(duck.connection(), mclip, "\"time\"", 1)
+    @test 1_000 < length(mbounds) < duck.MAXSLICES
+    @test DataFrame(
+        load(Context(0.0, 4_000.0),
+            readparquet(many; backend = :duckdb, sort = true, sortrows = 1)),
+    ).x == 1:3_000
     @test DataFrame(
         load(ctx, readparquet(fbig; backend = :duckdb, sort = true,
             sortrows = 1_000)),

@@ -71,11 +71,12 @@ function startquery!(p::QueryProducer)
     if src !== nothing
         try
             results = windowresults(p, quotename(src), sel)
-        catch
+        catch e
             # A time type DuckDB can't bind or compare with this column: read
             # the whole file and let the clip do the work, gathering under a
             # sort so DuckDB never sorts (and holds) the whole file. An
             # unreadable file fails again below with its own error.
+            isduckdberror(e) || rethrow()
             p.gather = p.sort
         end
     end
@@ -89,8 +90,10 @@ end
 # into time slices of about `sortrows` rows, each its own `ORDER BY` query, so
 # DuckDB holds one slice's rows at a time rather than the window's; any other
 # read is one slice. Ties never straddle a half-open slice boundary, so the
-# order stays stable. The first query runs here, where a window DuckDB can't
-# bind fails; the rest run lazily, each once the previous result is drained.
+# order stays stable. A window DuckDB can't bind fails here, in the first query
+# to name it: a sorted read's count, so no sort runs inside the caller's bind
+# fallback, or else the one streaming query. Slices run lazily, each once the
+# previous result is drained.
 function windowresults(p::QueryProducer, col::String, sel::String)
     clip = p.clip
     sorted = p.sort && !p.gather
@@ -101,9 +104,12 @@ function windowresults(p::QueryProducer, col::String, sel::String)
         "SELECT $sel FROM read_parquet(?) \
         $(windowfilter(col, clip.closed && i == length(lows)))$order",
         Any[clip.path, lows[i], highs[i]])
-    head = slice(1)   # eagerly, inside the caller's bind fallback
-    return Iterators.flatten(((head,), (slice(i) for i in 2:length(lows))))
+    return sorted ? (slice(i) for i in eachindex(lows)) : (slice(1),)
 end
+
+# The errors DuckDB raises for a query it can't bind or run; anything else (an
+# interrupt, a bug of ours) is no reason to retry the read another way.
+isduckdberror(e) = e isa Union{DuckDB.QueryException,DuckDB.NotImplementedException}
 
 # The WHERE bounding the time column by two parameters, `[lo, hi)` or, closed,
 # `[lo, hi]`. It also drops null times, so without `skipmissing` they go
@@ -114,10 +120,11 @@ windowfilter(
     closed::Bool,
 ) = "WHERE $col >= ? AND $col $(closed ? "<=" : "<") ?"
 
-# The times splitting the window into slices of about `sortrows` rows: none
-# when it holds no more, else DuckDB's approximate quantiles, in the context's
-# time type and strictly inside the window. A window DuckDB can't bind fails
-# the count; a quantile it can't take or convert just leaves one slice.
+# The times splitting the window into slices of about `sortrows` rows, at most
+# `MAXSLICES` of them: none when it holds no more, else DuckDB's approximate
+# quantiles, in the context's time type and strictly inside the window. A
+# window DuckDB can't bind fails the count; a quantile it can't take or convert
+# just leaves one slice.
 function sliceboundaries(con, clip::SourceClip{T}, col::String,
     sortrows::Int) where {T}
     from = "FROM read_parquet(?) $(windowfilter(col, clip.closed))"
@@ -125,7 +132,7 @@ function sliceboundaries(con, clip::SourceClip{T}, col::String,
     counted = DBInterface.execute(con, "SELECT count(*) AS n $from", params)
     n = only(Tables.columntable(counted).n)
     n <= sortrows && return T[]
-    k = cld(n, sortrows)
+    k = min(cld(n, sortrows), MAXSLICES)
     try
         qs = join((string(i / k) for i in 1:(k-1)), ", ")
         res = DBInterface.execute(con, "SELECT approx_quantile($col, [$qs]) AS q $from",
@@ -133,10 +140,15 @@ function sliceboundaries(con, clip::SourceClip{T}, col::String,
         bounds =
             T[slicebound(T, b) for b in only(Tables.columntable(res).q) if b !== missing]
         return filter(b -> clip.start < b < clip.stop, unique!(sort!(bounds)))
-    catch
+    catch e
+        e isa Union{MethodError,InexactError} || isduckdberror(e) || rethrow()
         return T[]
     end
 end
+
+# Each slice scans the file's time column, so a tiny `sortrows` would cost a
+# scan per few rows: past this many slices they grow instead.
+const MAXSLICES = 1024
 
 # A quantile as a cut time in the context's time type. A cut need only fall
 # inside the window, so a fractional quantile of a floating column is floored

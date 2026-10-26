@@ -298,7 +298,9 @@ stored by key, not time, the window is the whole file, and an 81.7M-row file
 column) is cut at DuckDB's `approx_quantile`s of the time into slices of about
 `sortrows` rows, each its own `WHERE … ORDER BY` query, run lazily once the
 previous one is drained. DuckDB then holds one slice at a time; the same file
-read in 1 GB, one scan of its time column per slice. Slices are half-open, so
+read in 1 GB, one scan of its time column per slice. That scan is why the
+slices are capped at 1024: past `1024 * sortrows` rows they grow rather than
+multiply. Slices are half-open, so
 rows sharing a time never straddle a boundary and the order stays stable;
 quantiles that collapse onto one time, or that DuckDB cannot take or the
 context's time type cannot hold, just leave fewer slices. `file_row_number` is there because

@@ -75,7 +75,8 @@ window.
   of about this many rows, one query each, so it holds one slice rather than
   the window. Slices are cut at approximate quantiles of the time, and rows
   sharing a time are never split, so a slice can run larger. Each slice is a
-  scan of the file's time column. Unused by Parquet2. Must be positive.
+  scan of the file's time column, so there are at most 1024 slices; a larger
+  window gets larger ones. Unused by Parquet2. Must be positive.
 - `closed = false`: clip to `[start, stop]` instead, keeping rows at `stop`.
 - `skipmissing = false`: drop rows whose time is `missing` (a null, or a `time`
   function returning `missing`). Without it such a row is an `ArgumentError`,
