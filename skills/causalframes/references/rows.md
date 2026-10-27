@@ -1,8 +1,9 @@
 # Row transformations
 
-Contents: `filterrows`, `addcolumns`, `head`, `lastrow`, `sortcycles`, `lag`, `warmup`, `Acausal.lead`, `settime`, `Acausal.settime`.
+Contents: `filterrows`, `addcolumns`, `head`, `lastrow`, `sortcycles`, `lag`, `warmup`, `Acausal.lead`, `settime`, `Acausal.settime`, `sharing`.
 
-Transforms that filter, compute, truncate, reorder or retime rows. The
+Transforms that filter, compute, truncate, reorder or retime rows, and
+`sharing`, which passes them through but decides how they are shared. The
 forward-looking `lead` and permissive `settime` are in the
 `CausalFrames.Acausal` submodule (`using CausalFrames.Acausal`).
 
@@ -262,3 +263,49 @@ the causal `settime` unambiguous; call it as `CausalFrames.Acausal.settime`.
 The input is not widened, so a row at or after `stop` is never seen, even if
 `spec` would move it into the window. For a constant shift, use
 `lead`, which does widen.
+
+## `sharing`
+
+    sharing(force::Bool) -> (CausalPipeline -> CausalPipeline)
+    sharing(p::CausalPipeline, force::Bool) -> CausalPipeline
+
+A transform passing its input through unchanged, but deciding whether the
+operators reading the result share one run of it.
+
+By default a pipeline read in several places of one evaluation, such as both
+sides of `asofjoin(p, p |> f)` or the input of `addrollingcolumns`,
+runs once for all of them when that gives each reader the rows it would get
+alone: when they ask for the same context, or when the pipeline's rows don't
+depend on where the context starts (or stops) and only that differs. Files and
+tables don't, and most transforms keep their input's independence. A
+`clock`, `head`, a cumulative `addsummarycolumns`, or a
+`summarize` emitting at `stop` do depend on it, so a reader asking for
+a widened context gets a run of its own.
+
+#### Arguments
+- `force`: `true` shares one run among every reader, over the union of their
+  contexts, each reader seeing that run clipped to its own context: rows that
+  may differ from its own run's when the pipeline depends on the context.
+  `false` gives every reader its own run of the pipeline and of everything
+  upstream of it, even over the same context, which holds no chunks back for
+  a reader that lags far behind the others.
+
+```julia
+p = clock(1) |> addsummarycolumns(Count())
+t = addrollingcolumns((w2 = 2,), Sum(:count))
+DataFrame(load(Context(3, 6), p |> sharing(true) |> t))
+
+# output
+
+3×3 DataFrame
+ Row │ time   count  w2_count_sum
+     │ Int64  Int64  Int64
+─────┼────────────────────────────
+   1 │     3      3             6
+   2 │     4      4             9
+   3 │     5      5            12
+```
+
+Here the counts depend on where the run starts. Sharing the run widened by the
+look-back shows the counts from 1, the ones summed; without `sharing(true)` the
+rows come from their own run over `[3, 6)` and restart at 1.

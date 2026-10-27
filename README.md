@@ -112,6 +112,7 @@ time,bid,ask,mid
 | [`lag(offset)`](https://farrellm.github.io/CausalFrames.jl/dev/api/rows/#lag) | move every row `offset` later |
 | [`warmup(lookback, f)`](https://farrellm.github.io/CausalFrames.jl/dev/api/rows/#warmup) | run `f` from `lookback` before the window, so its state starts warm |
 | [`settime(spec)`](https://farrellm.github.io/CausalFrames.jl/dev/api/rows/#settime) | recompute `:time` from a column or function; rows may only move later |
+| [`sharing(force)`](https://farrellm.github.io/CausalFrames.jl/dev/api/rows/#sharing) | pass rows through, forcing the readers of the result to share one run (`true`) or each run their own (`false`) |
 
 ### Column transformations
 

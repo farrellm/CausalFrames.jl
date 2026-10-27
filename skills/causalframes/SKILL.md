@@ -146,6 +146,7 @@ time,bid,ask,mid
 | [`lag(offset)`](references/rows.md#lag) | move every row `offset` later |
 | [`warmup(lookback, f)`](references/rows.md#warmup) | run `f` from `lookback` before the window, so its state starts warm |
 | [`settime(spec)`](references/rows.md#settime) | recompute `:time` from a column or function; rows may only move later |
+| [`sharing(force)`](references/rows.md#sharing) | pass rows through, forcing the readers of the result to share one run (`true`) or each run their own (`false`) |
 
 ### Column transformations
 

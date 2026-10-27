@@ -1,6 +1,7 @@
 # Row transformations
 
-Transforms that filter, compute, truncate, reorder or retime rows. The
+Transforms that filter, compute, truncate, reorder or retime rows, and
+`sharing`, which passes them through but decides how they are shared. The
 forward-looking `lead` and permissive `settime` are in the
 `CausalFrames.Acausal` submodule (`using CausalFrames.Acausal`).
 
@@ -62,4 +63,10 @@ settime
 
 ```@docs
 CausalFrames.Acausal.settime
+```
+
+## `sharing`
+
+```@docs
+sharing
 ```
