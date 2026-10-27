@@ -53,7 +53,8 @@ fallbacks in `src/parquet.jl` throw the `READHINT`/`WRITEHINT` message:
   which is what makes skipping a pure optimization
 - `clip.columns` is pushed down too: read only the file columns
   `readscolumn(clip, name)` accepts (`keptfilecolumns`: DuckDB's
-  `selectlist`, Parquet2's per-column `rowgroupframe`). `keepcolumns!` applies
+  `selectlist`, Parquet2's `rowgroupframe`, through Parquet2's own column
+  `select` so its `useparallel` still governs threading). `keepcolumns!` applies
   the same rule on arrival and reports a listed column the file lacks, so a
   producer that reads more is only slower. With none accepted,
   `keptfilecolumns` names the first column anyway, to carry the row count

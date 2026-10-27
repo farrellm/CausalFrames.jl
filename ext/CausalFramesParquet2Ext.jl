@@ -106,26 +106,12 @@ function open!(p::RowGroupProducer)
 end
 
 # A row group's columns, all of them or, for a `columns` read, only those it
-# keeps, each decoded on its own: on a task apiece when threaded, as Parquet2
-# loads a whole row group by default.
-function rowgroupframe(rg, clip::SourceClip, kept::Vector{String})
-    clip.columns === nothing && return DataFrame(rg)
-    cols =
-        Threads.nthreads() > 1 && length(kept) > 1 ?
-        Any[fetchcolumn(t) for t in [Threads.@spawn(Parquet2.load(rg, n)) for n in kept]] :
-        Any[Parquet2.load(rg, n) for n in kept]
-    return DataFrame(cols, Symbol.(kept); copycols = false)
-end
-
-# A decoded column, failing with the decoder's own error rather than the task's.
-function fetchcolumn(t::Task)
-    try
-        return fetch(t)
-    catch e
-        e isa TaskFailedException && throw(e.task.exception)
-        rethrow()
-    end
-end
+# keeps, loaded as Parquet2 loads a whole row group (in parallel per
+# `Parquet2.useparallel`).
+rowgroupframe(rg, clip::SourceClip, kept::Vector{String}) =
+    clip.columns === nothing ? DataFrame(rg) :
+    DataFrame(Parquet2.TableOperations.select(rg, map(Symbol, kept)...);
+        copycols = false)
 
 # Where a row group sits relative to the window, by its statistics: `:before`,
 # `:after` (so are all later ones, in a time-ordered file) or `:overlaps`, the
