@@ -9,7 +9,7 @@ using DataFrames
 using Parquet2
 
 using CausalFrames:
-    ChunkSink, PullCursor, SourceClip, pullclipped!, readcolumns, timesourcename,
+    ChunkSink, PullCursor, SourceClip, pullclipped!, keptfilecolumns, timesourcename,
     vcatowned
 
 CausalFrames.backendloaded(::Val{:parquet2}) = true
@@ -93,7 +93,7 @@ function open!(p::RowGroupProducer)
     p.dataset = Parquet2.Dataset(p.clip.path)
     filenames = String[String(n) for n in Base.names(p.dataset)]
     p.timecol = timesourcename(filenames, p.clip.time, p.clip.rename)
-    kept = readcolumns(p.clip, filenames)
+    kept = keptfilecolumns(p.clip, filenames)
     placed = Iterators.map(rg -> (rg, rowgroupwindow(p, rg)),
         1:Parquet2.nrowgroups(p.dataset))
     picked =

@@ -313,29 +313,25 @@ end
     # the result as one whole sort would, ties included, even when a tie
     # outgrows a slice or the window starts inside one
     duck = Base.get_extension(CausalFrames, :CausalFramesDuckDBExt)
-    function sliceclip(ctx; closed = false)
-        clip = CausalFrames.SourceClip(ctx, big, "parquet file", nothing, nothing,
-            closed, false)
-        return duck.sliceboundaries(duck.connection(), clip, "\"time\"", 1_000)
+    function slicebounds(file, ctx, sortrows)
+        clip = CausalFrames.SourceClip(ctx, file, "parquet file", nothing, nothing,
+            false, false)
+        return duck.sliceboundaries(duck.connection(), clip, "\"time\"", sortrows)
     end
-    @test length(sliceclip(ctx)) > 1
-    @test all(b -> 2 < b < 11, sliceclip(ctx))
-    @test isempty(sliceclip(Context(2, 3)))       # ~1.5k rows, one time: no split
+    bounds = slicebounds(big, ctx, 1_000)
+    @test length(bounds) > 1 && all(b -> 2 < b < 11, bounds)
+    @test isempty(slicebounds(big, Context(2, 3), 1_000)) # ~1.5k rows, one time
     # an integer context over a floating time column still slices: the
     # interpolated quantiles of its integral values are floored, not refused
     fts = Float64.(ts)
     fbig = ingroups(joinpath(dir, "fbig.parquet"),
         [DataFrame(time = fts[r], x = r) for r in Iterators.partition(1:n, 2_000)])
-    fclip = CausalFrames.SourceClip(ctx, fbig, "parquet file", nothing, nothing,
-        false, false)
-    fbounds = duck.sliceboundaries(duck.connection(), fclip, "\"time\"", 1_000)
+    fbounds = slicebounds(fbig, ctx, 1_000)
     @test length(fbounds) > 1 && all(b -> 2 < b < 11, fbounds)
     # a tiny `sortrows` gets at most `MAXSLICES` slices, not one per row
     many = ingroups(joinpath(dir, "many.parquet"),
         [DataFrame(time = Float64.(r), x = r) for r in Iterators.partition(1:3_000, 1_000)])
-    mclip = CausalFrames.SourceClip(Context(0.0, 4_000.0), many, "parquet file",
-        nothing, nothing, false, false)
-    mbounds = duck.sliceboundaries(duck.connection(), mclip, "\"time\"", 1)
+    mbounds = slicebounds(many, Context(0.0, 4_000.0), 1)
     @test 1_000 < length(mbounds) < duck.MAXSLICES
     @test DataFrame(
         load(Context(0.0, 4_000.0),

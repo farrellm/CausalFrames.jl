@@ -48,15 +48,18 @@ end
 readscolumn(clip::SourceClip, name::String) =
     clip.columns === nothing ||
     keepscolumn(clip, Symbol(renamedto(name, clip.rename)))
-function readcolumns(clip::SourceClip, filenames::Vector{String})
+# The file columns a reader that knows them all reads: those `readscolumn`
+# accepts or, with none, the first, to carry the row count (a zero-column
+# DataFrame has no rows) until `keepcolumns!` drops it or reports a listed
+# column the file lacks.
+function keptfilecolumns(clip::SourceClip, filenames::Vector{String})
     keep = filter(n -> readscolumn(clip, n), filenames)
-    return isempty(keep) && needscarrier(clip) ? first(filenames, 1) : keep
+    return isempty(keep) ? first(filenames, 1) : keep
 end
 
 # Whether a read keeps no file column: a `time` function over an empty
-# `columns` (listed names must exist, and a Symbol `time` names one). A
-# zero-column DataFrame has no rows, so the readers read the first column
-# anyway, to carry the row count until the time is materialized.
+# `columns` (listed names must exist, and a Symbol `time` names one). CSV.jl's
+# `select` sees one column at a time, so it reads the first by this rule.
 needscarrier(clip::SourceClip) =
     clip.time isa Function && clip.columns !== nothing && isempty(clip.columns)
 keepscolumn(clip::SourceClip, name::Symbol) =
@@ -70,10 +73,8 @@ function keepcolumns!(df::DataFrame, clip::SourceClip)
     names = clip.columns
     names === nothing && return nothing
     for name in names
-        hascolumn(df, name) || throw(
-            ArgumentError(
-                "$(sourcename(clip.what, clip.path)) has no column $(repr(name))"),
-        )
+        hascolumn(df, name) ||
+            throw(ArgumentError(nocolumn(clip.what, clip.path, name)))
     end
     keep = filter(n -> keepscolumn(clip, n), propertynames(df))
     length(keep) == ncol(df) || select!(df, keep)
@@ -265,12 +266,12 @@ end
 # The column holding the times, which must exist and, unless it is `:time`
 # itself, must not clash with a `:time` column.
 function timecolumn(cols, time::Union{Nothing,Symbol}, what::String, path::String)
-    name = something(time, :time)
+    name = timetarget(time)
     hascolumn(cols, name) || throw(
         ArgumentError(
             time === nothing ?
             "$(sourcename(what, path)) has no time column; choose one with `time`" :
-            "$(sourcename(what, path)) has no column $(repr(name))"),
+            nocolumn(what, path, name)),
     )
     name === :time || !hascolumn(cols, :time) ||
         throw(ArgumentError(timeclash(what, path, name)))
@@ -300,6 +301,12 @@ timeclash(
     name::Symbol,
 ) = "$(sourcename(what, path)) has both a :time column and the time column \
     $(repr(name)); drop one of them first"
+
+nocolumn(
+    what::String,
+    path::String,
+    name::Symbol,
+) = "$(sourcename(what, path)) has no column $(repr(name))"
 
 # Function barrier: computes the time column by applying `f` to the concretely
 # typed rows of the column table, so `f` specializes and the eltype is inferred.

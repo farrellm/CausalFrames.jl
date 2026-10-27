@@ -11,7 +11,7 @@ using DuckDB
 using Tables
 
 using CausalFrames:
-    ChunkSink, PullCursor, SourceClip, pullclipped!, readcolumns, timesourcename
+    ChunkSink, PullCursor, SourceClip, pullclipped!, keptfilecolumns, timesourcename
 
 CausalFrames.backendloaded(::Val{:duckdb}) = true
 
@@ -156,14 +156,11 @@ const MAXSLICES = 1024
 slicebound(::Type{T}, b) where {T} = convert(T, b)
 slicebound(::Type{T}, b::AbstractFloat) where {T<:Integer} = floor(T, b)
 
-# The SELECT list: the file columns a `columns` read keeps (`readcolumns`),
-# else `*`. SQL can't select nothing, so with none matching (a listed column
-# the file lacks) it is `*` too, and the clip reports the missing ones.
-function selectlist(filenames::Vector{String}, clip::SourceClip)
-    clip.columns === nothing && return "*"
-    keep = readcolumns(clip, filenames)
-    return isempty(keep) ? "*" : join(map(quotename, keep), ", ")
-end
+# The SELECT list: the file columns a `columns` read keeps
+# (`keptfilecolumns`), else `*`.
+selectlist(filenames::Vector{String}, clip::SourceClip) =
+    clip.columns === nothing ? "*" :
+    join(map(quotename, keptfilecolumns(clip, filenames)), ", ")
 
 quotename(name::String) = "\"" * replace(name, "\"" => "\"\"") * "\""
 
