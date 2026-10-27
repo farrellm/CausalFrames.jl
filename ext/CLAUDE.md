@@ -72,7 +72,10 @@ fallbacks in `src/parquet.jl` throw the `READHINT`/`WRITEHINT` message:
   bind, whose unfiltered re-run must not sort the whole file)
 - DuckDB's SQL sort is cut into time slices of about `sortrows` rows
   (`sliceboundaries`), since one `ORDER BY` holds the whole window in DuckDB's
-  memory, at most `MAXSLICES` of them. An unbindable window fails in the
+  memory, at most `MAXSLICES` of them, through one prepared statement (two
+  when `closed`). The quantile step catches only DuckDB's errors and a
+  conversion's (`slicebound`), and warns when it leaves one slice, since that
+  is the out-of-memory sort again. An unbindable window fails in the
   `count(*)` (or, unsorted, the one streaming query), inside the bind
   fallback's `try`, which catches only DuckDB's own errors; every sorted slice
   runs lazily, outside it, each once the previous result is drained, so one

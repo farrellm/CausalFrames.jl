@@ -92,17 +92,21 @@ end
 # read is one slice. Ties never straddle a half-open slice boundary, so the
 # order stays stable. A window DuckDB can't bind fails here, in the first query
 # to name it: a sorted read's count, so no sort runs inside the caller's bind
-# fallback, or else the one streaming query. Slices run lazily, each once the
-# previous result is drained.
+# fallback, or else the one streaming query. The slices share a prepared
+# statement (a second for the last when `closed`), and run lazily, each once
+# the previous result is drained.
 function windowresults(p::QueryProducer, col::String, sel::String)
     clip = p.clip
     sorted = p.sort && !p.gather
     bounds = sorted ? sliceboundaries(p.con, clip, col, p.sortrows) : Any[]
     lows, highs = Any[clip.start; bounds], Any[bounds; clip.stop]
     order = sorted ? " ORDER BY $col, file_row_number" : ""
-    slice(i) = execstream(p.con,
-        "SELECT $sel FROM read_parquet(?) \
-        $(windowfilter(col, clip.closed && i == length(lows)))$order",
+    query(closed) = DBInterface.prepare(p.con,
+        "SELECT $sel FROM read_parquet(?) $(windowfilter(col, closed))$order",
+        DuckDB.StreamResult)
+    final = query(clip.closed)
+    inner = clip.closed && length(lows) > 1 ? query(false) : final
+    slice(i) = DBInterface.execute(i == length(lows) ? final : inner,
         Any[clip.path, lows[i], highs[i]])
     return sorted ? (slice(i) for i in eachindex(lows)) : (slice(1),)
 end
@@ -123,8 +127,9 @@ windowfilter(
 # The times splitting the window into slices of about `sortrows` rows, at most
 # `MAXSLICES` of them: none when it holds no more, else DuckDB's approximate
 # quantiles, in the context's time type and strictly inside the window. A
-# window DuckDB can't bind fails the count; a quantile it can't take or convert
-# just leaves one slice.
+# window DuckDB can't bind fails the count. Quantiles DuckDB can't take, or
+# none of which converts, leave one slice, with a warning, since that one sort
+# holds the whole window.
 function sliceboundaries(con, clip::SourceClip{T}, col::String,
     sortrows::Int) where {T}
     from = "FROM read_parquet(?) $(windowfilter(col, clip.closed))"
@@ -133,28 +138,41 @@ function sliceboundaries(con, clip::SourceClip{T}, col::String,
     n = only(Tables.columntable(counted).n)
     n <= sortrows && return T[]
     k = min(cld(n, sortrows), MAXSLICES)
-    try
-        qs = join((string(i / k) for i in 1:(k-1)), ", ")
-        res = DBInterface.execute(con, "SELECT approx_quantile($col, [$qs]) AS q $from",
-            params)
-        bounds =
-            T[slicebound(T, b) for b in only(Tables.columntable(res).q) if b !== missing]
-        return filter(b -> clip.start < b < clip.stop, unique!(sort!(bounds)))
+    qs = join((string(i / k) for i in 1:(k-1)), ", ")
+    quantiles = try
+        res =
+            DBInterface.execute(con, "SELECT approx_quantile($col, [$qs]) AS q $from",
+                params)
+        collect(skipmissing(only(Tables.columntable(res).q)))
     catch e
-        e isa Union{MethodError,InexactError} || isduckdberror(e) || rethrow()
-        return T[]
+        isduckdberror(e) || rethrow()
+        Any[]
     end
+    bounds = T[b for b in (slicebound(T, q) for q in quantiles) if b !== nothing]
+    isempty(bounds) && @warn "readparquet: DuckDB found no $T cut times in the \
+        time column of parquet file $(clip.path), so its $n-row window is sorted \
+        in one query rather than in slices of `sortrows = $sortrows` rows"
+    return filter(b -> clip.start < b < clip.stop, unique!(sort!(bounds)))
 end
 
 # Each slice scans the file's time column, so a tiny `sortrows` would cost a
 # scan per few rows: past this many slices they grow instead.
 const MAXSLICES = 1024
 
-# A quantile as a cut time in the context's time type. A cut need only fall
-# inside the window, so a fractional quantile of a floating column is floored
-# into an integer context rather than refused, which would leave one slice.
-slicebound(::Type{T}, b) where {T} = convert(T, b)
-slicebound(::Type{T}, b::AbstractFloat) where {T<:Integer} = floor(T, b)
+# A quantile as a cut time in the context's time type, or nothing if it has
+# none. A cut need only fall inside the window, so a fractional quantile (of a
+# floating or decimal column) is floored into an integer context rather than
+# refused, which would leave one slice.
+function slicebound(::Type{T}, b) where {T}
+    try
+        return tobound(T, b)
+    catch e
+        e isa Union{MethodError,InexactError} || rethrow()
+        return nothing
+    end
+end
+tobound(::Type{T}, b) where {T} = convert(T, b)
+tobound(::Type{T}, b::Real) where {T<:Integer} = floor(T, b)
 
 # The SELECT list: the file columns a `columns` read keeps
 # (`keptfilecolumns`), else `*`.

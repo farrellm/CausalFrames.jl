@@ -360,6 +360,31 @@ end
     end
     @test_throws ArgumentError readparquet(big; sort = true, sortrows = 0)
 
+    # an integer context over a DECIMAL time column slices too: its quantiles
+    # come back as fractional decimals, floored like floats, not refused
+    dec = joinpath(dir, "dec.parquet")
+    DBInterface.execute(duck.connection(),
+        "COPY (SELECT (((i + 1) * 7919) % 13)::DECIMAL(10, 2) AS time, i + 1 AS x \
+        FROM range($n) t(i)) TO '$dec' (FORMAT parquet, ROW_GROUP_SIZE 2048)")
+    dbounds = slicebounds(dec, ctx, 1_000)
+    @test length(dbounds) > 1 && all(b -> 2 < b < 11, dbounds)
+    @test DataFrame(
+        load(ctx, readparquet(dec; backend = :duckdb, sort = true,
+            sortrows = 1_000)),
+    ).x == keep
+    @test duck.slicebound(Int, 2.5) == 2
+    @test duck.slicebound(Int, Inf) === nothing
+    @test duck.slicebound(Float64, 2) === 2.0
+    # with no cut times to be had, the window is sorted in one query, and says so
+    txt = joinpath(dir, "txt.parquet")
+    DBInterface.execute(duck.connection(),
+        "COPY (SELECT lpad(i::VARCHAR, 6, '0') AS time FROM range(3000) t(i)) \
+        TO '$txt' (FORMAT parquet)")
+    @test_logs (:warn, r"sorted in one query rather than in slices") match_mode = :any @test_throws(
+        "textual",
+        load(Context("000000", "999999"),
+            readparquet(txt; backend = :duckdb, sort = true, sortrows = 1_000)))
+
     # a window DuckDB can't bind (a Rational) is clipped and sorted in Julia,
     # in one gathered chunk, rather than by sorting the whole file in SQL
     qctx = Context(2 // 1, 11 // 1)

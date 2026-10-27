@@ -297,13 +297,20 @@ stored by key, not time, the window is the whole file, and an 81.7M-row file
 (a `count(*)` under the window's `WHERE` decides, scanning only the time
 column) is cut at DuckDB's `approx_quantile`s of the time into slices of about
 `sortrows` rows, each its own `WHERE … ORDER BY` query, run lazily once the
-previous one is drained. DuckDB then holds one slice at a time; the same file
+previous one is drained, all through one prepared statement (two when
+`closed`, whose last slice alone includes `stop`). DuckDB then holds one slice
+at a time; the same file
 read in 1 GB, one scan of its time column per slice. That scan is why the
 slices are capped at 1024: past `1024 * sortrows` rows they grow rather than
 multiply. Slices are half-open, so
 rows sharing a time never straddle a boundary and the order stays stable;
-quantiles that collapse onto one time, or that DuckDB cannot take or the
-context's time type cannot hold, just leave fewer slices. `file_row_number` is there because
+quantiles that collapse onto one time just leave fewer slices. A fractional
+quantile (of a floating or `DECIMAL` column) is floored into an integer
+context, since a cut need only fall inside the window. Quantiles DuckDB cannot
+take, or none of which the context's time type can hold, leave one slice, so
+one sort holds the window again: that is the out-of-memory case slicing
+exists for, so it warns rather than passing silently. Only the conversion
+failing (`slicebound`) or DuckDB's own errors are caught there. `file_row_number` is there because
 DuckDB's `ORDER BY` is not stable: it is the reader's virtual column, left out of
 `*`, and the tiebreak that makes the order the file's. Pushdown needs a nameable
 time column and that tiebreak, so a `time` function, an untraceable `rename`, or
