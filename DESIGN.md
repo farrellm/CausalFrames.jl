@@ -2972,13 +2972,14 @@ and #105). So evaluation plans before it runs.
   its own: requests made under different `sharing(false)` runs never group),
   and `sharing(true)` shares among requests that would not otherwise (a
   dependent node's widened run, its rows then as that run gives them).
-- **Abandoning.** A reader that stops early (`head` once its budget is spent,
-  a join once its left input ends, `concatenate` for the inputs it never
-  reaches) calls `abandon!` on what it holds, forwarded through `chunkmap`
-  (with an `abandon` hook for an operator's other inputs), `PullCursor` and the
-  producers. The tee then empties that side's queue and stops queueing for it,
-  and abandons the run once no side is live. Without it, `merge(p |> head(2),
-  p)` would queue all of `p` for the `head` side.
+- **Abandoning.** Once a run ends, or its reader abandons it, its operator
+  will not pull its inputs again, so the plan abandons every input slot of
+  that run, opened or not (a join's right side, the inputs `concatenate`
+  never reached). A reader stopping while it still runs (`head` once its
+  budget is spent) calls `abandon!` on its input itself. The tee then empties
+  that side's queue and stops queueing for it, and abandons the run once no
+  side is live. Without it, `merge(p |> head(2), p)` would queue all of `p`
+  for the `head` side.
 
 | Operator | `startfree` | `stopfree` |
 |---|---|---|

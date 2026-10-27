@@ -51,8 +51,7 @@ function intervalize(clk::CausalPipeline, summarizers; key = nothing,
             st = IntervalizeState{T}(IntervalCursor{T}(openinput(ins, 2)), T[], 2,
                 SummaryFold(cfg, keycols, terms, "intervalize"), closelast)
             return chunkmap(c -> intervalchunk!(st, c), openinput(ins, 1);
-                flush = () -> intervalflush!(st, ctx.stop),
-                abandon = () -> abandon!(st.cur.chunks))
+                flush = () -> intervalflush!(st, ctx.stop))
         end
     end
 end

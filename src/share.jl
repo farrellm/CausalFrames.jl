@@ -36,7 +36,7 @@ end
 
 # A source: `run(ctx)` builds its chunks.
 pipesource(@nospecialize(run); startfree::Bool = true, stopfree::Bool = true) =
-    CausalPipeline(SourceRun(run), CausalPipeline[], nothing, startfree,
+    CausalPipeline(SourceRun(run), CausalPipeline[], identity, startfree,
         stopfree, nothing)
 
 # A source's run function, ignoring the (absent) inputs.
@@ -149,10 +149,10 @@ mutable struct RunSlot
     const isolated::Any  # nothing, or the isolating RunInstance
     instance::Any      # its RunInstance
     side::Int
-    opened::Bool
+    iter::Any          # what its reader was handed; nothing until opened
     abandoned::Bool    # its reader won't pull again
     RunSlot(ctx::Context, isolated = nothing) =
-        new(ctx, isolated, nothing, 0, false, false)
+        new(ctx, isolated, nothing, 0, nothing, false)
 end
 
 # One run of a node, over the union of its slots' contexts, and the slots it
@@ -165,8 +165,8 @@ mutable struct RunInstance
     tee::Any           # its ChunkTee once a slot opens; one slot needs none
 end
 
-# What an operator's `run` reaches its inputs through: `openinput` and
-# `abandoninput`, over a planned run (`RunInputs`) or a direct one.
+# What an operator's `run` reaches its inputs through (`openinput`), over a
+# planned run (`RunInputs`) or a direct one.
 abstract type PipelineInputs end
 
 struct RunInputs <: PipelineInputs
@@ -175,11 +175,10 @@ end
 
 # Input i's chunks, over the context the operator declared for it.
 openinput(ins::RunInputs, i::Int) = openslot!(ins.instance.inputs[i])
+ninputs(ins::RunInputs) = length(ins.instance.inputs)
 
-# For an operator that will never open input i, which would otherwise have
-# its run's other readers hold chunks for it. One that opened it abandons the
-# iterator instead (`abandon!`).
-abandoninput(ins::RunInputs, i::Int) = abandonslot!(ins.instance.inputs[i])
+# Input i's context, from what a node's `contexts` gave.
+inputcontext(cs, i::Int) = cs isa Context ? cs : cs[i]
 
 # The chunks of `p` over `ctx`: plan the evaluation and open its root.
 runchunks(ctx::Context, @nospecialize(p::CausalPipeline)) =
@@ -200,20 +199,19 @@ function istree!(seen::Vector{CausalPipeline}, @nospecialize(p::CausalPipeline))
     return true
 end
 
-# What an operator's `run` reaches its inputs through, run directly.
+# What an operator's `run` reaches its inputs through, run directly: the node,
+# and its inputs' contexts.
 struct DirectInputs <: PipelineInputs
     node::CausalPipeline
-    ctx::Context
+    contexts::Any
 end
 
-function openinput(ins::DirectInputs, i::Int)
-    cs = ins.node.contexts(ins.ctx)
-    return opendirect(ins.node.inputs[i], cs isa Context ? cs : cs[i])
-end
-abandoninput(::DirectInputs, ::Int) = nothing   # never opened, never run
+openinput(ins::DirectInputs, i::Int) =
+    opendirect(ins.node.inputs[i], inputcontext(ins.contexts, i))
+ninputs(ins::DirectInputs) = length(ins.node.inputs)
 
 opendirect(@nospecialize(p::CausalPipeline), ctx::Context) =
-    p.run(ctx, DirectInputs(p, ctx))
+    p.run(ctx, DirectInputs(p, p.contexts(ctx)))
 
 # Visits the nodes after everything reading them (reverse postorder), so a
 # node's requests are all known when it is planned, and passes each instance's
@@ -226,10 +224,10 @@ function planrun(@nospecialize(root::CausalPipeline), ctx::Context)
     requests[root] = [rootslot]
     for node in Iterators.reverse(order)
         for inst in instances(node, requests[node])
-            cs = node.contexts === nothing ? nothing : node.contexts(inst.ctx)
+            cs = node.contexts(inst.ctx)
             iso = node.sharing === false ? inst : first(inst.slots).isolated
             for (i, input) in pairs(node.inputs)
-                slot = RunSlot(cs isa Context ? cs : cs[i], iso)
+                slot = RunSlot(inputcontext(cs, i), iso)
                 inst.inputs[i] = slot
                 push!(get!(() -> RunSlot[], requests, input), slot)
             end
@@ -285,56 +283,73 @@ end
 # A lone slot reads its instance's run directly; several read it through a tee
 # built when the first of them opens.
 function openslot!(s::RunSlot)
-    s.opened && throw(ArgumentError("internal: a run slot was opened twice"))
-    s.opened = true
+    s.iter === nothing || throw(ArgumentError("internal: a run slot was opened twice"))
     inst = s.instance::RunInstance
-    length(inst.slots) == 1 && return runinstance(inst)
-    inst.tee === nothing && (inst.tee = ChunkTee(inst))
-    return ChunkSource(TeeSide(inst.tee::ChunkTee, s.side))
+    if length(inst.slots) == 1
+        s.iter = runinstance(inst)
+    else
+        inst.tee === nothing && (inst.tee = ChunkTee(inst))
+        s.iter = ChunkSource(TeeSide(inst.tee::ChunkTee, s.side))
+    end
+    return s.iter
 end
 
-runinstance(inst::RunInstance) = inst.node.run(inst.ctx, RunInputs(inst))
+runinstance(inst::RunInstance) =
+    InstanceRun(inst, inst.node.run(inst.ctx, RunInputs(inst)), false)
 
+# The slot's reader won't pull again: abandon what it was handed, or, never
+# opened, keep its run's other readers from holding chunks for it.
 function abandonslot!(s::RunSlot)
-    s.abandoned = true
+    s.iter === nothing || return abandon!(s.iter)
     inst = s.instance::RunInstance
-    inst.tee === nothing || abandonside!(inst.tee::ChunkTee, s.side)
+    inst.tee === nothing ? (s.abandoned = true) :
+    abandonside!(inst.tee::ChunkTee, s.side)
     return nothing
 end
 
+# A planned run's chunks. Once they end, or their reader abandons them, the
+# operator won't open or pull its inputs again, so every input slot is
+# abandoned: a run a slot shares stops holding chunks back for it, opened or
+# not. So no operator wires up abandoning of its own; only one stopping early
+# while it still runs (`head`) abandons its input itself.
+mutable struct InstanceRun
+    const instance::RunInstance
+    const iter::Any    # erased, so a run's type never nests its inputs'
+    done::Bool
+end
+
+Base.IteratorSize(::Type{InstanceRun}) = Base.SizeUnknown()
+Base.eltype(::Type{InstanceRun}) = DataFrame
+
+function Base.iterate(r::InstanceRun, state...)
+    next = iterate(r.iter, state...)
+    next === nothing && (abandon!(r); return nothing)
+    c, s = next
+    return (c::DataFrame, s)
+end
+
 # A side's view of the shared run: the rows of its own context. The run's
-# context is the union, so a side starts later (`cutstart`, the lead-in
-# dropped as `warmup` drops it) or stops earlier (`cutstop`), or neither.
+# context is the union, so a side starts later (the lead-in dropped as
+# `warmup` drops it) or stops earlier (`cutstop`), or neither.
 mutable struct SideClip{T}
-    const start::T
+    const leadin::LeadInDrop{T}  # passed from the outset unless it starts later
     const stop::T
-    const cutstart::Bool
     const cutstop::Bool
-    passed::Bool       # a row at or after `start` has been kept
     finished::Bool     # a row at or after `stop` has been seen: nothing more
 end
 SideClip(side::Context{T}, run::Context{T}) where {T} =
-    SideClip{T}(side.start, side.stop, side.start > run.start,
-        side.stop < run.stop, false, false)
+    SideClip{T}(LeadInDrop{T}(side.start, side.start <= run.start), side.stop,
+        side.stop < run.stop, false)
 
-# The side's part of the chunk, or `nothing`. A chunk kept whole is passed on
-# as is, a straddling one sliced, never `deleteat!`ed (the `writecsv`
-# hand-off argument).
+# The side's part of the chunk, or `nothing`.
 function clipside!(cl::SideClip, c::DataFrame)
     cl.finished && return nothing
-    lo = 1
-    if cl.cutstart && !cl.passed
-        lo = firstkept(c.time, cl.start)
-        lo > nrow(c) && return nothing
-        cl.passed = true
-    end
     hi = nrow(c)
     if cl.cutstop
         hi = firstkept(c.time, cl.stop) - 1
         hi < nrow(c) && (cl.finished = true)
     end
-    lo > hi && return nothing
-    return lo == 1 && hi == nrow(c) ? c : c[lo:hi, :]
+    return dropleadin!(cl.leadin, c, hi)
 end
 
 # One run read by several sides at their own paces. A side with queued chunks
@@ -397,14 +412,19 @@ checklive!(tee::ChunkTee) =
 # --- abandoning ------------------------------------------------------------
 
 # Tell an input iterator its reader won't pull it again, so a shared run stops
-# holding chunks back for it: `head` once its budget is spent, a join once its
-# left input ends. Forwarded through the iterators and producers that hold an
-# input; a no-op for anything else.
+# holding chunks back for it. What a planned run hands out (an `InstanceRun`, a
+# tee side) acts on it, and a `PullCursor` passes it on; anything else is only
+# ever run directly, where nothing is shared, so it is a no-op.
 abandon!(::Any) = nothing
 function abandon!(c::PullCursor)
     c.done && return nothing
     c.done = true
     return abandon!(c.iter)
 end
-abandon!(it::ChunkSource) = abandon!(it.produce)
-abandon!(s::TeeSide) = abandonside!(s.tee, s.side)
+function abandon!(r::InstanceRun)
+    r.done && return nothing
+    r.done = true
+    foreach(abandonslot!, r.instance.inputs)
+    return nothing
+end
+abandon!(it::ChunkSource{<:TeeSide}) = abandonside!(it.produce.tee, it.produce.side)

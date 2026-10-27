@@ -52,30 +52,20 @@ end
 struct Flushed end
 
 """
-    chunkmap(step, upstream; flush = () -> nothing, abandon = nothing)
+    chunkmap(step, upstream; flush = () -> nothing)
 
 Internal lazy chunk transformer. Applies `step(chunk::DataFrame) ->
 Union{Nothing, DataFrame}` to each upstream chunk, skipping `nothing` and empty
 results, then calls `flush() -> Union{Nothing, DataFrame}` once after upstream
 ends and yields its result if non-empty. Single-pass, so `step` and `flush` may
-close over mutable per-run state. Abandoning it (`abandon!`) abandons
-`upstream`, then calls `abandon()` if given, for the other inputs `step`
-reads.
+close over mutable per-run state.
 """
-chunkmap(step, upstream; flush = () -> nothing, abandon = nothing) =
-    ChunkMap(step, flush, upstream, abandon)
+chunkmap(step, upstream; flush = () -> nothing) = ChunkMap(step, flush, upstream)
 
-struct ChunkMap{S,F,U,A}
+struct ChunkMap{S,F,U}
     step::S
     flush::F
     upstream::U
-    abandon::A
-end
-
-function abandon!(it::ChunkMap)
-    abandon!(it.upstream)
-    it.abandon === nothing || it.abandon()
-    return nothing
 end
 
 Base.IteratorSize(::Type{<:ChunkMap}) = Base.SizeUnknown()
@@ -98,6 +88,32 @@ function advance(it::ChunkMap, next)
     out isa DataFrame && nrow(out) > 0 && return (out, Flushed())
     return nothing
 end
+
+# Per-run state of a drop of the rows before `start` (`warmup`'s lead-in, a
+# shared run's later-starting side). Times are non-decreasing, so once a row at
+# or after `start` has been seen every later chunk passes through untouched.
+mutable struct LeadInDrop{T}
+    const start::T
+    passed::Bool
+end
+LeadInDrop(start::T) where {T} = LeadInDrop{T}(start, false)
+
+# The chunk's rows from `start` on, up to row `hi`, or `nothing`.
+function dropleadin!(st::LeadInDrop, c::DataFrame, hi::Int = nrow(c))
+    i = 1
+    if !st.passed
+        i = firstkept(c.time, st.start)
+        i > nrow(c) && return nothing
+        st.passed = true
+    end
+    i > hi && return nothing
+    # The straddling chunk is sliced, not `deleteat!`ed: column vectors may be
+    # shared (see `sinkchunk`), so none is mutated in place.
+    return i == 1 && hi == nrow(c) ? c : c[i:hi, :]
+end
+
+# Function barrier: the search specializes on the concretely typed column.
+firstkept(times::AbstractVector, start) = searchsortedfirst(times, start)
 
 # The clock cursor: one boundary time at a time over the clock's chunks, pulling
 # clock chunks lazily. The type-unstable pull is confined here; reading

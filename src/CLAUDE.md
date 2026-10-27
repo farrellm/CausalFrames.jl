@@ -15,9 +15,9 @@ design rationale and performance constraints behind each module.
   producer draining its input, a binary transform pulling its second stream):
   sticky `pull!`, state in fields, touched per chunk only. Not
   `Iterators.Stateful`, which on Julia 1.10 prefetches and would break
-  `head`'s early exit. `chunkmap`'s `abandon` hook is how an operator holding
-  other inputs in its step's state (a join's right side) passes `abandon!` on
-  to them (see `share.jl`)
+  `head`'s early exit. `LeadInDrop`/`dropleadin!` drop the rows before a
+  start, for `warmup`, `forwardfill`'s `tolerance` and a shared run's
+  later-starting side
 - `src/share.jl` — the `CausalPipeline{F}` node and the plan of one
   evaluation (issue #105). A node is immutable (a `mutable struct` of `const`
   fields, for cheap identity): its run function `(ctx, ins) -> iterator`, its
@@ -26,10 +26,9 @@ design rationale and performance constraints behind each module.
   `startfree`/`stopfree` flags; build it with `pipesource`, `pipenode` or
   `pipetransform() do upstream, ctx … end`, each and-ing the operator's own
   flags with its inputs'. Operators reach inputs only through
-  `openinput(ins, i)` (each at most once; `abandoninput` for one never
-  opened), never another node's `run`: that is what lets `planrun` see every
-  request before anything runs, and it is the seam a parallel executor would
-  use. `planrun` visits nodes in reverse postorder and groups each node's
+  `openinput(ins, i)` (each at most once), never another node's `run`: that
+  is what lets `planrun` see every request before anything runs, and it is
+  the seam a parallel executor would use. `planrun` visits nodes in reverse postorder and groups each node's
   requests (`RunSlot`s) into `RunInstance`s by `sharekey` (time type, then
   start unless startfree, stop unless stopfree, and the isolating
   `sharing(false)` run if any), each over the union of its slots' contexts.
@@ -39,9 +38,13 @@ design rationale and performance constraints behind each module.
   lone slot reads its run directly; several read a `ChunkTee`, which queues
   per side only the rows that side's `SideClip` keeps (`copycols = false`
   indexes, the `writecsv` hand-off argument), so a side starting later queues
-  none of the lead-in. `abandon!` (no-op by default; `PullCursor`,
-  `ChunkSource`, `ChunkMap` and the producers forward it) stops queueing for a
-  reader that won't pull again, and abandons a run no side needs. The flags'
+  none of the lead-in. A planned run's chunks come wrapped in an
+  `InstanceRun`, which abandons every input slot (`abandonslot!`, opened or
+  not) once the run ends or is abandoned, so operators wire up no abandoning
+  of their own: only `head`, stopping while it still runs, calls `abandon!`
+  (through its `PullCursor`). A tee then stops queueing for that side, and
+  abandons the run once no side is live; off the plan nothing is shared and
+  `abandon!` is a no-op. The flags'
   per-operator table is in DESIGN.md's "Shared runs"; a wrong `true` is a
   silent wrong answer, so every flag is covered by `test/sharing.jl`'s
   property test. Everything that takes a pipeline once per build or per
@@ -424,9 +427,8 @@ design rationale and performance constraints behind each module.
   kernel, comparison and right window picked by dispatch
   (`newstore`/`widenstore`/`segment!`/`joincmp`/`rightcontext`, and
   `joinfreedom`, its flags). A new join direction adds those six methods,
-  never a second driver. Once the left input ends (or is abandoned) the join
-  abandons its right one (`rightdone`), so a run the right side shares stops
-  queueing for it. The store is a
+  never a second driver. `joinnode` builds the node from a `JoinConfig` and a
+  chunk step, for the joins and `applymodels` alike. The store is a
   `SlotStore` (a `Dict{K,Int}` of slot numbers over a `Vector{V}` of rows,
   shared with `lastrow` through `admitslot!`), and a match is a `Vector{V}`
   plus a `Vector{Bool}` mask (unmatched slots left undefined, hence

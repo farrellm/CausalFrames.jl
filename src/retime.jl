@@ -97,27 +97,6 @@ function warmup(lookback, f)
 end
 warmup(p::CausalPipeline, lookback, f) = warmup(lookback, f)(p)
 
-# Per-run state of `warmup`'s drop. Times are non-decreasing, so once a row at
-# or after `start` has been seen every later chunk passes through untouched.
-mutable struct LeadInDrop{T}
-    const start::T
-    passed::Bool
-end
-LeadInDrop(start::T) where {T} = LeadInDrop{T}(start, false)
-
-function dropleadin!(st::LeadInDrop, c::DataFrame)
-    st.passed && return c
-    i = firstkept(c.time, st.start)
-    i > nrow(c) && return nothing
-    st.passed = true
-    # The straddling chunk is sliced, not `deleteat!`ed: column vectors may be
-    # shared (see `sinkchunk`), so none is mutated in place.
-    return i == 1 ? c : c[i:end, :]
-end
-
-# Function barrier: the search specializes on the concretely typed column.
-firstkept(times::AbstractVector, start) = searchsortedfirst(times, start)
-
 """
     head(n) -> (CausalPipeline -> CausalPipeline)
     head(p::CausalPipeline, n) -> CausalPipeline
@@ -187,7 +166,6 @@ function takerows!(p::HeadProducer, c::DataFrame)
     return c[1:k, :]
 end
 
-abandon!(p::HeadProducer) = abandon!(p.upstream)
 
 """
     settime(spec) -> (CausalPipeline -> CausalPipeline)

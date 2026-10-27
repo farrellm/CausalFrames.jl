@@ -59,23 +59,8 @@ function jointransform(right::CausalPipeline, direction, op::String; key,
         righttime $(repr(righttime)) collides with a key column"))
     cfg = JoinConfig(direction, op, keycols; tolerance, strict, leftprefix,
         rightprefix, righttime)
-    contexts = ctx -> (ctx, rightcontext(direction, ctx, tolerance, op))
-    startfree, stopfree = joinfreedom(direction, tolerance)
-    return function (@nospecialize(left::CausalPipeline),)
-        return pipenode((left, right); contexts, startfree, stopfree) do ctx, ins
-            js = JoinState(openinput(ins, 2), cfg)
-            # Through `js`, whose `cfg` is erased, so the iterator's type and
-            # the per-chunk driver are the same for every key and tolerance.
-            return chunkmap(c -> joinchunk!(js, js.cfg, c), openinput(ins, 1);
-                rightdone(js)...)
-        end
-    end
+    return joinnode(right, cfg, joinchunk!)
 end
-
-# Once the left input ends, or is abandoned, the right one is never pulled
-# again: a run it shares holds nothing more back for it.
-rightdone(js) = (; flush = () -> (abandon!(js.right); nothing),
-    abandon = () -> abandon!(js.right))
 
 normprefix(::Nothing) = nothing
 normprefix(p::Union{Symbol,AbstractString}) = String(p)
@@ -109,6 +94,22 @@ JoinConfig(direction, op::String, keycols::Vector{Symbol}; tolerance = nothing,
     JoinConfig(keycols, Val(Tuple(keycols)), tolerance,
         joincmp(direction, strict), direction, normprefix(leftprefix),
         normprefix(rightprefix), righttime, op)
+
+# The join engine's node over `(left, right)`, its chunks
+# `step(js, js.cfg, chunk)` per left chunk; `applymodels` shares it.
+function joinnode(right::CausalPipeline, cfg::JoinConfig, step)
+    (; direction, tolerance, op) = cfg
+    contexts = ctx -> (ctx, rightcontext(direction, ctx, tolerance, op))
+    startfree, stopfree = joinfreedom(direction, tolerance)
+    return function (@nospecialize(left::CausalPipeline),)
+        return pipenode((left, right); contexts, startfree, stopfree) do ctx, ins
+            js = JoinState(openinput(ins, 2), cfg)
+            # Through `js`, whose `cfg` is erased, so the iterator's type and
+            # the per-chunk driver are the same for every key and tolerance.
+            return chunkmap(c -> step(js, js.cfg, c), openinput(ins, 1))
+        end
+    end
+end
 
 # Per-run state. The untyped fields are per-chunk setup; the per-row work sits
 # behind the `segment!` function barrier.

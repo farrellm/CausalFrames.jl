@@ -36,7 +36,6 @@ struct SinkGuard{I}
 end
 
 Base.IteratorSize(::Type{<:SinkGuard}) = Base.SizeUnknown()
-abandon!(g::SinkGuard) = abandon!(g.inner)
 Base.eltype(::Type{<:SinkGuard}) = DataFrame
 
 function Base.iterate(g::SinkGuard, state...)

@@ -467,3 +467,9 @@ a dynamic `openinput`, so no evaluation infers the whole chain at once.
 
 Julia 1.13.2, 4 threads, the per-file table from `timed_runtests.jl`; the
 harness outputs were identical, element types included.
+
+The `/simplify` pass over it (abandoning moved into the plan's `InstanceRun`,
+`joinnode`, `SideClip` over `LeadInDrop`) was flat: included files 762.1 s
+wall (707.7 compile) before, 767.8 s (712.2) after, every file within noise.
+The one outlier, `barwindow.jl` (+4.7 s), measured 32.0–32.9 s compile on both
+sides when timed alone, alternating, twice each.

@@ -90,27 +90,16 @@
     end
 
     @testset "flags" begin
+        # the rest are asserted by the property test below
         p = readtable(df)
-        @test p.startfree && p.stopfree
         @test !readtable(df; closed = true).stopfree
         @test readtable(df; closed = true).startfree
-        @test !clock(1).startfree && clock(1).stopfree
-        @test !(p |> head(2)).startfree && (p |> head(2)).stopfree
         @test !(p |> summarize(Count())).startfree
         @test !(p |> summarize(Count())).stopfree
         @test (p |> filterrows(r -> true) |> lag(1)).startfree
         @test !(clock(1) |> filterrows(r -> true)).startfree
-        @test !(p |> forwardfill(:m)).startfree
-        @test (p |> forwardfill(:m; tolerance = 2)).startfree
         @test !asofjoin(p, p |> renamed(1)).startfree
-        @test asofjoin(p, p |> renamed(1); tolerance = 2).startfree
-        @test !summarizewindows(p, p, 3, Count(); key = :k).startfree
-        @test summarizewindows(p, p, 3, Count()).startfree
-        @test !addrollingcolumns(p, (b = Bars(2),), Count()).startfree
-        @test addrollingcolumns(p, (w = 2,), Count()).startfree
         @test !CausalFrames.Acausal.futurejoin(p, p |> renamed(1)).stopfree
-        @test CausalFrames.Acausal.futurejoin(p, p |> renamed(1);
-            tolerance = 2).stopfree
         @test !CausalPipeline(_ -> DataFrame[]).startfree
     end
 

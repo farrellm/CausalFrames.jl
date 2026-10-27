@@ -106,16 +106,8 @@ function applymodels(models::CausalPipeline; column::Symbol = :model,
     # reported by predictchunk! under this operator's name.
     right = models |> selectcolumns(n -> Symbol(n) === column || Symbol(n) in keycols)
     cfg = JoinConfig(Backward(), "applymodels", keycols; tolerance, strict)
-    contexts = ctx -> (ctx, rightcontext(Backward(), ctx, tolerance, "applymodels"))
-    startfree, stopfree = joinfreedom(Backward(), tolerance)
-    return function (@nospecialize(p::CausalPipeline),)
-        return pipenode((p, right); contexts, startfree, stopfree) do ctx, ins
-            js = JoinState(openinput(ins, 2), cfg)
-            return chunkmap(
-                c -> predictchunk!(js, js.cfg, column, name, operation, c),
-                openinput(ins, 1); rightdone(js)...)
-        end
-    end
+    return joinnode(right, cfg,
+        (js, cfg, c) -> predictchunk!(js, cfg, column, name, operation, c))
 end
 applymodels(p::CausalPipeline, models::CausalPipeline; kwargs...) =
     applymodels(models; kwargs...)(p)

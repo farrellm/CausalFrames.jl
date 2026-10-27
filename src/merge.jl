@@ -56,7 +56,7 @@ function Base.merge(p::CausalPipeline, ps::CausalPipeline...;
     pipelines = (p, ps...)
     n = Int(batchsize)
     return pipenode(pipelines) do ctx, ins
-        return ChunkSource(MergeProducer(ins, length(pipelines), ctx, n))
+        return ChunkSource(MergeProducer(ins, ctx, n))
     end
 end
 
@@ -94,7 +94,6 @@ Base.length(pc::MergePiece) = pc.hi - pc.lo + 1
 # The stateful producer behind merge's ChunkSource.
 mutable struct MergeProducer{T}
     const ins::PipelineInputs
-    const n::Int                       # the number of pipelines
     const batchsize::Int
     const cursors::Vector{MergeCursor{T}}
     const pending::Vector{MergePiece}  # claimed rows, until batchsize of them
@@ -103,8 +102,8 @@ mutable struct MergeProducer{T}
     initialized::Bool
 end
 
-MergeProducer(ins::PipelineInputs, n::Int, ::Context{T}, batchsize::Int) where {T} =
-    MergeProducer{T}(ins, n, batchsize, MergeCursor{T}[], MergePiece[], [:time],
+MergeProducer(ins::PipelineInputs, ::Context{T}, batchsize::Int) where {T} =
+    MergeProducer{T}(ins, batchsize, MergeCursor{T}[], MergePiece[], [:time],
         0, false)
 
 function (p::MergeProducer)()
@@ -120,21 +119,11 @@ function (p::MergeProducer)()
     end
 end
 
-function abandon!(p::MergeProducer)
-    if p.initialized
-        foreach(cur -> abandon!(cur.input), p.cursors)
-    else
-        foreach(i -> abandoninput(p.ins, i), 1:p.n)
-        p.initialized = true
-    end
-    return nothing
-end
-
 # Run every pipeline and buffer its first chunk, fixing the union schema before
 # any output (every output chunk must carry the same names). The first claim
 # needs every head row anyway, so this pulls nothing extra.
 function initcursors!(p::MergeProducer{T}) where {T}
-    for i in 1:p.n
+    for i in 1:ninputs(p.ins)
         cur = MergeCursor{T}(i, openinput(p.ins, i))
         refill!(cur)
         push!(p.cursors, cur)

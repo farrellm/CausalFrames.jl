@@ -71,8 +71,7 @@ function summarizewindows(clk::CausalPipeline, lookback, summarizers;
             # Through `st`, whose `cfg` is erased, so the iterator's type and
             # the per-chunk driver are the same for every summarizer set.
             return chunkmap(c -> windowchunk!(st, st.cfg, c), openinput(ins, 1);
-                flush = () -> windowflush!(st, st.cfg),
-                abandon = () -> abandon!(st.cur.chunks))
+                flush = () -> windowflush!(st, st.cfg))
         end
     end
 end

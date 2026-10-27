@@ -146,10 +146,7 @@ function addrollingcolumns(windows, summarizers; key = nothing,
                 PullCursor(openinput(ins, 2)), from === nothing, leadin)
             # Through the gate, whose `cfg` is erased, so the iterator's type
             # and the per-chunk driver are the same for every summarizer set.
-            # Once the output side ends the summarized one isn't needed.
-            return chunkmap(c -> rollchunk!(gate.rs, gate.cfg, c), afterleadin(gate);
-                flush = () -> (abandon!(gate.rs.summarized); nothing),
-                abandon = () -> abandon!(gate.rs.summarized))
+            return chunkmap(c -> rollchunk!(gate.rs, gate.cfg, c), afterleadin(gate))
         end
     end
 end
@@ -369,14 +366,14 @@ end
 # input's columns and is pulled before any augmented chunk, so it takes the
 # augmented side's checks.
 function pullsummarized!(rs::RollingState, @nospecialize(cfg::RollingConfig),
-    shared::Bool = false)
+    self::Bool = false)
     chunk = pull!(rs.summarized)
     if chunk === nothing
         rs.snt === nothing && (rs.passthrough = true)
         return nothing
     end
     if rs.stypes === nothing
-        shared ? checkaugmented!(rs, cfg, chunk) :
+        self ? checkaugmented!(rs, cfg, chunk) :
         checkkeycolumns(cfg.keycols, chunk, "addrollingcolumns",
             "the summarized input")
     end
