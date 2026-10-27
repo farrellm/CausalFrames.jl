@@ -137,7 +137,7 @@ mutable struct TableProducer{T,X}
 end
 
 function (p::TableProducer)()
-    p.parts === nothing && (p.parts = PullCursor(tablepartitions(p.table, p.sort)))
+    p.parts === nothing && (p.parts = PullCursor(tablepartitions(p)))
     while !p.done
         part = pull!(p.parts)
         part === nothing && (p.done = true; break)
@@ -147,13 +147,24 @@ function (p::TableProducer)()
     return nothing
 end
 
-# The partitions are the chunks, except that a sort concatenates them first.
-function tablepartitions(table, sort::Bool)
-    parts = Tables.partitions(table)
-    sort || return parts
+# The partitions are the chunks, except that a sort concatenates them first,
+# each narrowed to the columns `columns` keeps so the others aren't copied.
+function tablepartitions(p::TableProducer)
+    parts = Tables.partitions(p.table)
+    p.sort || return parts
     collected = collect(parts)
     length(collected) <= 1 && return collected
-    return (reduce(vcat, [DataFrame(x; copycols = false) for x in collected]),)
+    return (reduce(vcat, [keptpartition(p, x) for x in collected]),)
+end
+
+# A partition as an uncopied DataFrame of the columns `columns` keeps or, with
+# none kept, its first, to carry the row count as `keptfilecolumns` does.
+function keptpartition(p::TableProducer, part)
+    df = DataFrame(part; copycols = false)
+    p.columns === nothing && return df
+    keep = keptcolumns(p.columns, p.time, propertynames(df), "table", "")
+    return select(df, isempty(keep) ? first(propertynames(df), 1) : keep;
+        copycols = false)
 end
 
 # One partition's in-window rows as a chunk, or nothing if none. Carries the

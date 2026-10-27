@@ -70,8 +70,12 @@
         src = DataFrame(ts = [1, 2, 3], a = [1, 2, 3], b = ["x", "y", "z"],
             c = [1.0, 2.0, 3.0])
         partitioned = Tables.partitioner(Tables.columntable.([src[1:2, :], src[3:3, :]]))
-        for t in (src, Tables.columntable(src), Tables.rowtable(src), partitioned)
-            loadwith(; kw...) = DataFrame(load(Context(0, 100), readtable(t; kw...)))
+        # a sort narrows each partition before concatenating them
+        for t in (src, Tables.columntable(src), Tables.rowtable(src), partitioned),
+            sort in (false, true)
+
+            loadwith(; kw...) =
+                DataFrame(load(Context(0, 100), readtable(t; sort, kw...)))
             # the table's order, whatever the list's; :time kept, listed or not
             got = loadwith(; time = :ts, columns = [:c, :a])
             @test names(got) == ["time", "a", "c"]

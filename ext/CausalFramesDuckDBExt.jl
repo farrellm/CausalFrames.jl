@@ -128,8 +128,10 @@ windowfilter(
 # `MAXSLICES` of them: none when it holds no more, else DuckDB's approximate
 # quantiles, in the context's time type and strictly inside the window. A
 # window DuckDB can't bind fails the count. Quantiles DuckDB can't take, or
-# none of which converts, leave one slice, with a warning, since that one sort
-# holds the whole window.
+# that collapse once converted and clipped (ties, or a floating column floored
+# into an integer context), can leave far fewer slices than asked for, each a
+# sort DuckDB holds whole: under half of them warns, judged on the cuts that
+# remain, since a cut at or outside the window bounds nothing.
 function sliceboundaries(con, clip::SourceClip{T}, col::String,
     sortrows::Int) where {T}
     from = "FROM read_parquet(?) $(windowfilter(col, clip.closed))"
@@ -149,10 +151,13 @@ function sliceboundaries(con, clip::SourceClip{T}, col::String,
         Any[]
     end
     bounds = T[b for b in (slicebound(T, q) for q in quantiles) if b !== nothing]
-    isempty(bounds) && @warn "readparquet: DuckDB found no $T cut times in the \
-        time column of parquet file $(clip.path), so its $n-row window is sorted \
-        in one query rather than in slices of `sortrows = $sortrows` rows"
-    return filter(b -> clip.start < b < clip.stop, unique!(sort!(bounds)))
+    cuts = filter!(b -> clip.start < b < clip.stop, unique!(sort!(bounds)))
+    slices = length(cuts) + 1
+    2slices < k && @warn "readparquet: DuckDB found $(length(cuts)) $T cut times \
+        inside the window in the time column of parquet file $(clip.path), so its \
+        $n-row window is sorted in $(slices == 1 ? "one query" : "$slices queries") \
+        rather than in $k slices of about `sortrows = $sortrows` rows"
+    return cuts
 end
 
 # Each slice scans the file's time column, so a tiny `sortrows` would cost a

@@ -19,7 +19,7 @@ fallbacks in `src/parquet.jl` throw the `READHINT`/`WRITEHINT` message:
 - `parquetproducer(::Val{:name}, clip::SourceClip, sort, sortrows)` → a
   zero-argument callable returning the next chunk, or `nothing` at the end. The
   clip carries the path, the context window and every clip option (`time`,
-  `rename`, `closed`, `skipmissing`), plus the running `prevtime` and `done`.
+  `rename`, `closed`, `skipmissing`, `columns`), plus the running `prevtime` and `done`.
   `sortrows` is only the producer's (DuckDB slices its sort by it; Parquet2
   ignores it), so it is an argument rather than a clip field
 - `parquetsink(::Val{:name}, path, queue, rowgroupsize, opts)` → a `ChunkSink`
@@ -75,8 +75,9 @@ fallbacks in `src/parquet.jl` throw the `READHINT`/`WRITEHINT` message:
   (`sliceboundaries`), since one `ORDER BY` holds the whole window in DuckDB's
   memory, at most `MAXSLICES` of them, through one prepared statement (two
   when `closed`). The quantile step catches only DuckDB's errors and a
-  conversion's (`slicebound`), and warns when it leaves one slice, since that
-  is the out-of-memory sort again. An unbindable window fails in the
+  conversion's (`slicebound`), and warns when the cuts left inside the window
+  give under half the slices asked for, since each oversized slice is the
+  out-of-memory sort again. An unbindable window fails in the
   `count(*)` (or, unsorted, the one streaming query), inside the bind
   fallback's `try`, which catches only DuckDB's own errors; every sorted slice
   runs lazily, outside it, each once the previous result is drained, so one

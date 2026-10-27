@@ -328,6 +328,24 @@ end
         [DataFrame(time = fts[r], x = r) for r in Iterators.partition(1:n, 2_000)])
     fbounds = slicebounds(fbig, ctx, 1_000)
     @test length(fbounds) > 1 && all(b -> 2 < b < 11, fbounds)
+    # but floored cuts that collapse into a few slices warn, judged after the
+    # window drops a cut at its start: here every time floors to 5
+    narrow = ingroups(joinpath(dir, "narrow.parquet"),
+        [
+            DataFrame(time = 5 .+ (r .- 1) ./ 3_000, x = r)
+            for r in Iterators.partition(1:3_000, 1_000)
+        ])
+    @test (@test_logs (:warn, r"sorted in one query rather than in 30 slices") match_mode =
+        :any isempty(
+        slicebounds(narrow, Context(5, 100), 100)))
+    @test (@test_logs (:warn, r"sorted in 2 queries rather than in 30 slices") match_mode =
+        :any slicebounds(
+        narrow, Context(0, 100), 100) == [5])
+    logs, fine = Test.collect_test_logs() do
+        slicebounds(narrow, Context(5.0, 100.0), 100)
+    end
+    @test length(fine) > 14
+    @test !any(l -> occursin("cut times", string(l.message)), logs)
     # a tiny `sortrows` gets at most `MAXSLICES` slices, not one per row
     many = ingroups(joinpath(dir, "many.parquet"),
         [DataFrame(time = Float64.(r), x = r) for r in Iterators.partition(1:3_000, 1_000)])
@@ -348,14 +366,12 @@ end
         @test baseline.x ==
               filter(i -> lo <= ts[i] && (closed ? ts[i] <= hi : ts[i] < hi), perm)
         for sortrows in (100, 1_000, 5_000)
-            @test isequal(
-                DataFrame(
-                    load(
-                        c,
-                        readparquet(big; backend = :duckdb,
-                            sort = true, closed, sortrows),
-                    ),
-                ), baseline)
+            # 13 distinct times can't make 100-row slices, and that warns
+            logs = sortrows == 100 ? ((:warn, r"rather than in \d+ slices"),) : ()
+            got = @test_logs(logs..., match_mode = :any,
+                load(c, readparquet(big; backend = :duckdb,
+                        sort = true, closed, sortrows)))
+            @test isequal(DataFrame(got), baseline)
         end
     end
     @test_throws ArgumentError readparquet(big; sort = true, sortrows = 0)
@@ -380,7 +396,7 @@ end
     DBInterface.execute(duck.connection(),
         "COPY (SELECT lpad(i::VARCHAR, 6, '0') AS time FROM range(3000) t(i)) \
         TO '$txt' (FORMAT parquet)")
-    @test_logs (:warn, r"sorted in one query rather than in slices") match_mode = :any @test_throws(
+    @test_logs (:warn, r"sorted in one query rather than in \d+ slices") match_mode = :any @test_throws(
         "textual",
         load(Context("000000", "999999"),
             readparquet(txt; backend = :duckdb, sort = true, sortrows = 1_000)))
