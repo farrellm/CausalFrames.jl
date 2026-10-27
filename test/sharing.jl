@@ -254,6 +254,21 @@
         end
         @test runs[] == 2   # one shared run per load above
 
+        # an input `concatenate` never reaches never runs, so its own read of
+        # the shared run is abandoned too, and queues nothing
+        x =
+            concatenate(chunked |> filterrows(r -> r.time < 20),
+                chunked |> filterrows(r -> r.time >= 20)) |> head(1)
+        p = merge(x, chunked)
+        @test nrow(DataFrame(load(ctx, p))) == 1 + nrow(df[5 .<= df.time .< 35, :])
+        slot = CausalFrames.planrun(p, ctx)
+        for _ in CausalFrames.openslot!(slot)
+        end
+        tee = slot.instance.inputs[2].instance.tee
+        @test length(tee.slots) == 3
+        @test all(s -> s.abandoned, tee.slots[1:2])
+        @test all(isempty, tee.queues)
+
         # head(0) never pulls; its side is abandoned from the start
         p = merge(chunked |> head(0), chunked)
         @test nrow(DataFrame(load(ctx, p))) == nrow(df[5 .<= df.time .< 35, :])

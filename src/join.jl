@@ -131,7 +131,6 @@ mutable struct JoinState
             nothing, nothing, nothing, Bool[], false, false, false)
 end
 
-
 # The backward store, shared with `lastrow`: a `Dict{K,Int}` of slot numbers
 # over a `Vector{V}` of rows. A Dict of rows answers a lookup as
 # `Union{Nothing,V}`, which heap-allocates when V is not isbits (any String or

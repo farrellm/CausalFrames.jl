@@ -230,7 +230,7 @@ function addpredictions(clk::CausalPipeline, lookback, model, predictors,
     operation::Symbol = :predict, verbosity::Integer = 0)
     fitter = FitModel(model, predictors, response; name = :model, verbosity)
     fits = summarizewindows(clk, lookback, fitter; key)
-    return function (p::CausalPipeline)
+    return function (@nospecialize(p::CausalPipeline),)
         return p |> applymodels(p |> fits; column = :model, key, strict = false,
             name, operation)
     end

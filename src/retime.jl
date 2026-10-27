@@ -166,7 +166,6 @@ function takerows!(p::HeadProducer, c::DataFrame)
     return c[1:k, :]
 end
 
-
 """
     settime(spec) -> (CausalPipeline -> CausalPipeline)
     settime(p::CausalPipeline, spec) -> CausalPipeline

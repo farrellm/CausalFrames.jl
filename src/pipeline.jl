@@ -68,7 +68,7 @@ function load(ctx::Context{T}, @nospecialize(p::CausalPipeline)) where {T}
     end
     return CausalFrame{T}(Trusted(), ctx, chunks)
 end
-load(ctx::Context) = (p::CausalPipeline) -> load(ctx, p)
+load(ctx::Context) = (@nospecialize(p::CausalPipeline),) -> load(ctx, p)
 
 """
     scan(ctx::Context, p::CausalPipeline) -> Nothing
@@ -87,7 +87,7 @@ function scan(ctx::Context, @nospecialize(p::CausalPipeline))
     end
     return nothing
 end
-scan(ctx::Context) = (p::CausalPipeline) -> scan(ctx, p)
+scan(ctx::Context) = (@nospecialize(p::CausalPipeline),) -> scan(ctx, p)
 
 # O(1)-per-chunk guards against a misbehaving hand-rolled source: cross-chunk
 # order and window bounds. Within-chunk order and schema equality are left to
@@ -122,7 +122,7 @@ extends to `ctx.stop`. The iterator is single-pass and looks one chunk ahead.
 The curried form ends a chain: `p |> stream(ctx)` is `stream(ctx, p)`.
 """
 stream(ctx::Context, @nospecialize(p::CausalPipeline)) = FrameStream(ctx, runchunks(ctx, p))
-stream(ctx::Context) = (p::CausalPipeline) -> stream(ctx, p)
+stream(ctx::Context) = (@nospecialize(p::CausalPipeline),) -> stream(ctx, p)
 
 struct FrameStream{T,U}
     ctx::Context{T}

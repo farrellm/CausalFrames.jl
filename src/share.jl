@@ -298,12 +298,20 @@ runinstance(inst::RunInstance) =
     InstanceRun(inst, inst.node.run(inst.ctx, RunInputs(inst)), false)
 
 # The slot's reader won't pull again: abandon what it was handed, or, never
-# opened, keep its run's other readers from holding chunks for it.
+# opened, keep its run's other readers from holding chunks for it. A run whose
+# every slot is abandoned unopened never starts, so its own input slots are
+# abandoned too: otherwise a shared run below it would queue its whole output
+# for a reader that will never come (`concatenate`'s unreached inputs).
 function abandonslot!(s::RunSlot)
     s.iter === nothing || return abandon!(s.iter)
+    s.abandoned && return nothing
     inst = s.instance::RunInstance
-    inst.tee === nothing ? (s.abandoned = true) :
-    abandonside!(inst.tee::ChunkTee, s.side)
+    if inst.tee === nothing
+        s.abandoned = true
+        all(t -> t.abandoned, inst.slots) && foreach(abandonslot!, inst.inputs)
+    else
+        abandonside!(inst.tee::ChunkTee, s.side)
+    end
     return nothing
 end
 
