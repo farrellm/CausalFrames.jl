@@ -335,6 +335,7 @@ function testcolumns(loadwith, source::String, c::Vector)
     @test df.time == [1, 2, 3]
     @test df.c == c
     @test names(readwith(; time = :ts, columns = ())) == ["time"]
+    @test names(readwith(; time = :ts, columns = [])) == ["time"]
     @test names(readwith(; time = :ts, columns = (:time, :b))) == ["time", "b"]
     # named after `rename`, by a map or a function
     @test names(readwith(; rename = Dict("ts" => "time", "b" => "B"),
@@ -354,5 +355,13 @@ function testcolumns(loadwith, source::String, c::Vector)
     @test readwith(; time = row -> length(row), columns = [:time]).time == [0, 0, 0]
     @test_throws "$source has no column :nope" readwith(; time = :ts,
         columns = [:a, :nope])
+    # a `:time` column beside a Symbol `time` still clashes, whatever is listed
+    clash = "$source has both a :time column and the time column :ts"
+    for columns in (nothing, [:c], [:time, :c], ())
+        @test_throws clash readwith(; rename = Dict("a" => "time"), time = :ts,
+            columns)
+    end
+    # a missing time column is reported as such, with nothing else to read
+    @test_throws "$source has no column :nope" readwith(; time = :nope, columns = ())
     return nothing
 end

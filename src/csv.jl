@@ -48,8 +48,7 @@ window. Column types are **not** inferred: every column is a `String` unless
   `ArgumentError`.
 
 Unlike [`readparquet`](@ref), there is no `backend` (CSV.jl reads every file)
-and no `sortrows`: a CSV file can't be queried by time, so a sort gathers the
-window. Order and missing-time errors are raised only for the chunks actually
+and no `sortrows` (a sort gathers the window). Order and missing-time errors are raised only for the chunks actually
 read.
 """
 function readcsv(path::AbstractString; columns = nothing, types = nothing,
@@ -112,14 +111,13 @@ function typesfunction(d::AbstractDict)
     end
 end
 
-# CSV.jl's `select` predicate for a `columns` read (a `Function`, as CSV.jl
-# requires). One concrete type for every context time type, so CSV.jl's reader
-# compiles once for it.
-struct ColumnSelect <: Function
-    clip::SourceClip
+# CSV.jl's `select` for a `columns` read: the header's names that every reader
+# reads (`keptfilecolumns`), from a read of the header alone.
+function csvselect(clip::SourceClip, delim)
+    header = CSV.File(clip.path; limit = 0, delim = delim, types = String)
+    filenames = String[String(n) for n in propertynames(header)]
+    return map(Symbol, keptfilecolumns(clip, filenames))
 end
-(s::ColumnSelect)(i, name) =
-    readscolumn(s.clip, String(name)) || (i == 1 && needscarrier(s.clip))
 
 # The file's chunks. A file that fits in one chunk, or that CSV.Chunks refuses
 # to split, is read whole. `delim = nothing` is CSV.jl's own default.
@@ -129,7 +127,7 @@ function csvchunks(clip::SourceClip, chunkbytes::Int, types, delim)
     bytes = filesize(path)
     bytes == 0 && return DataFrame[]
     opts = (; types = typesfunction(types), stringtype = String, delim = delim,
-        select = clip.columns === nothing ? nothing : ColumnSelect(clip))
+        select = clip.columns === nothing ? nothing : csvselect(clip, delim))
     ntasks = max(1, Int(cld(bytes, chunkbytes)))
     ntasks == 1 && return [CSV.read(path, DataFrame; opts...)]
     try

@@ -61,9 +61,10 @@ design rationale and performance constraints behind each module.
     (`resolvechunk!` — rename, keep `columns`, resolve `:time`, missing times
     via `table.jl`'s `presentrows`, shared with `gatherchunk!` — then
     sortedness, clip, convert). `readscolumn` is the one predicate every
-    reader pushes `columns` down by (CSV.jl's `select` through `ColumnSelect`,
-    a concrete `Function` so CSV.jl's reader compiles once for every context
-    type), and `keepcolumns!` holds each chunk to it. Also the `ChunkSink`
+    reader pushes `columns` down by (through `keptfilecolumns`, the one carrier
+    rule; CSV.jl's `select` is that list over the header, read first), over
+    `keepscolumn`, which `readtable` shares, and `keepcolumns!` holds each
+    chunk to it. Also the `ChunkSink`
     background writer, which
     `sinktransform` wires into a pass-through transform for all three writers.
     `sinkchunk` queues the chunk for the writer and passes downstream

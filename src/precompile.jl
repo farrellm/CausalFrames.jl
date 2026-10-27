@@ -23,6 +23,8 @@
                 Correlation(:v, :qty)]),
         )
         ld(readcsv(csv; types = csvtypes, sort = true))
+        # a `columns` read: the header read and CSV.jl's reader under a select
+        ld(readcsv(csv; types = csvtypes, columns = [:qty]))
         # The regressions get their own workload: each expands to a dependency
         # per cross product, and a prototype tuple much past 32 falls off
         # inference. Both solve paths run (the K = 1 closed form and the
@@ -137,6 +139,10 @@
         ld(readtable(tdf; time = :ts, sort = true))
         ld(readtable(DataFrame(time = [1, 2, 3], x = [1.0, 2.0, 3.0])))
         ld(readtable((time = [1, 2, 3], x = [1.0, 2.0, 3.0])))
+        ld(
+            readtable((time = [1, 2, 3], x = [1.0, 2.0, 3.0], y = [1, 2, 3]);
+                columns = [:x]),
+        )
         ld(readtable(load(ctx, p)))
         ld(emptyframe())
     end

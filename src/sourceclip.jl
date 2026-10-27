@@ -27,13 +27,13 @@ SourceClip(ctx::Context{T}, path::AbstractString, what::String, time, rename,
     SourceClip{T}(String(path), what, time, rename, closed, skipmissing,
         columns, ctx.start, ctx.stop, nothing, false)
 
-# A file source's `columns` keyword, checked eagerly: `nothing` for every
-# column, else the names to keep (after `rename`), as a fresh vector. A listed
-# `:time` is the output's, always kept, so it is dropped here rather than read
-# as a file column clashing with the one `time` names.
+# A source's `columns` keyword, checked eagerly: `nothing` for every column,
+# else the names to keep (after `rename`), as a fresh vector. A listed `:time`
+# is the output's, always kept, so it is dropped here rather than read as a
+# file column clashing with the one `time` names.
 function sourcecolumns(columns, op::String)
     columns === nothing && return nothing
-    columns isa Union{AbstractVector{Symbol},Tuple{Vararg{Symbol}}} ||
+    columns isa Union{AbstractVector,Tuple} && all(c -> c isa Symbol, columns) ||
         throw(ArgumentError("invalid $op columns of type $(typeof(columns)): \
             expected a vector or tuple of Symbols, or `nothing`"))
     names = collect(Symbol, columns)
@@ -41,42 +41,43 @@ function sourcecolumns(columns, op::String)
     return filter!(!=(:time), names)
 end
 
-# Whether a source reads the file column `name`: every column without
-# `columns`, else one that `rename` makes a listed name or the time column
-# (`time` when a Symbol, else `:time`). The readers push this down, so unread
-# columns are never decoded; `keepcolumns!` holds every chunk to it regardless.
+# Whether a source with `columns` keeps the column `name` (after `rename`): a
+# listed one, the time column (`time` when a Symbol, else `:time`) or, beside
+# a Symbol `time`, a `:time` column, kept so that it still clashes with it.
+keepscolumn(columns::Vector{Symbol}, time, name::Symbol) =
+    name in columns || name === timetarget(time) || (name === :time && time isa Symbol)
+timetarget(time::Symbol) = time
+timetarget(time) = :time
+
+# Whether a file source reads the file column `name`: every column without
+# `columns`, else one it keeps once renamed. The readers push this down, so
+# unread columns are never decoded; `keepcolumns!` holds every chunk to it
+# regardless.
 readscolumn(clip::SourceClip, name::String) =
     clip.columns === nothing ||
-    keepscolumn(clip, Symbol(renamedto(name, clip.rename)))
-# The file columns a reader that knows them all reads: those `readscolumn`
-# accepts or, with none, the first, to carry the row count (a zero-column
-# DataFrame has no rows) until `keepcolumns!` drops it or reports a listed
-# column the file lacks.
+    keepscolumn(clip.columns, clip.time, Symbol(renamedto(name, clip.rename)))
+# The file columns a reader reads, given them all: those `readscolumn` accepts
+# or, with none, the first, to carry the row count (a zero-column DataFrame has
+# no rows) until `keepcolumns!` drops it or reports a missing column.
 function keptfilecolumns(clip::SourceClip, filenames::Vector{String})
     keep = filter(n -> readscolumn(clip, n), filenames)
     return isempty(keep) ? first(filenames, 1) : keep
 end
 
-# Whether a read keeps no file column: a `time` function over an empty
-# `columns` (listed names must exist, and a Symbol `time` names one). CSV.jl's
-# `select` sees one column at a time, so it reads the first by this rule.
-needscarrier(clip::SourceClip) =
-    clip.time isa Function && clip.columns !== nothing && isempty(clip.columns)
-keepscolumn(clip::SourceClip, name::Symbol) =
-    name in clip.columns || name === timetarget(clip.time)
-timetarget(time::Symbol) = time
-timetarget(time) = :time
-
-# Drop the columns `columns` leaves out, once renamed, refusing a listed one
-# the file lacks.
-function keepcolumns!(df::DataFrame, clip::SourceClip)
-    names = clip.columns
-    names === nothing && return nothing
-    for name in names
-        hascolumn(df, name) ||
-            throw(ArgumentError(nocolumn(clip.what, clip.path, name)))
+# The columns of `colnames` a source with `columns` keeps, refusing a listed one
+# missing from them.
+function keptcolumns(columns::Vector{Symbol}, time, colnames, what::String,
+    path::String)
+    for name in columns
+        name in colnames || throw(ArgumentError(nocolumn(what, path, name)))
     end
-    keep = filter(n -> keepscolumn(clip, n), propertynames(df))
+    return Symbol[n for n in colnames if keepscolumn(columns, time, n)]
+end
+
+# Drop the columns `columns` leaves out, once renamed.
+function keepcolumns!(df::DataFrame, columns, time, what::String, path::String)
+    columns === nothing && return nothing
+    keep = keptcolumns(columns, time, propertynames(df), what, path)
     length(keep) == ncol(df) || select!(df, keep)
     return nothing
 end
@@ -84,11 +85,12 @@ end
 # The first steps of every chunk, sorted or not: rename the columns, keep
 # `columns`, materialize `:time`, and find the rows whose time is present
 # (`nothing` for all), refusing a missing one unless `skipmissing`. The rows
-# are counted first, since `columns` may keep no file column (`needscarrier`).
+# are counted first, since `columns` may keep no column but a carrier
+# (`keptfilecolumns`).
 function resolvechunk!(clip::SourceClip, df::DataFrame)
     renamecolumns!(df, clip.rename)
     n = nrow(df)
-    keepcolumns!(df, clip)
+    keepcolumns!(df, clip.columns, clip.time, clip.what, clip.path)
     resolvetime!(df, clip.time, clip.path, clip.what, n)
     return presentrows(df.time, clip.skipmissing, clip.what, clip.path)
 end
@@ -255,10 +257,16 @@ end
 
 # The raw time values, and the column they came from (`nothing` for a `time`
 # function, whose values become a `:time` column), refused if textual. `cols`
-# is a DataFrame or a Tables.jl column table.
-sourcetimes(cols, time::Function, what::String, path::String) =
-    (checktimes(maptime(time, Tables.columntable(cols)), true, what, path), nothing)
-function sourcetimes(cols, time::Union{Nothing,Symbol}, what::String, path::String)
+# is a DataFrame or a Tables.jl column table of `n` rows, which a table with no
+# columns no longer has.
+function sourcetimes(cols, time::Function, what::String, path::String, n::Int)
+    times =
+        isempty(Tables.columnnames(cols)) ? maptime(time, n) :
+        maptime(time, Tables.columntable(cols))
+    return (checktimes(times, true, what, path), nothing)
+end
+function sourcetimes(cols, time::Union{Nothing,Symbol}, what::String, path::String,
+    ::Int)
     name = timecolumn(cols, time, what, path)
     return (checktimes(Tables.getcolumn(cols, name), false, what, path), name)
 end

@@ -97,7 +97,7 @@ curried for `|>`, and also take the pipeline first: `filterrows(p, pred)` is
 | [`concatenate(ps...)`](references/sources.md#concatenate) | the pipelines one after another, in time order, with identical columns |
 | [`merge(ps...; batchsize)`](references/sources.md#merge) | the pipelines interleaved by time, with the union of their columns (`missing` where one lacks a column); ties in argument order |
 | [`clock(interval; batchsize)`](references/sources.md#clock) | one row every `interval` in `[start, stop)` |
-| [`readtable(table; time, checkorder, sort, closed, skipmissing)`](references/sources.md#readtable) | an in-memory Tables.jl table or `CausalFrame`, clipped to the window |
+| [`readtable(table; columns, time, checkorder, sort, closed, skipmissing)`](references/sources.md#readtable) | an in-memory Tables.jl table or `CausalFrame`, clipped to the window |
 
 ### File I/O
 

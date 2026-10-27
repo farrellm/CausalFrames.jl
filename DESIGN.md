@@ -96,7 +96,7 @@ boundaries.
 | `concatenate(ps...)` | source | the pipelines end to end, in time order, with identical columns (see "Concatenation") |
 | `merge(ps...; batchsize)` | source | the pipelines interleaved by time, with the union of their columns (see "Merging") |
 | `clock(interval; batchsize)` | source | rows at `start, start + interval, …` before `stop`, only `:time`, in chunks of `batchsize` |
-| `readtable(table; time, checkorder, sort, closed, skipmissing)` / `readtable(frame; closed, checkcontext)` | source | an in-memory table or frame (see "Tables as sources") |
+| `readtable(table; columns, time, checkorder, sort, closed, skipmissing)` / `readtable(frame; closed, checkcontext)` | source | an in-memory table or frame (see "Tables as sources") |
 | `readcsv(path; columns, types, time, rename, delim, sort, chunkbytes, closed, skipmissing)` | source | a CSV file, `String` columns unless typed, read in chunks of about `chunkbytes` bytes (see "Resolving the time column", "Missing times", "Sorting a file source") |
 | `readparquet(path; columns, time, rename, sort, sortrows, closed, skipmissing, backend)` | source | a parquet file through DuckDB or Parquet2, skipping data outside the window (see "Parquet I/O") |
 | `readjls(path; closed)` | source | a file written by `writejls` (see "JLS I/O") |
@@ -350,28 +350,31 @@ textual times, under both `resolvetime!` (file chunks, resolved in place) and
 
 ## Choosing columns
 
-`readcsv` and `readparquet` take `columns`, the columns to read, named after
-`rename`, as `selectcolumns` would name them downstream. The point is the work
-never done: CSV.jl's `select` leaves the others unparsed, DuckDB's `SELECT`
-list leaves them unread and unsorted, and Parquet2 decodes only the kept
-columns of each row group. The motivating file was 81.7M rows whose four wide
+`readcsv`, `readparquet` and `readtable` (over a table, not a frame) take
+`columns`, the columns to read, named after `rename`, as `selectcolumns`
+would name them downstream. The point is the work never done: CSV.jl's
+`select` leaves the others unparsed, DuckDB's `SELECT` list leaves them unread
+and unsorted, Parquet2 decodes only the kept columns of each row group, and
+`readtable` copies only the kept columns of the window's rows. The motivating file was 81.7M rows whose four wide
 string columns nobody downstream wanted, and every one of them went through a
-sort. One predicate decides for every reader, `readscolumn` (its file name,
-renamed, is listed or is the time column), and `keepcolumns!` applies the same
+sort. One predicate decides for every source, `keepscolumn` (the name, after
+`rename`, is listed or is the time column, or is `:time` beside a `Symbol`
+`time`), behind the file readers' `readscolumn`, and `keepcolumns!` applies the same
 rule to every chunk inside `clipchunk!`/`gatherchunk!`, so the result is the
 same whether or not the reader could push it down. `keepcolumns!` is also
 where a listed column the file lacks is refused.
 
 The time column is always read: `:time`, or the column `time` names. Listing
 `:time` names the output's time column, so `sourcecolumns` drops it from the
-list rather than letting it pull in a file `:time` that would clash with
-`time = :ts`. A `time` function sees only the columns read, so it must list
+list. A file `:time` beside `time = :ts` is still read, listed or not, so that
+it clashes as it would without `columns` rather than vanishing silently. A `time` function sees only the columns read, so it must list
 what it reads. With nothing listed it reads no file column at all, yet must
-still see every row, and a zero-column DataFrame has none: so the readers read
-the file's first column anyway (`keptfilecolumns`, or `needscarrier` for
-CSV.jl's per-column `select`), the chunk's rows are counted
+still see every row, and a zero-column DataFrame has none: so whenever no
+file column is kept, every reader reads the file's first column anyway
+(`keptfilecolumns`, applied to the header that `readcsv` reads first, since
+CSV.jl's `select` sees one column at a time), the chunk's rows are counted
 before `keepcolumns!` drops it, and the function is mapped over that many
-empty rows. The columns keep the file's order; reordering is
+empty rows. `readtable` knows its row count, so it needs no carrier. The columns keep the file's order; reordering is
 `reordercolumns`' job.
 
 ## Missing times

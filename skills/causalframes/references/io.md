@@ -65,8 +65,7 @@ window. Column types are **not** inferred: every column is a `String` unless
   `ArgumentError`.
 
 Unlike `readparquet`, there is no `backend` (CSV.jl reads every file)
-and no `sortrows`: a CSV file can't be queried by time, so a sort gathers the
-window. Order and missing-time errors are raised only for the chunks actually
+and no `sortrows` (a sort gathers the window). Order and missing-time errors are raised only for the chunks actually
 read.
 
 ## `readparquet`
