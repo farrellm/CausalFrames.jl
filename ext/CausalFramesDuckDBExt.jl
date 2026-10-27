@@ -11,7 +11,7 @@ using DuckDB
 using Tables
 
 using CausalFrames:
-    ChunkSink, PullCursor, SourceClip, pullclipped!, timesourcename
+    ChunkSink, PullCursor, SourceClip, pullclipped!, keptfilecolumns, timesourcename
 
 CausalFrames.backendloaded(::Val{:duckdb}) = true
 
@@ -34,14 +34,15 @@ end
 mutable struct QueryProducer{T}
     const clip::SourceClip{T}
     const sort::Bool
+    const sortrows::Int # rows a sorted read sorts at a time, roughly
     gather::Bool        # sort in Julia, the query being unable to
     con::Any            # DuckDB connection, opened on first pull
     parts::Any          # PullCursor over the result chunks, as DataFrames
 end
 
 CausalFrames.parquetproducer(::Val{:duckdb}, clip::SourceClip{T},
-    sort::Bool) where {T} =
-    QueryProducer{T}(clip, sort, false, nothing, nothing)
+    sort::Bool, sortrows::Int) where {T} =
+    QueryProducer{T}(clip, sort, sortrows, false, nothing, nothing)
 
 function (p::QueryProducer)()
     p.parts === nothing && startquery!(p)
@@ -55,8 +56,8 @@ end
 # A `sort` is pushed down too, as an ORDER BY on the time column. DuckDB's sort
 # is unstable, so ties are broken by `file_row_number`, the reader's virtual
 # column (not in `*`), unless a file column of that name (case-insensitively)
-# shadows it. Without a nameable time column or a usable tiebreak, the rows are
-# sorted in Julia.
+# shadows it. Without a nameable time column, a usable tiebreak or a window
+# DuckDB can bind, the rows are sorted in Julia.
 function startquery!(p::QueryProducer)
     clip = p.clip
     p.con = connection()
@@ -65,29 +66,126 @@ function startquery!(p::QueryProducer)
     p.gather =
         p.sort &&
         (src === nothing || any(n -> lowercase(n) == "file_row_number", filenames))
-    res = if src === nothing
-        execstream(p.con, "SELECT * FROM read_parquet(?)", Any[clip.path])
-    else
-        col = "\"" * replace(src, "\"" => "\"\"") * "\""
-        order = p.sort && !p.gather ? " ORDER BY $col, file_row_number" : ""
-        upper = clip.closed ? "<=" : "<"
-        # The WHERE also drops null times, so without `skipmissing` they go
-        # unreported here; `OR $col IS NULL` would cost the row-group skip
-        # (see notes/duckdb-null-pushdown.md).
+    sel = selectlist(filenames, clip)
+    results = nothing
+    if src !== nothing
         try
-            execstream(p.con,
-                "SELECT * FROM read_parquet(?) WHERE $col >= ? AND $col $upper ?$order",
-                Any[clip.path, clip.start, clip.stop])
-        catch
+            results = windowresults(p, quotename(src), sel)
+        catch e
             # A time type DuckDB can't bind or compare with this column: read
-            # the whole file and let the clip do the work. An unreadable file
-            # fails again here with its own error.
-            execstream(p.con, "SELECT * FROM read_parquet(?)$order", Any[clip.path])
+            # the whole file and let the clip do the work, gathering under a
+            # sort so DuckDB never sorts (and holds) the whole file. An
+            # unreadable file fails again below with its own error.
+            isduckdberror(e) || rethrow()
+            p.gather = p.sort
         end
     end
-    p.parts = PullCursor(Iterators.map(DataFrame, Tables.partitions(res)))
+    results === nothing && (results =
+        (execstream(p.con, "SELECT $sel FROM read_parquet(?)", Any[clip.path]),))
+    p.parts = PullCursor(DataFrame(t) for r in results for t in Tables.partitions(r))
     return nothing
 end
+
+# The streaming results of the window's query, in order. A sorted read is cut
+# into time slices of about `sortrows` rows, each its own `ORDER BY` query, so
+# DuckDB holds one slice's rows at a time rather than the window's; any other
+# read is one slice. Ties never straddle a half-open slice boundary, so the
+# order stays stable. A window DuckDB can't bind fails here, in the first query
+# to name it: a sorted read's count, so no sort runs inside the caller's bind
+# fallback, or else the one streaming query. The slices share a prepared
+# statement (a second for the last when `closed`), and run lazily, each once
+# the previous result is drained.
+function windowresults(p::QueryProducer, col::String, sel::String)
+    clip = p.clip
+    sorted = p.sort && !p.gather
+    bounds = sorted ? sliceboundaries(p.con, clip, col, p.sortrows) : Any[]
+    lows, highs = Any[clip.start; bounds], Any[bounds; clip.stop]
+    order = sorted ? " ORDER BY $col, file_row_number" : ""
+    query(closed) = DBInterface.prepare(p.con,
+        "SELECT $sel FROM read_parquet(?) $(windowfilter(col, closed))$order",
+        DuckDB.StreamResult)
+    final = query(clip.closed)
+    inner = clip.closed && length(lows) > 1 ? query(false) : final
+    slice(i) = DBInterface.execute(i == length(lows) ? final : inner,
+        Any[clip.path, lows[i], highs[i]])
+    return sorted ? (slice(i) for i in eachindex(lows)) : (slice(1),)
+end
+
+# The errors DuckDB raises for a query it can't bind or run; anything else (an
+# interrupt, a bug of ours) is no reason to retry the read another way.
+isduckdberror(e) = e isa Union{DuckDB.QueryException,DuckDB.NotImplementedException}
+
+# The WHERE bounding the time column by two parameters, `[lo, hi)` or, closed,
+# `[lo, hi]`. It also drops null times, so without `skipmissing` they go
+# unreported here; `OR $col IS NULL` would cost the row-group skip (see
+# notes/duckdb-null-pushdown.md).
+windowfilter(
+    col::String,
+    closed::Bool,
+) = "WHERE $col >= ? AND $col $(closed ? "<=" : "<") ?"
+
+# The times splitting the window into slices of about `sortrows` rows, at most
+# `MAXSLICES` of them: none when it holds no more, else DuckDB's approximate
+# quantiles, in the context's time type and strictly inside the window. A
+# window DuckDB can't bind fails the count. Quantiles DuckDB can't take, or
+# that collapse once converted and clipped (ties, or a floating column floored
+# into an integer context), can leave far fewer slices than asked for, each a
+# sort DuckDB holds whole: under half of them warns, judged on the cuts that
+# remain, since a cut at or outside the window bounds nothing.
+function sliceboundaries(con, clip::SourceClip{T}, col::String,
+    sortrows::Int) where {T}
+    from = "FROM read_parquet(?) $(windowfilter(col, clip.closed))"
+    params = Any[clip.path, clip.start, clip.stop]
+    counted = DBInterface.execute(con, "SELECT count(*) AS n $from", params)
+    n = only(Tables.columntable(counted).n)
+    n <= sortrows && return T[]
+    k = min(cld(n, sortrows), MAXSLICES)
+    qs = join((string(i / k) for i in 1:(k-1)), ", ")
+    quantiles = try
+        res =
+            DBInterface.execute(con, "SELECT approx_quantile($col, [$qs]) AS q $from",
+                params)
+        collect(skipmissing(only(Tables.columntable(res).q)))
+    catch e
+        isduckdberror(e) || rethrow()
+        Any[]
+    end
+    bounds = T[b for b in (slicebound(T, q) for q in quantiles) if b !== nothing]
+    cuts = filter!(b -> clip.start < b < clip.stop, unique!(sort!(bounds)))
+    slices = length(cuts) + 1
+    2slices < k && @warn "readparquet: DuckDB found $(length(cuts)) $T cut times \
+        inside the window in the time column of parquet file $(clip.path), so its \
+        $n-row window is sorted in $(slices == 1 ? "one query" : "$slices queries") \
+        rather than in $k slices of about `sortrows = $sortrows` rows"
+    return cuts
+end
+
+# Each slice scans the file's time column, so a tiny `sortrows` would cost a
+# scan per few rows: past this many slices they grow instead.
+const MAXSLICES = 1024
+
+# A quantile as a cut time in the context's time type, or nothing if it has
+# none. A cut need only fall inside the window, so a fractional quantile (of a
+# floating or decimal column) is floored into an integer context rather than
+# refused, which would leave one slice.
+function slicebound(::Type{T}, b) where {T}
+    try
+        return tobound(T, b)
+    catch e
+        e isa Union{MethodError,InexactError} || rethrow()
+        return nothing
+    end
+end
+tobound(::Type{T}, b) where {T} = convert(T, b)
+tobound(::Type{T}, b::Real) where {T<:Integer} = floor(T, b)
+
+# The SELECT list: the file columns a `columns` read keeps
+# (`keptfilecolumns`), else `*`.
+selectlist(filenames::Vector{String}, clip::SourceClip) =
+    clip.columns === nothing ? "*" :
+    join(map(quotename, keptfilecolumns(clip, filenames)), ", ")
+
+quotename(name::String) = "\"" * replace(name, "\"" => "\"\"") * "\""
 
 execstream(con, sql::String, params::Vector{Any}) =
     DBInterface.execute(DBInterface.prepare(con, sql, DuckDB.StreamResult), params)

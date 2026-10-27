@@ -323,3 +323,45 @@ function checkreleased(p::CausalPipeline, path::AbstractString)
     Sys.islinux() && @test openfds(path) == 0
     return nothing
 end
+
+# The `columns` behaviour readcsv and readparquet share, over a file with
+# columns `ts`, `a = 1:3`, `b` and `c`: `loadwith(kw)` loads it with the
+# keywords `kw`, `source` prefixes its errors and `c` is the expected column.
+function testcolumns(loadwith, source::String, c::Vector)
+    readwith(; kw...) = loadwith(kw)
+    # the file's order, whatever the list's; :time read whether listed or not
+    df = readwith(; time = :ts, columns = [:c, :a])
+    @test names(df) == ["time", "a", "c"]
+    @test df.time == [1, 2, 3]
+    @test df.c == c
+    @test names(readwith(; time = :ts, columns = ())) == ["time"]
+    @test names(readwith(; time = :ts, columns = [])) == ["time"]
+    @test names(readwith(; time = :ts, columns = (:time, :b))) == ["time", "b"]
+    # named after `rename`, by a map or a function
+    @test names(readwith(; rename = Dict("ts" => "time", "b" => "B"),
+        columns = [:B])) == ["time", "B"]
+    @test names(
+        readwith(; rename = n -> uppercase(String(n)), time = :TS,
+            columns = [:C]),
+    ) == ["time", "C"]
+    # a time function sees only the columns read
+    df = readwith(; time = row -> row.a * 10, columns = [:a])
+    @test df.time == [10, 20, 30]
+    @test sort!(names(df)) == ["a", "time"]
+    # or none, and still sees every row
+    df = readwith(; time = row -> 7, columns = ())
+    @test names(df) == ["time"]
+    @test df.time == [7, 7, 7]
+    @test readwith(; time = row -> length(row), columns = [:time]).time == [0, 0, 0]
+    @test_throws "$source has no column :nope" readwith(; time = :ts,
+        columns = [:a, :nope])
+    # a `:time` column beside a Symbol `time` still clashes, whatever is listed
+    clash = "$source has both a :time column and the time column :ts"
+    for columns in (nothing, [:c], [:time, :c], ())
+        @test_throws clash readwith(; rename = Dict("a" => "time"), time = :ts,
+            columns)
+    end
+    # a missing time column is reported as such, with nothing else to read
+    @test_throws "$source has no column :nope" readwith(; time = :nope, columns = ())
+    return nothing
+end

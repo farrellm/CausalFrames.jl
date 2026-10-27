@@ -9,8 +9,9 @@
 #   wholly inside the window passed on as a private index over its vectors.
 
 """
-    readtable(table; time = nothing, checkorder = true, sort = false,
-              closed = false, skipmissing = false) -> CausalPipeline
+    readtable(table; columns = nothing, time = nothing, checkorder = true,
+              sort = false, closed = false, skipmissing = false)
+        -> CausalPipeline
     readtable(frame::CausalFrame; closed = nothing, checkcontext = true)
         -> CausalPipeline
 
@@ -27,8 +28,10 @@ in the window are copied.
   already resolved, so only `closed` and `checkcontext` apply.
 
 # Keywords
-- `time = nothing`: where `:time` comes from, as for [`readcsv`](@ref). A
-  textual time column is an `ArgumentError`.
+- `columns = nothing`: the columns to read, as for [`readcsv`](@ref); the
+  others are never copied.
+- `time = nothing`: where `:time` comes from, as for `readcsv`. A textual time
+  column is an `ArgumentError`.
 - `checkorder = true`: check that time is non-decreasing. With `false` the
   caller vouches for the order, and an unsorted table gives wrong results rather
   than an error.
@@ -59,26 +62,32 @@ DataFrame(load(Context(0, 10), p))
    2 │     2      3.0
 ```
 """
-function readtable(table; time = nothing, checkorder::Bool = true,
-    sort::Bool = false, closed::Bool = false, skipmissing::Bool = false)
+function readtable(table; columns = nothing, time = nothing,
+    checkorder::Bool = true, sort::Bool = false, closed::Bool = false,
+    skipmissing::Bool = false)
     checksourcetimespec(time, "readtable")
+    names = sourcecolumns(columns, "readtable")
     Tables.istable(table) || throw(ArgumentError("readtable table must be a \
         Tables.jl table, got $(typeof(table))"))
     return CausalPipeline() do ctx::Context
         return ChunkSource(
-            TableProducer{timetype(ctx)}(table, time, checkorder,
+            TableProducer{timetype(ctx)}(table, names, time, checkorder,
                 sort, closed, skipmissing, ctx.start, ctx.stop),
         )
     end
 end
 
-function readtable(df::AbstractDataFrame; time = nothing, checkorder::Bool = true,
-    sort::Bool = false, closed::Bool = false, skipmissing::Bool = false)
+function readtable(df::AbstractDataFrame; columns = nothing, time = nothing,
+    checkorder::Bool = true, sort::Bool = false, closed::Bool = false,
+    skipmissing::Bool = false)
     checksourcetimespec(time, "readtable")
-    # A private index over the caller's vectors, so the rename and :time
-    # assignment below never reach `df`. O(ncols).
+    names = sourcecolumns(columns, "readtable")
+    # A private index over the caller's vectors, so the projection, rename and
+    # :time assignment below never reach `df`. O(ncols).
     wrapped = DataFrame(df; copycols = false)
-    times, source = sourcetimes(wrapped, time, "table", "")
+    n = nrow(wrapped)
+    keepcolumns!(wrapped, names, time, "table", "")
+    times, source = sourcetimes(wrapped, time, "table", "", n)
     applytime!(wrapped, times, source)
     # Unless dropping missing times or sorting copies the rows, the chunk
     # aliases the caller's vectors, so every run must slice rather than share.
@@ -110,6 +119,7 @@ readtable(frame::CausalFrame; closed::Union{Nothing,Bool} = nothing,
 # per-row work sits behind `tablerows`, `copytimes` and `maptime`.
 mutable struct TableProducer{T,X}
     const table::X
+    const columns::Union{Nothing,Vector{Symbol}}  # kept besides :time; nothing: all
     const time::Any      # Nothing | Symbol (column name) | Function (row -> time)
     const checkorder::Bool
     const sort::Bool
@@ -120,14 +130,14 @@ mutable struct TableProducer{T,X}
     parts::Any           # PullCursor over the partitions, created on first pull
     prevtime::Any        # last time of the previous partition, for its order
     done::Bool
-    TableProducer{T}(table::X, time, checkorder, sort, closed, skipmissing,
-        start, stop) where {T,X} =
-        new{T,X}(table, time, checkorder, sort, closed, skipmissing, start,
-            stop, nothing, nothing, false)
+    TableProducer{T}(table::X, columns, time, checkorder, sort, closed,
+        skipmissing, start, stop) where {T,X} =
+        new{T,X}(table, columns, time, checkorder, sort, closed, skipmissing,
+            start, stop, nothing, nothing, false)
 end
 
 function (p::TableProducer)()
-    p.parts === nothing && (p.parts = PullCursor(tablepartitions(p.table, p.sort)))
+    p.parts === nothing && (p.parts = PullCursor(tablepartitions(p)))
     while !p.done
         part = pull!(p.parts)
         part === nothing && (p.done = true; break)
@@ -137,13 +147,24 @@ function (p::TableProducer)()
     return nothing
 end
 
-# The partitions are the chunks, except that a sort concatenates them first.
-function tablepartitions(table, sort::Bool)
-    parts = Tables.partitions(table)
-    sort || return parts
+# The partitions are the chunks, except that a sort concatenates them first,
+# each narrowed to the columns `columns` keeps so the others aren't copied.
+function tablepartitions(p::TableProducer)
+    parts = Tables.partitions(p.table)
+    p.sort || return parts
     collected = collect(parts)
     length(collected) <= 1 && return collected
-    return (reduce(vcat, [DataFrame(x; copycols = false) for x in collected]),)
+    return (reduce(vcat, [keptpartition(p, x) for x in collected]),)
+end
+
+# A partition as an uncopied DataFrame of the columns `columns` keeps or, with
+# none kept, its first, to carry the row count as `keptfilecolumns` does.
+function keptpartition(p::TableProducer, part)
+    df = DataFrame(part; copycols = false)
+    p.columns === nothing && return df
+    keep = keptcolumns(p.columns, p.time, propertynames(df), "table", "")
+    return select(df, isempty(keep) ? first(propertynames(df), 1) : keep;
+        copycols = false)
 end
 
 # One partition's in-window rows as a chunk, or nothing if none. Carries the
@@ -152,7 +173,12 @@ end
 function tablechunk!(p::TableProducer{T}, part) where {T}
     cols = Tables.columns(part)
     colnames = Tables.columnnames(cols)
-    times, source = sourcetimes(cols, p.time, "table", "")
+    n = isempty(colnames) ? 0 : length(Tables.getcolumn(cols, first(colnames)))
+    if p.columns !== nothing
+        colnames = Tuple(keptcolumns(p.columns, p.time, colnames, "table", ""))
+        cols = NamedTuple{colnames}(map(c -> Tables.getcolumn(cols, c), colnames))
+    end
+    times, source = sourcetimes(cols, p.time, "table", "", n)
     present = presentrows(times, p.skipmissing, "table", "")
     # with missing times dropped, the kept indices are into the view of the
     # present rows, mapped back to the partition below

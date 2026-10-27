@@ -66,6 +66,46 @@
         @test_throws ArgumentError readtable(clock(1))
     end
 
+    @testset "columns" begin
+        src = DataFrame(ts = [1, 2, 3], a = [1, 2, 3], b = ["x", "y", "z"],
+            c = [1.0, 2.0, 3.0])
+        partitioned = Tables.partitioner(Tables.columntable.([src[1:2, :], src[3:3, :]]))
+        # a sort narrows each partition before concatenating them
+        for t in (src, Tables.columntable(src), Tables.rowtable(src), partitioned),
+            sort in (false, true)
+
+            loadwith(; kw...) =
+                DataFrame(load(Context(0, 100), readtable(t; sort, kw...)))
+            # the table's order, whatever the list's; :time kept, listed or not
+            got = loadwith(; time = :ts, columns = [:c, :a])
+            @test names(got) == ["time", "a", "c"]
+            @test got.c == [1.0, 2.0, 3.0]
+            for columns in ((), [], [:time])
+                @test names(loadwith(; time = :ts, columns)) == ["time"]
+            end
+            # a time function sees only the columns read, or none
+            @test loadwith(; time = r -> 10 * r.a, columns = [:a]).time == [10, 20, 30]
+            got = loadwith(; time = r -> length(r), columns = ())
+            @test names(got) == ["time"]
+            @test got.time == [0, 0, 0]
+            @test_throws "table has no column :nope" loadwith(; time = :ts,
+                columns = [:a, :nope])
+            @test_throws "table has no column :nope" loadwith(; time = :nope,
+                columns = ())
+        end
+        # the caller's DataFrame keeps every column
+        @test names(src) == ["ts", "a", "b", "c"]
+        both = DataFrame(time = [1, 2], ts = [1, 2], a = [1, 2])
+        for t in (both, Tables.columntable(both)), columns in ([:a], [:time, :a])
+            @test_throws "table has both a :time column and the time column :ts" load(
+                Context(0, 10), readtable(t; time = :ts, columns))
+        end
+        @test_throws "invalid readtable columns of type Vector{String}" readtable(src;
+            columns = ["a"])
+        @test_throws "readtable columns must be unique" readtable(
+            Tables.columntable(src); columns = [:a, :a])
+    end
+
     @testset "order" begin
         ctx = Context(0, 10)
         unsorted = DataFrame(time = [3, 1, 2], x = [1, 2, 3])

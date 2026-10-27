@@ -36,12 +36,13 @@ function resolvebackend(request::Symbol, preferred::Symbol, hint::String)
 end
 
 # Backend hooks. These fallbacks run only when the backend is not loaded.
-parquetproducer(::Val, ::Any, ::Any) = throw(ArgumentError(READHINT))
+parquetproducer(::Val, ::Any, ::Any, ::Any) = throw(ArgumentError(READHINT))
 parquetsink(::Val, ::Any, ::Any, ::Any, ::Any) = throw(ArgumentError(WRITEHINT))
 
 """
-    readparquet(path; time = nothing, rename = nothing, sort = false,
-                closed = false, skipmissing = false, backend = :auto)
+    readparquet(path; columns = nothing, time = nothing, rename = nothing,
+                sort = false, sortrows = 1_000_000, closed = false,
+                skipmissing = false, backend = :auto)
         -> CausalPipeline
 
 A source reading the parquet file at `path`, clipped to `[start, stop)`. Column
@@ -59,14 +60,28 @@ window.
 - `path`: the file.
 
 # Keywords
-- `time = nothing`: where `:time` comes from, as for [`readcsv`](@ref).
+- `columns = nothing`: the columns to read, as for [`readcsv`](@ref); the
+  others are never decoded.
+- `time = nothing`: where `:time` comes from, as for `readcsv`.
 - `rename = nothing`: a map or a `name -> name` function applied to the column
   names before `time` is resolved, as for `readcsv`.
 - `sort = false`: stably sort the rows by time, for a file not stored in time
   order. DuckDB sorts in the query and still streams; Parquet2 (and DuckDB with
-  a `time` function or a `rename` hiding the time column) reads every in-window
-  row and emits them as one sorted chunk. Without it, a decreasing time is an
+  a `time` function, a `rename` hiding the time column, or a context time type
+  it cannot compare with the column) reads every in-window row and emits them
+  as one sorted chunk. Without it, a decreasing time is an
   `ArgumentError`.
+- `sortrows = 1_000_000`: under `sort`, DuckDB sorts the window in time slices
+  of about this many rows, one query each, so it holds one slice rather than
+  the window. Slices are cut at approximate quantiles of the time, and rows
+  sharing a time are never split, so a slice can run larger. There are at most
+  1024 slices; a larger window gets larger ones. Each slice is its own read
+  of the file, pruned only by row-group statistics, so on a file not written
+  in time order a smaller `sortrows` costs more reads. If the cut times
+  collapse into fewer than half the slices asked for (heavy ties, or a
+  floating time column spanning few values of an integer context), the
+  window is sorted in those larger slices, with a warning. Unused by Parquet2.
+  Must be positive.
 - `closed = false`: clip to `[start, stop]` instead, keeping rows at `stop`.
 - `skipmissing = false`: drop rows whose time is `missing` (a null, or a `time`
   function returning `missing`). Without it such a row is an `ArgumentError`,
@@ -74,19 +89,24 @@ window.
 - `backend = :auto`: `:duckdb`, `:parquet2`, or `:auto` (DuckDB if loaded).
   Naming a backend that is not loaded is an `ArgumentError`.
 
-Order and missing-time errors are raised only for the rows actually read.
+Unlike `readcsv`, there is no `types` (column types come from the file) and no
+`delim`. Order and missing-time errors are raised only for the rows actually
+read.
 """
-function readparquet(path::AbstractString; time = nothing, rename = nothing,
-    sort::Bool = false, closed::Bool = false, skipmissing::Bool = false,
-    backend::Symbol = :auto)
+function readparquet(path::AbstractString; columns = nothing, time = nothing,
+    rename = nothing, sort::Bool = false, sortrows::Integer = 1_000_000,
+    closed::Bool = false,
+    skipmissing::Bool = false, backend::Symbol = :auto)
     checksourcetimespec(time, "readparquet")
+    names = sourcecolumns(columns, "readparquet")
+    checkpositive(sortrows, "readparquet sortrows")
     resolvebackend(backend, :duckdb, READHINT)   # eager: fail at the call site
     return CausalPipeline() do ctx::Context
         clip = SourceClip(ctx, path, "parquet file", time, rename, closed,
-            skipmissing)
+            skipmissing, names)
         return ChunkSource(
             parquetproducer(resolvebackend(backend, :duckdb, READHINT), clip,
-                sort),
+                sort, Int(sortrows)),
         )
     end
 end
@@ -168,7 +188,7 @@ writeparquet(p::CausalPipeline, path::AbstractString; kwargs...) =
 # scan.
 function timesourcename(filenames::Vector{String}, time, rename)
     time isa Function && return nothing
-    target = time isa Symbol ? String(time) : "time"
+    target = String(timetarget(time))
     matches = [n for n in filenames if renamedto(n, rename) == target]
     return length(matches) == 1 ? only(matches) : nothing
 end

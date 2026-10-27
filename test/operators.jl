@@ -511,6 +511,30 @@ end
     @test reduce(vcat, DataFrame.(stream(ctx, p))) == df
 end
 
+@testset "readcsv columns" begin
+    dir = mktempdir()
+    path = joinpath(dir, "cols.csv")
+    write(path, "ts,a,b,c\n1,1,x,1.5\n2,2,y,2.5\n3,3,z,3.5\n")
+    # `:nope` is typed so a read naming it as the time reaches the file
+    types = Dict(:ts => Int, :a => Int, :c => Float64, :nope => Int)
+    for chunkbytes in (8, 4 * 1024 * 1024), sort in (false, true)
+        testcolumns("CSV file $path", [1.5, 2.5, 3.5]) do kw
+            DataFrame(load(Context(0, 100),
+                readcsv(path; types, chunkbytes, sort, kw...)))
+        end
+    end
+    # an unread column is never parsed: typing `b` as Int warns only when read
+    badtypes = Dict(:ts => Int, :b => Int)
+    @test_logs load(Context(0, 100),
+        readcsv(path; types = badtypes, time = :ts, columns = [:a]))
+    @test_logs (:warn,) match_mode = :any load(Context(0, 100),
+        readcsv(path; types = badtypes, time = :ts))
+    @test_throws "invalid readcsv columns of type Vector{String}" readcsv(path;
+        types, time = :ts, columns = ["a"])
+    @test_throws "readcsv columns must be unique" readcsv(path; types, time = :ts,
+        columns = [:a, :a])
+end
+
 @testset "readcsv chunked" begin
     dir = mktempdir()
     path = joinpath(dir, "long.csv")

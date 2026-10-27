@@ -16,9 +16,10 @@ Readers clip to `[start, stop)` and read incrementally.
 
 ## `readcsv`
 
-    readcsv(path; types = nothing, time = nothing, rename = nothing,
-            delim = nothing, sort = false, chunkbytes = 4 * 1024 * 1024,
-            closed = false, skipmissing = false) -> CausalPipeline
+    readcsv(path; columns = nothing, types = nothing, time = nothing,
+            rename = nothing, delim = nothing, sort = false,
+            chunkbytes = 4 * 1024 * 1024, closed = false, skipmissing = false)
+        -> CausalPipeline
 
 A source reading the CSV file at `path`, clipped to `[start, stop)`. The file is
 read incrementally, in chunks, and reading stops at the first time past the
@@ -30,6 +31,12 @@ window. Column types are **not** inferred: every column is a `String` unless
   empty stream) reads as no rows.
 
 #### Keywords
+- `columns = nothing`: the columns to read, as a vector or tuple of `Symbol`s
+  named after `rename`; the others are never parsed. `:time` (or the column
+  `time` names) is always read and need not be listed, and a `time` function
+  sees only the columns read. The columns keep the file's order. Duplicates, or
+  anything but `Symbol`s, are an `ArgumentError`, as is a listed column the
+  file lacks.
 - `types = nothing`: concrete types for some columns, keyed by the file's own
   column names (before `rename`): a single type for every column, a vector
   indexed by column position (`nothing` entries stay `String`), a `Dict` keyed by
@@ -57,12 +64,15 @@ window. Column types are **not** inferred: every column is a `String` unless
   `time` function returning `missing`). Without it such a row is an
   `ArgumentError`.
 
-Order and missing-time errors are raised only for the chunks actually read.
+Unlike `readparquet`, there is no `backend` (CSV.jl reads every file)
+and no `sortrows` (a sort gathers the window). Order and missing-time errors are raised only for the chunks actually
+read.
 
 ## `readparquet`
 
-    readparquet(path; time = nothing, rename = nothing, sort = false,
-                closed = false, skipmissing = false, backend = :auto)
+    readparquet(path; columns = nothing, time = nothing, rename = nothing,
+                sort = false, sortrows = 1_000_000, closed = false,
+                skipmissing = false, backend = :auto)
         -> CausalPipeline
 
 A source reading the parquet file at `path`, clipped to `[start, stop)`. Column
@@ -80,14 +90,28 @@ window.
 - `path`: the file.
 
 #### Keywords
+- `columns = nothing`: the columns to read, as for `readcsv`; the
+  others are never decoded.
 - `time = nothing`: where `:time` comes from, as for `readcsv`.
 - `rename = nothing`: a map or a `name -> name` function applied to the column
   names before `time` is resolved, as for `readcsv`.
 - `sort = false`: stably sort the rows by time, for a file not stored in time
   order. DuckDB sorts in the query and still streams; Parquet2 (and DuckDB with
-  a `time` function or a `rename` hiding the time column) reads every in-window
-  row and emits them as one sorted chunk. Without it, a decreasing time is an
+  a `time` function, a `rename` hiding the time column, or a context time type
+  it cannot compare with the column) reads every in-window row and emits them
+  as one sorted chunk. Without it, a decreasing time is an
   `ArgumentError`.
+- `sortrows = 1_000_000`: under `sort`, DuckDB sorts the window in time slices
+  of about this many rows, one query each, so it holds one slice rather than
+  the window. Slices are cut at approximate quantiles of the time, and rows
+  sharing a time are never split, so a slice can run larger. There are at most
+  1024 slices; a larger window gets larger ones. Each slice is its own read
+  of the file, pruned only by row-group statistics, so on a file not written
+  in time order a smaller `sortrows` costs more reads. If the cut times
+  collapse into fewer than half the slices asked for (heavy ties, or a
+  floating time column spanning few values of an integer context), the
+  window is sorted in those larger slices, with a warning. Unused by Parquet2.
+  Must be positive.
 - `closed = false`: clip to `[start, stop]` instead, keeping rows at `stop`.
 - `skipmissing = false`: drop rows whose time is `missing` (a null, or a `time`
   function returning `missing`). Without it such a row is an `ArgumentError`,
@@ -95,7 +119,9 @@ window.
 - `backend = :auto`: `:duckdb`, `:parquet2`, or `:auto` (DuckDB if loaded).
   Naming a backend that is not loaded is an `ArgumentError`.
 
-Order and missing-time errors are raised only for the rows actually read.
+Unlike `readcsv`, there is no `types` (column types come from the file) and no
+`delim`. Order and missing-time errors are raised only for the rows actually
+read.
 
 ## `readjls`
 

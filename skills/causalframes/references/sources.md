@@ -116,8 +116,9 @@ A source with only a `:time` column, one row at each of `start`,
 
 ## `readtable`
 
-    readtable(table; time = nothing, checkorder = true, sort = false,
-              closed = false, skipmissing = false) -> CausalPipeline
+    readtable(table; columns = nothing, time = nothing, checkorder = true,
+              sort = false, closed = false, skipmissing = false)
+        -> CausalPipeline
     readtable(frame::CausalFrame; closed = nothing, checkcontext = true)
         -> CausalPipeline
 
@@ -134,8 +135,10 @@ in the window are copied.
   already resolved, so only `closed` and `checkcontext` apply.
 
 #### Keywords
-- `time = nothing`: where `:time` comes from, as for `readcsv`. A
-  textual time column is an `ArgumentError`.
+- `columns = nothing`: the columns to read, as for `readcsv`; the
+  others are never copied.
+- `time = nothing`: where `:time` comes from, as for `readcsv`. A textual time
+  column is an `ArgumentError`.
 - `checkorder = true`: check that time is non-decreasing. With `false` the
   caller vouches for the order, and an unsorted table gives wrong results rather
   than an error.

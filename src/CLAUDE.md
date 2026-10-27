@@ -58,8 +58,14 @@ design rationale and performance constraints behind each module.
   barrier, never `DataFrameRow`s.
   - shared with the parquet and JLS operators: `SourceClip` (a file source's
     clip options, window, carried `prevtime` and `done` flag), `clipchunk!`
-    (rename, resolve `:time`, missing times via `table.jl`'s `presentrows`,
-    sortedness, clip, convert) and the `ChunkSink` background writer, which
+    (`resolvechunk!` — rename, keep `columns`, resolve `:time`, missing times
+    via `table.jl`'s `presentrows`, shared with `gatherchunk!` — then
+    sortedness, clip, convert). `readscolumn` is the one predicate every
+    reader pushes `columns` down by (through `keptfilecolumns`, the one carrier
+    rule; CSV.jl's `select` is that list over the header, read first), over
+    `keepscolumn`, which `readtable` shares, and `keepcolumns!` holds each
+    chunk to it. Also the `ChunkSink`
+    background writer, which
     `sinktransform` wires into a pass-through transform for all three writers.
     `sinkchunk` queues the chunk for the writer and passes downstream
     `DataFrame(c; copycols = false)`, a private index over the same vectors:
@@ -121,7 +127,9 @@ design rationale and performance constraints behind each module.
   `gatherchunk!`/`sortgathered` in `sourceclip.jl` (scan every chunk for
   in-window rows, stable-sort once, emit one chunk), except that DuckDB sorts
   in SQL, tie-broken by its virtual `file_row_number` since its `ORDER BY` is
-  unstable (see DESIGN.md's "Sorting a file source")
+  unstable, and in time slices of about `sortrows` rows, since one sort over a
+  key-ordered file's window holds the whole file (see DESIGN.md's "Sorting a
+  file source")
 - `src/jls.jl` — `writejls`/`readjls`, the untyped persistence pair: a header
   record then one `serialize`d DataFrame per chunk, each its own `serialize`
   call so records are independent. The sink is `ChunkSink` with a serializing

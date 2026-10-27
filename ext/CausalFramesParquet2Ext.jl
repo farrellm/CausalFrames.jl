@@ -9,7 +9,8 @@ using DataFrames
 using Parquet2
 
 using CausalFrames:
-    ChunkSink, PullCursor, SourceClip, pullclipped!, timesourcename, vcatowned
+    ChunkSink, PullCursor, SourceClip, pullclipped!, keptfilecolumns, timesourcename,
+    vcatowned
 
 CausalFrames.backendloaded(::Val{:parquet2}) = true
 
@@ -74,8 +75,9 @@ mutable struct RowGroupProducer{T}
     usestats::Bool      # statistics comparable with this context's times
 end
 
+# `sortrows` is DuckDB's: a sorted read here gathers the whole window.
 CausalFrames.parquetproducer(::Val{:parquet2}, clip::SourceClip{T},
-    sort::Bool) where {T} =
+    sort::Bool, ::Int) where {T} =
     RowGroupProducer{T}(clip, sort, nothing, nothing, nothing, true)
 
 function (p::RowGroupProducer)()
@@ -89,17 +91,27 @@ end
 # group overlapping the window.
 function open!(p::RowGroupProducer)
     p.dataset = Parquet2.Dataset(p.clip.path)
-    p.timecol = timesourcename(String[String(n) for n in Base.names(p.dataset)],
-        p.clip.time, p.clip.rename)
+    filenames = String[String(n) for n in Base.names(p.dataset)]
+    p.timecol = timesourcename(filenames, p.clip.time, p.clip.rename)
+    kept = keptfilecolumns(p.clip, filenames)
     placed = Iterators.map(rg -> (rg, rowgroupwindow(p, rg)),
         1:Parquet2.nrowgroups(p.dataset))
     picked =
         p.sort ? Iterators.filter(g -> g[2] === :overlaps, placed) :
         Iterators.filter(g -> g[2] !== :before,
             Iterators.takewhile(g -> g[2] !== :after, placed))
-    p.groups = PullCursor(Iterators.map(g -> DataFrame(p.dataset[g[1]]), picked))
+    p.groups = PullCursor(
+        Iterators.map(g -> rowgroupframe(p.dataset[g[1]], p.clip, kept), picked))
     return nothing
 end
+
+# A row group's columns, all of them or, for a `columns` read, only those it
+# keeps, loaded as Parquet2 loads a whole row group (in parallel per
+# `Parquet2.useparallel`).
+rowgroupframe(rg, clip::SourceClip, kept::Vector{String}) =
+    clip.columns === nothing ? DataFrame(rg) :
+    DataFrame(Parquet2.TableOperations.select(rg, map(Symbol, kept)...);
+        copycols = false)
 
 # Where a row group sits relative to the window, by its statistics: `:before`,
 # `:after` (so are all later ones, in a time-ordered file) or `:overlaps`, the

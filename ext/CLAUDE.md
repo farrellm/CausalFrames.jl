@@ -16,10 +16,12 @@ fallbacks in `src/parquet.jl` throw the `READHINT`/`WRITEHINT` message:
   discovers the extension. It runs eagerly at operator construction *and*
   again per run, so a missing backend is reported where the user typed the
   operator, while one loaded afterwards still counts
-- `parquetproducer(::Val{:name}, clip::SourceClip, sort)` → a zero-argument
-  callable returning the next chunk, or `nothing` at the end. The clip carries
-  the path, the context window and every clip option (`time`, `rename`,
-  `closed`, `skipmissing`), plus the running `prevtime` and `done`
+- `parquetproducer(::Val{:name}, clip::SourceClip, sort, sortrows)` → a
+  zero-argument callable returning the next chunk, or `nothing` at the end. The
+  clip carries the path, the context window and every clip option (`time`,
+  `rename`, `closed`, `skipmissing`, `columns`), plus the running `prevtime` and `done`.
+  `sortrows` is only the producer's (DuckDB slices its sort by it; Parquet2
+  ignores it), so it is an argument rather than a clip field
 - `parquetsink(::Val{:name}, path, queue, rowgroupsize, opts)` → a `ChunkSink`
   wrapping a `chan -> writeloop(chan, ...)`. Translate options *here*, on the
   pipeline's own task, so an unsupported one is reported when the run starts
@@ -49,6 +51,13 @@ fallbacks in `src/parquet.jl` throw the `READHINT`/`WRITEHINT` message:
   `clipchunk!` to judge
 - Every chunk is clipped on arrival whether or not the window was pushed down,
   which is what makes skipping a pure optimization
+- `clip.columns` is pushed down too: read only the file columns
+  `readscolumn(clip, name)` accepts (`keptfilecolumns`: DuckDB's
+  `selectlist`, Parquet2's `rowgroupframe`, through Parquet2's own column
+  `select` so its `useparallel` still governs threading). `keepcolumns!` applies
+  the same rule on arrival and reports a listed column the file lacks, so a
+  producer that reads more is only slower. With none accepted,
+  `keptfilecolumns` names the first column anyway, to carry the row count
 - Skipping must honour `closed`, the one way it could be *wrong* rather than
   slow: DuckDB's `WHERE` bounds the time with `<=`, and Parquet2's `:after`
   needs a row group's minimum strictly past `stop`, since one starting exactly
@@ -60,7 +69,19 @@ fallbacks in `src/parquet.jl` throw the `READHINT`/`WRITEHINT` message:
   the scan early: Parquet2's `:after` row groups are skipped, not terminal.
   DuckDB instead sorts in SQL, tie-broken by the virtual `file_row_number`,
   and gathers only when that is impossible (a `time` function, an untraceable
-  `rename`, or a real column shadowing `file_row_number`)
+  `rename`, a real column shadowing `file_row_number`, or a window it cannot
+  bind, whose unfiltered re-run must not sort the whole file)
+- DuckDB's SQL sort is cut into time slices of about `sortrows` rows
+  (`sliceboundaries`), since one `ORDER BY` holds the whole window in DuckDB's
+  memory, at most `MAXSLICES` of them, through one prepared statement (two
+  when `closed`). The quantile step catches only DuckDB's errors and a
+  conversion's (`slicebound`), and warns when the cuts left inside the window
+  give under half the slices asked for, since each oversized slice is the
+  out-of-memory sort again. An unbindable window fails in the
+  `count(*)` (or, unsorted, the one streaming query), inside the bind
+  fallback's `try`, which catches only DuckDB's own errors; every sorted slice
+  runs lazily, outside it, each once the previous result is drained, so one
+  connection serves them all and an out-of-memory sort surfaces
 
 ## Skipping never fails a read
 
@@ -71,8 +92,9 @@ error — a wrong answer is unacceptable, a slower one is fine:
   down (a `time` function, an unmatched name, an ambiguous `rename`), which
   simply disables pushdown
 - DuckDB catches a time type it cannot bind or compare and re-runs the query
-  unfiltered; Parquet2 catches an incomparable statistic and sets
-  `usestats = false` for the rest of the run
+  unfiltered (gathering in Julia under `sort`, never ordering in SQL);
+  Parquet2 catches an incomparable statistic and sets `usestats = false` for
+  the rest of the run
 - Missing or unusable row-group statistics read as `:overlaps`
 
 ## DuckDB specifics

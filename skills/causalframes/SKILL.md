@@ -97,7 +97,7 @@ curried for `|>`, and also take the pipeline first: `filterrows(p, pred)` is
 | [`concatenate(ps...)`](references/sources.md#concatenate) | the pipelines one after another, in time order, with identical columns |
 | [`merge(ps...; batchsize)`](references/sources.md#merge) | the pipelines interleaved by time, with the union of their columns (`missing` where one lacks a column); ties in argument order |
 | [`clock(interval; batchsize)`](references/sources.md#clock) | one row every `interval` in `[start, stop)` |
-| [`readtable(table; time, checkorder, sort, closed, skipmissing)`](references/sources.md#readtable) | an in-memory Tables.jl table or `CausalFrame`, clipped to the window |
+| [`readtable(table; columns, time, checkorder, sort, closed, skipmissing)`](references/sources.md#readtable) | an in-memory Tables.jl table or `CausalFrame`, clipped to the window |
 
 ### File I/O
 
@@ -107,8 +107,8 @@ each chunk as it flows by, on a background task.
 
 | Operator | Semantics |
 |---|---|
-| [`readcsv(path; types, time, rename, delim, sort, chunkbytes, closed, skipmissing)`](references/io.md#readcsv) | a CSV file; columns are `String` unless `types` says otherwise |
-| [`readparquet(path; time, rename, sort, closed, skipmissing, backend)`](references/io.md#readparquet) | a parquet file, skipping data outside the window |
+| [`readcsv(path; columns, types, time, rename, delim, sort, chunkbytes, closed, skipmissing)`](references/io.md#readcsv) | a CSV file; columns are `String` unless `types` says otherwise |
+| [`readparquet(path; columns, time, rename, sort, sortrows, closed, skipmissing, backend)`](references/io.md#readparquet) | a parquet file, skipping data outside the window |
 | [`readjls(path; closed)`](references/io.md#readjls) | a file written by `writejls` |
 | [`writecsv(path; queue, ...)`](references/io.md#writecsv) | write a CSV file |
 | [`writeparquet(path; queue, rowgroupsize, backend, ...)`](references/io.md#writeparquet) | write a parquet file, valid once the stream is exhausted |

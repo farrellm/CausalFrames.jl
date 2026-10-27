@@ -112,6 +112,26 @@ end
     @test df.time == [1, 2, 3]
 end
 
+@testset "readparquet columns" begin
+    dir = mktempdir()
+    path = writeparquetfile(joinpath(dir, "cols.parquet"),
+        DataFrame(ts = [1, 2, 3], a = [1, 2, 3], b = ["x", "y", "z"],
+            c = [1.0, 2.0, 3.0]))
+    ctx = Context(0, 100)
+    for backend in (:duckdb, :parquet2),
+        (sort, sortrows) in
+        ((false, 1), (true, 1), (true, 1_000_000))
+
+        testcolumns("parquet file $path", [1.0, 2.0, 3.0]) do kw
+            DataFrame(load(ctx, readparquet(path; backend, sort, sortrows, kw...)))
+        end
+    end
+    @test_throws "invalid readparquet columns of type Vector{String}" readparquet(path;
+        columns = ["a"])
+    @test_throws "readparquet columns must be unique" readparquet(path;
+        columns = [:a, :a])
+end
+
 @testset "readparquet window pushdown" begin
     dir = mktempdir()
     times = repeat(1:100, inner = 5)
@@ -289,6 +309,111 @@ end
             sort = true))),
     ) == 1
 
+    # DuckDB sorts a window larger than `sortrows` in time slices, which leaves
+    # the result as one whole sort would, ties included, even when a tie
+    # outgrows a slice or the window starts inside one
+    duck = Base.get_extension(CausalFrames, :CausalFramesDuckDBExt)
+    function slicebounds(file, ctx, sortrows)
+        clip = CausalFrames.SourceClip(ctx, file, "parquet file", nothing, nothing,
+            false, false)
+        return duck.sliceboundaries(duck.connection(), clip, "\"time\"", sortrows)
+    end
+    bounds = slicebounds(big, ctx, 1_000)
+    @test length(bounds) > 1 && all(b -> 2 < b < 11, bounds)
+    @test isempty(slicebounds(big, Context(2, 3), 1_000)) # ~1.5k rows, one time
+    # an integer context over a floating time column still slices: the
+    # interpolated quantiles of its integral values are floored, not refused
+    fts = Float64.(ts)
+    fbig = ingroups(joinpath(dir, "fbig.parquet"),
+        [DataFrame(time = fts[r], x = r) for r in Iterators.partition(1:n, 2_000)])
+    fbounds = slicebounds(fbig, ctx, 1_000)
+    @test length(fbounds) > 1 && all(b -> 2 < b < 11, fbounds)
+    # but floored cuts that collapse into a few slices warn, judged after the
+    # window drops a cut at its start: here every time floors to 5
+    narrow = ingroups(joinpath(dir, "narrow.parquet"),
+        [
+            DataFrame(time = 5 .+ (r .- 1) ./ 3_000, x = r)
+            for r in Iterators.partition(1:3_000, 1_000)
+        ])
+    @test (@test_logs (:warn, r"sorted in one query rather than in 30 slices") match_mode =
+        :any isempty(
+        slicebounds(narrow, Context(5, 100), 100)))
+    @test (@test_logs (:warn, r"sorted in 2 queries rather than in 30 slices") match_mode =
+        :any slicebounds(
+        narrow, Context(0, 100), 100) == [5])
+    logs, fine = Test.collect_test_logs() do
+        slicebounds(narrow, Context(5.0, 100.0), 100)
+    end
+    @test length(fine) > 14
+    @test !any(l -> occursin("cut times", string(l.message)), logs)
+    # a tiny `sortrows` gets at most `MAXSLICES` slices, not one per row
+    many = ingroups(joinpath(dir, "many.parquet"),
+        [DataFrame(time = Float64.(r), x = r) for r in Iterators.partition(1:3_000, 1_000)])
+    mbounds = slicebounds(many, Context(0.0, 4_000.0), 1)
+    @test 1_000 < length(mbounds) < duck.MAXSLICES
+    @test DataFrame(
+        load(Context(0.0, 4_000.0),
+            readparquet(many; backend = :duckdb, sort = true, sortrows = 1)),
+    ).x == 1:3_000
+    @test DataFrame(
+        load(ctx, readparquet(fbig; backend = :duckdb, sort = true,
+            sortrows = 1_000)),
+    ).x == filter(i -> 2 <= fts[i] < 11, perm)
+    for c in (ctx, Context(0, 13), Context(5, 6)), closed in (false, true)
+        baseline = DataFrame(load(c, readparquet(big; backend = :duckdb,
+            sort = true, closed)))
+        lo, hi = c.start, c.stop
+        @test baseline.x ==
+              filter(i -> lo <= ts[i] && (closed ? ts[i] <= hi : ts[i] < hi), perm)
+        for sortrows in (100, 1_000, 5_000)
+            # 13 distinct times can't make 100-row slices, and that warns
+            logs = sortrows == 100 ? ((:warn, r"rather than in \d+ slices"),) : ()
+            got = @test_logs(logs..., match_mode = :any,
+                load(c, readparquet(big; backend = :duckdb,
+                        sort = true, closed, sortrows)))
+            @test isequal(DataFrame(got), baseline)
+        end
+    end
+    @test_throws ArgumentError readparquet(big; sort = true, sortrows = 0)
+
+    # an integer context over a DECIMAL time column slices too: its quantiles
+    # come back as fractional decimals, floored like floats, not refused
+    dec = joinpath(dir, "dec.parquet")
+    DBInterface.execute(duck.connection(),
+        "COPY (SELECT (((i + 1) * 7919) % 13)::DECIMAL(10, 2) AS time, i + 1 AS x \
+        FROM range($n) t(i)) TO '$dec' (FORMAT parquet, ROW_GROUP_SIZE 2048)")
+    dbounds = slicebounds(dec, ctx, 1_000)
+    @test length(dbounds) > 1 && all(b -> 2 < b < 11, dbounds)
+    @test DataFrame(
+        load(ctx, readparquet(dec; backend = :duckdb, sort = true,
+            sortrows = 1_000)),
+    ).x == keep
+    @test duck.slicebound(Int, 2.5) == 2
+    @test duck.slicebound(Int, Inf) === nothing
+    @test duck.slicebound(Float64, 2) === 2.0
+    # with no cut times to be had, the window is sorted in one query, and says so
+    txt = joinpath(dir, "txt.parquet")
+    DBInterface.execute(duck.connection(),
+        "COPY (SELECT lpad(i::VARCHAR, 6, '0') AS time FROM range(3000) t(i)) \
+        TO '$txt' (FORMAT parquet)")
+    @test_logs (:warn, r"sorted in one query rather than in \d+ slices") match_mode = :any @test_throws(
+        "textual",
+        load(Context("000000", "999999"),
+            readparquet(txt; backend = :duckdb, sort = true, sortrows = 1_000)))
+
+    # a window DuckDB can't bind (a Rational) is clipped and sorted in Julia,
+    # in one gathered chunk, rather than by sorting the whole file in SQL
+    qctx = Context(2 // 1, 11 // 1)
+    got = DataFrame(load(qctx, readparquet(big; backend = :duckdb, sort = true)))
+    @test got.time == ts[keep]
+    @test got.x == keep
+    @test length(collect(stream(qctx, readparquet(big; backend = :duckdb,
+        sort = true)))) == 1
+    @test DataFrame(
+        load(Context(0 // 1, 11 // 1),
+            readparquet(path; backend = :duckdb, sort = true)),
+    ).x == [5, 4, 6, 8, 7]
+
     # every way of naming the time column, including a function, which DuckDB
     # cannot sort in SQL and so sorts in Julia
     variants = (
@@ -324,8 +449,11 @@ end
     dt = ingroups(joinpath(dir, "dt.parquet"),
         [DataFrame(ts = stamps, x = 1:5)]; stats = ["ts"])
     dtctx = Context(DateTime(2026, 1, 1, 1), DateTime(2026, 1, 1, 9))
-    for backend in (:duckdb, :parquet2)
-        got = DataFrame(load(dtctx, readparquet(dt; backend, time = :ts, sort = true)))
+    for backend in (:duckdb, :parquet2), sortrows in (1, 1_000_000)
+        got = DataFrame(
+            load(dtctx,
+                readparquet(dt; backend, time = :ts, sort = true, sortrows)),
+        )
         @test got.x == [2, 4, 1]
     end
 end

@@ -1,7 +1,8 @@
 """
-    readcsv(path; types = nothing, time = nothing, rename = nothing,
-            delim = nothing, sort = false, chunkbytes = 4 * 1024 * 1024,
-            closed = false, skipmissing = false) -> CausalPipeline
+    readcsv(path; columns = nothing, types = nothing, time = nothing,
+            rename = nothing, delim = nothing, sort = false,
+            chunkbytes = 4 * 1024 * 1024, closed = false, skipmissing = false)
+        -> CausalPipeline
 
 A source reading the CSV file at `path`, clipped to `[start, stop)`. The file is
 read incrementally, in chunks, and reading stops at the first time past the
@@ -13,6 +14,12 @@ window. Column types are **not** inferred: every column is a `String` unless
   empty stream) reads as no rows.
 
 # Keywords
+- `columns = nothing`: the columns to read, as a vector or tuple of `Symbol`s
+  named after `rename`; the others are never parsed. `:time` (or the column
+  `time` names) is always read and need not be listed, and a `time` function
+  sees only the columns read. The columns keep the file's order. Duplicates, or
+  anything but `Symbol`s, are an `ArgumentError`, as is a listed column the
+  file lacks.
 - `types = nothing`: concrete types for some columns, keyed by the file's own
   column names (before `rename`): a single type for every column, a vector
   indexed by column position (`nothing` entries stay `String`), a `Dict` keyed by
@@ -40,20 +47,23 @@ window. Column types are **not** inferred: every column is a `String` unless
   `time` function returning `missing`). Without it such a row is an
   `ArgumentError`.
 
-Order and missing-time errors are raised only for the chunks actually read.
+Unlike [`readparquet`](@ref), there is no `backend` (CSV.jl reads every file)
+and no `sortrows` (a sort gathers the window). Order and missing-time errors are raised only for the chunks actually
+read.
 """
-function readcsv(path::AbstractString; types = nothing, time = nothing,
-    rename = nothing, delim = nothing, sort::Bool = false,
+function readcsv(path::AbstractString; columns = nothing, types = nothing,
+    time = nothing, rename = nothing, delim = nothing, sort::Bool = false,
     chunkbytes::Integer = 4 * 1024 * 1024, closed::Bool = false,
     skipmissing::Bool = false)
     checksourcetimespec(time, "readcsv")
+    names = sourcecolumns(columns, "readcsv")
     checkpositive(chunkbytes, "readcsv chunkbytes")
     # Fail eagerly when the time column is provably untyped: no `types`, or a
     # name-keyed dict with no entry for it. Other `types` forms, and any
     # `rename` (`types` names the file's original columns), can only be judged
     # on the first chunk, in `resolvetime!`.
     if !(time isa Function) && rename === nothing
-        timename = time isa Symbol ? time : :time
+        timename = timetarget(time)
         namekeyed = types isa AbstractDict && keytype(types) <: Union{Symbol,
             AbstractString}
         typedbydict =
@@ -65,7 +75,7 @@ function readcsv(path::AbstractString; types = nothing, time = nothing,
     end
     return CausalPipeline() do ctx::Context
         clip = SourceClip(ctx, path, "CSV file", time, rename, closed,
-            skipmissing)
+            skipmissing, names)
         return ChunkSource(CSVProducer(clip, Int(chunkbytes), types, delim, sort))
     end
 end
@@ -101,13 +111,23 @@ function typesfunction(d::AbstractDict)
     end
 end
 
+# CSV.jl's `select` for a `columns` read: the header's names that every reader
+# reads (`keptfilecolumns`), from a read of the header alone.
+function csvselect(clip::SourceClip, delim)
+    header = CSV.File(clip.path; limit = 0, delim = delim, types = String)
+    filenames = String[String(n) for n in propertynames(header)]
+    return map(Symbol, keptfilecolumns(clip, filenames))
+end
+
 # The file's chunks. A file that fits in one chunk, or that CSV.Chunks refuses
 # to split, is read whole. `delim = nothing` is CSV.jl's own default.
-function csvchunks(path::String, chunkbytes::Int, types, delim)
+function csvchunks(clip::SourceClip, chunkbytes::Int, types, delim)
+    path = clip.path
     # writecsv leaves a zero-byte file (no header) for an empty stream.
     bytes = filesize(path)
     bytes == 0 && return DataFrame[]
-    opts = (; types = typesfunction(types), stringtype = String, delim = delim)
+    opts = (; types = typesfunction(types), stringtype = String, delim = delim,
+        select = clip.columns === nothing ? nothing : csvselect(clip, delim))
     ntasks = max(1, Int(cld(bytes, chunkbytes)))
     ntasks == 1 && return [CSV.read(path, DataFrame; opts...)]
     try
@@ -124,7 +144,7 @@ function (p::CSVProducer)()
     p.chunks === nothing && (
         p.chunks = PullCursor(
             Iterators.map(tochunk,
-                csvchunks(clip.path, p.chunkbytes, p.types, p.delim)),
+                csvchunks(clip, p.chunkbytes, p.types, p.delim)),
         )
     )
     return pullclipped!(clip, p.chunks, p.sort)
