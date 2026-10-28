@@ -274,8 +274,11 @@ end
 function framepipeline(chunks::Vector{DataFrame}, fctx::Union{Nothing,Context},
     closed::Union{Nothing,Bool}, checkcontext::Bool, share::Bool)
     # `closed = nothing` closes only a run stopping where the frame does, and a
-    # reader stopping earlier is cut at its own stop, so it keeps stopfree.
-    return pipesource(; stopfree = closed !== true) do ctx::Context
+    # reader stopping earlier is cut at its own stop, so it keeps stopfree. Not
+    # without the context check: a run stopping past the frame isn't closed,
+    # so a reader stopping where the frame does would lose its rows at `stop`.
+    stopfree = closed === false || (closed === nothing && checkcontext)
+    return pipesource(; stopfree) do ctx::Context
         checkcontext && checkframecontext(ctx, fctx)
         isclosed = closed === nothing ? ctx.stop == fctx.stop : closed
         start, stop = ctx.start, ctx.stop

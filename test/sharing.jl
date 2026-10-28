@@ -101,6 +101,22 @@
         @test !asofjoin(p, p |> renamed(1)).startfree
         @test !CausalFrames.Acausal.futurejoin(p, p |> renamed(1)).stopfree
         @test !CausalPipeline(_ -> DataFrame[]).startfree
+        # a frame's automatic `closed` rule holds only under the context check:
+        # a run stopping past the frame isn't closed at the frame's stop
+        f = load(
+            Context(0, 10),
+            readtable(DataFrame(time = [2, 10, 11], x = 1:3);
+                closed = true),
+        )
+        @test readtable(f).stopfree
+        @test !readtable(f; checkcontext = false).stopfree
+        q = readtable(f; checkcontext = false)
+        joined = DataFrame(
+            load(Context(0, 10),
+                CausalFrames.Acausal.futurejoin(q, q |> selectcolumns(:time, :x);
+                    tolerance = 2, rightprefix = "r")),
+        )
+        @test joined.time == [2, 10]
     end
 
     @testset "a free pipeline's rows don't depend on its context" begin

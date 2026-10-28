@@ -2983,7 +2983,7 @@ and #105). So evaluation plans before it runs.
 
 | Operator | `startfree` | `stopfree` |
 |---|---|---|
-| file and table sources, `emptyframe` | yes | unless `closed` (`readtable(frame)`'s automatic rule keeps it) |
+| file and table sources, `emptyframe` | yes | unless `closed` (`readtable(frame)`'s automatic rule keeps it, unless `checkcontext = false`) |
 | `concatenate`, `merge`, row-wise and column transforms, `fillmissing`, `sortcycles`, `lookupjoin`, `modelreports`, the writers, `lag`, `Acausal.lead`, `summarizecycles`, `sharing` | inherited | inherited |
 | `clock`, `head`, `addsummarycolumns`, `settime` | no | inherited |
 | `summarize`, `lastrow`, `Acausal.settime` | no | no |
