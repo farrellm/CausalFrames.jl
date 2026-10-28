@@ -68,7 +68,8 @@ onechunk(; cols...) = CausalPipeline(ctx -> [DataFrame(; cols...)])
 # widened contexts of the window operators decide which early rows are seen.
 clippedsource(chunks) = CausalPipeline(
     ctx -> filter(c -> nrow(c) > 0,
-        [c[(ctx.start .<= c.time) .& (c.time .< ctx.stop), :] for c in chunks]))
+        [c[(ctx.start .<= c.time) .& (c.time .< ctx.stop), :] for c in chunks]);
+    startfree = true, stopfree = true)
 
 # The prediction oracle for addpredictions: each row at t is predicted by OLS
 # fit on the rows (of its key) in [τ - L, τ), τ the latest tick <= t; missing
@@ -355,6 +356,23 @@ end
     @test isequal(
         DataFrame(load(ctx,
             addpredictions(p, clock(15), 40, ToyOLS(), :x, :y; key = :k))), loaded)
+
+    # Fitting and predicting share one run of the input, also when stacked,
+    # each stage fed the previous one's predictions (issue #105).
+    runs = Ref(0)
+    counted = CausalPipeline(; startfree = true, stopfree = true) do c
+        runs[] += 1
+        return CausalFrames.runchunks(c, p)
+    end
+    stage(n) = addpredictions(clock(15), 40, ToyOLS(), :x, :y; key = :k,
+        name = Symbol(:prediction, n))
+    for depth in 1:3
+        runs[] = 0
+        df = DataFrame(load(ctx, foldl((q, n) -> q |> stage(n), 1:depth;
+            init = counted)))
+        @test runs[] == 1
+        @test isequal(df.prediction1, loaded.prediction)
+    end
 end
 
 @testset "modelreports" begin

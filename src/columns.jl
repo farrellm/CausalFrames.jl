@@ -99,9 +99,9 @@ reordercolumns(p::CausalPipeline, selectors...) = reordercolumns(selectors...)(p
 # `resolve(names)`, the columns to keep in order, or `nothing` to pass it
 # through.
 function columntransform(resolve)
-    return pipetransform() do p, ctx
+    return pipetransform() do upstream, ctx
         memo = SchemaMemo()
-        return chunkmap(p.run(ctx)) do c
+        return chunkmap(upstream) do c
             keep = memoized!(resolve, memo, c)
             return keep === nothing ? c : c[!, keep]
         end

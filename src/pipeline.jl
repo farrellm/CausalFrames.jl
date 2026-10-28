@@ -1,5 +1,5 @@
 """
-    CausalPipeline(run)
+    CausalPipeline(run; startfree = false, stopfree = false) -> CausalPipeline
 
 A lazy description of how to produce time-series data. `run` maps a
 [`Context`](@ref) to a single-pass iterator of DataFrame chunks whose `:time`
@@ -28,15 +28,25 @@ CausalFrame{Int64} with 2 rows over [0, 10]
 
 Every operator is *causal*: its output at time `t` depends only on input rows
 with time `<= t`.
-"""
-struct CausalPipeline{F}
-    run::F
-end
 
-# A transform's shell: `run(p, ctx)` builds the chunk iterator of the pipeline
-# `p` transformed, over `ctx`. Written as a do block, so a transform reads
-# `pipetransform() do p, ctx … end`.
-pipetransform(run) = (p::CausalPipeline) -> CausalPipeline(ctx::Context -> run(p, ctx))
+A pipeline read by several operators of one evaluation runs once for all of
+them when that is exact; see [`sharing`](@ref). The constructor builds a source
+of your own. It is shared only between readers asking for the same context,
+unless it declares that its rows don't depend on where the context starts or
+stops.
+
+# Arguments
+- `run`: a function `ctx -> iterator` of `DataFrame` chunks clipped to the
+  context.
+
+# Keywords
+- `startfree = false`: whether running over an earlier start and dropping the
+  rows before `start` gives the rows a run from `start` gives, as for a file.
+- `stopfree = false`: likewise for a later stop and the rows at or after
+  `stop`. A source emitting rows at `stop` isn't `stopfree`.
+"""
+CausalPipeline(@nospecialize(run); startfree::Bool = false, stopfree::Bool = false) =
+    pipesource(run; startfree, stopfree)
 
 """
     load(ctx::Context, p::CausalPipeline) -> CausalFrame
@@ -49,16 +59,16 @@ with only `:time`.
 
 The curried form ends a chain: `p |> load(ctx)` is `load(ctx, p)`.
 """
-function load(ctx::Context{T}, p::CausalPipeline) where {T}
+function load(ctx::Context{T}, @nospecialize(p::CausalPipeline)) where {T}
     chunks = DataFrame[]
     prev = nothing
-    for c in p.run(ctx)
+    for c in runchunks(ctx, p)
         prev = checkchunk(ctx, c, prev)
         push!(chunks, c)
     end
     return CausalFrame{T}(Trusted(), ctx, chunks)
 end
-load(ctx::Context) = (p::CausalPipeline) -> load(ctx, p)
+load(ctx::Context) = (@nospecialize(p::CausalPipeline),) -> load(ctx, p)
 
 """
     scan(ctx::Context, p::CausalPipeline) -> Nothing
@@ -70,14 +80,14 @@ produced — the way to run a pipeline ending in a writer such as
 
 The curried form ends a chain: `p |> scan(ctx)` is `scan(ctx, p)`.
 """
-function scan(ctx::Context, p::CausalPipeline)
+function scan(ctx::Context, @nospecialize(p::CausalPipeline))
     prev = nothing
-    for c in p.run(ctx)
+    for c in runchunks(ctx, p)
         prev = checkchunk(ctx, c, prev)
     end
     return nothing
 end
-scan(ctx::Context) = (p::CausalPipeline) -> scan(ctx, p)
+scan(ctx::Context) = (@nospecialize(p::CausalPipeline),) -> scan(ctx, p)
 
 # O(1)-per-chunk guards against a misbehaving hand-rolled source: cross-chunk
 # order and window bounds. Within-chunk order and schema equality are left to
@@ -111,8 +121,8 @@ extends to `ctx.stop`. The iterator is single-pass and looks one chunk ahead.
 
 The curried form ends a chain: `p |> stream(ctx)` is `stream(ctx, p)`.
 """
-stream(ctx::Context, p::CausalPipeline) = FrameStream(ctx, p.run(ctx))
-stream(ctx::Context) = (p::CausalPipeline) -> stream(ctx, p)
+stream(ctx::Context, @nospecialize(p::CausalPipeline)) = FrameStream(ctx, runchunks(ctx, p))
+stream(ctx::Context) = (@nospecialize(p::CausalPipeline),) -> stream(ctx, p)
 
 struct FrameStream{T,U}
     ctx::Context{T}

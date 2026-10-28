@@ -13,8 +13,8 @@ A transform keeping the rows for which `pred(row)` is `true`.
   including `row.time`.
 """
 function filterrows(pred)
-    return pipetransform() do p, ctx
-        return chunkmap(c -> filterchunk(pred, c), p.run(ctx))
+    return pipetransform() do upstream, ctx
+        return chunkmap(c -> filterchunk(pred, c), upstream)
     end
 end
 filterrows(p::CausalPipeline, pred) = filterrows(pred)(p)
@@ -65,8 +65,8 @@ DataFrame(load(Context(0, 10), p |> addcolumns(r -> (; mid = (r.bid + r.ask) / 2
 ```
 """
 function addcolumns(f)
-    return pipetransform() do p, ctx
-        return chunkmap(c -> addchunk(f, c), p.run(ctx))
+    return pipetransform() do upstream, ctx
+        return chunkmap(c -> addchunk(f, c), upstream)
     end
 end
 addcolumns(p::CausalPipeline, f) = addcolumns(f)(p)

@@ -89,46 +89,33 @@ function advance(it::ChunkMap, next)
     return nothing
 end
 
-# Splits one single-pass chunk iterator into two, for a consumer reading the
-# same stream twice at different paces (`addrollingcolumns` summarizing its own
-# input). A side with queued chunks reads its queue; otherwise it pulls
-# upstream and queues the chunk for the other side as a private index over the
-# same vectors (sound by the `writecsv` hand-off argument), so each side owns
-# what it is given. A queue holds only the chunks the other side is ahead by.
-# `keep` is the second side's view of a chunk (the chunk, a slice of it, or
-# `nothing` to skip it), applied to every chunk that side gets: the first side
-# can then run ahead through rows the second never reads without queueing them.
-struct ChunkTee{I,F}
-    upstream::PullCursor{I}
-    queues::NTuple{2,Vector{DataFrame}}
-    keep::F
+# Per-run state of a drop of the rows before `start` (`warmup`'s lead-in, a
+# shared run's later-starting side). Times are non-decreasing, so once a row at
+# or after `start` has been seen every later chunk passes through untouched.
+mutable struct LeadInDrop{T}
+    const start::T
+    passed::Bool
 end
+LeadInDrop(start::T) where {T} = LeadInDrop{T}(start, false)
 
-function teesides(iter, keep = identity)
-    tee = ChunkTee(PullCursor(iter), (DataFrame[], DataFrame[]), keep)
-    return (ChunkSource(() -> teepull!(tee, 1)),
-        ChunkSource(() -> teepull!(tee, 2)))
-end
-
-function teepull!(tee::ChunkTee, side::Int)
-    q = tee.queues[side]
-    isempty(q) || return popfirst!(q)
-    while true
-        c = pull!(tee.upstream)
-        c === nothing && return nothing
-        c = c::DataFrame
-        if side == 1
-            k = tee.keep(c)
-            k === nothing || push!(tee.queues[2], DataFrame(k; copycols = false))
-            return c
-        end
-        push!(tee.queues[1], DataFrame(c; copycols = false))
-        k = tee.keep(c)
-        k === nothing || return k
+# The chunk's rows from `start` on, up to row `hi`, or `nothing`.
+function dropleadin!(st::LeadInDrop, c::DataFrame, hi::Int = nrow(c))
+    i = 1
+    if !st.passed
+        i = firstkept(c.time, st.start)
+        i > nrow(c) && return nothing
+        st.passed = true
     end
+    i > hi && return nothing
+    # The straddling chunk is sliced, not `deleteat!`ed: column vectors may be
+    # shared (see `sinkchunk`), so none is mutated in place.
+    return i == 1 && hi == nrow(c) ? c : c[i:hi, :]
 end
 
-# The clock cursor: one boundary time at a time over clk.run(ctx), pulling
+# Function barrier: the search specializes on the concretely typed column.
+firstkept(times::AbstractVector, start) = searchsortedfirst(times, start)
+
+# The clock cursor: one boundary time at a time over the clock's chunks, pulling
 # clock chunks lazily. The type-unstable pull is confined here; reading
 # boundaries from the concrete `times` is typed. Clock order is trusted to the
 # chunk protocol.

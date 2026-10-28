@@ -110,14 +110,14 @@
         a = CausalPipeline(c -> [DataFrame(time = collect(0:2:98), x = 1:50)])
         b = CausalPipeline(c -> [DataFrame(time = collect(1:2:99), x = 1:50)])
         big = Context(0, 100)
-        sizes = [nrow(c) for c in merge(a, b; batchsize = 8).run(big)]
+        sizes = [nrow(c) for c in CausalFrames.runchunks(big, merge(a, b; batchsize = 8))]
         @test sum(sizes) == 100
         @test all(>=(8), sizes[1:(end-1)])
         @test all(<=(8 + 50 - 1), sizes)
 
         # batchsize 1 emits one chunk per block, so an alternating merge
         # yields one row at a time
-        @test [nrow(c) for c in merge(a, b; batchsize = 1).run(big)] ==
+        @test [nrow(c) for c in CausalFrames.runchunks(big, merge(a, b; batchsize = 1))] ==
               fill(1, 100)
 
         # batching does not change the rows
@@ -148,7 +148,7 @@
             DataFrame(time = [4], x = [2])])
         b = counted(2, [DataFrame(time = [2], x = [3]),
             DataFrame(time = [6], x = [4])])
-        it = merge(a, b; batchsize = 1).run(ctx)
+        it = CausalFrames.runchunks(ctx, merge(a, b; batchsize = 1))
         next = iterate(it)
         @test pulls == [1, 1]
         @test next[1].time == [0]
@@ -195,7 +195,7 @@
         chunk = DataFrame(time = [0, 1, 2], x = [1, 2, 3])
         a = CausalPipeline(c -> [chunk])
         b = onechunk(time = [9], x = [4])
-        out = first(iterate(merge(a, b; batchsize = 1).run(ctx)))
+        out = first(iterate(CausalFrames.runchunks(ctx, merge(a, b; batchsize = 1))))
         @test out === chunk
         @test out.x === chunk.x
     end

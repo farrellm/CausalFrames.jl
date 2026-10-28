@@ -101,7 +101,7 @@ function readparquet(path::AbstractString; columns = nothing, time = nothing,
     names = sourcecolumns(columns, "readparquet")
     checkpositive(sortrows, "readparquet sortrows")
     resolvebackend(backend, :duckdb, READHINT)   # eager: fail at the call site
-    return CausalPipeline() do ctx::Context
+    return pipesource(; stopfree = !closed) do ctx::Context
         clip = SourceClip(ctx, path, "parquet file", time, rename, closed,
             skipmissing, names)
         return ChunkSource(

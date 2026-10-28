@@ -78,7 +78,10 @@ docstring before relying on its keywords; the details (what `key` accepts, how
   from a source and chained with `|>`. It runs only when evaluated:
   `load(ctx, p)` materializes the window, `stream(ctx, p)` yields it chunk by
   chunk, and `scan(ctx, p)` runs it for its side effects. Each also has a
-  curried form, `p |> load(ctx)`.
+  curried form, `p |> load(ctx)`. A pipeline read in several places, such as
+  both sides of `asofjoin(p, p |> f)`, runs once for all of them whenever that
+  gives each the rows it would get alone; `sharing(true)` or `sharing(false)`
+  overrides that.
 - **`CausalFrame`**: a loaded table. Read it through Tables.jl or copy it out
   with `DataFrame(frame)`.
 
@@ -143,6 +146,7 @@ time,bid,ask,mid
 | [`lag(offset)`](references/rows.md#lag) | move every row `offset` later |
 | [`warmup(lookback, f)`](references/rows.md#warmup) | run `f` from `lookback` before the window, so its state starts warm |
 | [`settime(spec)`](references/rows.md#settime) | recompute `:time` from a column or function; rows may only move later |
+| [`sharing(force)`](references/rows.md#sharing) | pass rows through, forcing the readers of the result to share one run (`true`) or each run their own (`false`) |
 
 ### Column transformations
 
@@ -171,7 +175,7 @@ key is emitted each time.
 | [`intervalize(clock, ss; key, keyset, closelast)`](references/summarizing.md#intervalize) | each interval between clock ticks, emitted at its end |
 | [`summarizewindows(clock, lookback, ss; key, keyset)`](references/summarizing.md#summarizewindows) | the window `[τ - lookback, τ)` at each clock tick `τ` |
 | [`addsummarycolumns(ss; key)`](references/summarizing.md#addsummarycolumns) | append running summaries of every row so far |
-| [`addrollingcolumns(windows, ss; key, from, sharedrun)`](references/summarizing.md#addrollingcolumns) | append summaries of `[t - lookback, t]`, or of the last `n` rows under [`Bars(n)`](references/summarizing.md#Bars), for each named window |
+| [`addrollingcolumns(windows, ss; key, from)`](references/summarizing.md#addrollingcolumns) | append summaries of `[t - lookback, t]`, or of the last `n` rows under [`Bars(n)`](references/summarizing.md#Bars), for each named window |
 
 ```julia
 p |> addrollingcolumns((m1 = Minute(1), h1 = Hour(1)), Mean(:mid)) |>

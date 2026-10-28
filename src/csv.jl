@@ -73,7 +73,7 @@ function readcsv(path::AbstractString; columns = nothing, types = nothing,
             throw(ArgumentError("readcsv time column $(repr(timename)) needs a \
                 concrete type via `types`, or a `time` function to produce it"))
     end
-    return CausalPipeline() do ctx::Context
+    return pipesource(; stopfree = !closed) do ctx::Context
         clip = SourceClip(ctx, path, "CSV file", time, rename, closed,
             skipmissing, names)
         return ChunkSource(CSVProducer(clip, Int(chunkbytes), types, delim, sort))

@@ -69,7 +69,7 @@ function readtable(table; columns = nothing, time = nothing,
     names = sourcecolumns(columns, "readtable")
     Tables.istable(table) || throw(ArgumentError("readtable table must be a \
         Tables.jl table, got $(typeof(table))"))
-    return CausalPipeline() do ctx::Context
+    return pipesource(; stopfree = !closed) do ctx::Context
         return ChunkSource(
             TableProducer{timetype(ctx)}(table, names, time, checkorder,
                 sort, closed, skipmissing, ctx.start, ctx.stop),
@@ -273,7 +273,12 @@ end
 # its vectors; without it every chunk is sliced.
 function framepipeline(chunks::Vector{DataFrame}, fctx::Union{Nothing,Context},
     closed::Union{Nothing,Bool}, checkcontext::Bool, share::Bool)
-    return CausalPipeline() do ctx::Context
+    # `closed = nothing` closes only a run stopping where the frame does, and a
+    # reader stopping earlier is cut at its own stop, so it keeps stopfree. Not
+    # without the context check: a run stopping past the frame isn't closed,
+    # so a reader stopping where the frame does would lose its rows at `stop`.
+    stopfree = closed === false || (closed === nothing && checkcontext)
+    return pipesource(; stopfree) do ctx::Context
         checkcontext && checkframecontext(ctx, fctx)
         isclosed = closed === nothing ? ctx.stop == fctx.stop : closed
         start, stop = ctx.start, ctx.stop

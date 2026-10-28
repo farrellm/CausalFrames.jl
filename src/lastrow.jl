@@ -38,11 +38,12 @@ A chunk whose column names differ from the first chunk's is an
 """
 function lastrow(; key = nothing)
     keycols = keycolumns(key, "lastrow")
-    return pipetransform() do p, ctx
+    # Emits at the run's stop what it saw since its start.
+    return pipetransform(; startfree = false, stopfree = false) do upstream, ctx
         st = LastRowState(keycols)
         # The key names reach the kernels through `st`, erased, so the
         # iterator's type and the driver are the same for every key.
-        return chunkmap(c -> lastrowchunk!(st, c), p.run(ctx);
+        return chunkmap(c -> lastrowchunk!(st, c), upstream;
             flush = () -> lastrowflush!(st, ctx.stop))
     end
 end

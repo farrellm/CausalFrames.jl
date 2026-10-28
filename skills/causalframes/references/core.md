@@ -61,7 +61,7 @@ chunks. A frame with no rows gives a zero-row DataFrame with only `:time`.
 
 ## Evaluation
 
-    CausalPipeline(run)
+    CausalPipeline(run; startfree = false, stopfree = false) -> CausalPipeline
 
 A lazy description of how to produce time-series data. `run` maps a
 `Context` to a single-pass iterator of DataFrame chunks whose `:time`
@@ -90,6 +90,22 @@ CausalFrame{Int64} with 2 rows over [0, 10]
 
 Every operator is *causal*: its output at time `t` depends only on input rows
 with time `<= t`.
+
+A pipeline read by several operators of one evaluation runs once for all of
+them when that is exact; see `sharing`. The constructor builds a source
+of your own. It is shared only between readers asking for the same context,
+unless it declares that its rows don't depend on where the context starts or
+stops.
+
+#### Arguments
+- `run`: a function `ctx -> iterator` of `DataFrame` chunks clipped to the
+  context.
+
+#### Keywords
+- `startfree = false`: whether running over an earlier start and dropping the
+  rows before `start` gives the rows a run from `start` gives, as for a file.
+- `stopfree = false`: likewise for a later stop and the rows at or after
+  `stop`. A source emitting rows at `stop` isn't `stopfree`.
 
 ---
 

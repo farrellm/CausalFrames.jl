@@ -1067,7 +1067,7 @@ end
         push!(runs, i)
         return [DataFrame(time = [t], x = [i])]
     end
-    it = concatenate(probe(1, 1), probe(2, 2)).run(ctx)
+    it = CausalFrames.runchunks(ctx, concatenate(probe(1, 1), probe(2, 2)))
     next = iterate(it)
     @test runs == [1]
     @test iterate(it, next[2]) !== nothing

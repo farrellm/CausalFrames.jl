@@ -8,7 +8,7 @@ using Serialization: Serialization, deserialize, serialize
 using Tables
 
 export Context, CausalFrame, CausalPipeline, load, stream, scan, context,
-    timetype,
+    timetype, sharing,
     emptyframe, concatenate, clock, readcsv, writecsv, readparquet,
     writeparquet, readjls, writejls, readtable,
     filterrows, addcolumns,
@@ -29,6 +29,7 @@ include("context.jl")
 include("frame.jl")
 include("chunks.jl")
 include("compaction.jl")
+include("share.jl")
 include("pipeline.jl")
 include("sources.jl")
 include("sourceclip.jl")

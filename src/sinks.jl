@@ -18,10 +18,10 @@ end
 # then), and joining its writer once upstream is exhausted. `SinkGuard` joins it
 # too when the run fails instead.
 function sinktransform(makesink)
-    return pipetransform() do p, ctx
+    return pipetransform() do upstream, ctx
         sink = makesink()
         return SinkGuard(
-            chunkmap(c -> sinkchunk(sink, c), p.run(ctx);
+            chunkmap(c -> sinkchunk(sink, c), upstream;
                 flush = () -> finishwrite!(sink)),
             sink)
     end

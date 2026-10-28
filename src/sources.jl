@@ -8,7 +8,7 @@
 A source producing no rows. Loading it gives a zero-row frame with only
 `:time`. It is the identity of [`concatenate`](@ref) and [`merge`](@ref "merge").
 """
-emptyframe() = CausalPipeline(ctx -> ChunkSource(() -> nothing))
+emptyframe() = pipesource(ctx -> ChunkSource(() -> nothing))
 
 """
     concatenate(ps::CausalPipeline...) -> CausalPipeline
@@ -51,27 +51,24 @@ DataFrame(load(Context(0, 10), p))
 """
 concatenate() = emptyframe()
 concatenate(ps::CausalPipeline...) =
-    CausalPipeline(ctx::Context -> ChunkSource(ConcatProducer(ps, ctx)))
+    pipenode((ctx, ins) -> ChunkSource(ConcatProducer(ins)), ps)
 
 # The stateful producer behind concatenate's ChunkSource. State lives in fields
 # rather than captured locals, which would be boxed when reassigned. The untyped
 # fields are touched once per chunk or per pipeline, never per row.
-mutable struct ConcatProducer{P<:Tuple,C<:Context}
-    const pipelines::P
-    const ctx::C
+mutable struct ConcatProducer
+    const ins::PipelineInputs
     index::Int          # the pipeline currently being drained
     cursor::Any         # a PullCursor over its chunks; nothing until reached
     names::Union{Nothing,Vector{String}}  # column names of the first chunk
     prevtime::Any       # last time emitted, for cross-pipeline ordering
     previndex::Int      # which pipeline emitted it, for the error message
-    ConcatProducer(ps::P, ctx::C) where {P<:Tuple,C<:Context} =
-        new{P,C}(ps, ctx, 1, nothing, nothing, nothing, 0)
+    ConcatProducer(ins::PipelineInputs) = new(ins, 1, nothing, nothing, nothing, 0)
 end
 
 function (p::ConcatProducer)()
-    while p.index <= length(p.pipelines)
-        p.cursor === nothing &&
-            (p.cursor = PullCursor(p.pipelines[p.index].run(p.ctx)))
+    while p.index <= ninputs(p.ins)
+        p.cursor === nothing && (p.cursor = PullCursor(openinput(p.ins, p.index)))
         chunk = pull!(p.cursor)
         if chunk === nothing
             p.index += 1
@@ -124,7 +121,8 @@ A source with only a `:time` column, one row at each of `start`,
 """
 function clock(interval; batchsize::Integer = 1024)
     checkpositive(batchsize, "clock batchsize")
-    return CausalPipeline() do ctx::Context
+    # Ticks are anchored to the run's start.
+    return pipesource(; startfree = false) do ctx::Context
         ctx.start + interval > ctx.start ||
             throw(ArgumentError("clock interval must be positive, got $interval"))
         return ClockChunks(ctx.start, ctx.stop, interval, Int(batchsize))

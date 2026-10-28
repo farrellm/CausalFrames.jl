@@ -44,7 +44,10 @@ CausalFrame{Dates.DateTime} with 2 rows over [2026-01-01T00:00:00, 2026-02-01T00
   from a source and chained with `|>`. It runs only when evaluated:
   `load(ctx, p)` materializes the window, `stream(ctx, p)` yields it chunk by
   chunk, and `scan(ctx, p)` runs it for its side effects. Each also has a
-  curried form, `p |> load(ctx)`.
+  curried form, `p |> load(ctx)`. A pipeline read in several places, such as
+  both sides of `asofjoin(p, p |> f)`, runs once for all of them whenever that
+  gives each the rows it would get alone; `sharing(true)` or `sharing(false)`
+  overrides that.
 - **`CausalFrame`**: a loaded table. Read it through Tables.jl or copy it out
   with `DataFrame(frame)`.
 
@@ -109,6 +112,7 @@ time,bid,ask,mid
 | [`lag(offset)`](https://farrellm.github.io/CausalFrames.jl/dev/api/rows/#lag) | move every row `offset` later |
 | [`warmup(lookback, f)`](https://farrellm.github.io/CausalFrames.jl/dev/api/rows/#warmup) | run `f` from `lookback` before the window, so its state starts warm |
 | [`settime(spec)`](https://farrellm.github.io/CausalFrames.jl/dev/api/rows/#settime) | recompute `:time` from a column or function; rows may only move later |
+| [`sharing(force)`](https://farrellm.github.io/CausalFrames.jl/dev/api/rows/#sharing) | pass rows through, forcing the readers of the result to share one run (`true`) or each run their own (`false`) |
 
 ### Column transformations
 
@@ -137,7 +141,7 @@ key is emitted each time.
 | [`intervalize(clock, ss; key, keyset, closelast)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizing/#intervalize) | each interval between clock ticks, emitted at its end |
 | [`summarizewindows(clock, lookback, ss; key, keyset)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizing/#summarizewindows) | the window `[τ - lookback, τ)` at each clock tick `τ` |
 | [`addsummarycolumns(ss; key)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizing/#addsummarycolumns) | append running summaries of every row so far |
-| [`addrollingcolumns(windows, ss; key, from, sharedrun)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizing/#addrollingcolumns) | append summaries of `[t - lookback, t]`, or of the last `n` rows under [`Bars(n)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizing/#Bars), for each named window |
+| [`addrollingcolumns(windows, ss; key, from)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizing/#addrollingcolumns) | append summaries of `[t - lookback, t]`, or of the last `n` rows under [`Bars(n)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizing/#Bars), for each named window |
 
 ```julia
 p |> addrollingcolumns((m1 = Minute(1), h1 = Hour(1)), Mean(:mid)) |>

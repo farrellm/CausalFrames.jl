@@ -106,11 +106,8 @@ function applymodels(models::CausalPipeline; column::Symbol = :model,
     # reported by predictchunk! under this operator's name.
     right = models |> selectcolumns(n -> Symbol(n) === column || Symbol(n) in keycols)
     cfg = JoinConfig(Backward(), "applymodels", keycols; tolerance, strict)
-    return pipetransform() do p, ctx
-        js = JoinState(right, cfg, ctx)
-        return chunkmap(c -> predictchunk!(js, js.cfg, column, name, operation, c),
-            p.run(ctx))
-    end
+    return joinnode(right, cfg,
+        (js, cfg, c) -> predictchunk!(js, cfg, column, name, operation, c))
 end
 applymodels(p::CausalPipeline, models::CausalPipeline; kwargs...) =
     applymodels(models; kwargs...)(p)
@@ -210,7 +207,8 @@ with `key`); each row is then predicted by the model of the latest tick at or
 before it, so training rows always precede the rows they predict. Rows before
 the first tick, or whose latest window was empty, get `missing`. It is
 [`summarizewindows`](@ref) over [`FitModel`](@ref) feeding
-[`applymodels`](@ref), and the input runs twice.
+[`applymodels`](@ref), both reading the input, which runs once for both unless
+its rows depend on where the run starts (see [`sharing`](@ref)).
 
 # Arguments
 - `clock`: a pipeline whose `:time` column gives the refit times, such as
@@ -232,7 +230,7 @@ function addpredictions(clk::CausalPipeline, lookback, model, predictors,
     operation::Symbol = :predict, verbosity::Integer = 0)
     fitter = FitModel(model, predictors, response; name = :model, verbosity)
     fits = summarizewindows(clk, lookback, fitter; key)
-    return function (p::CausalPipeline)
+    return function (@nospecialize(p::CausalPipeline),)
         return p |> applymodels(p |> fits; column = :model, key, strict = false,
             name, operation)
     end
@@ -262,8 +260,8 @@ function modelreports(; column::Symbol = :model, name::Symbol = :report)
         throw(ArgumentError("modelreports column may not be :time"))
     name === :time &&
         throw(ArgumentError("modelreports output column may not be named :time"))
-    return pipetransform() do p, ctx
-        return chunkmap(c -> reportchunk!(c, column, name), p.run(ctx))
+    return pipetransform() do upstream, ctx
+        return chunkmap(c -> reportchunk!(c, column, name), upstream)
     end
 end
 modelreports(p::CausalPipeline; kwargs...) = modelreports(; kwargs...)(p)
