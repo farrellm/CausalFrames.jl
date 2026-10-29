@@ -229,6 +229,54 @@
         end
     end
 
+    @testset "disjoint requests run apart" begin
+        # A context-free source recording the context of each run.
+        function recording(df)
+            ctxs = Context[]
+            p = CausalPipeline(; startfree = true, stopfree = true) do c
+                push!(ctxs, c)
+                return CausalFrames.runchunks(c, readtable(df))
+            end
+            return p, ctxs
+        end
+        c = Context(20, 30)
+        unshared(f) = DataFrame(load(c, f(readtable(df))))
+
+        # issue #132: no run over the gap between them
+        q, ctxs = recording(df)
+        f = q -> merge(q, q |> lag(20))
+        @test isequal(DataFrame(load(c, f(q))), unshared(f))
+        @test sort(ctxs; by = x -> x.start) == [Context(0, 10), Context(20, 30)]
+
+        # touching or overlapping contexts still share one run
+        for (n, start) in ((10, 10), (5, 15))
+            q, ctxs = recording(df)
+            f = q -> merge(q, q |> lag(n))
+            @test isequal(DataFrame(load(c, f(q))), unshared(f))
+            @test ctxs == [Context(start, 30)]
+        end
+
+        # three requests: the two overlapping share, the far one runs apart
+        q, ctxs = recording(df)
+        f = q -> merge(q, q |> lag(5), q |> lag(25))
+        @test isequal(DataFrame(load(c, f(q))), unshared(f))
+        @test sort(ctxs; by = x -> x.start) == [Context(-5, 5), Context(15, 30)]
+
+        # a data error only in the gap no longer fails the load
+        bad = CausalPipeline(; startfree = true, stopfree = true) do c
+            c.start < 15 < c.stop && throw(ArgumentError("bad row in the gap"))
+            return CausalFrames.runchunks(c, readtable(df))
+        end
+        @test isequal(DataFrame(load(c, merge(bad, bad |> lag(20)))),
+            unshared(q -> merge(q, q |> lag(20))))
+
+        # a forced share keeps one run over the hull
+        q, ctxs = recording(df)
+        s = q |> sharing(true)
+        load(c, merge(s, s |> lag(20)))
+        @test ctxs == [Context(0, 30)]
+    end
+
     @testset "sharing" begin
         p = readtable(df)
         @test isequal(DataFrame(load(ctx, p |> sharing(true))),

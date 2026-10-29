@@ -7,7 +7,7 @@
 # instance* over their union, which a tee hands to each reader clipped back to
 # the context it asked for. Requests with equal contexts are always grouped; a
 # `startfree` node also groups requests differing in start, a `stopfree` one in
-# stop. So a diamond (one upstream read by two legs of a stage) runs its
+# stop, as long as their contexts overlap or touch. So a diamond (one upstream read by two legs of a stage) runs its
 # upstream once instead of once per leg, which compounded to 2^d runs over d
 # chained stages.
 #
@@ -246,7 +246,8 @@ function postorder!(order::Vector{CausalPipeline}, seen::IdDict,
     return push!(order, p)
 end
 
-# Group a node's requests into runs by `sharekey`, in request order.
+# Group a node's requests into runs by `sharekey`, in request order, then
+# (unless sharing is forced) split each group where its contexts leave a gap.
 function instances(@nospecialize(node::CausalPipeline), slots::Vector{RunSlot})
     groups = Pair{Any,Vector{RunSlot}}[]
     for s in slots
@@ -254,7 +255,30 @@ function instances(@nospecialize(node::CausalPipeline), slots::Vector{RunSlot})
         g = findfirst(gr -> isequal(first(gr), k), groups)
         g === nothing ? push!(groups, k => [s]) : push!(last(groups[g]), s)
     end
-    return [newinstance(node, last(gr)) for gr in groups]
+    insts = RunInstance[]
+    for gr in groups
+        cls = node.sharing === true ? [last(gr)] : clusters(last(gr))
+        for cl in cls
+            push!(insts, newinstance(node, cl))
+        end
+    end
+    return insts
+end
+
+# The slots in runs of overlapping or touching contexts, by start: a run over
+# their hull then covers no time none of them asked for (issue #132), and two
+# runs over disjoint windows read no row twice, so the split loses nothing a
+# share would save. A group sharing its start or its stop is always one run.
+function clusters(slots::Vector{RunSlot})
+    length(slots) == 1 && return [slots]
+    sorted = sort(slots; by = s -> s.ctx.start)
+    cls = [RunSlot[first(sorted)]]
+    stop = first(sorted).ctx.stop
+    for s in Iterators.drop(sorted, 1)
+        s.ctx.start <= stop ? push!(last(cls), s) : push!(cls, RunSlot[s])
+        stop = max(stop, s.ctx.stop)
+    end
+    return cls
 end
 
 # Requests share a run when their keys are equal. The time type is always in

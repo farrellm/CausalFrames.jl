@@ -31,7 +31,11 @@ design rationale and performance constraints behind each module.
   the seam a parallel executor would use. `planrun` visits nodes in reverse postorder and groups each node's
   requests (`RunSlot`s) into `RunInstance`s by `sharekey` (time type, then
   start unless startfree, stop unless stopfree, and the isolating
-  `sharing(false)` run if any), each over the union of its slots' contexts.
+  `sharing(false)` run if any), then, unless `sharing(true)` forces one run,
+  splits each group into clusters of overlapping or touching contexts
+  (`clusters`, issue #132), each instance over the union of its slots'
+  contexts: so no run covers a gap no request asked for, which costs nothing,
+  since runs over disjoint windows read no row twice.
   A pipeline with no node reached twice skips the plan (`istree`,
   `DirectInputs`): it cost 4-6 µs per evaluation, +20-90% on the
   sub-millisecond benchmarks. A

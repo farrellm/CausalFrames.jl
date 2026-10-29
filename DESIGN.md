@@ -2948,8 +2948,14 @@ and #105). So evaluation plans before it runs.
   a node's requests (a context each, one per reading input) are complete when
   it is planned. Requests group into *run instances* by key: the time type
   (a source converts its rows to it), then the start unless `startfree` and
-  the stop unless `stopfree`. Each instance runs once over the union of its
-  requests' contexts and passes its own input contexts down as requests. So
+  the stop unless `stopfree`. A group whose contexts leave a gap splits there,
+  into one instance per run of overlapping or touching contexts: otherwise
+  `merge(q, q |> lag(20))` over `[20, 30)` would run `q` over `[0, 30)`,
+  reading the gap `[10, 20)` only to drop it, and failing on any data error
+  there (issue #132). Runs over disjoint windows read no row twice, so the
+  split costs nothing a share would save. Each instance runs once over the
+  union of its requests' contexts and passes its own input contexts down as
+  requests. So
   equal contexts always share, and a dependent node asked for two contexts
   runs twice, each run then requesting its own inputs, which may share again
   below.
@@ -2971,7 +2977,8 @@ and #105). So evaluation plans before it runs.
   readers that drift far apart (each reader then runs its whole upstream on
   its own: requests made under different `sharing(false)` runs never group),
   and `sharing(true)` shares among requests that would not otherwise (a
-  dependent node's widened run, its rows then as that run gives them).
+  dependent node's widened run, its rows then as that run gives them), as one
+  run over all of them, gap or not.
 - **Abandoning.** Once a run ends, or its reader abandons it, its operator
   will not pull its inputs again, so the plan abandons every input slot of
   that run, opened or not (a join's right side, the inputs `concatenate`
