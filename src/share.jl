@@ -253,8 +253,10 @@ function postorder!(order::Vector{CausalPipeline}, seen::IdDict,
 end
 
 # Group a node's requests into runs by `sharekey`, the groups in request order,
-# then split each group where its contexts leave a gap (`pushruns!`).
+# then split each group where its contexts leave a gap (`pushruns!`). Most
+# nodes of a plan have one request, which is one run whatever its key.
 function instances(@nospecialize(node::CausalPipeline), slots::Vector{RunSlot})
+    length(slots) == 1 && return [newinstance(node, slots)]
     groups = Pair{Any,Vector{RunSlot}}[]
     for s in slots
         k = sharekey(node, s)

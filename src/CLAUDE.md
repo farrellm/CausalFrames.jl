@@ -36,7 +36,10 @@ design rationale and performance constraints behind each module.
   `sharing(true)` or at a `rescans` source, see DESIGN.md "Planning"), each
   instance over the union of its slots' contexts. The split sorts by a typed
   insertion sort (`sortslots!`: `sort!` over the erased contexts dispatched
-  per comparison), and an unsplit group is its instance's slot vector.
+  per comparison), and an unsplit group is its instance's slot vector. A
+  node with one request skips the grouping: most of a plan's nodes have one,
+  and building their keys and groups cost 6-40% of `planrun` (diamond4
+  23 -> 14 µs).
   A pipeline with no node reached twice skips the plan (`istree`,
   `DirectInputs`): it cost 4-6 µs per evaluation, +20-90% on the
   sub-millisecond benchmarks. A
