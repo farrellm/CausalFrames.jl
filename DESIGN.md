@@ -2955,7 +2955,8 @@ and #105). So evaluation plans before it runs.
   there (issue #132). Runs over disjoint windows deliver no row twice, so the
   split costs only each run's fixed setup, except at a `rescans` source
   (`readcsv`, `readjls`: no index to seek by, so every run reads its file from
-  the beginning). That one is never split: a split run would parse everything
+  the beginning; likewise a `readtable` that sorts, or converts a row table to
+  columns, on every run). That one is never split: a split run would parse everything
   before its start again, and the gap is read either way. Each instance runs
   once over the union of its requests' contexts and passes its own input
   contexts down as requests. So

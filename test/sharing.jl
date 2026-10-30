@@ -282,6 +282,13 @@
             end
         end
         @test !readtable(df).rescans
+        # a generic table splits unless every run reads all of it
+        cols = Tables.columntable(df)
+        @test !readtable(cols).rescans
+        @test readtable(cols; sort = true).rescans
+        rows = Tables.rowtable(cols)
+        @test readtable(rows).rescans
+        @test matches(gap, readtable(rows))
 
         # a forced share keeps one run over the hull
         q, runs = recording()

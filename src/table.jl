@@ -69,7 +69,10 @@ function readtable(table; columns = nothing, time = nothing,
     names = sourcecolumns(columns, "readtable")
     Tables.istable(table) || throw(ArgumentError("readtable table must be a \
         Tables.jl table, got $(typeof(table))"))
-    return pipesource(; stopfree = !closed) do ctx::Context
+    # a sort, or a row table's conversion to columns, reads the whole table on
+    # every run, so the plan never splits its runs
+    rescans = sort || !Tables.columnaccess(table)
+    return pipesource(; stopfree = !closed, rescans) do ctx::Context
         return ChunkSource(
             TableProducer{timetype(ctx)}(table, names, time, checkorder,
                 sort, closed, skipmissing, ctx.start, ctx.stop),

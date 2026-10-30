@@ -278,7 +278,9 @@ runs once for all of them when that gives each reader the rows it would get
 alone: when they ask for the same context, or when the pipeline's rows don't
 depend on where the context starts (or stops) and only that differs, as long as
 the contexts overlap or touch: readers whose windows leave a gap get a run each,
-except readers of a `readcsv` or `readjls` file, who share one. Files
+except readers of a source that reads from its beginning on every run (a
+`readcsv` or `readjls` file, or a `readtable` that sorts
+or reads a row table), who share one. Files
 and tables don't depend on the context, and most transforms keep their input's
 independence. A
 `clock`, `head`, a cumulative `addsummarycolumns`, or a
