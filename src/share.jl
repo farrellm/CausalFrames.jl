@@ -7,9 +7,9 @@
 # instance* over their union, which a tee hands to each reader clipped back to
 # the context it asked for. Requests with equal contexts are always grouped; a
 # `startfree` node also groups requests differing in start, a `stopfree` one in
-# stop, as long as their contexts overlap or touch. So a diamond (one upstream read by two legs of a stage) runs its
-# upstream once instead of once per leg, which compounded to 2^d runs over d
-# chained stages.
+# stop, as long as their contexts overlap or touch. So a diamond (one upstream
+# read by two legs of a stage) runs its upstream once instead of once per leg,
+# which compounded to 2^d runs over d chained stages.
 #
 # The run instance is also the unit a parallel executor would schedule:
 # operators reach their inputs only through `openinput`, and all of a run's
@@ -27,6 +27,7 @@ mutable struct CausalPipeline{F}
     const contexts::Any  # ctx -> each input's context (a Context: all of them)
     const startfree::Bool  # rows don't depend on where the run starts
     const stopfree::Bool   # rows don't depend on where the run stops
+    const rescans::Bool    # every run reads its source from the beginning
     const sharing::Union{Nothing,Bool}  # `sharing`'s override; nothing: automatic
 end
 
@@ -34,10 +35,12 @@ end
 # them specializes: every pipeline's run function and inputs are distinct
 # types, and each would otherwise compile its own copy of this plumbing.
 
-# A source: `run(ctx)` builds its chunks.
-pipesource(@nospecialize(run); startfree::Bool = true, stopfree::Bool = true) =
+# A source: `run(ctx)` builds its chunks. `rescans` marks one whose every run
+# reads from the beginning of its file, which the plan never splits.
+pipesource(@nospecialize(run); startfree::Bool = true, stopfree::Bool = true,
+    rescans::Bool = false) =
     CausalPipeline(SourceRun(run), CausalPipeline[], identity, startfree,
-        stopfree, nothing)
+        stopfree, rescans, nothing)
 
 # A source's run function, ignoring the (absent) inputs.
 struct SourceRun{R}
@@ -60,7 +63,7 @@ function pipenode(@nospecialize(run), @nospecialize(inputs); contexts = identity
         startfree &= p.startfree
         stopfree &= p.stopfree
     end
-    return CausalPipeline(run, ins, contexts, startfree, stopfree, sharing)
+    return CausalPipeline(run, ins, contexts, startfree, stopfree, false, sharing)
 end
 
 # A unary transform's shell: `run(upstream, ctx)` builds its chunks from the
@@ -96,8 +99,13 @@ By default a pipeline read in several places of one evaluation, such as both
 sides of `asofjoin(p, p |> f)` or the input of [`addrollingcolumns`](@ref),
 runs once for all of them when that gives each reader the rows it would get
 alone: when they ask for the same context, or when the pipeline's rows don't
-depend on where the context starts (or stops) and only that differs. Files and
-tables don't, and most transforms keep their input's independence. A
+depend on where the context starts (or stops) and only that differs, as long as
+the contexts overlap or touch. Readers asking for windows with a gap between
+them get a run each, so no run reads rows none of them asked for, except of a
+[`readcsv`](@ref) or [`readjls`](@ref) file, which every run reads from its
+beginning anyway: those readers share one run. Files and
+tables don't depend on the context, and most transforms keep their input's
+independence. A
 [`clock`](@ref), [`head`](@ref), a cumulative [`addsummarycolumns`](@ref), or a
 [`summarize`](@ref) emitting at `stop` do depend on it, so a reader asking for
 a widened context gets a run of its own.
@@ -246,8 +254,9 @@ function postorder!(order::Vector{CausalPipeline}, seen::IdDict,
     return push!(order, p)
 end
 
-# Group a node's requests into runs by `sharekey`, in request order, then
-# (unless sharing is forced) split each group where its contexts leave a gap.
+# Group a node's requests into runs by `sharekey`, the groups in request order,
+# then (unless sharing is forced) split each group where its contexts leave a
+# gap, its runs and their slots then ordered by start.
 function instances(@nospecialize(node::CausalPipeline), slots::Vector{RunSlot})
     groups = Pair{Any,Vector{RunSlot}}[]
     for s in slots
@@ -264,13 +273,14 @@ end
 
 # An instance per run of overlapping or touching contexts in the group, by
 # start: a run over their hull then covers no time none of them asked for
-# (issue #132), and two runs over disjoint windows read no row twice, so the
-# split loses nothing a share would save. A group sharing its start or its stop
-# is always one run. The group is sorted in place and, unsplit, is the
+# (issue #132), and two runs over disjoint windows read no in-window row twice,
+# so the split loses nothing a share would save, except for a `rescans` source,
+# whose every run reads the rows before its start: that one is never split. A
+# group sharing its start or its stop is always one run. The group is sorted in place and, unsplit, is the
 # instance's own slot vector, so the common case allocates nothing more.
 function pushruns!(insts::Vector{RunInstance}, @nospecialize(node::CausalPipeline),
     slots::Vector{RunSlot})
-    (node.sharing === true || length(slots) == 1) &&
+    (node.sharing === true || node.rescans || length(slots) == 1) &&
         return push!(insts, newinstance(node, slots))
     ctx = first(slots).ctx
     hi = sortslots!(slots, ctx)

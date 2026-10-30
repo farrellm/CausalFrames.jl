@@ -2952,8 +2952,12 @@ and #105). So evaluation plans before it runs.
   into one instance per run of overlapping or touching contexts: otherwise
   `merge(q, q |> lag(20))` over `[20, 30)` would run `q` over `[0, 30)`,
   reading the gap `[10, 20)` only to drop it, and failing on any data error
-  there (issue #132). Runs over disjoint windows read no row twice, so the
-  split costs nothing a share would save. Each instance runs once over the
+  there (issue #132). Runs over disjoint windows deliver no row twice, so the
+  split costs nothing a share would save, except at a source whose every run
+  reads its file from the beginning (`rescans`: `readcsv` and `readjls`, which
+  have no index to seek by). Split, it would parse the rows before each run's
+  start again, and it reads the gap, failing on its data errors, either way,
+  so it is never split. Each instance runs once over the
   union of its requests' contexts and passes its own input contexts down as
   requests. So
   equal contexts always share, and a dependent node asked for two contexts

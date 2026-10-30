@@ -35,7 +35,10 @@ design rationale and performance constraints behind each module.
   splits each group into clusters of overlapping or touching contexts
   (`pushruns!`, issue #132), each instance over the union of its slots'
   contexts: so no run covers a gap no request asked for, which costs nothing,
-  since runs over disjoint windows read no row twice.
+  since runs over disjoint windows deliver no row twice. The exception is a
+  `rescans` source (`readcsv`, `readjls`: no index, so every run reads the
+  file from its beginning), never split, since each split run would parse the
+  rows before its start again.
   A pipeline with no node reached twice skips the plan (`istree`,
   `DirectInputs`): it cost 4-6 µs per evaluation, +20-90% on the
   sub-millisecond benchmarks. A
