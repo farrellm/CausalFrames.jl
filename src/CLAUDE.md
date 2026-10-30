@@ -22,8 +22,9 @@ design rationale and performance constraints behind each module.
   evaluation (issue #105). A node is immutable (a `mutable struct` of `const`
   fields, for cheap identity): its run function `(ctx, ins) -> iterator`, its
   inputs (an erased `Vector{CausalPipeline}`, so a pipeline's type never nests
-  its inputs'), `contexts` (each input's context from its own) and the
-  `startfree`/`stopfree` flags; build it with `pipesource`, `pipenode` or
+  its inputs'), `contexts` (each input's context from its own), the
+  `startfree`/`stopfree` flags and a source's `rescans` (planning only: never
+  split its runs); build it with `pipesource`, `pipenode` or
   `pipetransform() do upstream, ctx … end`, each and-ing the operator's own
   flags with its inputs'. Operators reach inputs only through
   `openinput(ins, i)` (each at most once), never another node's `run`: that

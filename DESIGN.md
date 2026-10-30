@@ -71,7 +71,8 @@ reads, the context it reads each one over, and two flags saying whether its
 rows depend on where the context starts or stops. Evaluation plans the whole
 DAG first, so one upstream read by several operators runs once for all of
 them when that is exact (see "Shared runs"). The public constructor,
-`CausalPipeline(run; startfree, stopfree)` with `run(ctx)`, builds a source;
+`CausalPipeline(run; startfree, stopfree, rescans)` with `run(ctx)`, builds a
+source (`rescans`: every run reads it from its beginning, see "Planning");
 nothing outside the package reaches a pipeline's inputs. Nothing runs until
 the iterator is consumed, by one of:
 

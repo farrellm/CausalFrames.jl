@@ -61,7 +61,8 @@ chunks. A frame with no rows gives a zero-row DataFrame with only `:time`.
 
 ## Evaluation
 
-    CausalPipeline(run; startfree = false, stopfree = false) -> CausalPipeline
+    CausalPipeline(run; startfree = false, stopfree = false, rescans = false)
+        -> CausalPipeline
 
 A lazy description of how to produce time-series data. `run` maps a
 `Context` to a single-pass iterator of DataFrame chunks whose `:time`

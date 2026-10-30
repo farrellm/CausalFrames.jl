@@ -1,5 +1,6 @@
 """
-    CausalPipeline(run; startfree = false, stopfree = false) -> CausalPipeline
+    CausalPipeline(run; startfree = false, stopfree = false, rescans = false)
+        -> CausalPipeline
 
 A lazy description of how to produce time-series data. `run` maps a
 [`Context`](@ref) to a single-pass iterator of DataFrame chunks whose `:time`
