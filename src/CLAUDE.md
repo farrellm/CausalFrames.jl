@@ -33,7 +33,7 @@ design rationale and performance constraints behind each module.
   start unless startfree, stop unless stopfree, and the isolating
   `sharing(false)` run if any), then, unless `sharing(true)` forces one run,
   splits each group into clusters of overlapping or touching contexts
-  (`clusters`, issue #132), each instance over the union of its slots'
+  (`pushruns!`, issue #132), each instance over the union of its slots'
   contexts: so no run covers a gap no request asked for, which costs nothing,
   since runs over disjoint windows read no row twice.
   A pipeline with no node reached twice skips the plan (`istree`,

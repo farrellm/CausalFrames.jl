@@ -257,28 +257,62 @@ function instances(@nospecialize(node::CausalPipeline), slots::Vector{RunSlot})
     end
     insts = RunInstance[]
     for gr in groups
-        cls = node.sharing === true ? [last(gr)] : clusters(last(gr))
-        for cl in cls
-            push!(insts, newinstance(node, cl))
-        end
+        pushruns!(insts, node, last(gr))
     end
     return insts
 end
 
-# The slots in runs of overlapping or touching contexts, by start: a run over
-# their hull then covers no time none of them asked for (issue #132), and two
-# runs over disjoint windows read no row twice, so the split loses nothing a
-# share would save. A group sharing its start or its stop is always one run.
-function clusters(slots::Vector{RunSlot})
-    length(slots) == 1 && return [slots]
-    sorted = sort(slots; by = s -> s.ctx.start)
-    cls = [RunSlot[first(sorted)]]
-    stop = first(sorted).ctx.stop
-    for s in Iterators.drop(sorted, 1)
-        s.ctx.start <= stop ? push!(last(cls), s) : push!(cls, RunSlot[s])
-        stop = max(stop, s.ctx.stop)
+# An instance per run of overlapping or touching contexts in the group, by
+# start: a run over their hull then covers no time none of them asked for
+# (issue #132), and two runs over disjoint windows read no row twice, so the
+# split loses nothing a share would save. A group sharing its start or its stop
+# is always one run. The group is sorted in place and, unsplit, is the
+# instance's own slot vector, so the common case allocates nothing more.
+function pushruns!(insts::Vector{RunInstance}, @nospecialize(node::CausalPipeline),
+    slots::Vector{RunSlot})
+    (node.sharing === true || length(slots) == 1) &&
+        return push!(insts, newinstance(node, slots))
+    ctx = first(slots).ctx
+    hi = sortslots!(slots, ctx)
+    hi == length(slots) && return push!(insts, newinstance(node, slots))
+    lo = 1
+    while true
+        push!(insts, newinstance(node, slots[lo:hi]))
+        hi == length(slots) && return insts
+        lo = hi + 1
+        hi = runend(slots, lo, ctx)
     end
-    return cls
+end
+
+# Sort a group by start, by a stable insertion sort, and give the end of its
+# first run. A group is a handful of slots, all of one time type (it is in the
+# key), so past one dispatch the comparisons are typed: `sort!` over the erased
+# contexts dispatched per comparison, a microsecond on a small plan. Neither
+# takes the node, which is `@nospecialize` and made the dispatch ten times as
+# slow.
+function sortslots!(slots::Vector{RunSlot}, ctx::Context{T}) where {T}
+    for i in 2:length(slots)
+        s = slots[i]
+        t = (s.ctx::Context{T}).start
+        j = i - 1
+        while j >= 1 && (slots[j].ctx::Context{T}).start > t
+            slots[j+1] = slots[j]
+            j -= 1
+        end
+        slots[j+1] = s
+    end
+    return runend(slots, 1, ctx)
+end
+
+# The last slot of the run of overlapping or touching contexts from `lo`.
+function runend(slots::Vector{RunSlot}, lo::Int, ::Context{T}) where {T}
+    stop = (slots[lo].ctx::Context{T}).stop
+    for i in (lo+1):length(slots)
+        c = slots[i].ctx::Context{T}
+        c.start > stop && return i - 1
+        stop = max(stop, c.stop)
+    end
+    return length(slots)
 end
 
 # Requests share a run when their keys are equal. The time type is always in
