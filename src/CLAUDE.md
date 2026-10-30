@@ -33,7 +33,8 @@ design rationale and performance constraints behind each module.
   start unless startfree, stop unless stopfree, and the isolating
   `sharing(false)` run if any), then splits each group into clusters of
   overlapping or touching contexts (`pushruns!`, issue #132; never under
-  `sharing(true)` or at a `rescans` source, see DESIGN.md "Planning"), each
+  `sharing(true)` or at a `rescans` source, nor where the runs' input
+  contexts overlap again, `inputsmeet`; see DESIGN.md "Planning"), each
   instance over the union of its slots' contexts. The split sorts by a typed
   insertion sort (`sortslots!`: `sort!` over the erased contexts dispatched
   per comparison), and an unsplit group is its instance's slot vector. A

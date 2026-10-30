@@ -2953,11 +2953,17 @@ and #105). So evaluation plans before it runs.
   `merge(q, q |> lag(20))` over `[20, 30)` would run `q` over `[0, 30)`,
   reading the gap `[10, 20)` only to drop it, and failing on any data error
   there (issue #132). Runs over disjoint windows deliver no row twice, so the
-  split costs only each run's fixed setup, except at a `rescans` source
+  split costs only each run's fixed setup, unless the node's own reads
+  overlap again. Two runs whose input contexts overlap or touch (a look-back
+  bridging the gap, as `addrollingcolumns` over a day read by
+  `merge(q, q |> lag(Minute(1)))`) stay one run: apart, the node would admit
+  those input rows once per run. Deeper nodes need no such check, since their
+  own requests then overlap and share. Nor is a `rescans` source split
   (`readcsv`, `readjls`: no index to seek by, so every run reads its file from
   the beginning; likewise a `readtable` that sorts, or converts a row table to
-  columns, on every run). That one is never split: a split run would parse everything
-  before its start again, and the gap is read either way. Each instance runs
+  columns, on every run, and a `CausalPipeline` source declaring `rescans`):
+  a split run would parse everything before its start again, and the gap is
+  read either way. Each instance runs
   once over the union of its requests' contexts and passes its own input
   contexts down as requests. So
   equal contexts always share, and a dependent node asked for two contexts

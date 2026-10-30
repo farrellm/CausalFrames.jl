@@ -234,9 +234,7 @@
         function recording(; startfree = true, stopfree = true, rescans = false)
             ctxs = Context[]
             run = c -> (push!(ctxs, c); CausalFrames.runchunks(c, readtable(df)))
-            p =
-                rescans ? CausalFrames.pipesource(run; rescans) :
-                CausalPipeline(run; startfree, stopfree)
+            p = CausalPipeline(run; startfree, stopfree, rescans)
             return p, () -> sort(ctxs; by = x -> x.start)
         end
         c = Context(20, 30)
@@ -289,6 +287,32 @@
         rows = Tables.rowtable(cols)
         @test readtable(rows).rescans
         @test matches(gap, readtable(rows))
+
+        # a node whose look-back bridges the gap runs once, not once per side
+        function lookback(q, w)
+            ctxs = Context[]
+            # passes on the rows from its start, dropping the look-back's
+            run = function (c, ins)
+                push!(ctxs, c)
+                chunks =
+                    (x[x.time .>= c.start, :] for x in CausalFrames.openinput(ins, 1))
+                return Iterators.filter(!isempty, chunks)
+            end
+            node = CausalFrames.pipenode(run, (q,);
+                contexts = c -> Context(c.start - w, c.stop))
+            return node, () -> sort(ctxs; by = x -> x.start)
+        end
+        for (w, own, source) in (
+            (5, [Context(0, 10), Context(20, 30)], [Context(-5, 10), Context(15, 30)]),
+            (10, [Context(0, 30)], [Context(-10, 30)]),
+            (15, [Context(0, 30)], [Context(-15, 30)]),
+        )
+            q, runs = recording()
+            r, nodes = lookback(q, w)
+            @test matches(gap, r)
+            @test nodes() == own
+            @test runs() == source
+        end
 
         # a forced share keeps one run over the hull
         q, runs = recording()

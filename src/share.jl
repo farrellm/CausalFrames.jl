@@ -100,11 +100,13 @@ sides of `asofjoin(p, p |> f)` or the input of [`addrollingcolumns`](@ref),
 runs once for all of them when that gives each reader the rows it would get
 alone: when they ask for the same context, or when the pipeline's rows don't
 depend on where the context starts (or stops) and only that differs, as long as
-the contexts overlap or touch: readers whose windows leave a gap get a run each,
-except readers of a source that reads from its beginning on every run (a
-[`readcsv`](@ref) or [`readjls`](@ref) file, or a [`readtable`](@ref) that sorts
-or reads a row table), who share one. Files
-and tables don't depend on the context, and most transforms keep their input's
+the contexts overlap or touch. Readers whose windows leave a gap get a run
+each, unless that would read rows twice: when the pipeline's look-back bridges
+the gap, or when its source reads from its beginning on every run (a
+[`readcsv`](@ref) or [`readjls`](@ref) file, a [`readtable`](@ref) that sorts
+or reads a row table, or a [`CausalPipeline`](@ref) declaring `rescans`).
+Files and tables don't depend on the context, except for the rows at `stop`
+that `closed = true` keeps, and most transforms keep their input's
 independence. A
 [`clock`](@ref), [`head`](@ref), a cumulative [`addsummarycolumns`](@ref), or a
 [`summarize`](@ref) emitting at `stop` do depend on it, so a reader asking for
@@ -275,8 +277,10 @@ end
 # An instance per run of overlapping or touching contexts in the group, by
 # start, so no run covers a gap none of its slots asked for (issue #132). A
 # forced share, a `rescans` source, a single slot and a group fixing its start
-# or its stop are always one run. Unsplit, the group (sorted in place) is the
-# instance's own slot vector, so the common case allocates nothing more.
+# or its stop are always one run. Runs whose input contexts overlap or touch
+# again (a look-back bridging the gap) stay one too: apart, the node would
+# read those input rows once per run. Unsplit, the group (sorted in place) is
+# the instance's own slot vector, so the common case allocates nothing more.
 function pushruns!(insts::Vector{RunInstance}, @nospecialize(node::CausalPipeline),
     slots::Vector{RunSlot})
     (
@@ -288,10 +292,36 @@ function pushruns!(insts::Vector{RunInstance}, @nospecialize(node::CausalPipelin
     n, lo = length(slots), 1
     while lo <= n
         hi = runend(slots, lo, ctx)
+        while hi < n
+            next = runend(slots, hi + 1, ctx)
+            inputsmeet(node, slothull(slots, lo, hi, ctx),
+                slothull(slots, hi + 1, next, ctx)) || break
+            hi = next
+        end
         push!(insts, newinstance(node, lo == 1 && hi == n ? slots : slots[lo:hi]))
         lo = hi + 1
     end
     return insts
+end
+
+# The union of the sorted slots `lo:hi`'s contexts.
+function slothull(slots::Vector{RunSlot}, lo::Int, hi::Int, ::Context{T}) where {T}
+    stop = (slots[lo].ctx::Context{T}).stop
+    for i in (lo+1):hi
+        stop = max(stop, (slots[i].ctx::Context{T}).stop)
+    end
+    return Context((slots[lo].ctx::Context{T}).start, stop)
+end
+
+# Whether runs over `a` and the later `b` would read any input over
+# overlapping or touching contexts. Called once per gap, so it may dispatch.
+function inputsmeet(@nospecialize(node::CausalPipeline), a::Context, b::Context)
+    as, bs = node.contexts(a), node.contexts(b)
+    for i in eachindex(node.inputs)
+        ia, ib = inputcontext(as, i), inputcontext(bs, i)
+        ia.start <= ib.stop && ib.start <= ia.stop && return true
+    end
+    return false
 end
 
 # Sort a group by start, by a stable insertion sort with typed comparisons: a

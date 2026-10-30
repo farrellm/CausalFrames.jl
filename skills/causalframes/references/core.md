@@ -106,6 +106,9 @@ stops.
   rows before `start` gives the rows a run from `start` gives, as for a file.
 - `stopfree = false`: likewise for a later stop and the rows at or after
   `stop`. A source emitting rows at `stop` isn't `stopfree`.
+- `rescans = false`: whether every run reads the source from its beginning,
+  whatever the start, as a file without an index is read. Readers whose
+  contexts leave a gap then share one run instead of reading it twice.
 
 ---
 
