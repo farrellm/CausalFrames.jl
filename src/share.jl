@@ -100,11 +100,9 @@ sides of `asofjoin(p, p |> f)` or the input of [`addrollingcolumns`](@ref),
 runs once for all of them when that gives each reader the rows it would get
 alone: when they ask for the same context, or when the pipeline's rows don't
 depend on where the context starts (or stops) and only that differs, as long as
-the contexts overlap or touch. Readers asking for windows with a gap between
-them get a run each, so no run reads rows none of them asked for, except of a
-[`readcsv`](@ref) or [`readjls`](@ref) file, which every run reads from its
-beginning anyway: those readers share one run. Files and
-tables don't depend on the context, and most transforms keep their input's
+the contexts overlap or touch: readers whose windows leave a gap get a run each,
+except readers of a [`readcsv`](@ref) or [`readjls`](@ref) file, who share one. Files
+and tables don't depend on the context, and most transforms keep their input's
 independence. A
 [`clock`](@ref), [`head`](@ref), a cumulative [`addsummarycolumns`](@ref), or a
 [`summarize`](@ref) emitting at `stop` do depend on it, so a reader asking for
@@ -255,8 +253,7 @@ function postorder!(order::Vector{CausalPipeline}, seen::IdDict,
 end
 
 # Group a node's requests into runs by `sharekey`, the groups in request order,
-# then (unless sharing is forced) split each group where its contexts leave a
-# gap, its runs and their slots then ordered by start.
+# then split each group where its contexts leave a gap (`pushruns!`).
 function instances(@nospecialize(node::CausalPipeline), slots::Vector{RunSlot})
     groups = Pair{Any,Vector{RunSlot}}[]
     for s in slots
@@ -272,35 +269,32 @@ function instances(@nospecialize(node::CausalPipeline), slots::Vector{RunSlot})
 end
 
 # An instance per run of overlapping or touching contexts in the group, by
-# start: a run over their hull then covers no time none of them asked for
-# (issue #132), and two runs over disjoint windows read no in-window row twice,
-# so the split loses nothing a share would save, except for a `rescans` source,
-# whose every run reads the rows before its start: that one is never split. A
-# group sharing its start or its stop is always one run. The group is sorted in place and, unsplit, is the
+# start, so no run covers a gap none of its slots asked for (issue #132). A
+# forced share, a `rescans` source, a single slot and a group fixing its start
+# or its stop are always one run. Unsplit, the group (sorted in place) is the
 # instance's own slot vector, so the common case allocates nothing more.
 function pushruns!(insts::Vector{RunInstance}, @nospecialize(node::CausalPipeline),
     slots::Vector{RunSlot})
-    (node.sharing === true || node.rescans || length(slots) == 1) &&
-        return push!(insts, newinstance(node, slots))
+    (
+        node.sharing === true || node.rescans || !(node.startfree & node.stopfree) ||
+        length(slots) == 1
+    ) && return push!(insts, newinstance(node, slots))
     ctx = first(slots).ctx
-    hi = sortslots!(slots, ctx)
-    hi == length(slots) && return push!(insts, newinstance(node, slots))
-    lo = 1
-    while true
-        push!(insts, newinstance(node, slots[lo:hi]))
-        hi == length(slots) && return insts
-        lo = hi + 1
+    sortslots!(slots, ctx)
+    n, lo = length(slots), 1
+    while lo <= n
         hi = runend(slots, lo, ctx)
+        push!(insts, newinstance(node, lo == 1 && hi == n ? slots : slots[lo:hi]))
+        lo = hi + 1
     end
+    return insts
 end
 
-# Sort a group by start, by a stable insertion sort, and give the end of its
-# first run. A group is a handful of slots, all of one time type (it is in the
-# key), so past one dispatch the comparisons are typed: `sort!` over the erased
-# contexts dispatched per comparison, a microsecond on a small plan. Neither
-# takes the node, which is `@nospecialize` and made the dispatch ten times as
-# slow.
-function sortslots!(slots::Vector{RunSlot}, ctx::Context{T}) where {T}
+# Sort a group by start, by a stable insertion sort with typed comparisons: a
+# group is a handful of slots of one time type (it is in the key), and `sort!`
+# over the erased contexts dispatched per comparison. It takes no node, whose
+# `@nospecialize` slowed that dispatch tenfold.
+function sortslots!(slots::Vector{RunSlot}, ::Context{T}) where {T}
     for i in 2:length(slots)
         s = slots[i]
         t = (s.ctx::Context{T}).start
@@ -311,7 +305,7 @@ function sortslots!(slots::Vector{RunSlot}, ctx::Context{T}) where {T}
         end
         slots[j+1] = s
     end
-    return runend(slots, 1, ctx)
+    return slots
 end
 
 # The last slot of the run of overlapping or touching contexts from `lo`.

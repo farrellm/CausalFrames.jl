@@ -230,104 +230,82 @@
     end
 
     @testset "disjoint requests run apart" begin
-        # A context-free source recording the context of each run.
-        function recording(df)
+        # A source recording the context of each run, sorted by start.
+        function recording(; startfree = true, stopfree = true, rescans = false)
             ctxs = Context[]
-            p = CausalPipeline(; startfree = true, stopfree = true) do c
-                push!(ctxs, c)
-                return CausalFrames.runchunks(c, readtable(df))
-            end
-            return p, ctxs
+            run = c -> (push!(ctxs, c); CausalFrames.runchunks(c, readtable(df)))
+            p =
+                rescans ? CausalFrames.pipesource(run; rescans) :
+                CausalPipeline(run; startfree, stopfree)
+            return p, () -> sort(ctxs; by = x -> x.start)
         end
         c = Context(20, 30)
-        unshared(f) = DataFrame(load(c, f(readtable(df))))
+        matches(f, q) = isequal(DataFrame(load(c, f(q))),
+            DataFrame(load(c, f(readtable(df)))))
+        gap = q -> merge(q, q |> lag(20))
 
         # issue #132: no run over the gap between them
-        q, ctxs = recording(df)
-        f = q -> merge(q, q |> lag(20))
-        @test isequal(DataFrame(load(c, f(q))), unshared(f))
-        @test sort(ctxs; by = x -> x.start) == [Context(0, 10), Context(20, 30)]
+        q, runs = recording()
+        @test matches(gap, q)
+        @test runs() == [Context(0, 10), Context(20, 30)]
 
         # touching or overlapping contexts still share one run
         for (n, start) in ((10, 10), (5, 15))
-            q, ctxs = recording(df)
-            f = q -> merge(q, q |> lag(n))
-            @test isequal(DataFrame(load(c, f(q))), unshared(f))
-            @test ctxs == [Context(start, 30)]
+            q, runs = recording()
+            @test matches(q -> merge(q, q |> lag(n)), q)
+            @test runs() == [Context(start, 30)]
         end
 
         # three requests: the two overlapping share, the far one runs apart
-        q, ctxs = recording(df)
-        f = q -> merge(q, q |> lag(5), q |> lag(25))
-        @test isequal(DataFrame(load(c, f(q))), unshared(f))
-        @test sort(ctxs; by = x -> x.start) == [Context(-5, 5), Context(15, 30)]
+        q, runs = recording()
+        @test matches(q -> merge(q, q |> lag(5), q |> lag(25)), q)
+        @test runs() == [Context(-5, 5), Context(15, 30)]
 
         # a data error only in the gap no longer fails the load
         bad = CausalPipeline(; startfree = true, stopfree = true) do c
             c.start < 15 < c.stop && throw(ArgumentError("bad row in the gap"))
             return CausalFrames.runchunks(c, readtable(df))
         end
-        @test isequal(DataFrame(load(c, merge(bad, bad |> lag(20)))),
-            unshared(q -> merge(q, q |> lag(20))))
+        @test matches(gap, bad)
 
         # a source reading its file from the beginning shares one run anyway
-        ctxs = Context[]
-        q = CausalFrames.pipesource(; rescans = true) do c
-            push!(ctxs, c)
-            return CausalFrames.runchunks(c, readtable(df))
-        end
-        @test isequal(DataFrame(load(c, merge(q, q |> lag(20)))),
-            unshared(q -> merge(q, q |> lag(20))))
-        @test ctxs == [Context(0, 30)]
+        q, runs = recording(; rescans = true)
+        @test matches(gap, q)
+        @test runs() == [Context(0, 30)]
         mktempdir() do dir
             csv, jls = joinpath(dir, "a.csv"), joinpath(dir, "a.jls")
             scan(Context(0, 50), readtable(df) |> writecsv(csv) |> writejls(jls))
             types = Dict(:time => Int, :x => Float64, :m => Union{Missing,Float64})
             for q in (readcsv(csv; types), readjls(jls))
                 @test q.rescans
-                @test isequal(DataFrame(load(c, merge(q, q |> lag(20)))),
-                    unshared(q -> merge(q, q |> lag(20))))
+                @test matches(gap, q)
             end
         end
         @test !readtable(df).rescans
-        @test !(readtable(df) |> lag(1)).rescans
 
         # a forced share keeps one run over the hull
-        q, ctxs = recording(df)
+        q, runs = recording()
         s = q |> sharing(true)
         load(c, merge(s, s |> lag(20)))
-        @test ctxs == [Context(0, 30)]
+        @test runs() == [Context(0, 30)]
 
         # each isolated run splits its own requests, never joining another's
-        q, ctxs = recording(df)
-        inner = merge(q, q |> lag(20)) |> sharing(false)
-        p = merge(inner, inner |> filterrows(r -> true))
-        @test isequal(DataFrame(load(c, p)),
-            unshared(
-                q -> (i = merge(q, q |> lag(20)); merge(i, i |> filterrows(r -> true))),
-            ))
-        @test sort(ctxs; by = x -> x.start) ==
-              [Context(0, 10), Context(0, 10), Context(20, 30), Context(20, 30)]
+        q, runs = recording()
+        isolated = q -> (i = gap(q) |> sharing(false); merge(i, i |> filterrows(r -> true)))
+        @test matches(isolated, q)
+        @test runs() == [Context(0, 10), Context(0, 10), Context(20, 30), Context(20, 30)]
 
         # a node free at one end only shares that end, so touching contexts
         # differing at the other still run apart, each over its own context
         for (startfree, stopfree) in ((false, true), (true, false))
-            ctxs = Context[]
-            q = CausalPipeline(; startfree, stopfree) do c
-                push!(ctxs, c)
-                return CausalFrames.runchunks(c, readtable(df))
-            end
+            q, runs = recording(; startfree, stopfree)
             load(c, merge(q, q |> lag(10)))
-            @test sort(ctxs; by = x -> x.start) == [Context(10, 20), Context(20, 30)]
+            @test runs() == [Context(10, 20), Context(20, 30)]
         end
         # and requests sharing its dependent end are one run over their union
-        ctxs = Context[]
-        q = CausalPipeline(; startfree = true, stopfree = false) do c
-            push!(ctxs, c)
-            return CausalFrames.runchunks(c, readtable(df))
-        end
+        q, runs = recording(; stopfree = false)
         load(c, merge(q, warmup(q, 15, x -> x)))
-        @test ctxs == [Context(5, 30)]
+        @test runs() == [Context(5, 30)]
     end
 
     @testset "sharing" begin

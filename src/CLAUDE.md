@@ -31,14 +31,12 @@ design rationale and performance constraints behind each module.
   the seam a parallel executor would use. `planrun` visits nodes in reverse postorder and groups each node's
   requests (`RunSlot`s) into `RunInstance`s by `sharekey` (time type, then
   start unless startfree, stop unless stopfree, and the isolating
-  `sharing(false)` run if any), then, unless `sharing(true)` forces one run,
-  splits each group into clusters of overlapping or touching contexts
-  (`pushruns!`, issue #132), each instance over the union of its slots'
-  contexts: so no run covers a gap no request asked for, which costs nothing,
-  since runs over disjoint windows deliver no row twice. The exception is a
-  `rescans` source (`readcsv`, `readjls`: no index, so every run reads the
-  file from its beginning), never split, since each split run would parse the
-  rows before its start again.
+  `sharing(false)` run if any), then splits each group into clusters of
+  overlapping or touching contexts (`pushruns!`, issue #132; never under
+  `sharing(true)` or at a `rescans` source, see DESIGN.md "Planning"), each
+  instance over the union of its slots' contexts. The split sorts by a typed
+  insertion sort (`sortslots!`: `sort!` over the erased contexts dispatched
+  per comparison), and an unsplit group is its instance's slot vector.
   A pipeline with no node reached twice skips the plan (`istree`,
   `DirectInputs`): it cost 4-6 µs per evaluation, +20-90% on the
   sub-millisecond benchmarks. A

@@ -277,11 +277,9 @@ sides of `asofjoin(p, p |> f)` or the input of `addrollingcolumns`,
 runs once for all of them when that gives each reader the rows it would get
 alone: when they ask for the same context, or when the pipeline's rows don't
 depend on where the context starts (or stops) and only that differs, as long as
-the contexts overlap or touch. Readers asking for windows with a gap between
-them get a run each, so no run reads rows none of them asked for, except of a
-`readcsv` or `readjls` file, which every run reads from its
-beginning anyway: those readers share one run. Files and
-tables don't depend on the context, and most transforms keep their input's
+the contexts overlap or touch: readers whose windows leave a gap get a run each,
+except readers of a `readcsv` or `readjls` file, who share one. Files
+and tables don't depend on the context, and most transforms keep their input's
 independence. A
 `clock`, `head`, a cumulative `addsummarycolumns`, or a
 `summarize` emitting at `stop` do depend on it, so a reader asking for
