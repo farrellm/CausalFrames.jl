@@ -280,10 +280,16 @@
             end
         end
         @test !readtable(df).rescans
-        # a generic table splits unless every run reads all of it
+        # a generic table splits unless every run reads all of it: sorting,
+        # checking the order, computing times or scanning for missing ones
         cols = Tables.columntable(df)
-        @test !readtable(cols).rescans
-        @test readtable(cols; sort = true).rescans
+        @test !readtable(cols; checkorder = false).rescans
+        @test matches(gap, readtable(cols; checkorder = false))
+        @test readtable(cols).rescans
+        @test readtable(cols; checkorder = false, sort = true).rescans
+        @test readtable(cols; checkorder = false, time = r -> r.time).rescans
+        withmissing = merge(cols, (time = Vector{Union{Missing,Int}}(cols.time),))
+        @test readtable(withmissing; checkorder = false).rescans
         rows = Tables.rowtable(cols)
         @test readtable(rows).rescans
         @test matches(gap, readtable(rows))

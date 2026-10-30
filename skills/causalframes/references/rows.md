@@ -280,8 +280,10 @@ depend on where the context starts (or stops) and only that differs, as long as
 the contexts overlap or touch. Readers whose windows leave a gap get a run
 each, unless that would read rows twice: when the pipeline's look-back bridges
 the gap, or when its source reads from its beginning on every run (a
-`readcsv` or `readjls` file, a `readtable` that sorts
-or reads a row table, or a `CausalPipeline` declaring `rescans`).
+`readcsv` or `readjls` file, a `readtable` over a
+generic table, unless it reads a column table with `checkorder = false` and its
+times from a column whose type rules out `missing`, or a
+`CausalPipeline` declaring `rescans`).
 Files and tables don't depend on the context, except for the rows at `stop`
 that `closed = true` keeps, and most transforms keep their input's
 independence. A

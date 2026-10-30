@@ -69,15 +69,29 @@ function readtable(table; columns = nothing, time = nothing,
     names = sourcecolumns(columns, "readtable")
     Tables.istable(table) || throw(ArgumentError("readtable table must be a \
         Tables.jl table, got $(typeof(table))"))
-    # a sort, or a row table's conversion to columns, reads the whole table on
-    # every run, so the plan never splits its runs
-    rescans = sort || !Tables.columnaccess(table)
-    return pipesource(; stopfree = !closed, rescans) do ctx::Context
+    return pipesource(;
+        stopfree = !closed,
+        rescans = tablerescans(table, time, checkorder, sort),
+    ) do ctx::Context
         return ChunkSource(
             TableProducer{timetype(ctx)}(table, names, time, checkorder,
                 sort, closed, skipmissing, ctx.start, ctx.stop),
         )
     end
+end
+
+# Whether every run of the generic path reads whole partitions, not just the
+# window, so the plan never splits its runs: a sort, a row table's conversion to
+# columns, the order check, times computed by a function, and the scan for
+# missing times when the schema doesn't rule them out.
+function tablerescans(table, time, checkorder::Bool, sort::Bool)
+    (sort || checkorder || time isa Function || !Tables.columnaccess(table)) &&
+        return true
+    schema = Tables.schema(table)
+    schema === nothing && return true
+    i = findfirst(==(timetarget(time)), schema.names)
+    # a missing time column is an error on every run, split or not
+    return i !== nothing && Missing <: schema.types[i]
 end
 
 function readtable(df::AbstractDataFrame; columns = nothing, time = nothing,

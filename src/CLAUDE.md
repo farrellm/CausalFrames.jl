@@ -179,7 +179,9 @@ design rationale and performance constraints behind each module.
 - `src/table.jl` — `readtable`, the in-memory source, on three paths sharing
   the `windowbounds` clip. A generic Tables.jl table is resolved per run and
   per partition by `TableProducer`, with `tablerows` the typed barrier and only
-  in-window rows copied. An `AbstractDataFrame` is resolved once at
+  in-window rows copied. Each run still scans whole partitions for the order
+  check, function times and missing times, so `tablerescans` marks it
+  `rescans` unless none of them applies. An `AbstractDataFrame` is resolved once at
   construction into a private index over the caller's vectors, then read by
   the frame path with `share = false` (every run slices, so a loaded frame
   never aliases the caller) unless dropping missing times or sorting made owned
