@@ -2962,14 +2962,14 @@ and #105). So evaluation plans before it runs.
   own requests then overlap and share. Nor is a `rescans` source split
   (`readcsv`, `readjls`: no index to seek by, so every run reads its file from
   the beginning; likewise a `readparquet` whose times come from a function,
-  which can't push the window down, and a generic-table `readtable` that, on every run, sorts, converts
-  a row table to columns, checks the order (`checkorder`, the default),
-  computes times by a function, or scans for missing times its schema doesn't
-  rule out, and a `CausalPipeline` source declaring `rescans`):
-  a split run would parse everything before its start again, and the gap is
-  read either way. Each instance runs
-  once over the union of its requests' contexts and passes its own input
-  contexts down as requests. So
+  which can't push the window down, and a generic-table `readtable` that, on
+  every run, sorts, converts a row table to columns, checks the order
+  (`checkorder`, the default), computes times by a function, or scans for
+  missing times its schema doesn't rule out, and a `CausalPipeline` source
+  declaring `rescans`): a split run would parse everything before its start
+  again, and the gap is read either way. Each instance runs once over the
+  union of its requests' contexts and passes its own input contexts down as
+  requests. So
   equal contexts always share, and a dependent node asked for two contexts
   runs twice, each run then requesting its own inputs, which may share again
   below.
