@@ -289,7 +289,9 @@ function pushruns!(insts::Vector{RunInstance}, @nospecialize(node::CausalPipelin
         length(slots) == 1
     ) && return push!(insts, newinstance(node, slots))
     ctx = first(slots).ctx
-    sortslots!(slots, ctx)
+    # dispatched on the erased context, so a group too wide for insertion
+    # compiles its merge only when one is planned
+    length(slots) > SORTINSERTMAX ? mergeslots!(slots, ctx) : sortslots!(slots, ctx)
     n, lo, hi = length(slots), 1, runend(slots, 1, ctx)
     hi == n && return push!(insts, newinstance(node, slots))
     # a later cluster starts past every earlier stop, so the hull of the
@@ -330,9 +332,9 @@ function inputsmeet(@nospecialize(node::CausalPipeline), a::Context, b::Context)
 end
 
 # Sort a group by start, by a stable insertion sort with typed comparisons: a
-# group is a handful of slots of one time type (it is in the key), and `sort!`
-# over the erased contexts dispatched per comparison. It takes no node, whose
-# `@nospecialize` slowed that dispatch tenfold.
+# group is usually a handful of slots of one time type (it is in the key), and
+# `sort!` over the erased contexts dispatched per comparison. It takes no node,
+# whose `@nospecialize` slowed that dispatch tenfold.
 function sortslots!(slots::Vector{RunSlot}, ::Context{T}) where {T}
     for i in 2:length(slots)
         s = slots[i]
@@ -345,6 +347,38 @@ function sortslots!(slots::Vector{RunSlot}, ::Context{T}) where {T}
         slots[j+1] = s
     end
     return slots
+end
+
+# The widest group `sortslots!` sorts: insertion is quadratic, and past about
+# this many slots the merge is faster.
+const SORTINSERTMAX = 32
+
+# Sort a wide fan-out's group like `sortslots!`, by a stable bottom-up merge
+# sort through one buffer. `sortperm` of the typed starts sorted faster but
+# compiled three times longer.
+function mergeslots!(slots::Vector{RunSlot}, ::Context{T}) where {T}
+    n, w = length(slots), 1
+    src, dst = slots, similar(slots)
+    while w < n
+        for lo in 1:2w:n
+            mid, hi = min(lo + w - 1, n), min(lo + 2w - 1, n)
+            i, j = lo, mid + 1
+            for k in lo:hi
+                if j > hi || (
+                    i <= mid &&
+                    (src[i].ctx::Context{T}).start <= (src[j].ctx::Context{T}).start
+                )
+                    dst[k] = src[i]
+                    i += 1
+                else
+                    dst[k] = src[j]
+                    j += 1
+                end
+            end
+        end
+        src, dst, w = dst, src, 2w
+    end
+    return src === slots ? slots : copyto!(slots, src)
 end
 
 # The last slot of the run of overlapping or touching contexts from `lo`.

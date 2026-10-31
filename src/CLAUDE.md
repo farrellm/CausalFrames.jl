@@ -38,7 +38,9 @@ design rationale and performance constraints behind each module.
   contexts overlap again, `inputsmeet`; see DESIGN.md "Planning"), each
   instance over the union of its slots' contexts. The split sorts by a typed
   insertion sort (`sortslots!`: `sort!` over the erased contexts dispatched
-  per comparison), and an unsplit group is its instance's slot vector. A
+  per comparison), or past 32 slots a merge sort (`mergeslots!`, dispatched
+  so only a wide fan-out compiles it: 50 ms per time type, against 175 ms
+  for `sortperm`; 2000 slots sort in 90 µs, not 3.5 ms), and an unsplit group is its instance's slot vector. A
   node with one request skips the grouping: most of a plan's nodes have one,
   and building their keys and groups cost 6-40% of `planrun` (diamond4
   23 -> 14 µs).

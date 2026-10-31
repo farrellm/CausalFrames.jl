@@ -259,6 +259,19 @@
         @test matches(q -> merge(q, q |> lag(5), q |> lag(25)), q)
         @test runs() == [Context(-5, 5), Context(15, 30)]
 
+        # a fan-out too wide for the insertion sort, requested out of order
+        n = CausalFrames.SORTINSERTMAX + 8
+        q, runs = recording()
+        @test matches(q -> merge(q, (q |> lag(11i) for i in n:-1:1)...), q)
+        @test runs() == [Context(20 - 11i, 30 - 11i) for i in n:-1:0]
+        # whose merge sort is stable, as the insertion sort is
+        for len in (n, 2n + 3)
+            ctxs = [Context(mod(7i, 10), 100) for i in 1:len]
+            slots = [CausalFrames.RunSlot(x) for x in ctxs]
+            sorted = sort(slots; by = s -> s.ctx.start)
+            @test CausalFrames.mergeslots!(slots, first(ctxs)) == sorted
+        end
+
         # a data error only in the gap no longer fails the load
         bad = CausalPipeline(; startfree = true, stopfree = true) do c
             c.start < 15 < c.stop && throw(ArgumentError("bad row in the gap"))
