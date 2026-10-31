@@ -109,7 +109,9 @@ stops.
   `stop`. A source emitting rows at `stop` isn't `stopfree`.
 - `rescans = false`: whether every run reads the source from its beginning,
   whatever the start, as a file without an index is read. Readers whose
-  contexts leave a gap then share one run instead of reading it twice.
+  contexts leave a gap then share one run instead of reading it twice. It
+  matters only when `startfree` and `stopfree` are both true: otherwise
+  readers with different contexts never share a run.
 
 ---
 
