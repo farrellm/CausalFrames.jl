@@ -1,5 +1,6 @@
 """
-    CausalPipeline(run; startfree = false, stopfree = false) -> CausalPipeline
+    CausalPipeline(run; startfree = false, stopfree = false, rescans = false)
+        -> CausalPipeline
 
 A lazy description of how to produce time-series data. `run` maps a
 [`Context`](@ref) to a single-pass iterator of DataFrame chunks whose `:time`
@@ -44,9 +45,14 @@ stops.
   rows before `start` gives the rows a run from `start` gives, as for a file.
 - `stopfree = false`: likewise for a later stop and the rows at or after
   `stop`. A source emitting rows at `stop` isn't `stopfree`.
+- `rescans = false`: whether every run reads the source from its beginning,
+  whatever the start, as a file without an index is read. Readers whose
+  contexts leave a gap then share one run instead of reading it twice. It
+  matters only when `startfree` and `stopfree` are both true: otherwise
+  readers with different contexts never share a run.
 """
-CausalPipeline(@nospecialize(run); startfree::Bool = false, stopfree::Bool = false) =
-    pipesource(run; startfree, stopfree)
+CausalPipeline(@nospecialize(run); startfree::Bool = false, stopfree::Bool = false,
+    rescans::Bool = false) = pipesource(run; startfree, stopfree, rescans)
 
 """
     load(ctx::Context, p::CausalPipeline) -> CausalFrame

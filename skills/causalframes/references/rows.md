@@ -276,9 +276,16 @@ By default a pipeline read in several places of one evaluation, such as both
 sides of `asofjoin(p, p |> f)` or the input of `addrollingcolumns`,
 runs once for all of them when that gives each reader the rows it would get
 alone: when they ask for the same context, or when the pipeline's rows don't
-depend on where the context starts (or stops) and only that differs. Files and
-tables don't, and most transforms keep their input's independence. A
-`clock`, `head`, a cumulative `addsummarycolumns`, or a
+depend on where the context starts (or stops) and only that differs, as long as
+the contexts overlap or touch. Readers whose windows leave a gap get a run
+each, unless that would read rows twice: when the pipeline's look-back bridges
+the gap, or when its source reads from its beginning on every run (a
+`readcsv` or `readjls` file, some `readparquet` and
+`readtable` reads, or a `CausalPipeline` declaring `rescans`).
+Files and tables don't depend on the context, except for the rows at `stop`
+that `closed = true` keeps, and most transforms keep their input's
+independence. A `clock`, `head`, a cumulative
+`addsummarycolumns`, or a
 `summarize` emitting at `stop` do depend on it, so a reader asking for
 a widened context gets a run of its own.
 

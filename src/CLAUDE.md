@@ -22,8 +22,9 @@ design rationale and performance constraints behind each module.
   evaluation (issue #105). A node is immutable (a `mutable struct` of `const`
   fields, for cheap identity): its run function `(ctx, ins) -> iterator`, its
   inputs (an erased `Vector{CausalPipeline}`, so a pipeline's type never nests
-  its inputs'), `contexts` (each input's context from its own) and the
-  `startfree`/`stopfree` flags; build it with `pipesource`, `pipenode` or
+  its inputs'), `contexts` (each input's context from its own), the
+  `startfree`/`stopfree` flags and a source's `rescans` (planning only: never
+  split its runs); build it with `pipesource`, `pipenode` or
   `pipetransform() do upstream, ctx … end`, each and-ing the operator's own
   flags with its inputs'. Operators reach inputs only through
   `openinput(ins, i)` (each at most once), never another node's `run`: that
@@ -31,7 +32,18 @@ design rationale and performance constraints behind each module.
   the seam a parallel executor would use. `planrun` visits nodes in reverse postorder and groups each node's
   requests (`RunSlot`s) into `RunInstance`s by `sharekey` (time type, then
   start unless startfree, stop unless stopfree, and the isolating
-  `sharing(false)` run if any), each over the union of its slots' contexts.
+  `sharing(false)` run if any), then splits each group into clusters of
+  overlapping or touching contexts (`pushruns!`, issue #132; never under
+  `sharing(true)` or at a `rescans` source, nor where the runs' input
+  contexts overlap again, `inputsmeet`; see DESIGN.md "Planning"), each
+  instance over the union of its slots' contexts. The split sorts by a typed
+  insertion sort (`sortslots!`: `sort!` over the erased contexts dispatched
+  per comparison), or past 32 slots a merge sort (`mergeslots!`, dispatched
+  so only a wide fan-out compiles it: 50 ms per time type, against 175 ms
+  for `sortperm`; 2000 slots sort in 90 µs, not 3.5 ms), and an unsplit group is its instance's slot vector. A
+  node with one request skips the grouping: most of a plan's nodes have one,
+  and building their keys and groups cost 6-40% of `planrun` (diamond4
+  23 -> 14 µs).
   A pipeline with no node reached twice skips the plan (`istree`,
   `DirectInputs`): it cost 4-6 µs per evaluation, +20-90% on the
   sub-millisecond benchmarks. A
@@ -169,7 +181,9 @@ design rationale and performance constraints behind each module.
 - `src/table.jl` — `readtable`, the in-memory source, on three paths sharing
   the `windowbounds` clip. A generic Tables.jl table is resolved per run and
   per partition by `TableProducer`, with `tablerows` the typed barrier and only
-  in-window rows copied. An `AbstractDataFrame` is resolved once at
+  in-window rows copied. Each run still scans whole partitions for the order
+  check, function times and missing times, so `tablerescans` marks it
+  `rescans` unless none of them applies. An `AbstractDataFrame` is resolved once at
   construction into a private index over the caller's vectors, then read by
   the frame path with `share = false` (every run slices, so a loaded frame
   never aliases the caller) unless dropping missing times or sorting made owned
