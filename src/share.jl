@@ -103,9 +103,10 @@ depend on where the context starts (or stops) and only that differs, as long as
 the contexts overlap or touch. Readers whose windows leave a gap get a run
 each, unless that would read rows twice: when the pipeline's look-back bridges
 the gap, or when its source reads from its beginning on every run (a
-[`readcsv`](@ref) or [`readjls`](@ref) file, a [`readtable`](@ref) over a
-generic table, unless it reads a column table with `checkorder = false` and its
-times from a column whose type rules out `missing`, or a
+[`readcsv`](@ref) or [`readjls`](@ref) file, a [`readparquet`](@ref) file
+whose times come from a function, a [`readtable`](@ref) over a generic table,
+unless it reads a column table with `checkorder = false` and `sort = false` and
+its times from a column whose type rules out `missing`, or a
 [`CausalPipeline`](@ref) declaring `rescans`).
 Files and tables don't depend on the context, except for the rows at `stop`
 that `closed = true` keeps, and most transforms keep their input's
@@ -292,8 +293,9 @@ function pushruns!(insts::Vector{RunInstance}, @nospecialize(node::CausalPipelin
     ctx = first(slots).ctx
     sortslots!(slots, ctx)
     n, lo = length(slots), 1
+    hi = runend(slots, lo, ctx)
     while lo <= n
-        hi = runend(slots, lo, ctx)
+        next = hi  # the end of the run after this one, once found
         while hi < n
             next = runend(slots, hi + 1, ctx)
             inputsmeet(node, slothull(slots, lo, hi, ctx),
@@ -301,7 +303,7 @@ function pushruns!(insts::Vector{RunInstance}, @nospecialize(node::CausalPipelin
             hi = next
         end
         push!(insts, newinstance(node, lo == 1 && hi == n ? slots : slots[lo:hi]))
-        lo = hi + 1
+        lo, hi = hi + 1, next
     end
     return insts
 end
