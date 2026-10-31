@@ -229,6 +229,135 @@
         end
     end
 
+    @testset "disjoint requests run apart" begin
+        # A source recording the context of each run, sorted by start.
+        function recording(; startfree = true, stopfree = true, rescans = false)
+            ctxs = Context[]
+            run = c -> (push!(ctxs, c); CausalFrames.runchunks(c, readtable(df)))
+            p = CausalPipeline(run; startfree, stopfree, rescans)
+            return p, () -> sort(ctxs; by = x -> x.start)
+        end
+        c = Context(20, 30)
+        matches(f, q) = isequal(DataFrame(load(c, f(q))),
+            DataFrame(load(c, f(readtable(df)))))
+        gap = q -> merge(q, q |> lag(20))
+
+        # issue #132: no run over the gap between them
+        q, runs = recording()
+        @test matches(gap, q)
+        @test runs() == [Context(0, 10), Context(20, 30)]
+
+        # touching or overlapping contexts still share one run
+        for (n, start) in ((10, 10), (5, 15))
+            q, runs = recording()
+            @test matches(q -> merge(q, q |> lag(n)), q)
+            @test runs() == [Context(start, 30)]
+        end
+
+        # three requests: the two overlapping share, the far one runs apart
+        q, runs = recording()
+        @test matches(q -> merge(q, q |> lag(5), q |> lag(25)), q)
+        @test runs() == [Context(-5, 5), Context(15, 30)]
+
+        # a fan-out too wide for the insertion sort, requested out of order
+        n = CausalFrames.SORTINSERTMAX + 8
+        q, runs = recording()
+        @test matches(q -> merge(q, (q |> lag(11i) for i in n:-1:1)...), q)
+        @test runs() == [Context(20 - 11i, 30 - 11i) for i in n:-1:0]
+        # whose merge sort is stable, as the insertion sort is
+        for len in (n, 2n + 3)
+            ctxs = [Context(mod(7i, 10), 100) for i in 1:len]
+            slots = [CausalFrames.RunSlot(x) for x in ctxs]
+            sorted = sort(slots; by = s -> s.ctx.start)
+            @test CausalFrames.mergeslots!(slots, first(ctxs)) == sorted
+        end
+
+        # a data error only in the gap no longer fails the load
+        bad = CausalPipeline(; startfree = true, stopfree = true) do c
+            c.start < 15 < c.stop && throw(ArgumentError("bad row in the gap"))
+            return CausalFrames.runchunks(c, readtable(df))
+        end
+        @test matches(gap, bad)
+
+        # a source reading its file from the beginning shares one run anyway
+        q, runs = recording(; rescans = true)
+        @test matches(gap, q)
+        @test runs() == [Context(0, 30)]
+        mktempdir() do dir
+            csv, jls = joinpath(dir, "a.csv"), joinpath(dir, "a.jls")
+            scan(Context(0, 50), readtable(df) |> writecsv(csv) |> writejls(jls))
+            types = Dict(:time => Int, :x => Float64, :m => Union{Missing,Float64})
+            for q in (readcsv(csv; types), readjls(jls))
+                @test q.rescans
+                @test matches(gap, q)
+            end
+        end
+        @test !readtable(df).rescans
+        # a generic table splits unless every run reads all of it: sorting,
+        # checking the order, computing times or scanning for missing ones
+        cols = Tables.columntable(df)
+        @test !readtable(cols; checkorder = false).rescans
+        @test matches(gap, readtable(cols; checkorder = false))
+        @test readtable(cols).rescans
+        @test readtable(cols; checkorder = false, sort = true).rescans
+        @test readtable(cols; checkorder = false, time = r -> r.time).rescans
+        withmissing = merge(cols, (time = Vector{Union{Missing,Int}}(cols.time),))
+        @test readtable(withmissing; checkorder = false).rescans
+        rows = Tables.rowtable(cols)
+        @test readtable(rows).rescans
+        @test matches(gap, readtable(rows))
+
+        # a node whose look-back bridges the gap runs once, not once per side
+        function lookback(q, w)
+            ctxs = Context[]
+            # passes on the rows from its start, dropping the look-back's
+            run = function (c, ins)
+                push!(ctxs, c)
+                chunks =
+                    (x[x.time .>= c.start, :] for x in CausalFrames.openinput(ins, 1))
+                return Iterators.filter(!isempty, chunks)
+            end
+            node = CausalFrames.pipenode(run, (q,);
+                contexts = c -> Context(c.start - w, c.stop))
+            return node, () -> sort(ctxs; by = x -> x.start)
+        end
+        for (w, own, source) in (
+            (5, [Context(0, 10), Context(20, 30)], [Context(-5, 10), Context(15, 30)]),
+            (10, [Context(0, 30)], [Context(-10, 30)]),
+            (15, [Context(0, 30)], [Context(-15, 30)]),
+        )
+            q, runs = recording()
+            r, nodes = lookback(q, w)
+            @test matches(gap, r)
+            @test nodes() == own
+            @test runs() == source
+        end
+
+        # a forced share keeps one run over the hull
+        q, runs = recording()
+        s = q |> sharing(true)
+        load(c, merge(s, s |> lag(20)))
+        @test runs() == [Context(0, 30)]
+
+        # each isolated run splits its own requests, never joining another's
+        q, runs = recording()
+        isolated = q -> (i = gap(q) |> sharing(false); merge(i, i |> filterrows(r -> true)))
+        @test matches(isolated, q)
+        @test runs() == [Context(0, 10), Context(0, 10), Context(20, 30), Context(20, 30)]
+
+        # a node free at one end only shares that end, so touching contexts
+        # differing at the other still run apart, each over its own context
+        for (startfree, stopfree) in ((false, true), (true, false))
+            q, runs = recording(; startfree, stopfree)
+            load(c, merge(q, q |> lag(10)))
+            @test runs() == [Context(10, 20), Context(20, 30)]
+        end
+        # and requests sharing its dependent end are one run over their union
+        q, runs = recording(; stopfree = false)
+        load(c, merge(q, warmup(q, 15, x -> x)))
+        @test runs() == [Context(5, 30)]
+    end
+
     @testset "sharing" begin
         p = readtable(df)
         @test isequal(DataFrame(load(ctx, p |> sharing(true))),

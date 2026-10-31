@@ -72,6 +72,9 @@ end
         DataFrame(ts = [1, 2, 3], x = [10, 20, 30]))
 
     frame = load(Context(0, 100), readparquet(path; time = :ts))
+    # a time column is pushed down, so its runs split; a time function isn't
+    @test !readparquet(path; time = :ts).rescans
+    @test readparquet(path; time = row -> row.ts).rescans
     df = DataFrame(frame)
     @test names(df) == ["time", "x"]
     @test df.time == [1, 2, 3]

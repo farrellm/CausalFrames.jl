@@ -71,7 +71,9 @@ reads, the context it reads each one over, and two flags saying whether its
 rows depend on where the context starts or stops. Evaluation plans the whole
 DAG first, so one upstream read by several operators runs once for all of
 them when that is exact (see "Shared runs"). The public constructor,
-`CausalPipeline(run; startfree, stopfree)` with `run(ctx)`, builds a source;
+`CausalPipeline(run; startfree, stopfree, rescans)` with `run(ctx)`, builds a
+source (`rescans`: every run reads it from its beginning, which matters only
+when it is both `startfree` and `stopfree`, see "Planning");
 nothing outside the package reaches a pipeline's inputs. Nothing runs until
 the iterator is consumed, by one of:
 
@@ -2948,8 +2950,27 @@ and #105). So evaluation plans before it runs.
   a node's requests (a context each, one per reading input) are complete when
   it is planned. Requests group into *run instances* by key: the time type
   (a source converts its rows to it), then the start unless `startfree` and
-  the stop unless `stopfree`. Each instance runs once over the union of its
-  requests' contexts and passes its own input contexts down as requests. So
+  the stop unless `stopfree`. A group whose contexts leave a gap splits there,
+  into one instance per run of overlapping or touching contexts: otherwise
+  `merge(q, q |> lag(20))` over `[20, 30)` would run `q` over `[0, 30)`,
+  reading the gap `[10, 20)` only to drop it, and failing on any data error
+  there (issue #132). Runs over disjoint windows deliver no row twice, so the
+  split costs only each run's fixed setup, unless the node's own reads
+  overlap again. Two runs whose input contexts overlap or touch (a look-back
+  bridging the gap, as `addrollingcolumns` over a day read by
+  `merge(q, q |> lag(Minute(1)))`) stay one run: apart, the node would admit
+  those input rows once per run. Deeper nodes need no such check, since their
+  own requests then overlap and share. Nor is a `rescans` source split
+  (`readcsv`, `readjls`: no index to seek by, so every run reads its file from
+  the beginning; likewise a `readparquet` whose times come from a function,
+  which can't push the window down, and a generic-table `readtable` that, on
+  every run, sorts, converts a row table to columns, checks the order
+  (`checkorder`, the default), computes times by a function, or scans for
+  missing times its schema doesn't rule out, and a `CausalPipeline` source
+  declaring `rescans`): a split run would parse everything before its start
+  again, and the gap is read either way. Each instance runs once over the
+  union of its requests' contexts and passes its own input contexts down as
+  requests. So
   equal contexts always share, and a dependent node asked for two contexts
   runs twice, each run then requesting its own inputs, which may share again
   below.
@@ -2971,7 +2992,8 @@ and #105). So evaluation plans before it runs.
   readers that drift far apart (each reader then runs its whole upstream on
   its own: requests made under different `sharing(false)` runs never group),
   and `sharing(true)` shares among requests that would not otherwise (a
-  dependent node's widened run, its rows then as that run gives them).
+  dependent node's widened run, its rows then as that run gives them), as one
+  run over all of them, gap or not.
 - **Abandoning.** Once a run ends, or its reader abandons it, its operator
   will not pull its inputs again, so the plan abandons every input slot of
   that run, opened or not (a join's right side, the inputs `concatenate`

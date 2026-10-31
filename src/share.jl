@@ -7,9 +7,9 @@
 # instance* over their union, which a tee hands to each reader clipped back to
 # the context it asked for. Requests with equal contexts are always grouped; a
 # `startfree` node also groups requests differing in start, a `stopfree` one in
-# stop. So a diamond (one upstream read by two legs of a stage) runs its
-# upstream once instead of once per leg, which compounded to 2^d runs over d
-# chained stages.
+# stop, as long as their contexts overlap or touch. So a diamond (one upstream
+# read by two legs of a stage) runs its upstream once instead of once per leg,
+# which compounded to 2^d runs over d chained stages.
 #
 # The run instance is also the unit a parallel executor would schedule:
 # operators reach their inputs only through `openinput`, and all of a run's
@@ -27,6 +27,7 @@ mutable struct CausalPipeline{F}
     const contexts::Any  # ctx -> each input's context (a Context: all of them)
     const startfree::Bool  # rows don't depend on where the run starts
     const stopfree::Bool   # rows don't depend on where the run stops
+    const rescans::Bool    # every run reads its source from the beginning
     const sharing::Union{Nothing,Bool}  # `sharing`'s override; nothing: automatic
 end
 
@@ -34,10 +35,12 @@ end
 # them specializes: every pipeline's run function and inputs are distinct
 # types, and each would otherwise compile its own copy of this plumbing.
 
-# A source: `run(ctx)` builds its chunks.
-pipesource(@nospecialize(run); startfree::Bool = true, stopfree::Bool = true) =
+# A source: `run(ctx)` builds its chunks. `rescans` marks one whose every run
+# reads from the beginning of its file, which the plan never splits.
+pipesource(@nospecialize(run); startfree::Bool = true, stopfree::Bool = true,
+    rescans::Bool = false) =
     CausalPipeline(SourceRun(run), CausalPipeline[], identity, startfree,
-        stopfree, nothing)
+        stopfree, rescans, nothing)
 
 # A source's run function, ignoring the (absent) inputs.
 struct SourceRun{R}
@@ -60,7 +63,7 @@ function pipenode(@nospecialize(run), @nospecialize(inputs); contexts = identity
         startfree &= p.startfree
         stopfree &= p.stopfree
     end
-    return CausalPipeline(run, ins, contexts, startfree, stopfree, sharing)
+    return CausalPipeline(run, ins, contexts, startfree, stopfree, false, sharing)
 end
 
 # A unary transform's shell: `run(upstream, ctx)` builds its chunks from the
@@ -96,9 +99,16 @@ By default a pipeline read in several places of one evaluation, such as both
 sides of `asofjoin(p, p |> f)` or the input of [`addrollingcolumns`](@ref),
 runs once for all of them when that gives each reader the rows it would get
 alone: when they ask for the same context, or when the pipeline's rows don't
-depend on where the context starts (or stops) and only that differs. Files and
-tables don't, and most transforms keep their input's independence. A
-[`clock`](@ref), [`head`](@ref), a cumulative [`addsummarycolumns`](@ref), or a
+depend on where the context starts (or stops) and only that differs, as long as
+the contexts overlap or touch. Readers whose windows leave a gap get a run
+each, unless that would read rows twice: when the pipeline's look-back bridges
+the gap, or when its source reads from its beginning on every run (a
+[`readcsv`](@ref) or [`readjls`](@ref) file, some [`readparquet`](@ref) and
+[`readtable`](@ref) reads, or a [`CausalPipeline`](@ref) declaring `rescans`).
+Files and tables don't depend on the context, except for the rows at `stop`
+that `closed = true` keeps, and most transforms keep their input's
+independence. A [`clock`](@ref), [`head`](@ref), a cumulative
+[`addsummarycolumns`](@ref), or a
 [`summarize`](@ref) emitting at `stop` do depend on it, so a reader asking for
 a widened context gets a run of its own.
 
@@ -246,15 +256,140 @@ function postorder!(order::Vector{CausalPipeline}, seen::IdDict,
     return push!(order, p)
 end
 
-# Group a node's requests into runs by `sharekey`, in request order.
+# Group a node's requests into runs by `sharekey`, the groups in request order,
+# then split each group where its contexts leave a gap (`pushruns!`). Most
+# nodes of a plan have one request, which is one run whatever its key.
 function instances(@nospecialize(node::CausalPipeline), slots::Vector{RunSlot})
+    length(slots) == 1 && return [newinstance(node, slots)]
     groups = Pair{Any,Vector{RunSlot}}[]
     for s in slots
         k = sharekey(node, s)
         g = findfirst(gr -> isequal(first(gr), k), groups)
         g === nothing ? push!(groups, k => [s]) : push!(last(groups[g]), s)
     end
-    return [newinstance(node, last(gr)) for gr in groups]
+    insts = RunInstance[]
+    for gr in groups
+        pushruns!(insts, node, last(gr))
+    end
+    return insts
+end
+
+# An instance per run of overlapping or touching contexts in the group, by
+# start, so no run covers a gap none of its slots asked for (issue #132). A
+# forced share and a `rescans` source are always one run. Runs whose input
+# contexts overlap or touch again (a look-back bridging the gap) stay one too:
+# apart, the node would read those input rows once per run. A single slot, or
+# a group fixing its start or its stop, can't leave a gap, so it skips the
+# sort. Unsplit, the group (sorted in place) is the instance's own slot
+# vector, so the common case allocates nothing more.
+function pushruns!(insts::Vector{RunInstance}, @nospecialize(node::CausalPipeline),
+    slots::Vector{RunSlot})
+    (
+        node.sharing === true || node.rescans || !(node.startfree & node.stopfree) ||
+        length(slots) == 1
+    ) && return push!(insts, newinstance(node, slots))
+    ctx = first(slots).ctx
+    # dispatched on the erased context, so a group too wide for insertion
+    # compiles its merge only when one is planned
+    length(slots) > SORTINSERTMAX ? mergeslots!(slots, ctx) : sortslots!(slots, ctx)
+    n, lo, hi = length(slots), 1, runend(slots, 1, ctx)
+    hi == n && return push!(insts, newinstance(node, slots))
+    # a later cluster starts past every earlier stop, so the hull of the
+    # clusters `lo:hi` ends where the last of them does
+    hull = slothull(slots, lo, hi, ctx)
+    while hi < n
+        next = runend(slots, hi + 1, ctx)
+        nexthull = slothull(slots, hi + 1, next, ctx)
+        if inputsmeet(node, hull, nexthull)
+            hull = Context(hull.start, nexthull.stop)
+        else
+            push!(insts, newinstance(node, slots[lo:hi]))
+            lo, hull = hi + 1, nexthull
+        end
+        hi = next
+    end
+    return push!(insts, newinstance(node, lo == 1 ? slots : slots[lo:n]))
+end
+
+# The union of the sorted slots `lo:hi`'s contexts.
+function slothull(slots::Vector{RunSlot}, lo::Int, hi::Int, ::Context{T}) where {T}
+    stop = (slots[lo].ctx::Context{T}).stop
+    for i in (lo+1):hi
+        stop = max(stop, (slots[i].ctx::Context{T}).stop)
+    end
+    return Context((slots[lo].ctx::Context{T}).start, stop)
+end
+
+# Whether runs over `a` and the later `b` would read any input over
+# overlapping or touching contexts. Called once per gap, so it may dispatch.
+function inputsmeet(@nospecialize(node::CausalPipeline), a::Context, b::Context)
+    as, bs = node.contexts(a), node.contexts(b)
+    for i in eachindex(node.inputs)
+        ia, ib = inputcontext(as, i), inputcontext(bs, i)
+        ia.start <= ib.stop && ib.start <= ia.stop && return true
+    end
+    return false
+end
+
+# Sort a group by start, by a stable insertion sort with typed comparisons: a
+# group is usually a handful of slots of one time type (it is in the key), and
+# `sort!` over the erased contexts dispatched per comparison. It takes no node,
+# whose `@nospecialize` slowed that dispatch tenfold.
+function sortslots!(slots::Vector{RunSlot}, ::Context{T}) where {T}
+    for i in 2:length(slots)
+        s = slots[i]
+        t = (s.ctx::Context{T}).start
+        j = i - 1
+        while j >= 1 && (slots[j].ctx::Context{T}).start > t
+            slots[j+1] = slots[j]
+            j -= 1
+        end
+        slots[j+1] = s
+    end
+    return slots
+end
+
+# The widest group `sortslots!` sorts: insertion is quadratic, and past about
+# this many slots the merge is faster.
+const SORTINSERTMAX = 32
+
+# Sort a wide fan-out's group like `sortslots!`, by a stable bottom-up merge
+# sort through one buffer. `sortperm` of the typed starts sorted faster but
+# compiled three times longer.
+function mergeslots!(slots::Vector{RunSlot}, ::Context{T}) where {T}
+    n, w = length(slots), 1
+    src, dst = slots, similar(slots)
+    while w < n
+        for lo in 1:2w:n
+            mid, hi = min(lo + w - 1, n), min(lo + 2w - 1, n)
+            i, j = lo, mid + 1
+            for k in lo:hi
+                if j > hi || (
+                    i <= mid &&
+                    (src[i].ctx::Context{T}).start <= (src[j].ctx::Context{T}).start
+                )
+                    dst[k] = src[i]
+                    i += 1
+                else
+                    dst[k] = src[j]
+                    j += 1
+                end
+            end
+        end
+        src, dst, w = dst, src, 2w
+    end
+    return src === slots ? slots : copyto!(slots, src)
+end
+
+# The last slot of the run of overlapping or touching contexts from `lo`.
+function runend(slots::Vector{RunSlot}, lo::Int, ::Context{T}) where {T}
+    stop = (slots[lo].ctx::Context{T}).stop
+    for i in (lo+1):length(slots)
+        c = slots[i].ctx::Context{T}
+        c.start > stop && return i - 1
+        stop = max(stop, c.stop)
+    end
+    return length(slots)
 end
 
 # Requests share a run when their keys are equal. The time type is always in

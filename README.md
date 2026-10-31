@@ -46,8 +46,8 @@ CausalFrame{Dates.DateTime} with 2 rows over [2026-01-01T00:00:00, 2026-02-01T00
   chunk, and `scan(ctx, p)` runs it for its side effects. Each also has a
   curried form, `p |> load(ctx)`. A pipeline read in several places, such as
   both sides of `asofjoin(p, p |> f)`, runs once for all of them whenever that
-  gives each the rows it would get alone; `sharing(true)` or `sharing(false)`
-  overrides that.
+  gives each the rows it would get alone, unless their windows leave a gap
+  it could skip; `sharing(true)` or `sharing(false)` overrides that.
 - **`CausalFrame`**: a loaded table. Read it through Tables.jl or copy it out
   with `DataFrame(frame)`.
 
