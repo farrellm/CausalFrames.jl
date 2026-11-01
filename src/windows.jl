@@ -373,11 +373,13 @@ end
     emitdense!(rows, τ, groups, ks, tiers, outs, emptyrow)
 
 # One row per declared key, in declared order: the key's summary when it has a
-# group, else the empty values. Lookups by the declared key need no conversion.
+# group, else the empty values. The declared key is looked up as given: a
+# `KeyDict` matches it field by field, whatever its field types.
 function emitdense!(rows::Vector{RT}, τ, groups::AbstractDict, ks::KeySet,
     tiers::WindowTiers, outs::Val, emptyrow) where {RT}
-    # `haskey` then indexing, not `get(groups, k, nothing)`: a refold primary's
-    # entry is a state tuple, which a Union with Nothing would box.
+    # `haskey` then indexing hashes each key twice, but `get(groups, k,
+    # nothing)` would box a refold primary's entry, a state tuple, in a Union
+    # with Nothing.
     for k in ks.keys
         if haskey(groups, k)
             push!(rows,

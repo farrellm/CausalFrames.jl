@@ -155,7 +155,7 @@ joinfreedom(::Backward, tolerance) = (tolerance !== nothing, true)
 # Slot numbers don't move, so only the keys are rebuilt; every slot is
 # occupied, so the vector converts wholesale.
 widenstore(st::SlotStore, ::Type{K}, ::Type{V}) where {K,V} =
-    SlotStore{K,V}(KeyDict{K,Int}(convert(K, k) => j for (k, j) in st.index),
+    SlotStore{K,V}(KeyDict{K,Int}(st.index),
         convert(Vector{V}, st.slots))
 
 # Store `row` as key `k`'s latest, in one hash: `get!` claims the next slot

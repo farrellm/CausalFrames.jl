@@ -516,7 +516,7 @@ design rationale and performance constraints behind each module.
   stateful operators DESIGN.md's streaming section lists. Its state is a
   `FillCell` per (key, *column*), not a row per key: columns carry
   independently, so `lastrow`'s whole-row store cannot serve. The cells are
-  mutable, so the store is a plain `KeyDict{K,NamedTuple}` rather than a
+  mutable, so the store is a `KeyDict{K,NamedTuple}` rather than a
   `SlotStore`: a lookup already answers with a pointer, with no
   `Union{Nothing,V}` to box (as with `KeyBuffer`). A selected column whose
   promoted type admits no `Missing` gets `nothing` instead of a replacement

@@ -135,6 +135,7 @@
         @test sort!(collect(values(d))) == [1, 2]
         delete!(d, (a = "x", b = 1))
         @test isequal(collect(d), [(a = missing, b = 2.0) => 2])
+        @test copy(d) isa CausalFrames.KeyDict{K,Int}
         @test isempty(empty!(d))
     end
 end

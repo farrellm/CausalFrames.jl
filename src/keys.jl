@@ -47,6 +47,8 @@ struct KeyDict{K<:NamedTuple,V} <: AbstractDict{K,V}
     KeyDict{K,V}() where {K,V} = new(Dict{Key{K},V}())
     function KeyDict{K,V}(kvs) where {K,V}
         d = Dict{Key{K},V}()
+        Base.IteratorSize(kvs) isa Union{Base.HasLength,Base.HasShape} &&
+            sizehint!(d, length(kvs))
         for (k, v) in kvs
             d[Key{K}(k)] = v
         end
@@ -70,6 +72,8 @@ end
 @inline Base.empty!(kd::KeyDict) = (empty!(kd.d); kd)
 @inline Base.sizehint!(kd::KeyDict, n::Integer) = (sizehint!(kd.d, n); kd)
 @inline Base.values(kd::KeyDict) = values(kd.d)
+# So `copy` and `empty` keep a store a KeyDict, not the generic plain `Dict`.
+Base.empty(::KeyDict, ::Type{K}, ::Type{V}) where {K<:NamedTuple,V} = KeyDict{K,V}()
 
 @inline function Base.iterate(kd::KeyDict{K,V}, s...) where {K,V}
     y = iterate(kd.d, s...)

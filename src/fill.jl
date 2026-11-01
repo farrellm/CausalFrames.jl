@@ -5,7 +5,7 @@
 #
 # The state is a cell per (key, column), not a row per key, because columns
 # carry independently (`:a` from row 3, `:b` from row 7), so `lastrow`'s
-# whole-row store cannot serve. The cells are mutable, so the store is a plain
+# whole-row store cannot serve. The cells are mutable, so the store is a
 # `KeyDict{K,NamedTuple}` rather than join.jl's `SlotStore`: a lookup already
 # answers with a pointer, with no `Union{Nothing,V}` to box (as with
 # `KeyBuffer` in src/acausal.jl).
@@ -167,7 +167,7 @@ function widencellstore(::Type{KeyDict{K,NT}}, old::AbstractDict) where {K,NT}
     new = KeyDict{K,NT}()
     sizehint!(new, length(old))
     for (k, v) in old
-        new[convert(K, k)] = widencells(NT, v)
+        new[k] = widencells(NT, v)
     end
     return new
 end

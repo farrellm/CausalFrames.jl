@@ -70,8 +70,10 @@ function tokeyset(keyset, keycols::Vector{Symbol}, op::String)
     cols = ntuple(j -> map(t -> t[j], tuples), length(KN))
     K = NamedTuple{KN,Tuple{map(eltype, cols)...}}
     keys = K[K(map(col -> col[i], cols)) for i in eachindex(tuples)]
-    allunique(keys) || throw(ArgumentError("$op keyset values must be unique"))
-    return KeySet{K}(keys, KeyDict{K,Int}(k => i for (i, k) in enumerate(keys)), op)
+    index = KeyDict{K,Int}(k => i for (i, k) in enumerate(keys))
+    length(index) == length(keys) ||
+        throw(ArgumentError("$op keyset values must be unique"))
+    return KeySet{K}(keys, index, op)
 end
 
 # One declared key as a tuple of column values. It is declared as the value

@@ -95,7 +95,7 @@ rightcontext(::Forward, ctx::Context, tolerance, op::String) =
 joinfreedom(::Forward, tolerance) = (true, tolerance !== nothing)
 widenstore(store::KeyDict{<:Any,<:KeyBuffer}, ::Type{K}, ::Type{V}) where {K,V} =
     KeyDict{K,KeyBuffer{V}}(
-        convert(K, k) => KeyBuffer{V}(convert(Vector{V}, b.rows), b.head)
+        k => KeyBuffer{V}(convert(Vector{V}, b.rows), b.head)
         for (k, b) in store)
 
 # --- merge kernel ----------------------------------------------------------
