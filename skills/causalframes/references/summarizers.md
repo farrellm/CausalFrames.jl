@@ -1,6 +1,6 @@
 # Summarizers
 
-Contents: Row terms, `Count`, `CountDistinct`, `Sum`, `SumPower`, `Moment`, `Product`, `DotProduct`, `AgeWeightedSum`, `Mean`, `Variance`, `Std`, `Covariance`, `Correlation`, `LinearRegression`, `Quantile`, `Median`, `PercentRank`, `MeanAbsDev`, `SortedValues`, `WindowValues`, `Min`, `Max`, `MinIndex`, `MaxIndex`, `MinWithIndex`, `MaxWithIndex`, `First`, `Last`, `FitModel`, Summarizer interface.
+Contents: Row terms, `Count`, `CountDistinct`, `Sum`, `SumPower`, `Moment`, `Product`, `DotProduct`, `AgeWeightedSum`, `Mean`, `Variance`, `Std`, `Skewness`, `Kurtosis`, `Covariance`, `Correlation`, `LinearRegression`, `Quantile`, `Median`, `PercentRank`, `MeanAbsDev`, `SortedValues`, `WindowValues`, `Min`, `Max`, `MinIndex`, `MaxIndex`, `MinWithIndex`, `MaxWithIndex`, `First`, `Last`, `FitModel`, Summarizer interface.
 
 Summarizers are what the [summarizing transforms](summarizing.md) fold over
 rows. Each output column is named by suffix (`Sum(:mid)` produces `:mid_sum`)
@@ -239,6 +239,47 @@ negatives clamped to zero.
 
 #### Keywords
 - `corrected = true`: as for `Variance`.
+
+## `Skewness`
+
+    Skewness(column::ColumnSpec; corrected = true) -> Summarizer
+
+The skewness of `column`, in `:{column}_skewness` (`missing` for no rows,
+`NaN` if a value is NaN or ±Inf). With `corrected = true` it is the
+sample-adjusted `G1 = g1·√(n(n-1))/(n-2)`, as pandas' rolling `skew` and
+Excel's `SKEW` compute; with `false`, the moment estimator
+`g1 = m₃/m₂^(3/2)` over population moments, as `StatsBase.skewness`. `NaN`
+when every value is equal, and for fewer than three rows when corrected.
+Integer input gives `Float64`. Like `Variance`, the state folds
+deviations from a shift near the data, so a large level doesn't cancel.
+
+#### Arguments
+- `column`: a column name, or a row term `name => f` (see `ColumnSpec`).
+
+#### Keywords
+- `corrected = true`: `G1` rather than `g1`. It is not part of the output
+  name, so both forms of one column cannot be requested together.
+
+## `Kurtosis`
+
+    Kurtosis(column::ColumnSpec; corrected = true) -> Summarizer
+
+The excess kurtosis of `column` (a normal distribution gives 0), in
+`:{column}_kurtosis` (`missing` for no rows, `NaN` if a value is NaN or ±Inf).
+With `corrected = true` it is the sample-adjusted
+`G2 = (n-1)((n+1)·g2 + 6)/((n-2)(n-3))`, as pandas' rolling `kurt`, Excel's
+`KURT` and TA-Lib's `KURTOSIS` compute; with `false`, the moment estimator
+`g2 = m₄/m₂² - 3` over population moments, as `StatsBase.kurtosis`. `NaN`
+when every value is equal, and for fewer than four rows when corrected.
+Integer input gives `Float64`. Like `Variance`, the state folds
+deviations from a shift near the data, so a large level doesn't cancel.
+
+#### Arguments
+- `column`: a column name, or a row term `name => f` (see `ColumnSpec`).
+
+#### Keywords
+- `corrected = true`: `G2` rather than `g2`. It is not part of the output
+  name, so both forms of one column cannot be requested together.
 
 ## `Covariance`
 

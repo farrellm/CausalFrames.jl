@@ -224,6 +224,8 @@ that never reaches the output: `Sum(:range => r -> r.high - r.low)` produces
 | [`Mean(:x)`](references/summarizers.md#Mean) | `:x_mean` | group | mean |
 | [`Variance(:x; corrected)`](references/summarizers.md#Variance) | `:x_variance` | group | variance, as `Statistics.var` |
 | [`Std(:x; corrected)`](references/summarizers.md#Std) | `:x_std` | group | standard deviation, as `Statistics.std` |
+| [`Skewness(:x; corrected)`](references/summarizers.md#Skewness) | `:x_skewness` | group | skewness, sample-adjusted `G1` (or `g1`) |
+| [`Kurtosis(:x; corrected)`](references/summarizers.md#Kurtosis) | `:x_kurtosis` | group | excess kurtosis, sample-adjusted `G2` (or `g2`) |
 | [`Covariance(:x, :y; corrected)`](references/summarizers.md#Covariance) | `:x_y_covariance` | group | covariance, as `Statistics.cov` |
 | [`Correlation(:x, :y)`](references/summarizers.md#Correlation) | `:x_y_correlation` | group | Pearson correlation |
 | [`LinearRegression(predictors, response; intercept, name)`](references/summarizers.md#LinearRegression) | `n`, `r2`, `stderr`, and a beta and t statistic per term | group | ordinary least squares |

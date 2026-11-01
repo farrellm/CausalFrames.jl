@@ -18,7 +18,7 @@
             p |> summarize([Count(), Sum(:v), SumPower(:v, 2),
                 Moment(:v, 2), Min(:v), Max(:v), MaxIndex(:v),
                 Product(:v), Mean(:v), Variance(:v),
-                Std(:v), DotProduct(:v, :qty),
+                Std(:v), Kurtosis(:v), DotProduct(:v, :qty),
                 Covariance(:v, :qty),
                 Correlation(:v, :qty)]),
         )
