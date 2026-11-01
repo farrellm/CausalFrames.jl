@@ -197,7 +197,7 @@ end
     states = freshall!(g.states)
     for j in from:length(buffer)
         row = @inbounds buffer[j]
-        isequal(keyvalues(row, keynames), k) && updateall!(states, row)
+        keyisequal(keyvalues(row, keynames), k) && updateall!(states, row)
     end
     g.states = states
     return true

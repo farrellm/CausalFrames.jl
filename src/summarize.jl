@@ -98,7 +98,7 @@ end
 # one declared key, the empty one, so it shares the declared-key paths. Every
 # row has that key, so its lookups compile away.
 const NoKey = NamedTuple{(),Tuple{}}
-nokeyset(op::String) = KeySet{NoKey}([(;)], KeyDict{NoKey,Int}(((;) => 1,)), op)
+nokeyset(op::String) = KeySet{NoKey}([(;)], KeyDict{NoKey,Int}((;) => 1), op)
 
 # The declared slot of a row's key, or an error for a key outside the set.
 @inline function keyindex(ks::KeySet, k)

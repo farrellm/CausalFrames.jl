@@ -163,14 +163,8 @@ end
 widencells(::Type{NamedTuple{FN,TT}}, old::NamedTuple{FN}) where {FN,TT} =
     NamedTuple{FN,TT}(ntuple(i -> widencell(fieldtype(TT, i), old[i]), Val(length(FN))))
 
-function widencellstore(::Type{KeyDict{K,NT}}, old::AbstractDict) where {K,NT}
-    new = KeyDict{K,NT}()
-    sizehint!(new, length(old))
-    for (k, v) in old
-        new[k] = widencells(NT, v)
-    end
-    return new
-end
+widencellstore(::Type{KeyDict{K,NT}}, old::AbstractDict) where {K,NT} =
+    KeyDict{K,NT}(k => widencells(NT, v) for (k, v) in old)
 
 # Per-chunk setup: build or widen the cells, allocate the replacement columns,
 # then call the per-row kernel with concretely typed arguments. A column whose

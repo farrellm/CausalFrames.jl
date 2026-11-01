@@ -377,9 +377,8 @@ end
 # `KeyDict` matches it field by field, whatever its field types.
 function emitdense!(rows::Vector{RT}, τ, groups::AbstractDict, ks::KeySet,
     tiers::WindowTiers, outs::Val, emptyrow) where {RT}
-    # `haskey` then indexing hashes each key twice, but `get(groups, k,
-    # nothing)` would box a refold primary's entry, a state tuple, in a Union
-    # with Nothing.
+    # `haskey` then indexing, not `get(groups, k, nothing)`: a refold primary's
+    # entry is a state tuple, which a Union with Nothing would box.
     for k in ks.keys
         if haskey(groups, k)
             push!(rows,
@@ -404,7 +403,7 @@ function emitwindow!(rows::Vector{RT}, τ, present::Vector{<:Pair},
             push!(rows, convert(RT, gridrow(τ, @inbounds(prevkeys[j]), emptyrow)))
             j += 1
         end
-        j <= np && isequal(@inbounds(prevkeys[j]), k) && (j += 1)
+        j <= np && keyisequal(@inbounds(prevkeys[j]), k) && (j += 1)
         push!(rows, convert(RT, gridrow(τ, k, tiervalues(tiers, k, g, outs))))
     end
     while j <= np

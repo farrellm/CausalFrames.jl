@@ -676,7 +676,7 @@ end
     seen = false
     for j in (@inbounds winheads[w]):length(buffer)
         s = @inbounds buffer[j]
-        isequal(keyvalues(s, keynames), k) || continue
+        keyisequal(keyvalues(s, keynames), k) || continue
         updateall!(states, s)
         seen = true
     end

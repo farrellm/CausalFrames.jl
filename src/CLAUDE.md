@@ -380,7 +380,8 @@ design rationale and performance constraints behind each module.
   same names, so lookups never convert (the `KeySet` and join promise that an
   `isequal` key of another type matches); inserts convert to `K`, a no-op
   for `keyat`/`keyvalues` keys. Never key a store by a bare `Dict{K}` of
-  NamedTuples. `filter!` is its own in-place method because the generic one
+  NamedTuples, nor compare keys outside one with Base's `isequal`: use
+  `keyisequal`, the same field-by-field comparison (the refold scans). `filter!` is its own in-place method because the generic one
   allocates a key vector per call (the window close filters per tick)
 - `src/summarize.jl` — the folding kernels and the transforms `summarize`,
   `summarizecycles` and `addsummarycolumns`; also the key validators every

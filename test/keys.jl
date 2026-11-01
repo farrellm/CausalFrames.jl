@@ -135,7 +135,13 @@
         @test sort!(collect(values(d))) == [1, 2]
         delete!(d, (a = "x", b = 1))
         @test isequal(collect(d), [(a = missing, b = 2.0) => 2])
-        @test copy(d) isa CausalFrames.KeyDict{K,Int}
+        c = copy(d)
+        @test c isa CausalFrames.KeyDict{K,Int} && isequal(collect(c), collect(d))
+        c[(a = "z", b = 4.0)] = 4
+        @test length(d) == 1
+        @test CausalFrames.keyisequal((a = missing, b = 1), (a = missing, b = 1.0))
+        @test !CausalFrames.keyisequal((a = "x", b = 1), (a = "y", b = 1))
+        @test CausalFrames.keyisequal((;), (;))
         @test isempty(empty!(d))
     end
 end

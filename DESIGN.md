@@ -2322,7 +2322,9 @@ as plain NamedTuples — so emission, ordering and error messages never see it.
 `isequal` and `hash` agree across NamedTuple types with the same names, so a
 lookup key of narrower or numerically different types (an `Int` against a
 `Float64` key) still finds its entry without conversion; only an insert
-converts, a no-op for keys built in the store's type.
+converts, a no-op for keys built in the store's type. Keys compared outside a
+store, as the refold and window-close scans do, go through the same
+field-by-field `keyisequal`.
 
 One consequence worth knowing: more than about 32 summarizers in a single
 call — counting hidden dependencies after expansion — exceeds Julia's tuple
