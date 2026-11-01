@@ -1405,6 +1405,15 @@ end
     st = CausalFrames.fresh(CausalFrames.CentralMoments{:x}(), intypes)
     foreach(row -> CausalFrames.update!(st, row), rs)
     @test st.peak == 0 && !CausalFrames.needsrefold(st)
+    # Float16, where the squared ratio would overflow: a flat window left
+    # after a spread still asks
+    st = CausalFrames.freshwindowed(CausalFrames.CentralMoments{:x}(),
+        (time = Int, x = Float16))
+    for v in Float16[0, 4, 0.5, 0.5, 0.5]
+        CausalFrames.update!(st, (time = 1, x = v))
+    end
+    foreach(v -> CausalFrames.downdate!(st, (time = 1, x = v)), Float16[0, 4])
+    @test CausalFrames.needsrefold(st)
 end
 
 @testset "sum refold after a dominant term leaves" begin
