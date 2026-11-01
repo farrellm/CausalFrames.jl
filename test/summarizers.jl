@@ -1316,6 +1316,61 @@ end
     )
     @test only(out.x_kurtosis) ≈ shape(xs .- 10^12, :kurtosis) atol = 1e-15
 
+    # BigFloat folds in plain storage (no compensation, no recentring), and
+    # combine! moves the shift by plain arithmetic; at 256 bits a far-apart
+    # combine is exact to far below Float64's eps
+    setprecision(BigFloat, 256) do
+        bt = (time = Int, x = BigFloat)
+        bs = [big(1e9) + big(i % 7) / 8 + big(sin(i)) for i in 1:10]
+        bs[6:end] .-= big(3e8)
+        exactb = (b = bs; m = sum(b) / length(b); Tuple(sum((b .- m) .^ j) for j in 2:4))
+        for k in (0, 3, 10)
+            l = CausalFrames.fresh(CausalFrames.CentralMoments{:x}(), bt)
+            r = CausalFrames.fresh(l)
+            foreach(v -> CausalFrames.update!(l, (; x = v)), bs[1:k])
+            foreach(v -> CausalFrames.update!(r, (; x = v)), bs[(k+1):end])
+            CausalFrames.combine!(l, l, r)
+            m = only(CausalFrames.value(l))
+            @test m isa NTuple{3,BigFloat}
+            @test all(abs.(m .- exactb) .<= big(1e-60) .* abs.(exactb))
+        end
+        out = DataFrame(
+            load(Context(0, 20),
+                readtable((time = collect(1:10), x = bs)) |>
+                addrollingcolumns((w = Bars(5),), Kurtosis(:x))),
+        )
+        @test eltype(out.w_x_kurtosis) == Union{Missing,BigFloat}
+        @test all(
+            i -> abs(out.w_x_kurtosis[i] - shape(Float64.(bs[(i-4):i]), :kurtosis)) <
+                 1e-6, 5:10)
+    end
+
+    # evicting every row restarts the sums at exactly zero, and the state
+    # then folds afresh at a new level
+    st = CausalFrames.freshwindowed(CausalFrames.CentralMoments{:x}(), intypes)
+    for v in (1e8 + 0.1, 1e8 + 7.3)
+        CausalFrames.update!(st, (; x = v))
+    end
+    for v in (1e8 + 0.1, 1e8 + 7.3)
+        CausalFrames.downdate!(st, (; x = v))
+    end
+    @test st.n == 0 && st.peak == 0 && only(CausalFrames.value(st)) === (0.0, 0.0, 0.0)
+    w = [-2.0, 3.0, 0.5, 9.0]
+    foreach(v -> CausalFrames.update!(st, (; x = v)), w)
+    @test all(only(CausalFrames.value(st)) .≈ exactm([(; x = v) for v in w]))
+
+    # an all-missing chunk widens to the real state, handing over its count:
+    # missing until both missing rows have left a Bars(3) window
+    p = concatenate(readtable(DataFrame(time = 1:2, x = fill(missing, 2))),
+        readtable(DataFrame(time = 3:7, x = [1.0, 2.0, 4.0, 8.0, 3.0])))
+    out = DataFrame(
+        load(Context(0, 10),
+            p |> addrollingcolumns((w = Bars(3),), Skewness(:x))),
+    )
+    @test all(ismissing, out.w_x_skewness[1:4])
+    @test out.w_x_skewness[5:7] ≈
+          [shape(w, :skewness) for w in ([1.0, 2, 4], [2.0, 4, 8], [4.0, 8, 3])]
+
     # a dominant row's departure: every window path refolds and recovers
     # (the 1e8 print in prices near 100, as for the co-moment)
     y = [100.0 + ((i * 37) % 11) * 0.01 for i in 0:199]
