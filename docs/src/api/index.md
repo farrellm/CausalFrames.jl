@@ -24,7 +24,7 @@ The [summarizers](summarizers.md) the summarizing transforms take:
 |---|---|
 | Counting | [`Count`](@ref "Count"), [`CountDistinct`](@ref "CountDistinct") |
 | Accumulating | [`Sum`](@ref "Sum"), [`SumPower`](@ref "SumPower"), [`Product`](@ref "Product"), [`DotProduct`](@ref "DotProduct"), [`AgeWeightedSum`](@ref "AgeWeightedSum") |
-| Moments | [`Moment`](@ref "Moment"), [`Mean`](@ref "Mean"), [`Variance`](@ref "Variance"), [`Std`](@ref "Std") |
+| Moments | [`Moment`](@ref "Moment"), [`Mean`](@ref "Mean"), [`Variance`](@ref "Variance"), [`Std`](@ref "Std"), [`Skewness`](@ref "Skewness"), [`Kurtosis`](@ref "Kurtosis") |
 | Relating two columns | [`Covariance`](@ref "Covariance"), [`Correlation`](@ref "Correlation"), [`LinearRegression`](@ref "LinearRegression") |
 | Order statistics | [`Quantile`](@ref "Quantile"), [`Median`](@ref "Median"), [`PercentRank`](@ref "PercentRank"), [`MeanAbsDev`](@ref "MeanAbsDev"), [`CausalFrames.SortedValues`](@ref "SortedValues"), [`CausalFrames.WindowValues`](@ref "WindowValues") |
 | Tracking a single row | [`Min`](@ref "Min"), [`Max`](@ref "Max"), [`MinIndex`](@ref "MinIndex"), [`MaxIndex`](@ref "MaxIndex"), [`MinWithIndex`](@ref "MinWithIndex"), [`MaxWithIndex`](@ref "MaxWithIndex"), [`First`](@ref "First"), [`Last`](@ref "Last") |
