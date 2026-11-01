@@ -75,6 +75,19 @@ variance negative.
 - `corrected = true`: divide by `n - 1` (a single row gives `NaN`); `false`
   divides by `n`. It is not part of the output name, so both forms of one column
   cannot be requested together.
+
+```jldoctest
+df = DataFrame(time = 1:5, x = [1.0, 2.0, 2.0, 3.0, 9.0])
+DataFrame(load(Context(0, 10), readtable(df) |> summarize(Variance(:x))))
+
+# output
+
+1×2 DataFrame
+ Row │ time   x_variance
+     │ Int64  Float64
+─────┼───────────────────
+   1 │    10        10.3
+```
 """
 struct Variance{C} <: GroupSummarizer
     corrected::Bool

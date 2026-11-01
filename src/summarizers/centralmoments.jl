@@ -372,6 +372,19 @@ deviations from a shift near the data, so a large level doesn't cancel.
 # Keywords
 - `corrected = true`: `G1` rather than `g1`. It is not part of the output
   name, so both forms of one column cannot be requested together.
+
+```jldoctest
+df = DataFrame(time = 1:5, x = [1.0, 2.0, 2.0, 3.0, 9.0])
+DataFrame(load(Context(0, 10), readtable(df) |> summarize(Skewness(:x))))
+
+# output
+
+1×2 DataFrame
+ Row │ time   x_skewness
+     │ Int64  Float64
+─────┼───────────────────
+   1 │    10     1.96936
+```
 """
 struct Skewness{C} <: GroupSummarizer
     corrected::Bool
@@ -398,6 +411,19 @@ deviations from a shift near the data, so a large level doesn't cancel.
 # Keywords
 - `corrected = true`: `G2` rather than `g2`. It is not part of the output
   name, so both forms of one column cannot be requested together.
+
+```jldoctest
+df = DataFrame(time = 1:5, x = [1.0, 2.0, 2.0, 3.0, 9.0])
+DataFrame(load(Context(0, 10), readtable(df) |> summarize(Kurtosis(:x))))
+
+# output
+
+1×2 DataFrame
+ Row │ time   x_kurtosis
+     │ Int64  Float64
+─────┼───────────────────
+   1 │    10     4.06919
+```
 """
 struct Kurtosis{C} <: GroupSummarizer
     corrected::Bool
