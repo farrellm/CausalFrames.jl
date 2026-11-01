@@ -2318,11 +2318,15 @@ allocated a tuple and two boxed hashes (issue #116). Every keyed store is
 therefore a `KeyDict`: a `Dict` storing each key wrapped in a package-owned
 `Key`, whose `hash` and `isequal` go field by field, so each field's `Union`
 splits. The wrapper stays inside the dictionary — keys go in and come out
-as plain NamedTuples — so emission, ordering and error messages never see it.
+as plain NamedTuples — so emission and ordering never see it (only the
+`KeyError` of a lookup on an absent key, an internal bug, shows it; a clean
+one would cost a second hash per lookup).
 `isequal` and `hash` agree across NamedTuple types with the same names, so a
 lookup key of narrower or numerically different types (an `Int` against a
 `Float64` key) still finds its entry without conversion; only an insert
-converts, a no-op for keys built in the store's type. Keys compared outside a
+converts, a no-op for keys built in the store's type, and as Base's `Dict` does
+it refuses a conversion that changes the key (a `Float64` into a `Float32`
+field), which would otherwise merge distinct keys. Keys compared outside a
 store, as the refold and window-close scans do, go through the same
 field-by-field `keyisequal`.
 

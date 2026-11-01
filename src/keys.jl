@@ -35,6 +35,19 @@ end
 # field as a `KeyDict` lookup compares, not through Base's `Tuple(nt)`.
 @inline keyisequal(a::NamedTuple, b::NamedTuple) = isequal(Key(a), Key(b))
 
+# A key as stored in a `KeyDict{K}`: converted to `K`, which must not change
+# it (as Base's `Dict` insists), else a lossy conversion (a `Float64` into a
+# `Float32` field) would silently merge distinct keys. Free for a key already
+# of type `K`.
+@inline storedkey(::Type{K}, k::K) where {K<:NamedTuple} = Key{K}(k)
+@inline function storedkey(::Type{K}, k::NamedTuple) where {K<:NamedTuple}
+    sk = Key{K}(k)
+    isequal(sk, Key(k)) || throwinvalidkey(K, k)
+    return sk
+end
+@noinline throwinvalidkey(K, k) =
+    throw(ArgumentError("$k is not a valid key for type $K"))
+
 # A `Dict{K,V}` over NamedTuple keys `K`, storing them as `Key{K}`. A lookup
 # wraps its key as given (no conversion, as above); an insert converts it to
 # `K`, a no-op for keys built in the store's type (`keyat`, `keyvalues`).
@@ -49,7 +62,7 @@ struct KeyDict{K<:NamedTuple,V} <: AbstractDict{K,V}
         Base.IteratorSize(kvs) isa Union{Base.HasLength,Base.HasShape} &&
             sizehint!(d, length(kvs))
         for (k, v) in kvs
-            d[Key{K}(k)] = v
+            d[storedkey(K, k)] = v
         end
         return new(d)
     end
@@ -59,12 +72,12 @@ KeyDict{K,V}(ps::Pair...) where {K,V} = KeyDict{K,V}(ps)
 @inline Base.length(kd::KeyDict) = length(kd.d)
 @inline Base.get(kd::KeyDict, k::NamedTuple, default) = get(kd.d, Key(k), default)
 @inline Base.get!(f::Base.Callable, kd::KeyDict{K}, k::NamedTuple) where {K} =
-    get!(f, kd.d, Key{K}(k))
+    get!(f, kd.d, storedkey(K, k))
 @inline Base.get!(kd::KeyDict{K}, k::NamedTuple, v) where {K} =
-    get!(kd.d, Key{K}(k), v)
+    get!(kd.d, storedkey(K, k), v)
 @inline Base.getindex(kd::KeyDict, k::NamedTuple) = kd.d[Key(k)]
 @inline Base.setindex!(kd::KeyDict{K}, v, k::NamedTuple) where {K} =
-    (kd.d[Key{K}(k)] = v; kd)
+    (kd.d[storedkey(K, k)] = v; kd)
 @inline Base.haskey(kd::KeyDict, k::NamedTuple) = haskey(kd.d, Key(k))
 @inline Base.delete!(kd::KeyDict, k::NamedTuple) = (delete!(kd.d, Key(k)); kd)
 @inline Base.empty!(kd::KeyDict) = (empty!(kd.d); kd)

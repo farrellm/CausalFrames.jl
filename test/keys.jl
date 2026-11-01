@@ -143,5 +143,12 @@
         @test !CausalFrames.keyisequal((a = "x", b = 1), (a = "y", b = 1))
         @test CausalFrames.keyisequal((;), (;))
         @test isempty(empty!(d))
+        # An insert that would change the key on conversion is refused, as
+        # Base's Dict refuses it, rather than merging distinct keys.
+        f = CausalFrames.KeyDict{@NamedTuple{a::Float32},Int}()
+        @test_throws ArgumentError f[(a = 0.1,)] = 1
+        @test_throws ArgumentError get!(f, (a = 0.1,), 1)
+        f[(a = 0.5,)] = 1
+        @test f[(a = 0.5f0,)] == 1
     end
 end
