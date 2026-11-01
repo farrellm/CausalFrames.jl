@@ -215,10 +215,12 @@ end
 end
 
 # Read on every eviction, so the compensated pair is read as is. A Σd⁴ gone to
-# zero under round-off asks too; a NaN one doesn't.
+# zero under round-off asks too; a NaN one doesn't. The ratio is applied once
+# to each side, since `REFOLDRATIO²` overflows Float16.
 @inline function needsrefold(st::CentralMomentState{N,C,T,M,S,W}) where {N,C,T,M,S,W}
     W || return false
-    return st.peak > convert(T, REFOLDRATIO)^2 * (st.s4.total + st.s4.comp)
+    r = convert(T, REFOLDRATIO)
+    return st.peak / r > r * (st.s4.total + st.s4.comp)
 end
 
 @inline function recentre!(st::CentralMomentState{N,C,T,M,S}, k) where {N,C,T,M,S}
@@ -290,7 +292,8 @@ end
     return (max(m2, zero(m2)), v3, max(v4, zero(v4)))
 end
 
-# Minimal double-double arithmetic over pairs (hi, lo), for `centralvalue`.
+# Minimal double-double arithmetic over pairs (hi, lo), for `deviation`,
+# `shiftpowers` and `centralvalue`.
 @inline dd(s::Compensated) = fasttwosum(s.total, s.comp)
 @inline fasttwosum(a, b) = (s = a + b; (s, b - (s - a)))
 @inline function twosum(a, b)
@@ -318,12 +321,11 @@ end
     p, e = twoprod(q, d)
     return fasttwosum(q, (((ah - p) - e) + al) / d)
 end
-centraltype(::Type{T}) where {T} = Base.promote_op(comomentof, Int, T, T, T)
 
 # `missing` while a missing row is folded, else NaNs while a nonfinite one is.
 # At most one row has no spread, exactly.
 @inline function value(st::CentralMomentState{N,C,T,M}) where {N,C,T,M}
-    V = centraltype(T)
+    V = comomenttype(T)
     R = maybemissing(NTuple{3,V}, M)
     M && st.missings > 0 && return NamedTuple{(N,),Tuple{R}}((missing,))
     if st.nonfinite > 0
