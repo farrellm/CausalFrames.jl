@@ -223,7 +223,7 @@ using CausalFrames.Acausal
             # idempotent, which is what makes a second one measurable
             lnt = (time = fill(1, n), sym = syms)
             rnt = (time = Int[], sym = String[], qty = Float64[])
-            store = Dict{K,KB{V}}(
+            store = CausalFrames.KeyDict{K,KB{V}}(
                 (sym = s,) => KB{V}(V[(time = 5, sym = s, qty = 1.0)], 1)
                 for s in unique(syms))
             matches = Vector{V}(undef, n)

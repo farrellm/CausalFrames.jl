@@ -118,7 +118,7 @@ end
 struct WindowTiers{R,B,G,MQ,GT,TG<:Tiering,SC}
     buffer::B        # Vector{R}, or nothing
     running::G       # RunningTable{K,SR}, or nothing
-    monoids::MQ      # Dict{K,MonoidQueues{ST,R,T}}, or nothing
+    monoids::MQ      # KeyDict{K,MonoidQueues{ST,R,T}}, or nothing
     refold::GT       # GroupTable{K,SF}, or nothing
     tg::TG           # the partition of the states into tiers
     scratch::SC      # Vector{Pair{K,V}} over the primary's dict: the sort buffer
@@ -288,7 +288,7 @@ end
 
 @inline admitwinmonoid!(::Nothing, stateprotos, k, row, ks, keynames::Val,
     lookbacks) = nothing
-@inline function admitwinmonoid!(monoids::Dict{K,Q}, stateprotos::Tuple, k,
+@inline function admitwinmonoid!(monoids::KeyDict{K,Q}, stateprotos::Tuple, k,
     row, ks, keynames::Val, lookbacks::Tuple) where {K,Q<:MonoidQueues}
     mq = get!(monoids, k) do
         checkdeclared(ks, row, keynames)
@@ -347,9 +347,9 @@ end
 @inline tierstates(::Nothing, k, g) = ()
 @inline tierstates(::RunningTable{K,S}, k, g::RunningGroup{S}) where {K,S<:Tuple} =
     g.states
-@inline tierstates(::Dict{K,V}, k, mq::V) where {K,V<:MonoidQueues} =
+@inline tierstates(::KeyDict{K,V}, k, mq::V) where {K,V<:MonoidQueues} =
     livestates(mq, 1)
-@inline tierstates(monoids::Dict{K,V}, k, g) where {K,V<:MonoidQueues} =
+@inline tierstates(monoids::KeyDict{K,V}, k, g) where {K,V<:MonoidQueues} =
     tierstates(monoids, k, monoids[k])
 @inline tierstates(::GroupTable{K,S}, k, states::S) where {K,S<:Tuple} = states
 @inline tierstates(gt::GroupTable, k, g) = gt.table[k]

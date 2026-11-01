@@ -21,20 +21,19 @@ using JET
     groups = CausalFrames.newgroups(keynames, states, intypes)
     JET.@test_opt CausalFrames.foldgroups!(groups, states, nt, keynames)
 
-    # Keys over `missing`-admitting columns: built in the table's key type and
-    # ordered by `keyisless`, neither dispatching (issue #114).
-    unames = Val((:k, :j))
+    # Keys over `missing`-admitting columns: built in the table's key type,
+    # ordered by `keyisless` (issue #114) and hashed field by field through
+    # `KeyDict` (issue #116, where Base's NamedTuple `hash` dispatched from
+    # four `Union` fields, two on Julia 1.10), none of it dispatching.
+    unames = Val((:k, :j, :l, :m))
     unt = (time = [1, 1, 2], k = Union{Missing,String}["a", missing, "a"],
-        j = Union{Missing,Int}[1, 2, missing], x = [1.0, 2.0, 3.0])
+        j = Union{Missing,Int}[1, 2, missing],
+        l = Union{Missing,String}["x", "y", missing],
+        m = Union{Missing,String}[missing, "u", "v"], x = [1.0, 2.0, 3.0])
     untypes = map(eltype, unt)
     ugroups = CausalFrames.newgroups(unames, states, untypes)
     JET.@test_opt CausalFrames.sortedgroups(ugroups)
-    # On Julia 1.10, Base's NamedTuple `hash` dispatches from two `Union`
-    # fields (issue #116), so the fold is checked over one key column there.
-    # When 1.10 support is dropped, check both columns on every version.
-    fnames = VERSION < v"1.11" ? Val((:k,)) : unames
-    fgroups = CausalFrames.newgroups(fnames, states, untypes)
-    JET.@test_opt CausalFrames.foldgroups!(fgroups, states, unt, fnames)
+    JET.@test_opt CausalFrames.foldgroups!(ugroups, states, unt, unames)
 
     JET.@test_opt CausalFrames.foldgroups!(states, states, nt, Val(()))
     JET.@test_opt CausalFrames.foldcycles!(states, states, nt, nothing, Val(()),
@@ -244,7 +243,7 @@ end
     # a String field makes V non-isbits, the case the slot store exists for
     V = typeof((time = 1, sym = "a", y = 1.0))
     K = typeof((sym = "a",))
-    index = Dict{K,Int}()
+    index = CausalFrames.KeyDict{K,Int}()
     slots = V[]
     matches = Vector{V}(undef, 1)
     found = [false]
@@ -259,7 +258,7 @@ end
     # a String key, which only the Int row vector keeps from boxing per row, and
     # the Missing-widening gather over a non-isbits and an isbits column
     K = typeof((sym = "a",))
-    index = Dict{K,Int}((sym = "a",) => 1)
+    index = CausalFrames.KeyDict{K,Int}(((sym = "a",) => 1,))
     nt = (time = [1, 2], sym = ["a", "b"])
     JET.@test_opt CausalFrames.lookuprows!(Vector{Int}(undef, 2), index, nt,
         Val((:sym,)))
@@ -278,7 +277,7 @@ end
     # the same non-isbits V the slot store exists for
     V = typeof((time = 1, sym = "a", y = 1.0))
     K = typeof((sym = "a",))
-    index = Dict{K,Int}()
+    index = CausalFrames.KeyDict{K,Int}()
     slots = V[]
     nt = (time = [1, 2], sym = ["a", "b"], y = [1.0, 2.0])
     JET.@test_opt CausalFrames.lastsegment!(index, slots, nt, Val((:sym,)))
@@ -416,7 +415,7 @@ end
     JET.@test_opt CausalFrames.fillkeyless!(times, groups, (C(),), 2)
 
     NT = typeof((v = C(),))
-    store = Dict{typeof((k = "a",)),NT}()
+    store = CausalFrames.KeyDict{typeof((k = "a",)),NT}()
     nt = (time = times, k = ["a", "a"], v = incol)
     JET.@test_opt CausalFrames.fillkeyed!(times, groups, nt, Val((:k,)), store, 2)
 end

@@ -230,10 +230,10 @@ end
 struct RollTiers{R,B,RG,G,MQ,TG<:Tiering}
     buffer::B              # Vector{R}, or nothing
     winheads::Vector{Int}  # per window, the first buffered row inside it
-    rings::RG              # Dict{K,RowRing{R}}, or nothing
+    rings::RG              # KeyDict{K,RowRing{R}}, or nothing
     barcap::Int            # the rings' capacity
     running::G             # NTuple{W,RunningTable{K,SR}}, or nothing
-    monoids::MQ            # Dict{K,MonoidQueues{ST,R,T}}, or nothing
+    monoids::MQ            # KeyDict{K,MonoidQueues{ST,R,T}}, or nothing
     tg::TG                 # the partition of the states into tiers
 end
 
@@ -305,7 +305,7 @@ end
 # all.
 function barsuffixes(::Type{K}, ::Type{R}, old, head::Int,
     keynames::Val) where {K,R}
-    suffixes = Dict{K,Vector{R}}()
+    suffixes = KeyDict{K,Vector{R}}()
     function offer!(k, rows)
         cur = get(suffixes, k, nothing)
         (cur === nothing || length(rows) > length(cur)) && (suffixes[k] = rows)
@@ -322,7 +322,7 @@ function barsuffixes(::Type{K}, ::Type{R}, old, head::Int,
         end
     end
     if old.buffer !== nothing
-        bykey = Dict{K,Vector{R}}()
+        bykey = KeyDict{K,Vector{R}}()
         for j in head:length(old.buffer)
             row = convert(R, old.buffer[j])
             push!(get!(() -> R[], bykey, keyvalues(row, keynames)), row)
@@ -336,7 +336,7 @@ end
 
 # Each key's ring, holding the newest `cap` rows of its suffix, if any.
 function rebuildrings(::Type{K}, ::Type{R}, cap::Int, suffixes) where {K,R}
-    rings = Dict{K,RowRing{R}}()
+    rings = KeyDict{K,RowRing{R}}()
     suffixes === nothing && return rings
     for (k, rows) in suffixes
         ring = RowRing{R}(cap)
@@ -353,7 +353,7 @@ function suffixmonoids(tg::Tiering, ::Type{K}, ::Type{R}, ::Type{T}, suffixes,
     keynames::Val, lookbacks::Tuple) where {K,R,T}
     isempty(tg.monoid) && return nothing
     monoids =
-        Dict{K,queuestype(tg.monoid, R, T)}()
+        KeyDict{K,queuestype(tg.monoid, R, T)}()
     for (_, rows) in suffixes
         replaymonoids!(monoids, rows, 1, tg.monoid, keynames, lookbacks)
     end
@@ -562,7 +562,7 @@ end
 # Push the row into its key's ring, then downdate, from each Bars window's
 # running table, the row the push took it past: n + 1 rows deep, oldest first.
 @inline admitrings!(::Nothing, running, cap::Int, k, row, lookbacks) = nothing
-@inline function admitrings!(rings::Dict{K,RowRing{R}}, running, cap::Int, k,
+@inline function admitrings!(rings::KeyDict{K,RowRing{R}}, running, cap::Int, k,
     row, lookbacks::Tuple) where {K,R}
     ring = get!(() -> RowRing{R}(cap), rings, k)
     ringpush!(ring, row)
@@ -593,7 +593,7 @@ end
 end
 
 @inline admitmonoid!(::Nothing, stateprotos, k, row, lookbacks) = nothing
-@inline admitmonoid!(monoids::Dict{K,Q}, stateprotos::Tuple, k, row,
+@inline admitmonoid!(monoids::KeyDict{K,Q}, stateprotos::Tuple, k, row,
     lookbacks::Tuple) where {K,Q<:MonoidQueues} =
     queuepush!(
         get!(() -> newqueues(Q, stateprotos, length(lookbacks)), monoids, k),

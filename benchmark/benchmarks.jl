@@ -44,6 +44,13 @@ const SRC = tradesource(CHUNKS)
 # A second, independent source for the binary joins, so the right side is not
 # a self join (which would need a prefix).
 const SRC2 = tradesource(tradechunks(N))
+# SRC keyed by four columns, the last typed `Union{Missing,String}` though no
+# value is missing: Base's NamedTuple `hash` allocated per lookup on such a key
+# (issue #116), and nothing else here keys by a `missing`-admitting column.
+const SRC4 = tradesource([
+    DataFrame(time = c.time, a = c.sym, b = c.sym, c = c.sym,
+        d = Vector{Union{Missing,String}}(c.sym), qty = c.qty) for c in CHUNKS
+])
 
 const BENCHDIR = mktempdir()
 const CSVPATH = joinpath(BENCHDIR, "bench.csv")
@@ -168,6 +175,8 @@ SUITE["summarize"]["keyless"] = @benchmarkable load(CTX,
     SRC |> summarize([Count(), Sum(:qty), Min(:qty), Max(:qty)]))
 SUITE["summarize"]["keyed"] = @benchmarkable load(CTX,
     SRC |> summarize([Count(), Sum(:qty)]; key = :sym))
+SUITE["summarize"]["keyed-missing4"] = @benchmarkable load(CTX,
+    SRC4 |> summarize([Count(), Sum(:qty)]; key = [:a, :b, :c, :d]))
 # The squared power sum, which nothing else in this suite reaches: every
 # Variance, Std, Covariance, Correlation and LinearRegression folds one, so its
 # per-row cost is worth watching (see notes/sumpower-terms.md).

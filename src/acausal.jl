@@ -8,7 +8,7 @@ module Acausal
 
 using ..CausalFrames: CausalPipeline, Context, pipetransform, chunkmap, shiftchunk!,
     settimechunk!, SetTimeState, checktimespec, timetype, rowat, keyat,
-    jointransform, widenstop, compactdead!
+    jointransform, widenstop, compactdead!, KeyDict
 import ..CausalFrames: newstore, widenstore, segment!, joincmp, rightcontext,
     joinfreedom
 
@@ -85,7 +85,7 @@ end
 # A Dict of mutable `KeyBuffer`s: a lookup answers with a pointer, so there is
 # no `Union{Nothing,V}` to box. A widening may arrive mid-left-chunk, so the
 # per-key buffers convert along with the matches buffer.
-newstore(::Forward, ::Type{K}, ::Type{V}) where {K,V} = Dict{K,KeyBuffer{V}}()
+newstore(::Forward, ::Type{K}, ::Type{V}) where {K,V} = KeyDict{K,KeyBuffer{V}}()
 
 # The earliest right row after the left one (at it, unless strict), over a
 # right window widened forward by the tolerance.
@@ -93,8 +93,8 @@ joincmp(::Forward, strict::Bool) = strict ? (>) : (>=)
 rightcontext(::Forward, ctx::Context, tolerance, op::String) =
     widenstop(ctx, tolerance, "$op tolerance")
 joinfreedom(::Forward, tolerance) = (true, tolerance !== nothing)
-widenstore(store::Dict{<:Any,<:KeyBuffer}, ::Type{K}, ::Type{V}) where {K,V} =
-    Dict{K,KeyBuffer{V}}(
+widenstore(store::KeyDict{<:Any,<:KeyBuffer}, ::Type{K}, ::Type{V}) where {K,V} =
+    KeyDict{K,KeyBuffer{V}}(
         convert(K, k) => KeyBuffer{V}(convert(Vector{V}, b.rows), b.head)
         for (k, b) in store)
 
@@ -105,14 +105,14 @@ widenstore(store::Dict{<:Any,<:KeyBuffer}, ::Type{K}, ::Type{V}) where {K,V} =
 # from index i. Returns (i, rpos, needpull): needpull means row i's key has no
 # buffered future row but the right stream isn't exhausted, so the driver must
 # pull the next right chunk before resolving row i.
-segment!(store::Dict{K,KeyBuffer{V}}, matches::Vector{V}, found::Vector{Bool},
+segment!(store::KeyDict{K,KeyBuffer{V}}, matches::Vector{V}, found::Vector{Bool},
     lnt::NamedTuple, i::Int, rnt::NamedTuple, rpos::Int, rdone::Bool,
     keynames::Val, after, tolerance) where {K,V} =
     futuresegment!(matches, found, store, lnt, i, rnt, rpos, rdone, keynames,
         after, tolerance)
 
 function futuresegment!(matches::Vector{V}, found::Vector{Bool},
-    store::Dict{K,KeyBuffer{V}}, lnt::NamedTuple, i::Int, rnt::NamedTuple,
+    store::KeyDict{K,KeyBuffer{V}}, lnt::NamedTuple, i::Int, rnt::NamedTuple,
     rpos::Int, rdone::Bool, keynames::Val{KN}, after::A,
     tolerance) where {K,V,KN,A}
     rlen = length(rnt.time)

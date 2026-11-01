@@ -6,7 +6,7 @@
 # The state is a cell per (key, column), not a row per key, because columns
 # carry independently (`:a` from row 3, `:b` from row 7), so `lastrow`'s
 # whole-row store cannot serve. The cells are mutable, so the store is a plain
-# `Dict{K,NamedTuple}` rather than join.jl's `SlotStore`: a lookup already
+# `KeyDict{K,NamedTuple}` rather than join.jl's `SlotStore`: a lookup already
 # answers with a pointer, with no `Union{Nothing,V}` to box (as with
 # `KeyBuffer` in src/acausal.jl).
 
@@ -96,7 +96,7 @@ mutable struct ForwardFillState
     fillnames::Union{Nothing,Vector{Symbol}}  # the columns being filled
     fillval::Any     # Val{Tuple(fillnames)}, memoized alongside it
     types::Union{Nothing,NamedTuple}          # promotion of every schema seen
-    cells::Any       # keyless: the NamedTuple of cells; keyed: Dict{K,NT} of them
+    cells::Any       # keyless: the NamedTuple of cells; keyed: KeyDict{K,NT} of them
 end
 ForwardFillState(keycols::Vector{Symbol}, selectors::Tuple, tolerance) =
     ForwardFillState(keycols, selectors, Val(Tuple(keycols)), tolerance,
@@ -163,8 +163,8 @@ end
 widencells(::Type{NamedTuple{FN,TT}}, old::NamedTuple{FN}) where {FN,TT} =
     NamedTuple{FN,TT}(ntuple(i -> widencell(fieldtype(TT, i), old[i]), Val(length(FN))))
 
-function widencellstore(::Type{Dict{K,NT}}, old::AbstractDict) where {K,NT}
-    new = Dict{K,NT}()
+function widencellstore(::Type{KeyDict{K,NT}}, old::AbstractDict) where {K,NT}
+    new = KeyDict{K,NT}()
     sizehint!(new, length(old))
     for (k, v) in old
         new[convert(K, k)] = widencells(NT, v)
@@ -190,7 +190,7 @@ function fillprepared!(st::ForwardFillState, ::Val{KN}, ::Val{FN}, tolerance,
         st.cells = cells
         fillkeyless!(nt.time, groups, values(cells::NT), tolerance)
     else
-        D = Dict{storekeytype(types, Val(KN)),NT}
+        D = KeyDict{storekeytype(types, Val(KN)),NT}
         store =
             st.cells === nothing ? D() :
             widened ? widencellstore(D, st.cells) : st.cells
@@ -230,7 +230,7 @@ function fillkeyless!(times::AbstractVector, groups::Tuple, cells::Tuple, tolera
 end
 
 function fillkeyed!(times::AbstractVector, groups::Tuple, nt::NamedTuple,
-    ::Val{KN}, store::Dict{K,NT}, tolerance) where {KN,K,NT}
+    ::Val{KN}, store::KeyDict{K,NT}, tolerance) where {KN,K,NT}
     for i in eachindex(times)
         cells = get!(() -> freshcells(NT), store, keyat(nt, i, Val(KN)))
         fillrow!(i, @inbounds(times[i]), tolerance, groups, values(cells))

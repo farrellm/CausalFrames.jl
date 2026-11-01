@@ -367,6 +367,21 @@ design rationale and performance constraints behind each module.
     column is concrete though the fit is opaque. It is a plain `Summarizer`
     (refolded everywhere). `fresh!` empties the buffers keeping capacity,
     which is safe only because `value` hands the model copies
+- `src/keys.jl` — `KeyDict{K,V}`, the dictionary behind every keyed store
+  (group tables, `KeySet`, `SlotStore`, `forwardfill`'s cells, the
+  `futurejoin`, `lookupjoin`, rolling and window stores). Base hashes a
+  NamedTuple through `Tuple(nt)`, which isn't inferred once a field is a
+  `Union` (from four fields, two on 1.10), so a `missing`-admitting key cost
+  every lookup a tuple, two boxed hashes and a dispatch (issue #116). The keys
+  are stored as a package-owned `Key{K}` whose generated `hash`/`isequal` go
+  field by field. The wrapper never leaves the dictionary: callers pass and
+  iterate plain NamedTuples, so emission, `keyisless` and error messages are
+  untouched. `isequal`/`hash` are defined across NamedTuple types with the
+  same names, so lookups never convert (the `KeySet` and join promise that an
+  `isequal` key of another type matches); inserts convert to `K`, a no-op
+  for `keyat`/`keyvalues` keys. Never key a store by a bare `Dict{K}` of
+  NamedTuples. `filter!` is its own in-place method because the generic one
+  allocates a key vector per call (the window close filters per tick)
 - `src/summarize.jl` — the folding kernels and the transforms `summarize`,
   `summarizecycles` and `addsummarycolumns`; also the key validators every
   keyed transform shares, `keycolumns` (eager: unique, never `:time`) and
@@ -426,7 +441,7 @@ design rationale and performance constraints behind each module.
   tuples that `closecycle!` retires into and `groupstates!` zeroes back out
   of: the keyed cycle fold closes a table per timestamp, and rebuilding it per
   cycle would be the package's heaviest allocation site. A declared `keyset`
-  (a `KeySet`: the declared keys plus a `Dict{K,Int}` slot index, built at
+  (a `KeySet`: the declared keys plus a `KeyDict{K,Int}` slot index, built at
   construction so the output key type is the declaration's) swaps the table
   for `DenseGroups`, a state tuple per slot plus a `folded` flag. Dense output
   closes *every* key every time, so there is nothing for the table's Dict,
@@ -446,7 +461,7 @@ design rationale and performance constraints behind each module.
   `joinfreedom`, its flags). A new join direction adds those six methods,
   never a second driver. `joinnode` builds the node from a `JoinConfig` and a
   chunk step, for the joins and `applymodels` alike. The store is a
-  `SlotStore` (a `Dict{K,Int}` of slot numbers over a `Vector{V}` of rows,
+  `SlotStore` (a `KeyDict{K,Int}` of slot numbers over a `Vector{V}` of rows,
   shared with `lastrow` through `admitslot!`), and a match is a `Vector{V}`
   plus a `Vector{Bool}` mask (unmatched slots left undefined, hence
   `convertmatches` for a mid-chunk widening). Both keep `V` out of a `Union`,
@@ -460,7 +475,7 @@ design rationale and performance constraints behind each module.
   tolerance and direction
 - `src/lookupjoin.jl` — `lookupjoin`, the key-only join against a timeless
   in-memory table. Not a stream: the table is copied and indexed once, at
-  construction, into a `LookupJoin` (a `Dict{K,Int}` of table rows plus the
+  construction, into a `LookupJoin` (a `KeyDict{K,Int}` of table rows plus the
   value columns as a concrete NamedTuple, captured by the closures so each
   chunk's call dispatches statically), and the transform is a stateless
   `chunkmap`, so unlike the as-of joins it keeps chunk concatenation over split
@@ -473,7 +488,7 @@ design rationale and performance constraints behind each module.
   form with `asofjoin`
 - `src/lastrow.jl` — `lastrow`, the last-row-per-key transform: `summarize`'s
   fold-and-flush-at-`stop` shape over `join.jl`'s `SlotStore` rather than a
-  `GroupTable`, since it keeps whole rows and a `Dict{K,V}` would box one per
+  `GroupTable`, since it keeps whole rows and a `KeyDict{K,V}` would box one per
   row for any non-isbits `V`. No `found` mask (every slot is written the
   instant it is claimed, so widening is a plain `convert`), and the keyless
   path skips the store: only the chunk's last row matters, so it costs nothing
@@ -501,7 +516,7 @@ design rationale and performance constraints behind each module.
   stateful operators DESIGN.md's streaming section lists. Its state is a
   `FillCell` per (key, *column*), not a row per key: columns carry
   independently, so `lastrow`'s whole-row store cannot serve. The cells are
-  mutable, so the store is a plain `Dict{K,NamedTuple}` rather than a
+  mutable, so the store is a plain `KeyDict{K,NamedTuple}` rather than a
   `SlotStore`: a lookup already answers with a pointer, with no
   `Union{Nothing,V}` to box (as with `KeyBuffer`). A selected column whose
   promoted type admits no `Missing` gets `nothing` instead of a replacement
