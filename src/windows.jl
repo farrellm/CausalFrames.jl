@@ -118,7 +118,7 @@ end
 struct WindowTiers{R,B,G,MQ,GT,TG<:Tiering,SC}
     buffer::B        # Vector{R}, or nothing
     running::G       # RunningTable{K,SR}, or nothing
-    monoids::MQ      # Dict{K,MonoidQueues{ST,R,T}}, or nothing
+    monoids::MQ      # KeyDict{K,MonoidQueues{ST,R,T}}, or nothing
     refold::GT       # GroupTable{K,SF}, or nothing
     tg::TG           # the partition of the states into tiers
     scratch::SC      # Vector{Pair{K,V}} over the primary's dict: the sort buffer
@@ -288,7 +288,7 @@ end
 
 @inline admitwinmonoid!(::Nothing, stateprotos, k, row, ks, keynames::Val,
     lookbacks) = nothing
-@inline function admitwinmonoid!(monoids::Dict{K,Q}, stateprotos::Tuple, k,
+@inline function admitwinmonoid!(monoids::KeyDict{K,Q}, stateprotos::Tuple, k,
     row, ks, keynames::Val, lookbacks::Tuple) where {K,Q<:MonoidQueues}
     mq = get!(monoids, k) do
         checkdeclared(ks, row, keynames)
@@ -347,9 +347,9 @@ end
 @inline tierstates(::Nothing, k, g) = ()
 @inline tierstates(::RunningTable{K,S}, k, g::RunningGroup{S}) where {K,S<:Tuple} =
     g.states
-@inline tierstates(::Dict{K,V}, k, mq::V) where {K,V<:MonoidQueues} =
+@inline tierstates(::KeyDict{K,V}, k, mq::V) where {K,V<:MonoidQueues} =
     livestates(mq, 1)
-@inline tierstates(monoids::Dict{K,V}, k, g) where {K,V<:MonoidQueues} =
+@inline tierstates(monoids::KeyDict{K,V}, k, g) where {K,V<:MonoidQueues} =
     tierstates(monoids, k, monoids[k])
 @inline tierstates(::GroupTable{K,S}, k, states::S) where {K,S<:Tuple} = states
 @inline tierstates(gt::GroupTable, k, g) = gt.table[k]
@@ -373,7 +373,8 @@ end
     emitdense!(rows, τ, groups, ks, tiers, outs, emptyrow)
 
 # One row per declared key, in declared order: the key's summary when it has a
-# group, else the empty values. Lookups by the declared key need no conversion.
+# group, else the empty values. The declared key is looked up as given: a
+# `KeyDict` matches it field by field, whatever its field types.
 function emitdense!(rows::Vector{RT}, τ, groups::AbstractDict, ks::KeySet,
     tiers::WindowTiers, outs::Val, emptyrow) where {RT}
     # `haskey` then indexing, not `get(groups, k, nothing)`: a refold primary's
@@ -402,7 +403,7 @@ function emitwindow!(rows::Vector{RT}, τ, present::Vector{<:Pair},
             push!(rows, convert(RT, gridrow(τ, @inbounds(prevkeys[j]), emptyrow)))
             j += 1
         end
-        j <= np && isequal(@inbounds(prevkeys[j]), k) && (j += 1)
+        j <= np && keyisequal(@inbounds(prevkeys[j]), k) && (j += 1)
         push!(rows, convert(RT, gridrow(τ, k, tiervalues(tiers, k, g, outs))))
     end
     while j <= np

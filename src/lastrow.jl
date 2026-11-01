@@ -89,7 +89,7 @@ end
 
 # Function barrier over concretely typed arguments. Last write wins: the
 # join's admission loop without tolerance or ordering.
-function lastsegment!(index::Dict{K,Int}, slots::Vector{V}, nt::NamedTuple,
+function lastsegment!(index::KeyDict{K,Int}, slots::Vector{V}, nt::NamedTuple,
     ::Val{KN}) where {K,V,KN}
     for i in eachindex(nt.time)
         admitslot!(index, slots, keyat(nt, i, Val(KN)), rowat(V, nt, i))

@@ -73,8 +73,9 @@
         # Per-row allocations, as the slope between two run lengths: once a
         # key column admitted `missing`, every row's key was built narrower
         # than the store's and converted on lookup, even with no value
-        # missing. Up to three key columns: from four, Base's NamedTuple
-        # `hash` allocates on any `Union` field (issue #116). Key `j` of row
+        # missing. From four key columns (two on Julia 1.10), Base's
+        # NamedTuple `hash` allocated on any `Union` field too, until the
+        # stores hashed through `KeyDict` (issue #116). Key `j` of row
         # `i` is `(i * j) % 5`, so the first five rows hold every key
         # combination: the lookup table.
         keycol(j, n) = Vector{Union{Missing,String}}(
@@ -103,14 +104,51 @@
             (k, s) -> asofjoin(CausalPipeline(ctx -> [s]) |> selectcolumns(k..., :x);
                 key = k, rightprefix = "r_"),
             (k, s) -> lookupjoin(keyed!(DataFrame(v = fill(1.0, 5)), k); key = k),
+            (k, s) -> CausalFrames.Acausal.futurejoin(
+                CausalPipeline(ctx -> [s]) |> selectcolumns(k..., :x);
+                key = k, rightprefix = "r_"),
         ]
-        # On Julia 1.10, Base's NamedTuple `hash` allocates from two `Union`
-        # fields (issue #116). When 1.10 support is dropped, test every key
-        # set on every version.
-        keysets = VERSION < v"1.11" ? ([:k1],) : ([:k1], [:k1, :k2], [:k1, :k2, :k3])
+        keysets = ([:k1], [:k1, :k2, :k3, :k4], [Symbol(:k, j) for j in 1:6])
         for t in ops, keys in keysets
             keyallocs(t, keys, 10) # compile
             @test keyallocs(t, keys, 8000) - keyallocs(t, keys, 2000) < 200
         end
+    end
+
+    @testset "KeyDict" begin
+        # Stored keys hash and compare field by field, so a lookup key of
+        # narrower or numerically different types finds its entry unconverted.
+        K = @NamedTuple{a::Union{Missing,String}, b::Float64}
+        d = CausalFrames.KeyDict{K,Int}()
+        d[(a = "x", b = 1.0)] = 1
+        d[(a = missing, b = 2.0)] = 2
+        @test d[(a = "x", b = 1)] == 1
+        @test get(d, (a = missing, b = 2), 0) == 2
+        @test get(d, (a = "x", b = 2), 0) == 0
+        @test haskey(d, (a = missing, b = 2.0))
+        @test get!(d, (a = "y", b = 3), 3) == 3
+        @test length(d) == 3
+        @test eltype(collect(d)) == Pair{K,Int}
+        @test isequal(first.(CausalFrames.sortedgroups(d)),
+            K[(a = "x", b = 1.0), (a = "y", b = 3.0), (a = missing, b = 2.0)])
+        filter!(p -> last(p) != 3, d)
+        @test sort!(collect(values(d))) == [1, 2]
+        delete!(d, (a = "x", b = 1))
+        @test isequal(collect(d), [(a = missing, b = 2.0) => 2])
+        c = copy(d)
+        @test c isa CausalFrames.KeyDict{K,Int} && isequal(collect(c), collect(d))
+        c[(a = "z", b = 4.0)] = 4
+        @test length(d) == 1
+        @test CausalFrames.keyisequal((a = missing, b = 1), (a = missing, b = 1.0))
+        @test !CausalFrames.keyisequal((a = "x", b = 1), (a = "y", b = 1))
+        @test CausalFrames.keyisequal((;), (;))
+        @test isempty(empty!(d))
+        # An insert that would change the key on conversion is refused, as
+        # Base's Dict refuses it, rather than merging distinct keys.
+        f = CausalFrames.KeyDict{@NamedTuple{a::Float32},Int}()
+        @test_throws ArgumentError f[(a = 0.1,)] = 1
+        @test_throws ArgumentError get!(f, (a = 0.1,), 1)
+        f[(a = 0.5,)] = 1
+        @test f[(a = 0.5f0,)] == 1
     end
 end

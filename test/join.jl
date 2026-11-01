@@ -244,7 +244,7 @@
             kn = Val((:sym,))
             matches = Vector{V}(undef, n)
             found = fill(false, n)
-            index = Dict{K,Int}()
+            index = CausalFrames.KeyDict{K,Int}()
             slots = V[]
             call() = CausalFrames.joinsegment!(matches, found, index, slots,
                 lnt, 1, rnt, 1, true, kn, <=, nothing)

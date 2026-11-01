@@ -1,6 +1,6 @@
 # The lookup join: a key-only join against an in-memory table with no time
 # column, and so constant over the window. The table is resolved once, at
-# construction, into a `Dict{K,Int}` row index over copied columns, and the
+# construction, into a `KeyDict{K,Int}` row index over copied columns, and the
 # transform is a stateless chunkmap. Type-unstable work runs once per chunk;
 # the per-row lookup and per-column gathers are function barriers.
 
@@ -102,7 +102,7 @@ end
 # Everything a run needs, concretely typed, so `lookupchunk` dispatches
 # statically on the table's types.
 struct LookupJoin{K<:NamedTuple,C<:NamedTuple,KN,M}
-    index::Dict{K,Int}           # key => row of the table
+    index::KeyDict{K,Int}           # key => row of the table
     values::C                    # the table's non-key columns, owned
     keycols::Vector{Symbol}
     keynames::Val{KN}
@@ -117,7 +117,7 @@ function buildlookup(cols::NamedTuple, keynames::Val{KN}, ::Val{VN},
     keycols::Vector{Symbol}, mode, leftprefix, rightnames) where {KN,VN}
     K = storekeytype(chunktypes(NamedTuple{KN}(cols)), keynames)
     n = length(getproperty(cols, first(KN)))
-    index = Dict{K,Int}()
+    index = KeyDict{K,Int}()
     sizehint!(index, n)
     for i in 1:n
         k = keyat(cols, i, keynames)
@@ -158,7 +158,7 @@ end
 # Each input row's table row, or 0 where its key is absent; returns the number
 # matched. The input's key type may differ from the table's: Dict lookup uses
 # `isequal` and hashing, without converting.
-function lookuprows!(rows::Vector{Int}, index::Dict{K,Int}, nt::NamedTuple,
+function lookuprows!(rows::Vector{Int}, index::KeyDict{K,Int}, nt::NamedTuple,
     keynames::Val{KN}) where {K,KN}
     nmatched = 0
     @inbounds for i in eachindex(rows)

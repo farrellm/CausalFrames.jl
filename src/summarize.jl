@@ -56,7 +56,7 @@ end
 # take it pass a reference instead of boxing a copy.
 mutable struct KeySet{K<:NamedTuple}
     const keys::Vector{K}
-    const index::Dict{K,Int}
+    const index::KeyDict{K,Int}
     const op::String
 end
 
@@ -70,8 +70,10 @@ function tokeyset(keyset, keycols::Vector{Symbol}, op::String)
     cols = ntuple(j -> map(t -> t[j], tuples), length(KN))
     K = NamedTuple{KN,Tuple{map(eltype, cols)...}}
     keys = K[K(map(col -> col[i], cols)) for i in eachindex(tuples)]
-    allunique(keys) || throw(ArgumentError("$op keyset values must be unique"))
-    return KeySet{K}(keys, Dict{K,Int}(k => i for (i, k) in enumerate(keys)), op)
+    index = KeyDict{K,Int}(k => i for (i, k) in enumerate(keys))
+    length(index) == length(keys) ||
+        throw(ArgumentError("$op keyset values must be unique"))
+    return KeySet{K}(keys, index, op)
 end
 
 # One declared key as a tuple of column values. It is declared as the value
@@ -96,7 +98,7 @@ end
 # one declared key, the empty one, so it shares the declared-key paths. Every
 # row has that key, so its lookups compile away.
 const NoKey = NamedTuple{(),Tuple{}}
-nokeyset(op::String) = KeySet{NoKey}([(;)], Dict((;) => 1), op)
+nokeyset(op::String) = KeySet{NoKey}([(;)], KeyDict{NoKey,Int}((;) => 1), op)
 
 # The declared slot of a row's key, or an error for a key outside the set.
 @inline function keyindex(ks::KeySet, k)
@@ -289,13 +291,13 @@ widenstates(states::Tuple, intypes::NamedTuple) =
 # `intervalize`) close tables through both buffers; `summarizewindows`' refold
 # tier reuses the pool.
 mutable struct GroupTable{K,S<:Tuple}
-    table::Dict{K,S}
+    table::KeyDict{K,S}
     scratch::Vector{Pair{K,S}}  # key-ordered emission buffer, reused
     pool::Vector{S}             # retired state tuples, zeroed on reuse
 end
 
 GroupTable{K,S}() where {K,S<:Tuple} =
-    GroupTable{K,S}(Dict{K,S}(), Pair{K,S}[], S[])
+    GroupTable{K,S}(KeyDict{K,S}(), Pair{K,S}[], S[])
 
 # A summarizing fold's groups, built for the first schema by the transform's
 # grouping: the state tuple itself when keyless (`Val(())`), or a `GroupTable`
@@ -375,7 +377,7 @@ end
 @inline groupisless(a::Pair, b::Pair) = keyisless(first(a), first(b))
 
 # For the once-per-run drains (`summarize`'s and `lastrow`'s flush); the
-# per-cycle drain reuses `closecycle!`'s buffer. `lastrow` passes a bare Dict.
+# per-cycle drain reuses `closecycle!`'s buffer. `lastrow` passes a bare KeyDict.
 sortedgroups(d::AbstractDict) = sort!(collect(d); lt = groupisless)
 sortedgroups(gt::GroupTable) = sortedgroups(gt.table)
 

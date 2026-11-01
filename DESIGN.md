@@ -2310,9 +2310,25 @@ a string or `missing`: a key typed from its values would be narrower than the
 store's, and converting it on every lookup allocates per row (issue #114).
 For the same reason keys are ordered by `keyisless`, which compares field by
 field, rather than through the tuple of their values, which is not inferred
-for a `Union` field. One cost remains, in Base: hashing a `NamedTuple` of four
-or more fields, one admitting `missing`, allocates per lookup — from two
-fields on Julia 1.10 (issue #116).
+for a `Union` field.
+
+Base hashes a `NamedTuple` through that same tuple, so from four fields with
+one admitting `missing` (two on Julia 1.10) every lookup in a plain `Dict`
+allocated a tuple and two boxed hashes (issue #116). Every keyed store is
+therefore a `KeyDict`: a `Dict` storing each key wrapped in a package-owned
+`Key`, whose `hash` and `isequal` go field by field, so each field's `Union`
+splits. The wrapper stays inside the dictionary — keys go in and come out
+as plain NamedTuples — so emission and ordering never see it (only the
+`KeyError` of a lookup on an absent key, an internal bug, shows it; a clean
+one would cost a second hash per lookup).
+`isequal` and `hash` agree across NamedTuple types with the same names, so a
+lookup key of narrower or numerically different types (an `Int` against a
+`Float64` key) still finds its entry without conversion; only an insert
+converts, a no-op for keys built in the store's type, and as Base's `Dict` does
+it refuses a conversion that changes the key (a `Float64` into a `Float32`
+field), which would otherwise merge distinct keys. Keys compared outside a
+store, as the refold and window-close scans do, go through the same
+field-by-field `keyisequal`.
 
 One consequence worth knowing: more than about 32 summarizers in a single
 call — counting hidden dependencies after expansion — exceeds Julia's tuple
@@ -3082,6 +3098,7 @@ hand-off argument, `abandon!` is the cancellation hook, and pulling order
 | `src/jls.jl` | the `Serialization`-backed persistence pair (`writejls`, `readjls`) |
 | `src/table.jl` | the in-memory source (`readtable`): the generic Tables.jl path, the eagerly resolved DataFrame path, and the frame path |
 | `src/summarizers.jl` | the include list for `src/summarizers/`: the `Summarizer`/`SummarizerState` interface (`interface.jl`), the compensated float arithmetic (`compensated.jl`), one file per summarizer family (`sums.jl`, `comoment.jl`, `agesum.jl`, `moments.jl`, `regression.jl`, `orderstats.jl`, `windowvalues.jl`, `extremes.jl`, `fitmodel.jl`), the derived states' no-op folds (`derived.jl`) and every built-in's `inputcolumns` (`inputcolumns.jl`) |
+| `src/keys.jl` | `KeyDict`, the dictionary every keyed store uses, hashing its NamedTuple keys field by field |
 | `src/summarize.jl` | folding kernels and the summarization transforms |
 | `src/join.jl` | the as-of join transform (`asofjoin`) and the join engine it shares with `applymodels` and `futurejoin` |
 | `src/lookupjoin.jl` | the key-only join against a timeless table (`lookupjoin`) |

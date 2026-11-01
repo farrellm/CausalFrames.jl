@@ -131,15 +131,15 @@ mutable struct JoinState
             nothing, nothing, nothing, Bool[], false, false, false)
 end
 
-# The backward store, shared with `lastrow`: a `Dict{K,Int}` of slot numbers
+# The backward store, shared with `lastrow`: a `KeyDict{K,Int}` of slot numbers
 # over a `Vector{V}` of rows. A Dict of rows answers a lookup as
 # `Union{Nothing,V}`, which heap-allocates when V is not isbits (any String or
 # Missing-admitting column); an Int slot lookup allocates nothing.
 struct SlotStore{K,V}
-    index::Dict{K,Int}
+    index::KeyDict{K,Int}
     slots::Vector{V}
 end
-SlotStore{K,V}() where {K,V} = SlotStore{K,V}(Dict{K,Int}(), V[])
+SlotStore{K,V}() where {K,V} = SlotStore{K,V}(KeyDict{K,Int}(), V[])
 
 newstore(::Backward, ::Type{K}, ::Type{V}) where {K,V} = SlotStore{K,V}()
 
@@ -155,12 +155,12 @@ joinfreedom(::Backward, tolerance) = (tolerance !== nothing, true)
 # Slot numbers don't move, so only the keys are rebuilt; every slot is
 # occupied, so the vector converts wholesale.
 widenstore(st::SlotStore, ::Type{K}, ::Type{V}) where {K,V} =
-    SlotStore{K,V}(Dict{K,Int}(convert(K, k) => j for (k, j) in st.index),
+    SlotStore{K,V}(KeyDict{K,Int}(st.index),
         convert(Vector{V}, st.slots))
 
 # Store `row` as key `k`'s latest, in one hash: `get!` claims the next slot
 # number on a miss.
-@inline function admitslot!(index::Dict{K,Int}, slots::Vector{V}, k,
+@inline function admitslot!(index::KeyDict{K,Int}, slots::Vector{V}, k,
     row::V) where {K,V}
     j = get!(index, k, length(slots) + 1)
     j > length(slots) ? push!(slots, row) : (@inbounds slots[j] = row)
@@ -266,7 +266,7 @@ segment!(st::SlotStore{K,V}, matches::Vector{V}, found::Vector{Bool},
         keynames, before, tolerance)
 
 function joinsegment!(matches::Vector{V}, found::Vector{Bool},
-    index::Dict{K,Int}, slots::Vector{V}, lnt::NamedTuple,
+    index::KeyDict{K,Int}, slots::Vector{V}, lnt::NamedTuple,
     i::Int, rnt::NamedTuple, rpos::Int, rdone::Bool,
     keynames::Val{KN}, before::B, tolerance) where {K,V,KN,B}
     n = length(lnt.time)

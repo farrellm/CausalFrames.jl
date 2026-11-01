@@ -114,12 +114,12 @@ mutable struct RunningGroup{S<:Tuple}
 end
 
 struct RunningTable{K,S<:Tuple}
-    groups::Dict{K,RunningGroup{S}}
+    groups::KeyDict{K,RunningGroup{S}}
     pool::Vector{RunningGroup{S}}
 end
 
 RunningTable{K,S}() where {K,S<:Tuple} =
-    RunningTable{K,S}(Dict{K,RunningGroup{S}}(), RunningGroup{S}[])
+    RunningTable{K,S}(KeyDict{K,RunningGroup{S}}(), RunningGroup{S}[])
 
 # Fold `row` into key `k`'s group, making it if needed. A declared keyset
 # (summarizewindows) is checked only then, since a key with a group was
@@ -197,7 +197,7 @@ end
     states = freshall!(g.states)
     for j in from:length(buffer)
         row = @inbounds buffer[j]
-        isequal(keyvalues(row, keynames), k) && updateall!(states, row)
+        keyisequal(keyvalues(row, keynames), k) && updateall!(states, row)
     end
     g.states = states
     return true
@@ -245,7 +245,7 @@ end
 
 # Push the live rows (from head on) into per-key queues, converting each to
 # the queues' row type; a function barrier like replayrunning!.
-function replaymonoids!(monoids::Dict{K,Q}, rows::Vector, head::Int,
+function replaymonoids!(monoids::KeyDict{K,Q}, rows::Vector, head::Int,
     stateprotos::S, keynames::Val,
     lookbacks::Tuple) where {K,S<:Tuple,R,Q<:MonoidQueues{S,R}}
     for j in head:length(rows)
@@ -288,7 +288,7 @@ function rebuildmonoids(tg::Tiering, ::Type{K}, ::Type{R}, ::Type{T}, old,
     head::Int, keynames::Val, lookbacks::Tuple) where {K,R,T}
     isempty(tg.monoid) && return nothing
     monoids =
-        Dict{K,queuestype(tg.monoid, R, T)}()
+        KeyDict{K,queuestype(tg.monoid, R, T)}()
     if old !== nothing && old.monoids !== nothing
         replayoldmonoids!(monoids, old.monoids, tg.monoid, keynames, lookbacks)
     elseif old !== nothing && old.buffer !== nothing
@@ -298,7 +298,7 @@ function rebuildmonoids(tg::Tiering, ::Type{K}, ::Type{R}, ::Type{T}, old,
 end
 
 # Replay every live row of the previous queues, which own their rows.
-function replayoldmonoids!(monoids::Dict, old::AbstractDict, stateprotos::Tuple,
+function replayoldmonoids!(monoids::KeyDict, old::AbstractDict, stateprotos::Tuple,
     keynames::Val, lookbacks::Tuple)
     for (_, mq) in old
         replaymonoids!(monoids, mq.rows, oldestlo(mq) - mq.dropped, stateprotos,

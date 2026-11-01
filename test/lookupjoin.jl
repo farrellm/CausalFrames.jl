@@ -201,7 +201,8 @@
         function lookupalloc()
             n = 200
             syms = ["s" * string(i % 7) for i in 1:n]   # s5, s6 unmatched
-            index = Dict((sym = "s" * string(i),) => i + 1 for i in 0:4)
+            index = CausalFrames.KeyDict{@NamedTuple{sym::String},Int}(
+                (sym = "s" * string(i),) => i + 1 for i in 0:4)
             nt = (time = collect(1:n), sym = syms)
             rows = Vector{Int}(undef, n)
             kn = Val((:sym,))
