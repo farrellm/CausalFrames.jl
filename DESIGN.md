@@ -2427,6 +2427,31 @@ the running tier's eviction, rolling buffers — sees an ordinary column, and
 vector per term per chunk, never per row. The term columns exist only in the
 summarizers' input, never in a transform's output.
 
+The row a term sees carries every input column, which has a cost on a wide
+table (issue #112). When `f` inlines into `termvalues`, the compiler drops the
+fields it never reads, so the row costs what the term reads. When it doesn't
+(it is large, recursive or `@noinline`), every field is built for every row,
+so the cost grows with the table's width. On `-t 1`, `summarize` over 100k rows
+with a `@noinline` term paid 0.4 ms over an inlined one on a narrow table,
+6.8 ms with 40 more `Float64` columns and 14 ms with 40 more
+`Union{Missing,Float64}` ones. The cost is accepted. A lazy row wrapper would
+break #107's promise that a term sees a `NamedTuple` (`Tuple(r)`, `r[1]`), and
+the fields a term reads can't in general be known, since it may call
+`Tuple(r)`. Each of these removed the penalty in that measurement:
+
+- marking the term's own definition `@inline` (an `@inline` at a call inside
+  it is not enough, since the row is still passed on);
+- keeping the term a small function that reads its fields and passes them to a
+  helper (`r -> g(r.x, r.y)`);
+- narrowing the input with `selectcolumns` upstream, where the transform's
+  output drops the input columns anyway (`summarize`, `summarizecycles`,
+  `intervalize`, `summarizewindows`);
+- computing the value with `addcolumns`, whose `Tables.rows` rows are lazy,
+  then summarizing it as a real column.
+
+The user-facing advice is in the "Row terms" section of the summarizers' API
+page.
+
 Terms are identified by name, so the same name must mean the same function,
 compared with `===`: two different functions under one name are an
 `ArgumentError` (`summarize row term :mfv is defined by more than one
