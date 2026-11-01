@@ -388,7 +388,10 @@ design rationale and performance constraints behind each module.
   since a tuple `map` over a wide table stops inferring) and by
   the values only when inference gives up, so a term's type is the same in
   every chunk and never abstract when it infers), with input types taken from
-  that table so term types widen like columns. `addcolumns` stays value-typed
+  that table so term types widen like columns. A term that isn't inlined
+  pays for every input column per row (issue #112): that cost is documented
+  and accepted, since a lazy row would break #107's `NamedTuple` promise, so
+  don't "fix" it with a row wrapper. `addcolumns` stays value-typed
   (`rowvalues`; DESIGN.md says why). The term vectors must never reach an
   output.
   The two transforms that store rows (`addrollingcolumns`,

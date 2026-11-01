@@ -194,7 +194,8 @@ An input column as a summarizer constructor takes it: a column name (a
 the input row's columns. The summarizer reads it as it
 would a column, so its output is named after `name` (`Sum(:range => f)` gives
 `:range_sum`). The summarizing transforms compute each row term once per row,
-alongside the input, and never add it to their output. See
+alongside the input, and never add it to their output. `f` sees every
+input column, so on a wide table it should be small enough to inline. See
 [Row terms](@ref).
 
 `Union{Symbol, Pair{Symbol, <:Base.Callable}}`.

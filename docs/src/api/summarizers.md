@@ -26,6 +26,22 @@ and the key columns). A custom summarizer takes row terms by calling
 [`CausalFrames.withterms`](@ref) in its constructor, and its
 [`CausalFrames.dependencies`](@ref) may declare terms too.
 
+A term's `row` holds every input column. A term the compiler inlines pays only
+for the fields it reads. A term it doesn't inline (a large, recursive or
+`@noinline` function) pays for every column on every row. On a table with
+dozens of columns, that can cost several times the term itself. On a wide
+table, do one of these:
+
+- mark the term function `@inline` where it is defined;
+- keep the term small, reading its fields and passing them on, as in
+  `r -> f(r.high, r.low)`;
+- drop the columns it doesn't need with [`selectcolumns`](@ref) upstream, when
+  the transform's output doesn't keep the input columns ([`summarize`](@ref),
+  [`summarizecycles`](@ref), [`intervalize`](@ref),
+  [`summarizewindows`](@ref));
+- compute the value as a column with [`addcolumns`](@ref) and summarize that
+  column.
+
 ## `Count`
 
 ```@docs
