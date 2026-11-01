@@ -146,6 +146,30 @@ end
     JET.@test_opt CausalFrames.value(st, (count = 3, x_y_comoment = -3.0))
 end
 
+@testset "central-moment accumulator" begin
+    # Skewness's and Kurtosis's accumulator: integers fold at Float64, so the
+    # storages are compensated floats (plain or windowed), BigFloat's plain
+    # one, and the missing-counting flag
+    for T in (Int, Float64, BigFloat, Union{Missing,Float64}),
+        w in (false, true)
+
+        s = CausalFrames.CentralMoments{:x}()
+        intypes = (time = Int, x = T)
+        st = w ? CausalFrames.freshwindowed(s, intypes) : CausalFrames.fresh(s, intypes)
+        row = (time = 1, x = one(nonmissingtype(T)))
+        JET.@test_opt CausalFrames.update!(st, row)
+        JET.@test_opt CausalFrames.downdate!(st, row)
+        JET.@test_opt CausalFrames.value(st)
+        JET.@test_opt CausalFrames.needsrefold(st)
+        JET.@test_opt CausalFrames.combine!(st, st, CausalFrames.fresh(st))
+    end
+    for s in (Skewness(:x), Kurtosis(:x; corrected = false))
+        st = CausalFrames.fresh(s, (time = Int, x = Float64))
+        JET.@test_opt CausalFrames.value(st,
+            (count = 5, x_centralmoments = (2.0, 1.0, 3.0)))
+    end
+end
+
 @testset "missing-counting accumulators" begin
     # the counting states over a Union{Missing,_} column must stay dispatch-free
     for T in (Union{Missing,Int}, Union{Missing,Float64})

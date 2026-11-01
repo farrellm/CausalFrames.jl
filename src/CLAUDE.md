@@ -237,7 +237,7 @@ design rationale and performance constraints behind each module.
     reports, so wanting both costs one deque, not two. `Product` is the only
     built-in monoid that is not a group
   - the dependent summarizers (`Moment`, `Mean`, `Variance`, `Std`,
-    `Covariance`, `Correlation`, `LinearRegression`, `Quantile`, `Median`,
+    `Skewness`, `Kurtosis`, `Covariance`, `Correlation`, `LinearRegression`, `Quantile`, `Median`,
     `PercentRank`, `MeanAbsDev`, and a reversed `DotProduct`'s `AliasState`)
     have empty state structs: they declare `dependencies` and read those
     values back through the two-argument `value(st, vals)`, naming each
@@ -288,6 +288,20 @@ design rationale and performance constraints behind each module.
     ~13% more; `notes/variance-cancellation.md` has
     the numbers and the rejected designs (Welford, error-free squares on the
     raw sums, a per-fit multivariate accumulator)
+  - `CentralMoments{c}` (unexported, no docstring; `centralmoments.jl`) is
+    `CoMoment`'s fourth-order one-column sibling behind `Skewness` and
+    `Kurtosis` (fieldless `ShapeState`s): compensated `Σd^k`, `k = 1…4`, valued
+    as the centred triple `(m2, m3, m4)`, with `CoMoment`'s shift, recentring,
+    counting and `combine!` rules. It folds at `float(T)` (an integer `d⁴`
+    overflows), and is error-free one step further than `CoMoment`: the
+    deviation `x − K` and the shift's move are exact `twosum` pairs, every
+    power and binomial coefficient a double-double, and `value` evaluates the
+    expansion in double-double (`dd*` helpers, `m2` through `comomentvalue`).
+    A rounded `x − K` cost `eps·(D/s)⁴` per row that changed shift between
+    fold and eviction, and it accumulated (6e-12 of a four-row kurtosis on a
+    series through zero). The refold ask compares the largest `d⁴` with
+    `REFOLDRATIO²·Σd⁴`, the co-moment's ratio on `|d|`; `REFOLDRATIO` alone
+    asked up to 160 times as often, for residues of only `n·eps²·d⁴`
   - `AgeWeightedSum` (`Σ k·y`, k the row's age) can't be a term functor, since
     its update reads its own `S₁`, so it has its own plain and compensated
     states, reusing the `Compensated` helpers and counting `missing` through

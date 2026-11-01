@@ -190,6 +190,8 @@ that never reaches the output: `Sum(:range => r -> r.high - r.low)` produces
 | [`Mean(:x)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#Mean) | `:x_mean` | group | mean |
 | [`Variance(:x; corrected)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#Variance) | `:x_variance` | group | variance, as `Statistics.var` |
 | [`Std(:x; corrected)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#Std) | `:x_std` | group | standard deviation, as `Statistics.std` |
+| [`Skewness(:x; corrected)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#Skewness) | `:x_skewness` | group | skewness, sample-adjusted `G1` (or `g1`) |
+| [`Kurtosis(:x; corrected)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#Kurtosis) | `:x_kurtosis` | group | excess kurtosis, sample-adjusted `G2` (or `g2`) |
 | [`Covariance(:x, :y; corrected)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#Covariance) | `:x_y_covariance` | group | covariance, as `Statistics.cov` |
 | [`Correlation(:x, :y)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#Correlation) | `:x_y_correlation` | group | Pearson correlation |
 | [`LinearRegression(predictors, response; intercept, name)`](https://farrellm.github.io/CausalFrames.jl/dev/api/summarizers/#LinearRegression) | `n`, `r2`, `stderr`, and a beta and t statistic per term | group | ordinary least squares |
