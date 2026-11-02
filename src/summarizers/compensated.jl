@@ -181,7 +181,9 @@ end
 
 # Minimal double-double arithmetic over pairs (hi, lo), for the central
 # moments' exact deviations, shifts and read-back (centralmoments.jl).
-@inline dd(s::Compensated) = fasttwosum(s.total, s.comp)
+# A Neumaier compensation can outgrow a cancelled total, so the pair is
+# renormalized by `twosum`, which (unlike `fasttwosum`) needs no ordering.
+@inline dd(s::Compensated) = twosum(s.total, s.comp)
 @inline fasttwosum(a, b) = (s = a + b; (s, b - (s - a)))
 @inline function twosum(a, b)
     s = a + b
