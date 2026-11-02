@@ -96,9 +96,7 @@ function narrowtype(Ts::Type...)
 end
 # The narrowed value and its type, `missing` kept.
 narrowval(::Type{Nothing}, x) = x
-narrowval(::Type{Nothing}, ::Missing) = missing
-narrowval(::Type, ::Missing) = missing
-narrowval(::Type{E}, x) where {E} = convert(E, x)
+narrowval(::Type{E}, x) where {E} = x === missing ? missing : convert(E, x)
 narrowedtype(::Type{Nothing}, ::Type{V}) where {V} = V
 narrowedtype(::Type{E}, ::Type{V}) where {E,V} =
     V === Missing ? Missing : maybemissing(E, Missing <: V)

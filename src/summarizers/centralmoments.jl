@@ -398,18 +398,16 @@ Kurtosis(column::ColumnSpec; corrected::Bool = true) =
     withterms(Kurtosis{colname(column)}(corrected), column)
 
 # The shape statistic K (`:skewness` or `:kurtosis`) of column C's centred
-# sums D, emitted as N in type E, the input's float type (the sums are folded
-# wider for Float16 and Float32); R is the corrected flag. Fieldless, like
-# `CovarianceState`, but re-typed by `widenstate` with the input.
+# sums D, emitted as N and narrowed to E (`narrowtype`, comoment.jl: the sums
+# of Float16 and Float32 are folded at Float64); R is the corrected flag.
+# Fieldless, like `CovarianceState`, and re-typed by `widenstate` as it is.
 struct ShapeState{N,C,D,K,R,E} <: DerivedState end
 
 shapestate(N, C, K, R, intypes::NamedTuple) =
-    ShapeState{N,C,centralname(C),K,R,shapefloat(intypes[C])}()
-shapefloat(::Type{Missing}) = Missing
-shapefloat(::Type{T}) where {T} = Base.promote_op(float, nonmissingtype(T))
+    ShapeState{N,C,centralname(C),K,R,narrowtype(intypes[C])}()
 
 widenstate(::ShapeState{N,C,D,K,R}, intypes::NamedTuple) where {N,C,D,K,R} =
-    ShapeState{N,C,D,K,R,shapefloat(intypes[C])}()
+    ShapeState{N,C,D,K,R,narrowtype(intypes[C])}()
 
 for (S, K) in ((:Skewness, :skewness), (:Kurtosis, :kurtosis))
     @eval begin
@@ -421,15 +419,15 @@ for (S, K) in ((:Skewness, :skewness), (:Kurtosis, :kurtosis))
     end
 end
 
-# The value type: E, `missing` kept from the centred sums' declared field type.
-shapetype(::Type{Missing}, ::Type) = Missing
-shapetype(::Type{F}, ::Type{E}) where {F,E} = maybemissing(E, Missing <: F)
+# The statistic's type before narrowing, from the centred sums' declared field
+# type: the triple's element type, `missing` kept.
+shapetype(::Type{Missing}) = Missing
+shapetype(::Type{F}) where {F} =
+    maybemissing(fieldtype(nonmissingtype(F), 1), Missing <: F)
 
 # The statistic from the centred sums over n rows. No spread (m2 not above 0,
 # which a NaN isn't either) gives NaN, as do too few rows for the correction.
-@inline shapeof(::Missing, ::Int, ::Val, ::Val, ::Type) = missing
-@inline shapeof(m::NTuple{3}, n::Int, k::Val, r::Val, ::Type{E}) where {E} =
-    convert(E, shapeof(m, n, k, r))
+@inline shapeof(::Missing, ::Int, ::Val, ::Val) = missing
 @inline function shapeof((m2, m3, m4)::NTuple{3,V}, n::Int, ::Val{:skewness},
     ::Val{R}) where {V,R}
     (m2 > 0 && (!R || n > 2)) || return convert(V, NaN)
@@ -447,6 +445,9 @@ end
 
 @inline function value(::ShapeState{N,C,D,K,R,E},
     vals::NamedTuple) where {N,C,D,K,R,E}
-    V = shapetype(fieldtype(typeof(vals), D), E)
-    return NamedTuple{(N,),Tuple{V}}((shapeof(vals[D], vals.count, Val(K), Val(R), E),))
+    V = narrowedtype(E, shapetype(fieldtype(typeof(vals), D)))
+    return NamedTuple{(N,),Tuple{V}}((
+        narrowval(E,
+            shapeof(vals[D], vals.count, Val(K), Val(R))),
+    ))
 end
