@@ -1238,13 +1238,31 @@ end
     @test only(out.x_kurtosis) ≈ shape(xs, :kurtosis) atol = 1e-15
     @test only(out.y_skewness) ≈ shape(xs, :skewness; corrected = false) atol = 1e-15
     @test only(out.y_kurtosis) ≈ shape(xs, :kurtosis; corrected = false) atol = 1e-15
-    # Float32 stays Float32
+    # Float32 stays Float32, from sums folded at Float64
     st = CausalFrames.fresh(Kurtosis(:x), (time = Int, x = Float32))
     @test @inferred(
         CausalFrames.value(st,
-            (count = 5, x_centralmoments = (1.0f0, 0.0f0, 2.0f0)))
+            (count = 5, x_centralmoments = (1.0, 0.0, 2.0)))
     ) ===
           (x_kurtosis = 32.0f0,)  # g2 = 5·2/1² - 3 = 7, G2 = 4·(6·7 + 6)/(3·2)
+
+    # Float16 and Float32 fold at Float64, so their powers don't overflow:
+    # Float16 d⁴ passes floatmax past a deviation of 16, n·Σd² past a few
+    # hundred rows, and Float32 d⁴ past 4.3e9
+    for xs in (Float16[(i * 3) % 8 for i in 1:300], Float16[(i * 7) % 40 for i in 1:20],
+        Float32[0, 1e10, 2e10, 1e10, 4.5e10, 3e10, 0.5e10, 2e10])
+        T = eltype(xs)
+        out = DataFrame(
+            load(Context(0, 400),
+                readtable((time = collect(eachindex(xs)), x = xs)) |>
+                summarize([Skewness(:x), Kurtosis(:x)])),
+        )
+        @test eltype(out.x_skewness) == T && eltype(out.x_kurtosis) == T
+        @test only(out.x_skewness) ≈ T(shape(xs, :skewness)) atol = 2eps(T)
+        @test only(out.x_kurtosis) ≈ T(shape(xs, :kurtosis)) atol = 4eps(T)
+    end
+    @test CausalFrames.fresh(CausalFrames.CentralMoments{:x}(), (x = Float16,)) isa
+          CausalFrames.CentralMomentState{<:Any,:x,Float64}
 
     # the two share one accumulator
     protos, _ = CausalFrames.prototypes(
@@ -1316,6 +1334,7 @@ end
     p = chunks(DataFrame(time = 1:3, x = Float32[1, 4, 2]),
         DataFrame(time = 4:6, x = [8.0, 1e-3, 5.0]))
     out = DataFrame(load(Context(0, 9), p |> summarize(Kurtosis(:x))))
+    @test eltype(out.x_kurtosis) == Float64
     @test only(out.x_kurtosis) ≈ shape(Float64[1, 4, 2, 8, 1e-3, 5], :kurtosis)
     xs = [10^12 + j for j in (3, 1, 4, 1, 5, 9, 2, 6)]
     out = DataFrame(
@@ -1413,8 +1432,7 @@ end
     st = CausalFrames.fresh(CausalFrames.CentralMoments{:x}(), intypes)
     foreach(row -> CausalFrames.update!(st, row), rs)
     @test st.peak == 0 && !CausalFrames.needsrefold(st)
-    # Float16, where the squared ratio would overflow: a flat window left
-    # after a spread still asks
+    # Float16 (folded at Float64): a flat window left after a spread still asks
     st = CausalFrames.freshwindowed(CausalFrames.CentralMoments{:x}(),
         (time = Int, x = Float16))
     for v in Float16[0, 4, 0.5, 0.5, 0.5]

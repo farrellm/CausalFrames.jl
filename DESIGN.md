@@ -1959,7 +1959,7 @@ Concrete summarizers provided, for an input column of element type `T`:
 | `WindowValues(column)` (unexported) | `:x_windowvalues` | the state itself, borrowed | `missing` |
 | `SortedValues(column)` (unexported) | `:x_sortedvalues` | the state itself, borrowed | `missing` |
 | `CoMoment{a,b}()` (unexported, internal) | `:a_b_comoment` | `Float64` for integers, else as `Ta * Tb` | `0` |
-| `CentralMoments{c}()` (unexported, internal) | `:x_centralmoments` | the triple `(m2, m3, m4)` of `float(T)` | `missing` |
+| `CentralMoments{c}()` (unexported, internal) | `:x_centralmoments` | the triple `(m2, m3, m4)` of `float(T)`, `Float64` for `Float16`/`Float32` | `missing` |
 | `Min(column)` | `:x_min` | `T` | `missing` |
 | `Max(column)` | `:x_max` | `T` | `missing` |
 | `MinIndex(column)` | `:x_minindex` | `Int` | `missing` |
@@ -2608,8 +2608,12 @@ it folds compensated `Σd^k`, `k = 1…4`, of shifted values `d = x − K`, with
 nonfinite rows, and `combine!`; the binomial expansion moves the shift. It
 differs in three ways:
 
-- it folds at `float(T)` (`Float64` for integers): an integer fourth power
-  overflows `Int64` once a deviation passes 55,000;
+- it folds at `float(T)`, widened to `Float64` for integers, `Float16` and
+  `Float32`: an integer fourth power overflows `Int64` once a deviation passes
+  55,000, a `Float16` one past 16 and a `Float32` one past `4.3e9`, and
+  `n·Σd²` overflows `Float16` past a few hundred rows. `Skewness` and
+  `Kurtosis`, bounded by about `√n` and `n`, still come out in the input's
+  float type (their states carry it, re-typed by `widenstate`);
 - the deviation `x − K` and the recentring move `δ` are exact pairs
   (`twosum`), and every power and coefficient is folded as a double-double. The
   rounding of `x − K` that the co-moment keeps (above) costs `eps · (D / s)⁴`

@@ -23,9 +23,12 @@ freshwindowed(s::CentralMoments{C}, intypes::NamedTuple) where {C} =
 # exactly zero whenever `n` returns to 0, and a float state recentres to the
 # row just folded once more than half its rows postdate the shift.
 #
-# The fold is at `float(T)`: a fourth power overflows Int64 once a deviation
-# passes 55,000 (550 dollars in cents), and the value is a float anyway. A
-# float fold rounds nothing at the scale of the distance D from the shift to
+# The fold is at `float(T)`, widened to Float64 for Float16 and Float32
+# (`centralfloat`): a fourth power overflows Int64 once a deviation passes
+# 55,000 (550 dollars in cents), Float16 once it passes 16 and Float32 past
+# 4.3e9, and `n·Σd²` overflows Float16 past a few hundred rows. Only Skewness
+# and Kurtosis, which are bounded by about √n and n, narrow back to the input's
+# type. A float fold rounds nothing at the scale of the distance D from the shift to
 # the window, where the sums sit, against moments at the spread's: the
 # deviation is an exact pair (`deviation`), each power enters the sums to about
 # eps² (`powerpairs`), and recentring and `combine!` move the shift by an exact
@@ -53,8 +56,12 @@ mutable struct CentralMomentState{N,C,T,M,S,W} <: SummarizerState
     missings::Int
 end
 
-# `Base.promote_op` rather than `float`, which has no method for `Any`.
-centralfloat(::Type{T}) where {T} = Base.promote_op(float, T)
+# The fold type: `Base.promote_op` rather than `float`, which has no method
+# for `Any`.
+centralfloat(::Type{T}) where {T} = widenfold(Base.promote_op(float, T))
+widenfold(::Type{T}) where {T} = T
+widenfold(::Type{Float16}) = Float64
+widenfold(::Type{Float32}) = Float64
 
 function centralfresh(s::CentralMoments{C}, ::Type{T},
     ::Val{windowed} = Val(false)) where {C,T,windowed}
@@ -207,7 +214,7 @@ end
 
 # Read on every eviction, so the compensated pair is read as is. A Σd⁴ gone to
 # zero under round-off asks too; a NaN one doesn't. The ratio is applied once
-# to each side, since `REFOLDRATIO²` overflows Float16.
+# to each side, as by the co-moment.
 @inline function needsrefold(st::CentralMomentState{N,C,T,M,S,W}) where {N,C,T,M,S,W}
     W || return false
     r = convert(T, REFOLDRATIO)
@@ -393,29 +400,39 @@ end
 Kurtosis(column::ColumnSpec; corrected::Bool = true) =
     withterms(Kurtosis{colname(column)}(corrected), column)
 
-# The shape statistic K (`:skewness` or `:kurtosis`) of the centred sums D,
-# emitted as N; R is the corrected flag. Fieldless, like `CovarianceState`.
-struct ShapeState{N,D,K,R} <: DerivedState end
+# The shape statistic K (`:skewness` or `:kurtosis`) of column C's centred
+# sums D, emitted as N in type E, the input's float type (the sums are folded
+# wider for Float16 and Float32); R is the corrected flag. Fieldless, like
+# `CovarianceState`, but re-typed by `widenstate` with the input.
+struct ShapeState{N,C,D,K,R,E} <: DerivedState end
+
+shapestate(N, C, K, R, intypes::NamedTuple) =
+    ShapeState{N,C,centralname(C),K,R,shapefloat(intypes[C])}()
+shapefloat(::Type{Missing}) = Missing
+shapefloat(::Type{T}) where {T} = Base.promote_op(float, nonmissingtype(T))
+
+widenstate(::ShapeState{N,C,D,K,R}, intypes::NamedTuple) where {N,C,D,K,R} =
+    ShapeState{N,C,D,K,R,shapefloat(intypes[C])}()
 
 for (S, K) in ((:Skewness, :skewness), (:Kurtosis, :kurtosis))
     @eval begin
         dependencies(::$S{C}) where {C} = (Count(), CentralMoments{C}())
         emptyvalue(::$S{C}) where {C} =
             NamedTuple{(Symbol(C, :_, $(QuoteNode(K))),)}((missing,))
-        fresh(s::$S{C}, ::NamedTuple) where {C} =
-            ShapeState{outname(s),centralname(C),$(QuoteNode(K)),s.corrected}()
+        fresh(s::$S{C}, intypes::NamedTuple) where {C} =
+            shapestate(outname(s), C, $(QuoteNode(K)), s.corrected, intypes)
     end
 end
 
-# The value type from the centred sums' declared field type: the triple's
-# element type, `missing` kept.
-shapetype(::Type{Missing}) = Missing
-shapetype(::Type{F}) where {F} =
-    maybemissing(fieldtype(nonmissingtype(F), 1), Missing <: F)
+# The value type: E, `missing` kept from the centred sums' declared field type.
+shapetype(::Type{Missing}, ::Type) = Missing
+shapetype(::Type{F}, ::Type{E}) where {F,E} = maybemissing(E, Missing <: F)
 
 # The statistic from the centred sums over n rows. No spread (m2 not above 0,
 # which a NaN isn't either) gives NaN, as do too few rows for the correction.
-@inline shapeof(::Missing, ::Int, ::Val, ::Val) = missing
+@inline shapeof(::Missing, ::Int, ::Val, ::Val, ::Type) = missing
+@inline shapeof(m::NTuple{3}, n::Int, k::Val, r::Val, ::Type{E}) where {E} =
+    convert(E, shapeof(m, n, k, r))
 @inline function shapeof((m2, m3, m4)::NTuple{3,V}, n::Int, ::Val{:skewness},
     ::Val{R}) where {V,R}
     (m2 > 0 && (!R || n > 2)) || return convert(V, NaN)
@@ -431,7 +448,8 @@ end
     return (n - 1) * ((n + 1) * g2 + 6) / ((n - 2) * (n - 3))
 end
 
-@inline function value(::ShapeState{N,D,K,R}, vals::NamedTuple) where {N,D,K,R}
-    V = shapetype(fieldtype(typeof(vals), D))
-    return NamedTuple{(N,),Tuple{V}}((shapeof(vals[D], vals.count, Val(K), Val(R)),))
+@inline function value(::ShapeState{N,C,D,K,R,E},
+    vals::NamedTuple) where {N,C,D,K,R,E}
+    V = shapetype(fieldtype(typeof(vals), D), E)
+    return NamedTuple{(N,),Tuple{V}}((shapeof(vals[D], vals.count, Val(K), Val(R), E),))
 end
