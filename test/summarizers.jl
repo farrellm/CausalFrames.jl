@@ -616,8 +616,8 @@ end
     st = CausalFrames.fresh(LinearRegression(:x, :y; intercept = false), intypes)
     @test @inferred(
         CausalFrames.value(st,
-            (count = 5, x_sumpower_2 = Int64(55), y_sumpower_2 = Int64(200),
-                x_y_dotproduct = Int64(100)))
+            (count = 5, x_x_crossproduct = Int64(55), y_y_crossproduct = Int64(200),
+                x_y_crossproduct = Int64(100)))
     ).x_beta ≈ 100 / 55
     st = CausalFrames.fresh(LinearRegression([:x, :z], :y), intypes)
     @test @inferred(
@@ -672,15 +672,15 @@ end
     ]
     @test count(==(:x_y_comoment), folded) == 1
     @test !(:y_x_comoment in folded)
-    # without an intercept the fit is on the raw products, as SumPower and
-    # the canonical DotProduct
+    # without an intercept the fit is on the raw products, the canonical
+    # CrossProducts (folded wide, so not shared with SumPower or DotProduct)
     protos, _ = CausalFrames.prototypes(
         Summarizer[LinearRegression(:x, :y; intercept = false)], Symbol[])
     @test Set(
         keys(CausalFrames.emptyvalue(s))
         for s in protos if length(keys(CausalFrames.emptyvalue(s))) == 1
     ) ⊇
-          Set([(:x_sumpower_2,), (:y_sumpower_2,), (:x_y_dotproduct,)])
+          Set([(:x_x_crossproduct,), (:y_y_crossproduct,), (:x_y_crossproduct,)])
 
     # the whole accumulate-then-project fold stays inferrable
     protos, requested = CausalFrames.prototypes(
@@ -1194,20 +1194,23 @@ end
         ),
     )
     ss = [Variance(:x), Std(:x), Covariance(:x, :y), Correlation(:x, :y),
-        LinearRegression(:x, :y)]
+        LinearRegression(:x, :y), LinearRegression(:x, :y; intercept = false, name = :o)]
     for (xs, ys) in
         ((Float16[(i * 3) % 8 for i in 1:300], Float16[(i * 5) % 7 for i in 1:300]),
         (Float16[300; [(i * 3) % 8 for i in 1:19]], Float16[(i * 5) % 7 for i in 1:20]),
         (Float32[2e19; 1:19], Float32[(i * 5) % 7 for i in 1:20]))
         T = eltype(xs)
         out = run(xs, ys, ss)
-        @test all(c -> eltype(out[!, c]) == T, names(out, Not([:time, :n])))
+        @test all(c -> eltype(out[!, c]) == T, names(out, Not([:time, :n, :o_n])))
         x, y = Float64.(xs), Float64.(ys)
         @test only(out.x_variance) ≈ T(Statistics.var(x)) rtol = 2eps(T)
         @test only(out.x_std) ≈ T(Statistics.std(x)) rtol = 2eps(T)
         @test only(out.x_y_covariance) ≈ T(Statistics.cov(x, y)) rtol = 2eps(T)
         @test only(out.x_y_correlation) ≈ T(Statistics.cor(x, y)) atol = 2eps(T)
         @test only(out.x_beta) ≈ T(Statistics.cov(x, y) / Statistics.var(x)) rtol = 4eps(T)
+        # the fit through the origin reads raw products, folded wide too (#140)
+        @test only(out.o_x_beta) ≈ T(sum(x .* y) / sum(x .^ 2)) rtol = 4eps(T)
+        @test isfinite(only(out.o_r2)) && isfinite(only(out.o_stderr))
     end
     # Std and Correlation read the co-moments, not the narrowed Variance and
     # Covariance: a variance past floatmax has a standard deviation and a

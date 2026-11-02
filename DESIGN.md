@@ -2042,8 +2042,8 @@ cannot specialize on a runtime value, so every row pays a general power where a
 move or a multiply would do. `SumPower(c, 1)` and `SumPower(c, 2)` therefore
 borrow the terms that hold their exponent in the *type* — `ColumnTerm{c}` and
 `PairProductTerm{c,c}` — which is worth roughly 3× on the fold, and matters
-well beyond `SumPower` itself since `Moment(c, 2)` and every
-`LinearRegression` without an intercept depend on the squared power sum. This is
+well beyond `SumPower` itself since `Moment(c, 2)` depends on the squared power
+sum. This is
 an implementation detail: the output column keeps its own name and the
 accumulator type is unchanged (`powertype(T, 1) === sumtype(T)` and
 `powertype(T, 2) === dottype(T, T)`), so no schema changes. The term value is
@@ -2721,8 +2721,12 @@ costs one accumulator plus a free fieldless rename.
 The rule is about argument *order*. The co-moment behind `Variance` and
 `Covariance` has one representation for a squared term, `CoMoment{x,x}`, so
 `Covariance(:x, :x)` shares with `Variance(:x)` too. A no-intercept
-`LinearRegression` sends its raw squared terms to `SumPower(c, 2)` rather than
-`DotProduct(c, c)`, sharing with `Moment(c, 2)`.
+`LinearRegression` reads its raw products, squared terms included, from the
+unexported canonical `CrossProduct{a,b}`: `DotProduct`'s sum folded at
+`widenfold` width, as the co-moments are, so a `Float16`/`Float32` square
+doesn't overflow a fit in range (issue #140). `SumPower` and `DotProduct` keep
+`Base.sum`'s type, so a no-intercept fit shares with neither, only with other
+no-intercept fits.
 
 Before running, the transforms expand the requested summarizers into the
 full set to fold: each one's dependencies recursively, in topological order

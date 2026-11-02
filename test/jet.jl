@@ -67,8 +67,8 @@ end
             x_y_comoment = 10.0, x_sum = 15.0, y_sum = 30.0))
     st = CausalFrames.fresh(LinearRegression(:x, :y; intercept = false), lr)
     JET.@test_opt CausalFrames.value(st,
-        (count = 5, x_sumpower_2 = 55.0, y_sumpower_2 = 200.0,
-            x_y_dotproduct = 100.0))
+        (count = 5, x_x_crossproduct = 55.0, y_y_crossproduct = 200.0,
+            x_y_crossproduct = 100.0))
     st = CausalFrames.fresh(LinearRegression([:x, :z], :y), lr)
     JET.@test_opt CausalFrames.value(st,
         (count = 5, x_x_comoment = 10.0, z_z_comoment = 10.0,

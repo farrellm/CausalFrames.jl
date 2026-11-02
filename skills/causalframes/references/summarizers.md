@@ -408,9 +408,12 @@ coefficients are exact but `stderr` and the t statistics are `NaN`.
 With an intercept the fit is computed from the same centred accumulators as
 `Variance` and `Covariance`, so large levels don't cancel, plus
 `Count` and each column's `Sum` for the means. Without one it
-is computed from `Count`, `SumPower``(·, 2)` and
-`DotProduct`. Either way, regressions over overlapping columns, and the
-statistics beside them, share accumulators. With `K ≥ 2` each emitted row allocates a `K × K`
+is computed from `Count` and the raw cross products `Σab`, shared only
+with other regressions without an intercept. Either way, regressions over
+overlapping columns, and the statistics beside them, share accumulators.
+`Float16` and `Float32` input is accumulated as `Float64` and the statistics
+narrowed back, so a square past the type's `floatmax` doesn't overflow a fit
+that is in range. With `K ≥ 2` each emitted row allocates a `K × K`
 workspace; `K = 1` allocates nothing.
 
 ## `Quantile`

@@ -57,9 +57,12 @@ coefficients are exact but `stderr` and the t statistics are `NaN`.
 With an intercept the fit is computed from the same centred accumulators as
 [`Variance`](@ref) and [`Covariance`](@ref), so large levels don't cancel, plus
 [`Count`](@ref) and each column's [`Sum`](@ref) for the means. Without one it
-is computed from [`Count`](@ref), [`SumPower`](@ref)`(·, 2)` and
-[`DotProduct`](@ref). Either way, regressions over overlapping columns, and the
-statistics beside them, share accumulators. With `K ≥ 2` each emitted row allocates a `K × K`
+is computed from [`Count`](@ref) and the raw cross products `Σab`, shared only
+with other regressions without an intercept. Either way, regressions over
+overlapping columns, and the statistics beside them, share accumulators.
+`Float16` and `Float32` input is accumulated as `Float64` and the statistics
+narrowed back, so a square past the type's `floatmax` doesn't overflow a fit
+that is in range. With `K ≥ 2` each emitted row allocates a `K × K`
 workspace; `K = 1` allocates nothing.
 """
 struct LinearRegression{P,Y} <: GroupSummarizer
@@ -131,11 +134,10 @@ end
 # The cross products a fit reads. With an intercept they are the centred
 # co-moments, which Variance, Covariance and Correlation share and which don't
 # cancel under a large level. Without one the fit is on the raw products by
-# definition: the canonical dot product, with a squared term as SumPower(c, 2)
-# rather than DotProduct(c, c), the same value under a name Moment shares.
+# definition: the canonical `CrossProduct` (sums.jl), folded at `widenfold`
+# width as the co-moments are, so only other no-intercept fits share it.
 crossdep(a::Symbol, b::Symbol, intercept::Bool) =
-    intercept ? canonicalcomoment(a, b) :
-    a === b ? SumPower(a, 2) : canonicaldot(a, b)
+    intercept ? canonicalcomoment(a, b) : crossproduct(a, b)
 crossname(a::Symbol, b::Symbol, intercept::Bool) =
     outname(crossdep(a, b, intercept))
 

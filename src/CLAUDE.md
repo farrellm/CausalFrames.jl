@@ -282,7 +282,10 @@ design rationale and performance constraints behind each module.
     `LinearRegressionState` carry the type to narrow back to (`narrowtype`,
     re-typed by `widenstate`), each narrowing only its own value: `Std` and
     `Correlation` read the co-moments, not the narrowed `Variance` and
-    `Covariance`, which overflow first. Sliding still kept a residue at the scale of a dominant
+    `Covariance`, which overflow first. A no-intercept `LinearRegression` reads the
+    unexported `CrossProduct{a,b}` (sums.jl), `DotProduct`'s `AccumState` over
+    a `WidePairTerm` folded at `widenfold` width, since `SumPower` and
+    `DotProduct` must keep `Base.sum`'s type (issue #140). Sliding still kept a residue at the scale of a dominant
     row once it had left (issue #97), so the windowed float state
     (`freshwindowed`, flag `W`; tracking on the ordinary state cost
     `summarize` 8%) tracks its largest product (`peak`) and, past `REFOLDRATIO` times the window's scale (`Σd²`,
