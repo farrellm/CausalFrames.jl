@@ -1160,6 +1160,14 @@ end
         foreach(row -> CausalFrames.update!(st, row), rows)
         @test st.peak == 0 && !CausalFrames.needsrefold(st)
     end
+    # Float16, where the squared ratio would overflow: a flat covariance
+    # window left after a spread still asks
+    st = CausalFrames.freshwindowed(CausalFrames.CoMoment{:x,:y}(),
+        (time = Int, x = Float16, y = Float16))
+    f16 = [(time = 1, x = Float16(v), y = Float16(v)) for v in (0, 4, 0.5, 0.5, 0.5)]
+    foreach(row -> CausalFrames.update!(st, row), f16)
+    foreach(row -> CausalFrames.downdate!(st, row), f16[1:2])
+    @test CausalFrames.needsrefold(st)
     # combine! re-expresses the covariance's plain squares at the left shift
     s = CausalFrames.CoMoment{:x,:y}()
     l, r = CausalFrames.freshwindowed(s, intypes), CausalFrames.freshwindowed(s, intypes)

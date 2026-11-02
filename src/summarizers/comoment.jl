@@ -192,11 +192,14 @@ end
 # squared for a covariance. A scale gone negative or to zero under round-off
 # asks too; a NaN one (an overflowed sum) doesn't, since refolding would not
 # change it. Read on every eviction, so the compensated pair is read as is.
+# The covariance divides the peak by the ratio before squaring, since
+# `REFOLDRATIO²` overflows Float16.
 @inline function needsrefold(st::CoMomentState{N,A,B,T,M,S,W}) where {N,A,B,T,M,S,W}
     W || return false
     r = convert(T, REFOLDRATIO)
     A === B && return st.peak > r * (st.sab.total + st.sab.comp)
-    return st.peak * st.peak > r * r * max(st.qa * st.qb, zero(T))
+    q = st.peak / r
+    return q * q > max(st.qa * st.qb, zero(T))
 end
 
 # Move the shifts to (ka, kb). With δ the move,
