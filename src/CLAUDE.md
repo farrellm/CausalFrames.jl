@@ -277,15 +277,19 @@ design rationale and performance constraints behind each module.
     sums sit at the scale of the squared distance to the shift and the
     co-moment at the spread's (issue #91). `combine!` re-expresses one side at
     the other's shift. `Float16`/`Float32` fold at `Float64` (`widenfold`:
-    their squares and `n·Σd²` overflow while the variance is in range), and
-    `CovarianceState`, `StdState`, `CorrelationState` and
-    `LinearRegressionState` carry the type to narrow back to (`narrowtype`,
-    re-typed by `widenstate`), each narrowing only its own value: `Std` and
+    their squares and `n·Σd²` overflow while the variance is in range; all of
+    it in `widen.jl`). The state's value is a `Widened{P}`, `P` the input type
+    it was built for (its last type parameter), and each dependent narrows only
+    its own value, to the type `narrowof` reads from its dependency values'
+    types, so the fieldless dependents carry no column parameters and no
+    `widenstate` for it (issue #139; a plain value stands for its own type, so
+    unit tests may pass literals). `Std` and
     `Correlation` read the co-moments, not the narrowed `Variance` and
     `Covariance`, which overflow first. A no-intercept `LinearRegression` reads the
     unexported `CrossProduct{a,b}` (sums.jl), `DotProduct`'s `AccumState` over
     a `WidePairTerm` folded at `widenfold` width, since `SumPower` and
-    `DotProduct` must keep `Base.sum`'s type (issue #140). Sliding still kept a residue at the scale of a dominant
+    `DotProduct` must keep `Base.sum`'s type (issue #140); the term carries
+    `P`, rebuilt on widening by `retermed`. Sliding still kept a residue at the scale of a dominant
     row once it had left (issue #97), so the windowed float state
     (`freshwindowed`, flag `W`; tracking on the ordinary state cost
     `summarize` 8%) tracks its largest product (`peak`) and, past `REFOLDRATIO` times the window's scale (`Σd²`,
@@ -303,7 +307,7 @@ design rationale and performance constraints behind each module.
     as the centred triple `(m2, m3, m4)`, with `CoMoment`'s shift, recentring,
     counting and `combine!` rules. It folds at `float(T)` (an integer `d⁴`
     overflows), widened to `Float64` for `Float16`/`Float32` as `CoMoment` is,
-    the `ShapeState` narrowing back to the input's type, and is error-free one
+    valued as a `Widened` triple for the `ShapeState` to narrow, and is error-free one
     step further than `CoMoment`: the
     deviation `x − K` and the shift's move are exact `twosum` pairs, every
     power and binomial coefficient a double-double, and `value` evaluates the

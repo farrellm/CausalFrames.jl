@@ -52,7 +52,10 @@ freshwindowed(s::CoMoment{A,B}, intypes::NamedTuple) where {A,B} =
 # left, and the residue left behind otherwise is at most ~eps·REFOLDRATIO of
 # the scale. Only the windowed state tracks (W false leaves peak, qa and qb at
 # 0): the ordinary one never downdates, and tracking cost `summarize` 8%.
-mutable struct CoMomentState{N,A,B,T,M,S,W} <: SummarizerState
+#
+# T is the fold type, `widenfold` of P, the input type the state was built
+# for, which its `Widened` value reports to the dependents (widen.jl).
+mutable struct CoMomentState{N,A,B,T,M,S,W,P} <: SummarizerState
     n::Int
     age::Int
     ka::T
@@ -74,35 +77,13 @@ function comomentfresh(s::CoMoment{A,B}, ::Type{T},
     N = comomentname(A, B)
     T === Missing && return MissingState{N}(s)
     M = Missing <: T
-    Tn = widenfold(nonmissingtype(T))
-    return CoMomentState{N,A,B,Tn,M,accstorage(Tn),windowed && compensable(Tn)}()
+    P = nonmissingtype(T)
+    Tn = widenfold(P)
+    return CoMomentState{N,A,B,Tn,M,accstorage(Tn),windowed && compensable(Tn),P}()
 end
 
-# Float16 and Float32 fold at Float64: at their own precision a square or a
-# product passes floatmax past a deviation of 256 (Float16) or 1.8e19
-# (Float32), and the value's `n·Σd²` past a few hundred Float16 rows, though
-# the variance itself is in range. The dependents narrow their value back to
-# the inputs' float type (`narrowtype`), so the output type is unchanged.
-widenfold(::Type{T}) where {T} = T
-widenfold(::Type{Float16}) = Float64
-widenfold(::Type{Float32}) = Float64
-
-# The type a dependent of a widened fold narrows its value to, from the types
-# of its input columns: their promoted float type where that was widened, else
-# `Nothing`, for no narrowing.
-function narrowtype(Ts::Type...)
-    T = promote_type(map(nonmissingtype, Ts)...)
-    return widenfold(T) === T ? Nothing : T
-end
-# The narrowed value and its type, `missing` kept.
-narrowval(::Type{Nothing}, x) = x
-narrowval(::Type{E}, x) where {E} = x === missing ? missing : convert(E, x)
-narrowedtype(::Type{Nothing}, ::Type{V}) where {V} = V
-narrowedtype(::Type{E}, ::Type{V}) where {E,V} =
-    V === Missing ? Missing : maybemissing(E, Missing <: V)
-
-CoMomentState{N,A,B,T,M,S,W}() where {N,A,B,T,M,S,W} =
-    CoMomentState{N,A,B,T,M,S,W}(0, 0, convert(T, 0), convert(T, 0), acczero(S),
+CoMomentState{N,A,B,T,M,S,W,P}() where {N,A,B,T,M,S,W,P} =
+    CoMomentState{N,A,B,T,M,S,W,P}(0, 0, convert(T, 0), convert(T, 0), acczero(S),
         acczero(S), acczero(S), convert(T, 0), convert(T, 0), convert(T, 0), 0, 0)
 
 # The co-moment from the shifted sums, with one rounding: the numerator is
@@ -294,17 +275,18 @@ end
 # `missing` while a missing row is folded, else NaN while a nonfinite one is.
 # A variance (A === B) is clamped at zero, so round-off never makes it
 # negative.
-@inline function value(st::CoMomentState{N,A,B,T,M}) where {N,A,B,T,M}
+@inline function value(st::CoMomentState{N,A,B,T,M,S,W,P}) where {N,A,B,T,M,S,W,P}
     V = comomenttype(T)
-    R = maybemissing(V, M)
+    R = maybemissing(Widened{P,V}, M)
     M && st.missings > 0 && return NamedTuple{(N,),Tuple{R}}((missing,))
-    st.nonfinite > 0 && return NamedTuple{(N,),Tuple{R}}((convert(V, NaN),))
+    st.nonfinite > 0 &&
+        return NamedTuple{(N,),Tuple{R}}((Widened{P}(convert(V, NaN)),))
     # One row deviates from its own mean by exactly 0, which sliding sums
     # need not reproduce bit for bit (Σd² minus d·d leaves round-off), and a
     # corrected single-row variance must be 0/0 = NaN, not ±Inf.
-    st.n <= 1 && return NamedTuple{(N,),Tuple{R}}((zero(V),))
+    st.n <= 1 && return NamedTuple{(N,),Tuple{R}}((Widened{P}(zero(V)),))
     c = comomentvalue(st.n, st.sab, st.sa, A === B ? st.sa : st.sb)
-    return NamedTuple{(N,),Tuple{R}}((A === B ? max(c, zero(c)) : c,))
+    return NamedTuple{(N,),Tuple{R}}((Widened{P}(A === B ? max(c, zero(c)) : c),))
 end
 
 function widenstate(st::CoMomentState{N,A,B}, intypes::NamedTuple) where {N,A,B}

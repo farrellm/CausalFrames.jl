@@ -1006,7 +1006,8 @@ end
             foreach(row -> CausalFrames.update!(l, row), rows[1:k])
             foreach(row -> CausalFrames.update!(r, row), rows[(k+1):end])
             CausalFrames.combine!(l, l, r)
-            @test only(CausalFrames.value(l)) ≈ exactcomoment(rows, a, b) rtol = 1e-12
+            @test CausalFrames.unwiden(only(CausalFrames.value(l))) ≈
+                  exactcomoment(rows, a, b) rtol = 1e-12
         end
     end
 
@@ -1291,13 +1292,18 @@ end
     @test only(out.x_kurtosis) ≈ shape(xs, :kurtosis) atol = 1e-15
     @test only(out.y_skewness) ≈ shape(xs, :skewness; corrected = false) atol = 1e-15
     @test only(out.y_kurtosis) ≈ shape(xs, :kurtosis; corrected = false) atol = 1e-15
-    # Float32 stays Float32, from sums folded at Float64
+    # Float32 stays Float32, from sums folded at Float64 whose value names the
+    # input type; plain sums stand for their own type
     st = CausalFrames.fresh(Kurtosis(:x), (time = Int, x = Float32))
     @test @inferred(
         CausalFrames.value(st,
-            (count = 5, x_centralmoments = (1.0, 0.0, 2.0)))
+            (count = 5,
+                x_centralmoments = CausalFrames.Widened{Float32}((1.0, 0.0, 2.0))))
     ) ===
-          (x_kurtosis = 32.0f0,)  # g2 = 5·2/1² - 3 = 7, G2 = 4·(6·7 + 6)/(3·2)
+          (x_kurtosis = 32.0f0,)
+    @test @inferred(
+        CausalFrames.value(st, (count = 5, x_centralmoments = (1.0, 0.0, 2.0)))
+    ) === (x_kurtosis = 32.0,)  # g2 = 5·2/1² - 3 = 7, G2 = 4·(6·7 + 6)/(3·2)
 
     # Float16 and Float32 fold at Float64, so their powers don't overflow:
     # Float16 d⁴ passes floatmax past a deviation of 16, n·Σd² past a few
@@ -1379,7 +1385,7 @@ end
         foreach(row -> CausalFrames.update!(l, row), rs[1:k])
         foreach(row -> CausalFrames.update!(r, row), rs[(k+1):end])
         CausalFrames.combine!(l, l, r)
-        @test all(only(CausalFrames.value(l)) .≈ exactm(rs))
+        @test all(CausalFrames.unwiden(only(CausalFrames.value(l))) .≈ exactm(rs))
     end
 
     # integer input folds at Float64, and a Float32 state widens mid-stream
@@ -1410,7 +1416,7 @@ end
             foreach(v -> CausalFrames.update!(l, (; x = v)), bs[1:k])
             foreach(v -> CausalFrames.update!(r, (; x = v)), bs[(k+1):end])
             CausalFrames.combine!(l, l, r)
-            m = only(CausalFrames.value(l))
+            m = CausalFrames.unwiden(only(CausalFrames.value(l)))
             @test m isa NTuple{3,BigFloat}
             @test all(abs.(m .- exactb) .<= big(1e-60) .* abs.(exactb))
         end
@@ -1434,10 +1440,14 @@ end
     for v in (1e8 + 0.1, 1e8 + 7.3)
         CausalFrames.downdate!(st, (; x = v))
     end
-    @test st.n == 0 && st.peak == 0 && only(CausalFrames.value(st)) === (0.0, 0.0, 0.0)
+    @test st.n == 0 && st.peak == 0 &&
+          CausalFrames.unwiden(only(CausalFrames.value(st))) === (0.0, 0.0, 0.0)
     w = [-2.0, 3.0, 0.5, 9.0]
     foreach(v -> CausalFrames.update!(st, (; x = v)), w)
-    @test all(only(CausalFrames.value(st)) .≈ exactm([(; x = v) for v in w]))
+    @test all(
+        CausalFrames.unwiden(only(CausalFrames.value(st))) .≈
+        exactm([(; x = v) for v in w]),
+    )
 
     # an all-missing chunk widens to the real state, handing over its count:
     # missing until both missing rows have left a Bars(3) window

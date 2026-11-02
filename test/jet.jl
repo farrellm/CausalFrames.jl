@@ -143,6 +143,22 @@ end
     end
     st = CausalFrames.fresh(Covariance(:y, :x), (time = Int, x = Float64, y = Float64))
     JET.@test_opt CausalFrames.value(st, (count = 3, x_y_comoment = -3.0))
+    # the type to narrow to is read from `Widened` dependency values' types,
+    # statically, alone or beside plain sums (issue #139)
+    W16 = CausalFrames.Widened{Float16}
+    JET.@test_opt CausalFrames.value(st, (count = 3, x_y_comoment = W16(-3.0)))
+    @test CausalFrames.value(st, (count = 3, x_y_comoment = W16(-3.0))) ===
+          (y_x_covariance = Float16(-1.5),)
+    st = CausalFrames.fresh(Correlation(:x, :y), (time = Int, x = Float16, y = Float16))
+    JET.@test_opt CausalFrames.value(st,
+        (count = 3, x_y_comoment = W16(-3.0), x_x_comoment = W16(2.0),
+            y_y_comoment = W16(8.0)))
+    st = CausalFrames.fresh(LinearRegression(:x, :y),
+        (time = Int, x = Float16, y = Float16))
+    vals = (count = 5, x_x_comoment = W16(10.0), y_y_comoment = W16(20.0),
+        x_y_comoment = W16(10.0), x_sum = Float16(15), y_sum = Float16(30))
+    JET.@test_opt CausalFrames.value(st, vals)
+    @test CausalFrames.value(st, vals).x_beta === Float16(1)
 end
 
 @testset "central-moment accumulator" begin

@@ -23,8 +23,12 @@ struct PowerTerm{C}
     power::Int
 end
 struct PairProductTerm{A,B} end
-# `PairProductTerm`, folded at `widenfold` width (`CrossProduct`).
-struct WidePairTerm{A,B} end
+# `PairProductTerm`, folded at `widenfold` width (`CrossProduct`); P is the
+# input type it was built for, which its `Widened` value reports, so a wider
+# input rebuilds the term (`retermed`).
+struct WidePairTerm{A,B,P} end
+widepairterm(a::Symbol, b::Symbol, intypes::NamedTuple) =
+    WidePairTerm{a,b,nonmissingtype(dottype(intypes[a], intypes[b]))}()
 
 @inline termvalue(::ColumnTerm{C}, ::Type{A}, row) where {C,A} =
     convert(A, getproperty(row, C))
@@ -51,6 +55,11 @@ acctype(::PairProductTerm{Ca,Cb}, intypes::NamedTuple) where {Ca,Cb} =
     dottype(intypes[Ca], intypes[Cb])
 acctype(::WidePairTerm{Ca,Cb}, intypes::NamedTuple) where {Ca,Cb} =
     widenfoldmissing(dottype(intypes[Ca], intypes[Cb]))
+
+# The term a wider input calls for: the same, but for `WidePairTerm`'s P.
+retermed(term, ::NamedTuple) = term
+retermed(::WidePairTerm{Ca,Cb}, intypes::NamedTuple) where {Ca,Cb} =
+    widepairterm(Ca, Cb, intypes)
 
 # The sum family's state. N names the output column, A is the accumulator type,
 # T the term functor's type (so update! inlines the term) and S the storage
@@ -117,10 +126,15 @@ end
 value(st::AccumState{N,A,T,M}) where {N,A,T,M} =
     NamedTuple{(N,),Tuple{maybemissing(A, M)}}((
         M && st.missings > 0 ? missing : accvalue(st.acc),))
+# `CrossProduct`'s value is `Widened`, for the regression to narrow by.
+value(st::AccumState{N,A,WidePairTerm{Ca,Cb,P},M}) where {N,A,Ca,Cb,P,M} =
+    NamedTuple{(N,),Tuple{maybemissing(Widened{P,A}, M)}}((
+        M && st.missings > 0 ? missing : Widened{P}(accvalue(st.acc)),))
 # A later chunk can widen the accumulator into a compensable float or onto the
 # missing-counting path.
 function widenstate(st::AccumState{N}, intypes::NamedTuple) where {N}
-    w = accumfresh(st.term, N, acctype(st.term, intypes))
+    term = retermed(st.term, intypes)
+    w = accumfresh(term, N, acctype(term, intypes))
     typeof(w) === typeof(st) && return st
     w.acc = widenacc(typeof(w.acc), st.acc)
     w.missings = st.missings
@@ -153,8 +167,11 @@ function widenstate(st::MissingState{N}, intypes::NamedTuple) where {N}
 end
 
 # The state a wider input calls for, from a MissingState's recipe.
-refresh(term::Union{ColumnTerm,PowerTerm,PairProductTerm,WidePairTerm}, N::Symbol,
-    intypes::NamedTuple) = accumfresh(term, N, acctype(term, intypes))
+function refresh(term::Union{ColumnTerm,PowerTerm,PairProductTerm,WidePairTerm},
+    N::Symbol, intypes::NamedTuple)
+    t = retermed(term, intypes)
+    return accumfresh(t, N, acctype(t, intypes))
+end
 refresh(s::Summarizer, ::Symbol, intypes::NamedTuple) = fresh(s, intypes)
 
 # Fold `n` missing rows into a fresh state, whose type admits `missing`.
@@ -475,16 +492,13 @@ struct CrossProduct{A,B} <: GroupSummarizer end
 crossproduct(a::Symbol, b::Symbol) = CrossProduct{canonicalpair(a, b)...}()
 crossproductname(a, b) = Symbol(a, :_, b, :_crossproduct)
 
-# `widenfold` of a possibly `Missing`-admitting type, `missing` kept.
-widenfoldmissing(::Type{Missing}) = Missing
-widenfoldmissing(::Type{T}) where {T} =
-    maybemissing(widenfold(nonmissingtype(T)), Missing <: T)
-
 emptyvalue(::CrossProduct{A,B}) where {A,B} =
     NamedTuple{(crossproductname(A, B),)}((0,))
-fresh(s::CrossProduct{A,B}, intypes::NamedTuple) where {A,B} =
-    accumfresh(WidePairTerm{A,B}(), crossproductname(A, B),
-        acctype(WidePairTerm{A,B}(), intypes))
-freshwindowed(s::CrossProduct{A,B}, intypes::NamedTuple) where {A,B} =
-    accumfresh(WidePairTerm{A,B}(), crossproductname(A, B),
-        acctype(WidePairTerm{A,B}(), intypes), trackedstorage)
+function fresh(s::CrossProduct{A,B}, intypes::NamedTuple) where {A,B}
+    t = widepairterm(A, B, intypes)
+    return accumfresh(t, crossproductname(A, B), acctype(t, intypes))
+end
+function freshwindowed(s::CrossProduct{A,B}, intypes::NamedTuple) where {A,B}
+    t = widepairterm(A, B, intypes)
+    return accumfresh(t, crossproductname(A, B), acctype(t, intypes), trackedstorage)
+end

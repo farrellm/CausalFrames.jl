@@ -3,6 +3,7 @@
 # holding it.
 include("summarizers/interface.jl")
 include("summarizers/compensated.jl")
+include("summarizers/widen.jl")
 include("summarizers/sums.jl")
 include("summarizers/comoment.jl")
 include("summarizers/centralmoments.jl")

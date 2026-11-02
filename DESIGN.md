@@ -2525,9 +2525,14 @@ round-off at the scale of the spread, since it is shift-invariant:
   passes `floatmax` past a deviation of 256 (`Float16`) or `1.8e19`
   (`Float32`), and the value's `n·Σd²` past a few hundred `Float16` rows,
   though the variance itself is in range. Every dependent narrows only its
-  own value back to the inputs' promoted float type (`narrowtype`; their
-  states carry it, re-typed by `widenstate`), so the output types are
-  unchanged. `Std` and `Correlation` read the co-moments rather than the
+  own value back to the inputs' promoted float type, so the output types are
+  unchanged. The widened accumulators say what they were built for: their
+  value is a `Widened{P}` (`widen.jl`), with `P` the input type folded, and a
+  dependent reads the type to narrow to from its dependency values' types
+  (`narrowof`, generated, so a constant). The fieldless dependent states
+  therefore carry no column or type parameter for it, and need no
+  `widenstate` when an input widens (issue #139); a plain dependency value
+  stands for its own type. `Std` and `Correlation` read the co-moments rather than the
   narrowed `Variance` and `Covariance`, which overflow first: a `Float16`
   `[0, 512]` has a variance past `floatmax` but a standard deviation of 362;
 - a float state *recentres* once more than half its rows arrived since the
@@ -2620,7 +2625,7 @@ differs in three ways:
   55,000, a `Float16` one past 16 and a `Float32` one past `4.3e9`, and
   `n·Σd²` overflows `Float16` past a few hundred rows. `Skewness` and
   `Kurtosis`, bounded by about `√n` and `n`, still come out in the input's
-  float type (their states carry it, re-typed by `widenstate`);
+  float type, from the accumulator's `Widened` value, as above;
 - the deviation `x − K` and the recentring move `δ` are exact pairs
   (`twosum`), and every power and coefficient is folded as a double-double. The
   rounding of `x − K` that the co-moment keeps (above) costs `eps · (D / s)⁴`
@@ -3158,7 +3163,7 @@ hand-off argument, `abandon!` is the cancellation hook, and pulling order
 | `ext/CausalFramesParquet2Ext.jl` | the Parquet2 backend: the preferred writer, the fallback reader |
 | `src/jls.jl` | the `Serialization`-backed persistence pair (`writejls`, `readjls`) |
 | `src/table.jl` | the in-memory source (`readtable`): the generic Tables.jl path, the eagerly resolved DataFrame path, and the frame path |
-| `src/summarizers.jl` | the include list for `src/summarizers/`: the `Summarizer`/`SummarizerState` interface (`interface.jl`), the compensated float arithmetic (`compensated.jl`), one file per summarizer family (`sums.jl`, `comoment.jl`, `centralmoments.jl`, `agesum.jl`, `moments.jl`, `regression.jl`, `orderstats.jl`, `windowvalues.jl`, `extremes.jl`, `fitmodel.jl`), the derived states' no-op folds (`derived.jl`) and every built-in's `inputcolumns` (`inputcolumns.jl`) |
+| `src/summarizers.jl` | the include list for `src/summarizers/`: the `Summarizer`/`SummarizerState` interface (`interface.jl`), the compensated float arithmetic (`compensated.jl`), the `Float16`/`Float32` widening and narrowing (`widen.jl`), one file per summarizer family (`sums.jl`, `comoment.jl`, `centralmoments.jl`, `agesum.jl`, `moments.jl`, `regression.jl`, `orderstats.jl`, `windowvalues.jl`, `extremes.jl`, `fitmodel.jl`), the derived states' no-op folds (`derived.jl`) and every built-in's `inputcolumns` (`inputcolumns.jl`) |
 | `src/keys.jl` | `KeyDict`, the dictionary every keyed store uses, hashing its NamedTuple keys field by field |
 | `src/summarize.jl` | folding kernels and the summarization transforms |
 | `src/join.jl` | the as-of join transform (`asofjoin`) and the join engine it shares with `applymodels` and `futurejoin` |

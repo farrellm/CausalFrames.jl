@@ -102,16 +102,10 @@ end
 # AN every accumulator name read, deduplicated (a predictor may be the
 # response); SP and SY the predictor and response sums, QY the response's power
 # sum, GN the packed upper triangle of the cross-product matrix, DN the
-# predictor-response cross products; I the intercept flag. CS are the input
-# columns, from which `widenstate` re-types E, the type the statistics narrow
-# to (`narrowtype`, comoment.jl: the co-moments of Float16 and Float32 are
-# folded at Float64).
-struct LinearRegressionState{NN,SN,AN,SP,SY,QY,GN,DN,I,CS,E} <: DerivedState end
-
-regnarrow(CS::Tuple, intypes::NamedTuple) = narrowtype(map(c -> intypes[c], CS)...)
-widenstate(::LinearRegressionState{NN,SN,AN,SP,SY,QY,GN,DN,I,CS},
-    intypes::NamedTuple) where {NN,SN,AN,SP,SY,QY,GN,DN,I,CS} =
-    LinearRegressionState{NN,SN,AN,SP,SY,QY,GN,DN,I,CS,regnarrow(CS, intypes)}()
+# predictor-response cross products; I the intercept flag. The statistics
+# narrow to the type the accumulators' `Widened` values name (`narrowof`,
+# widen.jl: the cross products of Float16 and Float32 are folded at Float64).
+struct LinearRegressionState{NN,SN,AN,SP,SY,QY,GN,DN,I} <: DerivedState end
 
 regname(::Nothing, base::Symbol) = base
 regname(prefix::Symbol, base::Symbol) = Symbol(prefix, :_, base)
@@ -170,7 +164,7 @@ function emptyvalue(r::LinearRegression{P,Y}) where {P,Y}
     return NamedTuple{ns}((0, ntuple(_ -> missing, length(ns) - 1)...))
 end
 
-function fresh(r::LinearRegression{P,Y}, intypes::NamedTuple) where {P,Y}
+function fresh(r::LinearRegression{P,Y}, ::NamedTuple) where {P,Y}
     ns = regnames(P, r.name, r.intercept)
     I = r.intercept
     gn = Tuple(crossname(P[i], P[j], I) for i in eachindex(P) for j in i:length(P))
@@ -179,9 +173,7 @@ function fresh(r::LinearRegression{P,Y}, intypes::NamedTuple) where {P,Y}
     sy = I ? (outname(Sum(Y)),) : ()
     sp = I ? map(p -> outname(Sum(p)), P) : ()
     an = Tuple(unique((qy..., gn..., dn..., sy..., sp...)))
-    cs = (P..., Y)
-    return LinearRegressionState{first(ns),Base.tail(ns),an,sp,sy,qy,gn,dn,I,cs,
-        regnarrow(cs, intypes)}()
+    return LinearRegressionState{first(ns),Base.tail(ns),an,sp,sy,qy,gn,dn,I}()
 end
 
 # The dependency values this regression reads, and the tuple type they are
@@ -190,7 +182,7 @@ end
 # eltype and push the emission into runtime dispatch; `Base.promote_op` gives
 # the declared type, a compile-time constant.
 @inline depvalues(vals::NamedTuple, ::Val{NS}) where {NS} =
-    values(NamedTuple{NS}(vals))
+    map(unwiden, values(NamedTuple{NS}(vals)))
 @inline deptypes(::Type{V}, ::Val{NS}) where {V<:NamedTuple,NS} =
     Base.promote_op(depvalues, V, Val{NS})
 
@@ -308,8 +300,9 @@ function regstats(::Type{Vc}, ::Val{I}, ::Val{M}, n::Vc, g::NTuple{G,Vc},
     return (r2, stderr, coefs...)
 end
 
-@inline function value(::LinearRegressionState{NN,SN,AN,SP,SY,QY,GN,DN,I,CS,E},
-    vals::NamedTuple) where {NN,SN,AN,SP,SY,QY,GN,DN,I,CS,E}
+@inline function value(::LinearRegressionState{NN,SN,AN,SP,SY,QY,GN,DN,I},
+    vals::NamedTuple) where {NN,SN,AN,SP,SY,QY,GN,DN,I}
+    E = narrowof(typeof(vals), Val(AN))
     W = regtype(deptypes(typeof(vals), Val(AN)))
     V = narrowedtype(E, W)
     M = length(SN)

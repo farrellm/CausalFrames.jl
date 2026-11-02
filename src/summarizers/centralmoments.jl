@@ -43,7 +43,10 @@ freshwindowed(s::CentralMoments{C}, intypes::NamedTuple) where {C} =
 # then about n·eps²·REFOLDRATIO² ≈ n·5e-26 of `Σd⁴`. It also refolds
 # a window gone flat after a spread, so a flat window's sums are exactly 0
 # again and Kurtosis reads it as flat.
-mutable struct CentralMomentState{N,C,T,M,S,W} <: SummarizerState
+#
+# As in `CoMomentState`, P is the input type the state was built for, which
+# its `Widened` value reports to the dependents (widen.jl).
+mutable struct CentralMomentState{N,C,T,M,S,W,P} <: SummarizerState
     n::Int
     age::Int
     k::T
@@ -65,12 +68,13 @@ function centralfresh(s::CentralMoments{C}, ::Type{T},
     N = centralname(C)
     T === Missing && return MissingState{N}(s)
     M = Missing <: T
-    Tn = centralfloat(nonmissingtype(T))
-    return CentralMomentState{N,C,Tn,M,accstorage(Tn),windowed && compensable(Tn)}()
+    P = nonmissingtype(T)
+    Tn = centralfloat(P)
+    return CentralMomentState{N,C,Tn,M,accstorage(Tn),windowed && compensable(Tn),P}()
 end
 
-CentralMomentState{N,C,T,M,S,W}() where {N,C,T,M,S,W} =
-    CentralMomentState{N,C,T,M,S,W}(0, 0, convert(T, 0), acczero(S), acczero(S),
+CentralMomentState{N,C,T,M,S,W,P}() where {N,C,T,M,S,W,P} =
+    CentralMomentState{N,C,T,M,S,W,P}(0, 0, convert(T, 0), acczero(S), acczero(S),
         acczero(S), acczero(S), convert(T, 0), 0, 0)
 
 fresh(::S) where {S<:CentralMomentState} = S()
@@ -290,17 +294,18 @@ end
 
 # `missing` while a missing row is folded, else NaNs while a nonfinite one is.
 # At most one row has no spread, exactly.
-@inline function value(st::CentralMomentState{N,C,T,M}) where {N,C,T,M}
+@inline function value(st::CentralMomentState{N,C,T,M,S,W,P}) where {N,C,T,M,S,W,P}
     V = comomenttype(T)
-    R = maybemissing(NTuple{3,V}, M)
+    R = maybemissing(Widened{P,NTuple{3,V}}, M)
     M && st.missings > 0 && return NamedTuple{(N,),Tuple{R}}((missing,))
     if st.nonfinite > 0
         nan = convert(V, NaN)
-        return NamedTuple{(N,),Tuple{R}}(((nan, nan, nan),))
+        return NamedTuple{(N,),Tuple{R}}((Widened{P}((nan, nan, nan)),))
     end
-    st.n <= 1 && return NamedTuple{(N,),Tuple{R}}(((zero(V), zero(V), zero(V)),))
+    st.n <= 1 &&
+        return NamedTuple{(N,),Tuple{R}}((Widened{P}((zero(V), zero(V), zero(V))),))
     m = centralvalue(st.n, st.s1, st.s2, st.s3, st.s4)
-    return NamedTuple{(N,),Tuple{R}}((convert(NTuple{3,V}, m),))
+    return NamedTuple{(N,),Tuple{R}}((Widened{P}(convert(NTuple{3,V}, m)),))
 end
 
 function widenstate(st::CentralMomentState{N,C}, intypes::NamedTuple) where {N,C}
@@ -397,25 +402,18 @@ end
 Kurtosis(column::ColumnSpec; corrected::Bool = true) =
     withterms(Kurtosis{colname(column)}(corrected), column)
 
-# The shape statistic K (`:skewness` or `:kurtosis`) of column C's centred
-# sums D, emitted as N and narrowed to E (`narrowtype`, comoment.jl: the sums
-# of Float16 and Float32 are folded at Float64); R is the corrected flag.
-# Fieldless, like `CovarianceState`, and re-typed by `widenstate` as it is.
-struct ShapeState{N,C,D,K,R,E} <: DerivedState end
-
-shapestate(N, C, K, R, intypes::NamedTuple) =
-    ShapeState{N,C,centralname(C),K,R,narrowtype(intypes[C])}()
-
-widenstate(::ShapeState{N,C,D,K,R}, intypes::NamedTuple) where {N,C,D,K,R} =
-    ShapeState{N,C,D,K,R,narrowtype(intypes[C])}()
+# The shape statistic K (`:skewness` or `:kurtosis`) of the centred sums D,
+# emitted as N and narrowed as the sums' `Widened` value says (widen.jl); R is
+# the corrected flag. Fieldless, like `CovarianceState`.
+struct ShapeState{N,D,K,R} <: DerivedState end
 
 for (S, K) in ((:Skewness, :skewness), (:Kurtosis, :kurtosis))
     @eval begin
         dependencies(::$S{C}) where {C} = (Count(), CentralMoments{C}())
         emptyvalue(::$S{C}) where {C} =
             NamedTuple{(Symbol(C, :_, $(QuoteNode(K))),)}((missing,))
-        fresh(s::$S{C}, intypes::NamedTuple) where {C} =
-            shapestate(outname(s), C, $(QuoteNode(K)), s.corrected, intypes)
+        fresh(s::$S{C}, ::NamedTuple) where {C} =
+            ShapeState{outname(s),centralname(C),$(QuoteNode(K)),s.corrected}()
     end
 end
 
@@ -423,7 +421,7 @@ end
 # type: the triple's element type, `missing` kept.
 shapetype(::Type{Missing}) = Missing
 shapetype(::Type{F}) where {F} =
-    maybemissing(fieldtype(nonmissingtype(F), 1), Missing <: F)
+    maybemissing(fieldtype(nonmissingtype(widenedvaluetype(F)), 1), Missing <: F)
 
 # The statistic from the centred sums over n rows. No spread (m2 not above 0,
 # which a NaN isn't either) gives NaN, as do too few rows for the correction.
@@ -443,11 +441,11 @@ end
     return (n - 1) * ((n + 1) * g2 + 6) / ((n - 2) * (n - 3))
 end
 
-@inline function value(::ShapeState{N,C,D,K,R,E},
-    vals::NamedTuple) where {N,C,D,K,R,E}
+@inline function value(::ShapeState{N,D,K,R}, vals::NamedTuple) where {N,D,K,R}
+    E = narrowof(typeof(vals), Val((D,)))
     V = narrowedtype(E, shapetype(fieldtype(typeof(vals), D)))
     return NamedTuple{(N,),Tuple{V}}((
         narrowval(E,
-            shapeof(vals[D], vals.count, Val(K), Val(R))),
+            shapeof(unwiden(vals[D]), vals.count, Val(K), Val(R))),
     ))
 end
