@@ -74,9 +74,34 @@ function comomentfresh(s::CoMoment{A,B}, ::Type{T},
     N = comomentname(A, B)
     T === Missing && return MissingState{N}(s)
     M = Missing <: T
-    Tn = nonmissingtype(T)
+    Tn = widenfold(nonmissingtype(T))
     return CoMomentState{N,A,B,Tn,M,accstorage(Tn),windowed && compensable(Tn)}()
 end
+
+# Float16 and Float32 fold at Float64: at their own precision a square or a
+# product passes floatmax past a deviation of 256 (Float16) or 1.8e19
+# (Float32), and the value's `n·Σd²` past a few hundred Float16 rows, though
+# the variance itself is in range. The dependents narrow their value back to
+# the inputs' float type (`narrowtype`), so the output type is unchanged.
+widenfold(::Type{T}) where {T} = T
+widenfold(::Type{Float16}) = Float64
+widenfold(::Type{Float32}) = Float64
+
+# The type a dependent of a widened fold narrows its value to, from the types
+# of its input columns: their promoted float type where that was widened, else
+# `Nothing`, for no narrowing.
+function narrowtype(Ts::Type...)
+    T = promote_type(map(nonmissingtype, Ts)...)
+    return widenfold(T) === T ? Nothing : T
+end
+# The narrowed value and its type, `missing` kept.
+narrowval(::Type{Nothing}, x) = x
+narrowval(::Type{Nothing}, ::Missing) = missing
+narrowval(::Type, ::Missing) = missing
+narrowval(::Type{E}, x) where {E} = convert(E, x)
+narrowedtype(::Type{Nothing}, ::Type{V}) where {V} = V
+narrowedtype(::Type{E}, ::Type{V}) where {E,V} =
+    V === Missing ? Missing : maybemissing(E, Missing <: V)
 
 CoMomentState{N,A,B,T,M,S,W}() where {N,A,B,T,M,S,W} =
     CoMomentState{N,A,B,T,M,S,W}(0, 0, convert(T, 0), convert(T, 0), acczero(S),
@@ -192,8 +217,8 @@ end
 # squared for a covariance. A scale gone negative or to zero under round-off
 # asks too; a NaN one (an overflowed sum) doesn't, since refolding would not
 # change it. Read on every eviction, so the compensated pair is read as is.
-# The covariance divides the peak by the ratio before squaring, since
-# `REFOLDRATIO²` overflows Float16.
+# The covariance divides the peak by the ratio before squaring, so
+# `REFOLDRATIO²` is never formed.
 @inline function needsrefold(st::CoMomentState{N,A,B,T,M,S,W}) where {N,A,B,T,M,S,W}
     W || return false
     r = convert(T, REFOLDRATIO)

@@ -100,8 +100,8 @@ emptyvalue(::Variance{C}) where {C} =
     NamedTuple{(Symbol(C, :_variance),)}((missing,))
 # A variance is the covariance of a column with itself, so it uses
 # CovarianceState (below) over the co-moment of the column with itself.
-fresh(v::Variance{C}, ::NamedTuple) where {C} =
-    CovarianceState{outname(v),outname(CoMoment{C,C}()),v.corrected}()
+fresh(v::Variance{C}, intypes::NamedTuple) where {C} =
+    covstate(outname(v), C, C, v.corrected, intypes)
 
 """
     Std(column::ColumnSpec; corrected = true) -> Summarizer
@@ -157,10 +157,17 @@ end
 Covariance(a::ColumnSpec, b::ColumnSpec; corrected::Bool = true) =
     withterms(Covariance{colname(a),colname(b)}(corrected), a, b)
 
-# The co-moment D over the divisor `n - Int(R)`, emitted as N. R (the
-# corrected flag) is a type parameter so the state stays fieldless. Variance
-# uses it too, over the co-moment of a column with itself.
-struct CovarianceState{N,D,R} <: DerivedState end
+# The co-moment D of columns A and B over the divisor `n - Int(R)`, emitted
+# as N and narrowed to E (`narrowtype`, comoment.jl). R (the corrected flag) is
+# a type parameter so the state stays fieldless; E is re-typed by `widenstate`.
+# Variance uses it too, over the co-moment of a column with itself.
+struct CovarianceState{N,A,B,D,R,E} <: DerivedState end
+
+covstate(N, A, B, R, intypes::NamedTuple) =
+    CovarianceState{N,A,B,outname(canonicalcomoment(A, B)),R,
+        narrowtype(intypes[A], intypes[B])}()
+widenstate(::CovarianceState{N,A,B,D,R}, intypes::NamedTuple) where {N,A,B,D,R} =
+    CovarianceState{N,A,B,D,R,narrowtype(intypes[A], intypes[B])}()
 
 covname(a, b) = Symbol(a, :_, b, :_covariance)
 # Reads the canonically ordered co-moment: Covariance(:y, :x) produces
@@ -169,11 +176,12 @@ dependencies(::Covariance{A,B}) where {A,B} =
     (Count(), canonicalcomoment(A, B))
 emptyvalue(::Covariance{A,B}) where {A,B} =
     NamedTuple{(covname(A, B),)}((missing,))
-fresh(c::Covariance{A,B}, ::NamedTuple) where {A,B} =
-    CovarianceState{outname(c),outname(canonicalcomoment(A, B)),c.corrected}()
-@inline function value(::CovarianceState{N,D,R}, vals::NamedTuple) where {N,D,R}
-    V = ratiotype(fieldtype(typeof(vals), D), Int)
-    return NamedTuple{(N,),Tuple{V}}((vals[D] / (vals.count - Int(R)),))
+fresh(c::Covariance{A,B}, intypes::NamedTuple) where {A,B} =
+    covstate(outname(c), A, B, c.corrected, intypes)
+@inline function value(::CovarianceState{N,A,B,D,R,E},
+    vals::NamedTuple) where {N,A,B,D,R,E}
+    V = narrowedtype(E, ratiotype(fieldtype(typeof(vals), D), Int))
+    return NamedTuple{(N,),Tuple{V}}((narrowval(E, vals[D] / (vals.count - Int(R))),))
 end
 
 """

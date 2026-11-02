@@ -1160,8 +1160,8 @@ end
         foreach(row -> CausalFrames.update!(st, row), rows)
         @test st.peak == 0 && !CausalFrames.needsrefold(st)
     end
-    # Float16, where the squared ratio would overflow: a flat covariance
-    # window left after a spread still asks
+    # Float16 (folded at Float64): a flat covariance window left after a
+    # spread still asks
     st = CausalFrames.freshwindowed(CausalFrames.CoMoment{:x,:y}(),
         (time = Int, x = Float16, y = Float16))
     f16 = [(time = 1, x = Float16(v), y = Float16(v)) for v in (0, 4, 0.5, 0.5, 0.5)]
@@ -1180,6 +1180,43 @@ end
     @test l.qa ≈ sum(row -> (row.x - l.ka)^2, both) rtol = 1e-12
     @test l.qb ≈ sum(row -> (row.y - l.kb)^2, both) rtol = 1e-12
     @test l.peak == peak
+end
+
+@testset "co-moment folds Float16/Float32 at Float64" begin
+    # At their own precision a square passed floatmax past a deviation of 256
+    # (Float16) or 1.8e19 (Float32), and n·Σd² past a few hundred Float16 rows,
+    # though the
+    # statistics are in range; the dependents narrow back to the input type
+    run(xs, ys, ss) = DataFrame(
+        load(Context(0, 1000),
+            readtable((time = collect(eachindex(xs)), x = xs, y = ys)) |> summarize(ss),
+        ),
+    )
+    ss = [Variance(:x), Std(:x), Covariance(:x, :y), Correlation(:x, :y),
+        LinearRegression(:x, :y)]
+    for (xs, ys) in
+        ((Float16[(i * 3) % 8 for i in 1:300], Float16[(i * 5) % 7 for i in 1:300]),
+        (Float16[300; [(i * 3) % 8 for i in 1:19]], Float16[(i * 5) % 7 for i in 1:20]),
+        (Float32[2e19; 1:19], Float32[(i * 5) % 7 for i in 1:20]))
+        T = eltype(xs)
+        out = run(xs, ys, ss)
+        @test all(c -> eltype(out[!, c]) == T, names(out, Not([:time, :n])))
+        x, y = Float64.(xs), Float64.(ys)
+        @test only(out.x_variance) ≈ T(Statistics.var(x)) rtol = 2eps(T)
+        @test only(out.x_std) ≈ T(Statistics.std(x)) rtol = 2eps(T)
+        @test only(out.x_y_covariance) ≈ T(Statistics.cov(x, y)) rtol = 2eps(T)
+        @test only(out.x_y_correlation) ≈ T(Statistics.cor(x, y)) atol = 2eps(T)
+        @test only(out.x_beta) ≈ T(Statistics.cov(x, y) / Statistics.var(x)) rtol = 4eps(T)
+    end
+    @test CausalFrames.fresh(CausalFrames.CoMoment{:x,:x}(), (x = Float32,)) isa
+          CausalFrames.CoMomentState{<:Any,:x,:x,Float64}
+    # a Float32 state widened mid-stream to Float64 widens its output too
+    chunks(cs...) = CausalPipeline(ctx -> collect(cs))
+    p = chunks(DataFrame(time = 1:3, x = Float32[1, 4, 2]),
+        DataFrame(time = 4:6, x = [8.0, 1e-3, 5.0]))
+    out = DataFrame(load(Context(0, 9), p |> summarize([Variance(:x), Std(:x)])))
+    @test eltype(out.x_variance) == Float64 && eltype(out.x_std) == Float64
+    @test only(out.x_variance) ≈ Statistics.var(Float64[1, 4, 2, 8, 1e-3, 5])
 end
 
 @testset "Skewness and Kurtosis" begin

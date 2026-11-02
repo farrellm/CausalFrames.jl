@@ -276,7 +276,10 @@ design rationale and performance constraints behind each module.
     reads the compensated pairs as double-doubles (`comomentvalue`), since the
     sums sit at the scale of the squared distance to the shift and the
     co-moment at the spread's (issue #91). `combine!` re-expresses one side at
-    the other's shift. Sliding still kept a residue at the scale of a dominant
+    the other's shift. `Float16`/`Float32` fold at `Float64` (`widenfold`:
+    their squares and `n·Σd²` overflow while the variance is in range), and
+    `CovarianceState` and `LinearRegressionState` carry the type to narrow back
+    to (`narrowtype`, re-typed by `widenstate`). Sliding still kept a residue at the scale of a dominant
     row once it had left (issue #97), so the windowed float state
     (`freshwindowed`, flag `W`; tracking on the ordinary state cost
     `summarize` 8%) tracks its largest product (`peak`) and, past `REFOLDRATIO` times the window's scale (`Σd²`,
@@ -293,8 +296,9 @@ design rationale and performance constraints behind each module.
     `Kurtosis` (fieldless `ShapeState`s): compensated `Σd^k`, `k = 1…4`, valued
     as the centred triple `(m2, m3, m4)`, with `CoMoment`'s shift, recentring,
     counting and `combine!` rules. It folds at `float(T)` (an integer `d⁴`
-    overflows), widened to `Float64` for `Float16`/`Float32` (whose `d⁴` and
-    `n·Σd²` overflow), the `ShapeState` narrowing back to the input's type, and is error-free one step further than `CoMoment`: the
+    overflows), widened to `Float64` for `Float16`/`Float32` as `CoMoment` is,
+    the `ShapeState` narrowing back to the input's type, and is error-free one
+    step further than `CoMoment`: the
     deviation `x − K` and the shift's move are exact `twosum` pairs, every
     power and binomial coefficient a double-double, and `value` evaluates the
     expansion in double-double (`dd*` helpers, `m2` through `comomentvalue`).

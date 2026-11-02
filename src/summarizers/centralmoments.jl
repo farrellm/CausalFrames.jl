@@ -59,9 +59,6 @@ end
 # The fold type: `Base.promote_op` rather than `float`, which has no method
 # for `Any`.
 centralfloat(::Type{T}) where {T} = widenfold(Base.promote_op(float, T))
-widenfold(::Type{T}) where {T} = T
-widenfold(::Type{Float16}) = Float64
-widenfold(::Type{Float32}) = Float64
 
 function centralfresh(s::CentralMoments{C}, ::Type{T},
     ::Val{windowed} = Val(false)) where {C,T,windowed}

@@ -1958,7 +1958,7 @@ Concrete summarizers provided, for an input column of element type `T`:
 | `MeanAbsDev(column)` | `:x_meanabsdev` | as `Mean` | `missing` |
 | `WindowValues(column)` (unexported) | `:x_windowvalues` | the state itself, borrowed | `missing` |
 | `SortedValues(column)` (unexported) | `:x_sortedvalues` | the state itself, borrowed | `missing` |
-| `CoMoment{a,b}()` (unexported, internal) | `:a_b_comoment` | `Float64` for integers, else as `Ta * Tb` | `0` |
+| `CoMoment{a,b}()` (unexported, internal) | `:a_b_comoment` | `Float64` for integers, `Float16` and `Float32`, else as `Ta * Tb` | `0` |
 | `CentralMoments{c}()` (unexported, internal) | `:x_centralmoments` | the triple `(m2, m3, m4)` of `float(T)`, `Float64` for `Float16`/`Float32` | `missing` |
 | `Min(column)` | `:x_min` | `T` | `missing` |
 | `Max(column)` | `:x_max` | `T` | `missing` |
@@ -2523,6 +2523,13 @@ round-off at the scale of the spread, since it is shift-invariant:
 
 - the shifts are set from the first row folded, and the sums restart at
   exactly zero when the state empties;
+- `Float16` and `Float32` fold at `Float64`: at their own precision a square
+  passes `floatmax` past a deviation of 256 (`Float16`) or `1.8e19`
+  (`Float32`), and the value's `n·Σd²` past a few hundred `Float16` rows,
+  though the variance itself is in range. `Variance`, `Covariance` and
+  `LinearRegression` narrow their values back to the inputs' promoted float
+  type (`narrowtype`; their states carry it, re-typed by `widenstate`), so
+  the output types are unchanged and `Std` and `Correlation` follow;
 - a float state *recentres* once more than half its rows arrived since the
   shift last moved, moving `K` to the row just folded and rewriting the sums
   (`Σd·d' − δ'Σd − δΣd' + nδδ'`). A steady window of `w` rows recentres every
