@@ -35,11 +35,9 @@ freshwindowed(s::CentralMoments{C}, intypes::NamedTuple) where {C} =
 # `CoMoment` row leaves, and the windowed float state (flag W) asks to be
 # refolded from its live rows (issue #97) only once its largest folded d⁴
 # (`peak`, since the sums last restarted) exceeds `REFOLDRATIO²` times the live
-# `Σd⁴`: the co-moment's ratio on |d|, so it asks about as often (on 10⁶ rows
-# of a random walk, 351 times at `Bars(5)` against the variance's 213, never at
-# `Bars(20)`; on Cauchy steps 1.1x-1.6x as often), where comparing with
-# `REFOLDRATIO` itself asked up to 160 times as often. The residue short of the
-# ratio is then about n·eps²·REFOLDRATIO² ≈ n·5e-26 of `Σd⁴`. It also refolds
+# `Σd⁴`: the co-moment's ratio on |d|, so it asks about as often as the
+# variance does (DESIGN.md has the counts). The residue short of the ratio is
+# then about n·eps²·REFOLDRATIO² ≈ n·5e-26 of `Σd⁴`. It also refolds
 # a window gone flat after a spread, so a flat window's sums are exactly 0
 # again and Kurtosis reads it as flat.
 mutable struct CentralMomentState{N,C,T,M,S,W} <: SummarizerState
@@ -137,29 +135,22 @@ end
 end
 
 # The compensated form takes δ as a pair and carries every coefficient as a
-# double-double, folding each product into the sums error-free, as
-# `CoMoment`'s `recentre!` does.
-# s + c·y, for c a pair and y an accumulator in s's storage.
-@inline function addscaled(s::Compensated{A}, (h, l)::Tuple{A,A},
-    y::Compensated{A}) where {A}
-    p, e = twoprod(h, y.total)
-    return compaddpair(s, p, e + (h * y.comp + l * y.total))
-end
-@inline addpair(s::Compensated, (h, l)) = compaddpair(s, h, l)
-@inline ddneg((h, l)) = (-h, -l)
+# double-double (`dd*` and `addscaled`, in compensated.jl), folding each
+# product into the sums error-free, as `CoMoment`'s `recentre!` does.
 @inline function shiftpowers(n::Int, s1::Compensated{A}, s2::Compensated{A},
     s3::Compensated{A}, s4::Compensated{A}, δ::Tuple{A,A}) where {A}
     δ2 = ddmul(δ, δ)
     δ3 = ddmul(δ2, δ)
     δ4 = ddmul(δ2, δ2)
-    r1 = addpair(s1, ddneg(ddscale(n, δ)))
-    r2 = addpair(addscaled(s2, ddscale(-2, δ), s1), ddscale(n, δ2))
-    r3 = addpair(addscaled(addscaled(s3, ddscale(-3, δ), s2), ddscale(3, δ2), s1),
-        ddneg(ddscale(n, δ3)))
-    r4 = addpair(
+    r1 = compaddpair(s1, ddscale(-n, δ)...)
+    r2 = compaddpair(addscaled(s2, ddscale(-2, δ), s1), ddscale(n, δ2)...)
+    r3 = compaddpair(
+        addscaled(addscaled(s3, ddscale(-3, δ), s2), ddscale(3, δ2), s1),
+        ddscale(-n, δ3)...)
+    r4 = compaddpair(
         addscaled(addscaled(addscaled(s4, ddscale(-4, δ), s3), ddscale(6, δ2), s2),
             ddscale(-4, δ3), s1),
-        ddscale(n, δ4))
+        ddscale(n, δ4)...)
     return r1, r2, r3, r4
 end
 
@@ -186,7 +177,7 @@ end
         st.peak = ifelse(isfinite(q) & (q > st.peak), q, st.peak)
     end
     st.n += 1
-    compensable(T) && 2 * st.age > st.n && recentre!(st, x)
+    compensable(T) && 2 * st.age > st.n && recentre!(st, x, d)
     return nothing
 end
 
@@ -223,9 +214,10 @@ end
     return st.peak / r > r * (st.s4.total + st.s4.comp)
 end
 
-@inline function recentre!(st::CentralMomentState{N,C,T,M,S}, k) where {N,C,T,M,S}
-    st.s1, st.s2, st.s3, st.s4 =
-        shiftpowers(st.n, st.s1, st.s2, st.s3, st.s4, deviation(S, k, st.k))
+# Move the shift to the row k just folded, whose deviation δ = k - st.k is the
+# shift's move.
+@inline function recentre!(st::CentralMomentState, k, δ)
+    st.s1, st.s2, st.s3, st.s4 = shiftpowers(st.n, st.s1, st.s2, st.s3, st.s4, δ)
     st.k = k
     st.age = 0
     return nothing
@@ -290,36 +282,6 @@ end
     m4 = ddsub(a4, ddmul(r, t))
     v3, v4 = m3[1] + m3[2], m4[1] + m4[2]
     return (max(m2, zero(m2)), v3, max(v4, zero(v4)))
-end
-
-# Minimal double-double arithmetic over pairs (hi, lo), for `deviation`,
-# `shiftpowers` and `centralvalue`.
-@inline dd(s::Compensated) = fasttwosum(s.total, s.comp)
-@inline fasttwosum(a, b) = (s = a + b; (s, b - (s - a)))
-@inline function twosum(a, b)
-    s = a + b
-    bb = s - a
-    return s, (a - (s - bb)) + (b - bb)
-end
-@inline function ddadd((ah, al), (bh, bl))
-    s, e = twosum(ah, bh)
-    return fasttwosum(s, e + (al + bl))
-end
-@inline ddsub(a, (bh, bl)) = ddadd(a, (-bh, -bl))
-@inline function ddmul((ah, al), (bh, bl))
-    p, e = twoprod(ah, bh)
-    return fasttwosum(p, e + (ah * bl + al * bh))
-end
-# k a small integer, so k·hi is formed exactly as a pair.
-@inline function ddscale(k::Int, (h, l))
-    kf = convert(typeof(h), k)
-    p, e = twoprod(kf, h)
-    return fasttwosum(p, e + kf * l)
-end
-@inline function dddiv((ah, al), d)
-    q = ah / d
-    p, e = twoprod(q, d)
-    return fasttwosum(q, (((ah - p) - e) + al) / d)
 end
 
 # `missing` while a missing row is folded, else NaNs while a nonfinite one is.
