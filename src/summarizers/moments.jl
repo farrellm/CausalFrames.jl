@@ -122,18 +122,30 @@ end
 Std(column::ColumnSpec; corrected::Bool = true) =
     withterms(Std{colname(column)}(corrected), column)
 
-struct StdState{N,V} <: DerivedState end
+# The square root of column C's variance from its co-moment D, emitted as N
+# and narrowed to E as `CovarianceState` narrows. It reads the co-moment, not
+# the narrowed `Variance`: a Float16 variance past floatmax has a square root
+# in range.
+struct StdState{N,C,D,R,E} <: DerivedState end
 
 stdsqrt(::Missing) = missing
 stdsqrt(v) = sqrt(max(v, zero(v)))
+# The type of `stdsqrt` over a co-moment field type F divided by an Int.
+sqrttype(::Type{F}) where {F} = Base.promote_op(sqrt, ratiotype(F, Int))
 
-dependencies(s::Std{C}) where {C} = (Variance(C; corrected = s.corrected),)
+dependencies(::Std{C}) where {C} = (Count(), CoMoment{C,C}())
 emptyvalue(::Std{C}) where {C} = NamedTuple{(Symbol(C, :_std),)}((missing,))
-fresh(s::Std{C}, ::NamedTuple) where {C} =
-    StdState{outname(s),outname(Variance(C))}()
-@inline function value(::StdState{N,V}, vals::NamedTuple) where {N,V}
-    T = Base.promote_op(sqrt, fieldtype(typeof(vals), V))
-    return NamedTuple{(N,),Tuple{T}}((stdsqrt(vals[V]),))
+fresh(s::Std{C}, intypes::NamedTuple) where {C} =
+    StdState{outname(s),C,outname(CoMoment{C,C}()),s.corrected,
+        narrowtype(intypes[C])}()
+widenstate(::StdState{N,C,D,R}, intypes::NamedTuple) where {N,C,D,R} =
+    StdState{N,C,D,R,narrowtype(intypes[C])}()
+@inline function value(::StdState{N,C,D,R,E}, vals::NamedTuple) where {N,C,D,R,E}
+    V = narrowedtype(E, sqrttype(fieldtype(typeof(vals), D)))
+    return NamedTuple{(N,),Tuple{V}}((
+        narrowval(E,
+            stdsqrt(vals[D] / (vals.count - Int(R)))),
+    ))
 end
 
 """
@@ -199,24 +211,37 @@ struct Correlation{A,B} <: GroupSummarizer end
 Correlation(a::ColumnSpec, b::ColumnSpec) =
     withterms(Correlation{colname(a),colname(b)}(), a, b)
 
-struct CorrelationState{N,CV,SA,SB} <: DerivedState end
+# The correlation of columns A and B from their co-moment DAB and the
+# columns' own DA and DB, as the corrected covariance over the corrected
+# standard deviations, emitted as N and narrowed to E as `CovarianceState`
+# narrows. It reads the co-moments, not the narrowed `Covariance` and `Std`,
+# whose Float16 values can overflow where the correlation is in range.
+struct CorrelationState{N,A,B,DAB,DA,DB,E} <: DerivedState end
 
 clampcor(::Missing) = missing
 clampcor(x) = clamp(x, -one(x), one(x))
 
 corname(a, b) = Symbol(a, :_, b, :_correlation)
 dependencies(::Correlation{A,B}) where {A,B} =
-    (Covariance(A, B), Std(A), Std(B))
+    (Count(), canonicalcomoment(A, B), CoMoment{A,A}(), CoMoment{B,B}())
 emptyvalue(::Correlation{A,B}) where {A,B} =
     NamedTuple{(corname(A, B),)}((missing,))
-fresh(c::Correlation{A,B}, ::NamedTuple) where {A,B} =
-    CorrelationState{outname(c),outname(Covariance(A, B)),outname(Std(A)),
-        outname(Std(B))}()
-@inline function value(::CorrelationState{N,CV,SA,SB},
-    vals::NamedTuple) where {N,CV,SA,SB}
-    Cvf = fieldtype(typeof(vals), CV)
-    Saf = fieldtype(typeof(vals), SA)
-    Sbf = fieldtype(typeof(vals), SB)
-    V = Base.promote_op(/, Cvf, Base.promote_op(*, Saf, Sbf))
-    return NamedTuple{(N,),Tuple{V}}((clampcor(vals[CV] / (vals[SA] * vals[SB])),))
+fresh(c::Correlation{A,B}, intypes::NamedTuple) where {A,B} =
+    CorrelationState{outname(c),A,B,outname(canonicalcomoment(A, B)),
+        outname(CoMoment{A,A}()),outname(CoMoment{B,B}()),
+        narrowtype(intypes[A], intypes[B])}()
+widenstate(::CorrelationState{N,A,B,DAB,DA,DB},
+    intypes::NamedTuple) where {N,A,B,DAB,DA,DB} =
+    CorrelationState{N,A,B,DAB,DA,DB,narrowtype(intypes[A], intypes[B])}()
+@inline function value(::CorrelationState{N,A,B,DAB,DA,DB,E},
+    vals::NamedTuple) where {N,A,B,DAB,DA,DB,E}
+    F = typeof(vals)
+    W = Base.promote_op(/, ratiotype(fieldtype(F, DAB), Int),
+        Base.promote_op(*, sqrttype(fieldtype(F, DA)), sqrttype(fieldtype(F, DB))))
+    m = vals.count - 1
+    sa, sb = stdsqrt(vals[DA] / m), stdsqrt(vals[DB] / m)
+    return NamedTuple{(N,),Tuple{narrowedtype(E, W)}}((
+        narrowval(E,
+            clampcor(vals[DAB] / m / (sa * sb))),
+    ))
 end

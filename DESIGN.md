@@ -2500,15 +2500,13 @@ is the built-in example: it depends on `Count()` and `SumPower(:x, n)` and
 emits their quotient. `Mean`, `Variance`, `Std`, and `Covariance` are the
 statistical dependents: `Mean(:x)` is `Sum(:x) / Count()`; `Variance(:x)` is
 `C / (n − corrected)` for the centred co-moment `C = Σ(x − x̄)²` and the row
-count `Count()`; `Std(:x)` is the square root of `Variance(:x)`;
+count `Count()`; `Std(:x)` is its square root, read from the same co-moment;
 `Covariance(:x, :y)` is the same over `Σ(x − x̄)(y − ȳ)`; and
-`Correlation(:x, :y)` is
-`Covariance(:x, :y) / (Std(:x) · Std(:y))`, clamped to `[-1, 1]`;
+`Correlation(:x, :y)` is that covariance over the two standard deviations,
+each from its co-moment, clamped to `[-1, 1]`;
 `Skewness(:x)` and `Kurtosis(:x)` read the centred sums `Σ(x − x̄)^k` up to
 `k = 4` (below). Dependencies
-may themselves be dependent — `Std` depends on `Variance`, which depends on the
-co-moment, and `Correlation` depends on all three — and the topological
-expansion handles that.
+may themselves be dependent, and the topological expansion handles that.
 
 The co-moment is the unexported accumulator `CoMoment{a,b}`, requested only in
 canonical (`isless`) order. It does **not** use the raw-sum identity
@@ -2526,10 +2524,12 @@ round-off at the scale of the spread, since it is shift-invariant:
 - `Float16` and `Float32` fold at `Float64`: at their own precision a square
   passes `floatmax` past a deviation of 256 (`Float16`) or `1.8e19`
   (`Float32`), and the value's `n·Σd²` past a few hundred `Float16` rows,
-  though the variance itself is in range. `Variance`, `Covariance` and
-  `LinearRegression` narrow their values back to the inputs' promoted float
-  type (`narrowtype`; their states carry it, re-typed by `widenstate`), so
-  the output types are unchanged and `Std` and `Correlation` follow;
+  though the variance itself is in range. Every dependent narrows only its
+  own value back to the inputs' promoted float type (`narrowtype`; their
+  states carry it, re-typed by `widenstate`), so the output types are
+  unchanged. `Std` and `Correlation` read the co-moments rather than the
+  narrowed `Variance` and `Covariance`, which overflow first: a `Float16`
+  `[0, 512]` has a variance past `floatmax` but a standard deviation of 362;
 - a float state *recentres* once more than half its rows arrived since the
   shift last moved, moving `K` to the row just folded and rewriting the sums
   (`Σd·d' − δ'Σd − δΣd' + nδδ'`). A steady window of `w` rows recentres every

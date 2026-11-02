@@ -278,8 +278,11 @@ design rationale and performance constraints behind each module.
     co-moment at the spread's (issue #91). `combine!` re-expresses one side at
     the other's shift. `Float16`/`Float32` fold at `Float64` (`widenfold`:
     their squares and `n·Σd²` overflow while the variance is in range), and
-    `CovarianceState` and `LinearRegressionState` carry the type to narrow back
-    to (`narrowtype`, re-typed by `widenstate`). Sliding still kept a residue at the scale of a dominant
+    `CovarianceState`, `StdState`, `CorrelationState` and
+    `LinearRegressionState` carry the type to narrow back to (`narrowtype`,
+    re-typed by `widenstate`), each narrowing only its own value: `Std` and
+    `Correlation` read the co-moments, not the narrowed `Variance` and
+    `Covariance`, which overflow first. Sliding still kept a residue at the scale of a dominant
     row once it had left (issue #97), so the windowed float state
     (`freshwindowed`, flag `W`; tracking on the ordinary state cost
     `summarize` 8%) tracks its largest product (`peak`) and, past `REFOLDRATIO` times the window's scale (`Σd²`,

@@ -301,12 +301,13 @@ end
     @test @inferred(CausalFrames.value(st, (count = 3, x_x_comoment = 2.0))) ===
           (x_variance = 1.0,)
     st = CausalFrames.fresh(Std(:x), (time = Int64, x = Int32))
-    @test @inferred(CausalFrames.value(st, (x_variance = 4.0,))) === (x_std = 2.0,)
+    @test @inferred(CausalFrames.value(st, (count = 3, x_x_comoment = 8.0))) ===
+          (x_std = 2.0,)
     st = CausalFrames.fresh(Covariance(:x, :y), (time = Int64, x = Int32, y = Int32))
     @test @inferred(CausalFrames.value(st, (count = 3, x_y_comoment = -3.0))) ===
           (x_y_covariance = -1.5,)
 
-    # nested dependency expansion (Std -> Variance -> raw sums) stays inferrable
+    # dependency expansion (Std -> co-moment -> shifted sums) stays inferrable
     # through the accumulate-then-project fold, and hidden dependencies are
     # folded but not emitted
     protos, requested =
@@ -349,7 +350,7 @@ end
     st = CausalFrames.fresh(Correlation(:x, :y), (time = Int64, x = Int32, y = Int32))
     @test @inferred(
         CausalFrames.value(st,
-            (x_y_covariance = -1.5, x_std = 1.0, y_std = 2.0))
+            (count = 3, x_y_comoment = -3.0, x_x_comoment = 2.0, y_y_comoment = 8.0))
     ) ===
           (x_y_correlation = -0.75,)
 end
@@ -1207,6 +1208,18 @@ end
         @test only(out.x_y_covariance) ≈ T(Statistics.cov(x, y)) rtol = 2eps(T)
         @test only(out.x_y_correlation) ≈ T(Statistics.cor(x, y)) atol = 2eps(T)
         @test only(out.x_beta) ≈ T(Statistics.cov(x, y) / Statistics.var(x)) rtol = 4eps(T)
+    end
+    # Std and Correlation read the co-moments, not the narrowed Variance and
+    # Covariance: a variance past floatmax has a standard deviation and a
+    # correlation in range
+    for (xs, ys) in ((Float16[0, 512, 256], Float16[0, 2, 1]),
+        (Float32[0, 4e19, 2e19], Float32[0, 2e19, 1e19]))
+        T = eltype(xs)
+        out = run(xs, ys, [Variance(:x), Std(:x), Correlation(:x, :y)])
+        @test isinf(only(out.x_variance))
+        @test only(out.x_std) ≈ T(Statistics.std(Float64.(xs))) rtol = 2eps(T)
+        @test only(out.x_y_correlation) == 1
+        @test eltype(out.x_std) == T && eltype(out.x_y_correlation) == T
     end
     @test CausalFrames.fresh(CausalFrames.CoMoment{:x,:x}(), (x = Float32,)) isa
           CausalFrames.CoMomentState{<:Any,:x,:x,Float64}
