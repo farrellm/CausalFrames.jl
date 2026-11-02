@@ -63,7 +63,6 @@ MMI.restore(::PointerModel, v::Float64) = (POINTERRESTORES[] += 1; Handle(v))
 
 olsfit(x::AbstractVector, y) = pinv(hcat(ones(length(x)), x)) * Float64.(y)
 
-onechunk(; cols...) = CausalPipeline(ctx -> [DataFrame(; cols...)])
 # A source clipping its chunks to the context, as real sources do, so the
 # widened contexts of the window operators decide which early rows are seen.
 clippedsource(chunks) = CausalPipeline(

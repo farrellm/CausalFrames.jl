@@ -1,5 +1,4 @@
 @testset "merge" begin
-    onechunk(; cols...) = CausalPipeline(ctx -> [DataFrame(; cols...)])
     ctx = Context(0, 10)
 
     @testset "basic" begin

@@ -2,7 +2,6 @@
     # A summarizer's output column takes its element type from the input
     # column: Min/Max/First/Last verbatim, Sum/SumPower via Base.sum's own
     # widening rule.
-    chunks(cs...) = CausalPipeline(ctx -> collect(cs))
     summarizeall(col) = DataFrame(
         load(Context(0, 9),
             chunks(DataFrame(time = [1, 2, 3], x = col)) |>
@@ -127,7 +126,6 @@
 end
 
 @testset "distinct counting" begin
-    chunks(cs...) = CausalPipeline(ctx -> collect(cs))
     summarized(p, ss; kwargs...) =
         DataFrame(load(Context(0, 9), p |> summarize(ss; kwargs...)))
 
@@ -195,7 +193,6 @@ end
 end
 
 @testset "statistical summarizers" begin
-    chunks(cs...) = CausalPipeline(ctx -> collect(cs))
     # x and y over three rows; the reference values are computed by hand:
     # sum(x)=6, prod(x)=6, sum(x^2)=14, mean(x)=2, and (corrected) var(x)=1;
     # dot(x,y)=19 and (corrected) cov(x,y)=-1.5.
@@ -359,7 +356,6 @@ end
     # A summarizer symmetric in two columns folds under the isless-sorted
     # argument order but still emits the column the caller asked for, so
     # Σab and Σba cost one accumulator between them rather than two.
-    chunks(cs...) = CausalPipeline(ctx -> collect(cs))
     stats(xcol, ycol, ss) = DataFrame(
         load(Context(0, 9),
             chunks(DataFrame(time = [1, 2, 3], x = xcol, y = ycol)) |>
@@ -450,7 +446,6 @@ end
 end
 
 @testset "linear regression" begin
-    chunks(cs...) = CausalPipeline(ctx -> collect(cs))
     # five points with a deliberate wobble, so the fit is not exact and the
     # standard error and t statistics have something to report
     xs = Float64[1, 2, 3, 4, 5]
@@ -1028,7 +1023,6 @@ end
     @test eltype(out.w_x_variance) == Union{Missing,Float64}
 
     # integer input folds exactly, and widens to a float accumulator mid-stream
-    chunks(cs...) = CausalPipeline(ctx -> collect(cs))
     p = chunks(DataFrame(time = [1, 2], x = [10^9, 10^9 + 2], y = [3, 1]),
         DataFrame(time = [3, 4], x = [1e9 + 1, 1e9 + 5], y = [2.0, 7.0]))
     out = DataFrame(
@@ -1228,7 +1222,6 @@ end
     @test CausalFrames.fresh(CausalFrames.CoMoment{:x,:x}(), (x = Float32,)) isa
           CausalFrames.CoMomentState{<:Any,:x,:x,Float64}
     # a Float32 state widened mid-stream to Float64 widens its output too
-    chunks(cs...) = CausalPipeline(ctx -> collect(cs))
     p = chunks(DataFrame(time = 1:3, x = Float32[1, 4, 2]),
         DataFrame(time = 4:6, x = [8.0, 1e-3, 5.0]))
     out = DataFrame(load(Context(0, 9), p |> summarize([Variance(:x), Std(:x)])))
@@ -1389,7 +1382,6 @@ end
     end
 
     # integer input folds at Float64, and a Float32 state widens mid-stream
-    chunks(cs...) = CausalPipeline(ctx -> collect(cs))
     p = chunks(DataFrame(time = 1:3, x = Float32[1, 4, 2]),
         DataFrame(time = 4:6, x = [8.0, 1e-3, 5.0]))
     out = DataFrame(load(Context(0, 9), p |> summarize(Kurtosis(:x))))
@@ -1608,7 +1600,6 @@ end
     # (a move and a multiply) rather than PowerTerm's runtime `^`. That must not
     # change the output name, the accumulator type or the term's *bits*. See
     # notes/sumpower-terms.md.
-    chunks(cs...) = CausalPipeline(ctx -> collect(cs))
     intypes = (time = Int64, x = Float64)
 
     # the specialized exponents pick the cheap terms, everything else does not
@@ -1749,7 +1740,6 @@ end
 end
 
 @testset "compensated float summation" begin
-    chunks(cs...) = CausalPipeline(ctx -> collect(cs))
     ftypes = (time = Int64, x = Float64, y = Float64)
     function fold(s, xs)
         st = CausalFrames.fresh(s, ftypes)

@@ -1,5 +1,4 @@
 @testset "addrollingcolumns" begin
-    onechunk(; cols...) = CausalPipeline(ctx -> [DataFrame(; cols...)])
 
     @testset "basic" begin
         p = onechunk(time = [1, 2, 3, 5, 8], x = [10, 20, 30, 40, 50])
@@ -406,7 +405,6 @@
 end
 
 @testset "rolling fast paths" begin
-    onechunk(; cols...) = CausalPipeline(ctx -> [DataFrame(; cols...)])
 
     # Column-wise agreement, exact but for floats, which may carry sliding-sum
     # round-off on the running path (and NaN, e.g. a single-row corrected

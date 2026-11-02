@@ -1,5 +1,4 @@
 @testset "intervalize" begin
-    onechunk(; cols...) = CausalPipeline(ctx -> [DataFrame(; cols...)])
     multichunk(chunks) = CausalPipeline(ctx -> chunks)
 
     @testset "keyless regular grid" begin
