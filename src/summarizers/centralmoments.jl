@@ -346,7 +346,7 @@ wrong after it has left.
 
 # Keywords
 - `corrected = true`: `G1` rather than `g1`. It is not part of the output
-  name, so both forms of one column cannot be requested together.
+  name, so requesting both forms of one column is an `ArgumentError`.
 
 ```jldoctest
 df = DataFrame(time = 1:5, x = [1.0, 2.0, 2.0, 3.0, 9.0])
@@ -393,7 +393,7 @@ Float32(r.x)`, see [`ColumnSpec`](@ref)) avoids it.
 
 # Keywords
 - `corrected = true`: `G2` rather than `g2`. It is not part of the output
-  name, so both forms of one column cannot be requested together.
+  name, so requesting both forms of one column is an `ArgumentError`.
 
 ```jldoctest
 df = DataFrame(time = 1:5, x = [1.0, 2.0, 2.0, 3.0, 9.0])

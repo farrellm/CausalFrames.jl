@@ -223,8 +223,8 @@ variance negative.
 
 #### Keywords
 - `corrected = true`: divide by `n - 1` (a single row gives `NaN`); `false`
-  divides by `n`. It is not part of the output name, so both forms of one column
-  cannot be requested together.
+  divides by `n`. It is not part of the output name, so requesting both forms of
+  one column is an `ArgumentError`.
 
 ```julia
 df = DataFrame(time = 1:5, x = [1.0, 2.0, 2.0, 3.0, 9.0])
@@ -275,7 +275,7 @@ wrong after it has left.
 
 #### Keywords
 - `corrected = true`: `G1` rather than `g1`. It is not part of the output
-  name, so both forms of one column cannot be requested together.
+  name, so requesting both forms of one column is an `ArgumentError`.
 
 ```julia
 df = DataFrame(time = 1:5, x = [1.0, 2.0, 2.0, 3.0, 9.0])
@@ -317,7 +317,7 @@ Float32(r.x)`, see `ColumnSpec`) avoids it.
 
 #### Keywords
 - `corrected = true`: `G2` rather than `g2`. It is not part of the output
-  name, so both forms of one column cannot be requested together.
+  name, so requesting both forms of one column is an `ArgumentError`.
 
 ```julia
 df = DataFrame(time = 1:5, x = [1.0, 2.0, 2.0, 3.0, 9.0])
@@ -455,7 +455,7 @@ O(window) per key.
   and TA-Lib's `PERCENTILE`), keeping `column`'s element type. It compares `k/n`
   and `p` in floating point, so `p = 0.07` over 100 rows gives the 7th value.
   Any other symbol is an `ArgumentError`. It is not part of the output name, so
-  both forms of one `p` cannot be requested together.
+  requesting both forms of one `p` is an `ArgumentError`.
 
 ```julia
 df = DataFrame(time = 1:5, x = [4, 1, 3, 5, 2])
@@ -984,7 +984,8 @@ not depend on the input.
 
 The summarizers whose values `s` reads in the two-argument `value`.
 They are expanded recursively and deduplicated by output name, so a dependency
-also requested by the user is folded once, and they appear in the output only
+also requested by the user is folded once (two that share an output name but
+are not `isequal` are an `ArgumentError`), and they appear in the output only
 if requested. Defaults to `()`.
 
 ---

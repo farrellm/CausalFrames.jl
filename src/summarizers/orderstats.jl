@@ -178,7 +178,7 @@ O(window) per key.
   and TA-Lib's `PERCENTILE`), keeping `column`'s element type. It compares `k/n`
   and `p` in floating point, so `p = 0.07` over 100 rows gives the 7th value.
   Any other symbol is an `ArgumentError`. It is not part of the output name, so
-  both forms of one `p` cannot be requested together.
+  requesting both forms of one `p` is an `ArgumentError`.
 
 ```jldoctest
 df = DataFrame(time = 1:5, x = [4, 1, 3, 5, 2])

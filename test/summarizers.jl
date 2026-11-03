@@ -352,6 +352,54 @@ end
           (x_y_correlation = -0.75,)
 end
 
+@testset "a setting outside the output name is not deduplicated away" begin
+    # issue #149: two configurations under one output name are an error, in
+    # either order, rather than the first silently winning
+    p = readtable(DataFrame(time = 1:4, x = [1.0, 2, 4, 8], y = [3.0, 1, 4, 1]))
+    for (a, b, n) in (
+            (Variance(:x), Variance(:x; corrected = false), :x_variance),
+            (Std(:x), Std(:x; corrected = false), :x_std),
+            (Covariance(:x, :y), Covariance(:x, :y; corrected = false), :x_y_covariance),
+        ),
+        ss in ([a, b], [b, a])
+
+        @test_throws ArgumentError(
+            "summarize output column $(repr(n)) is produced by more than one summarizer",
+        ) load(Context(0, 10), p |> summarize(ss))
+    end
+    # every summarizing transform names itself
+    @test_throws ArgumentError(
+        "addrollingcolumns output column :x_variance is produced by more than one summarizer",
+    ) load(
+        Context(0, 10),
+        p |> addrollingcolumns((w = 2,), [Variance(:x), Variance(:x; corrected = false)]),
+    )
+
+    # identical requests, and a hidden dependency shared by two requested
+    # summarizers, still fold once
+    protos, req = CausalFrames.prototypes(
+        Summarizer[Variance(:x), Variance(:x), Std(:x; corrected = false)], Symbol[])
+    @test req == (:x_variance, :x_std)
+    @test count(s -> s isa Variance, protos) == 1
+    @test count(s -> s isa CausalFrames.CoMoment, protos) == 1
+    df = DataFrame(
+        load(Context(0, 10),
+            p |> summarize([Variance(:x), Variance(:x), Std(:x; corrected = false)])),
+    )
+    @test df.x_variance ≈ [Statistics.var([1.0, 2, 4, 8])]
+    @test df.x_std ≈ [Statistics.std([1.0, 2, 4, 8]; corrected = false)]
+
+    # a row term: one bound function is shared, two functions are the row-term
+    # error, which comes first
+    f = r -> 2r.x
+    df = DataFrame(load(Context(0, 10), p |> summarize([Sum(:t => f), Sum(:t => f)])))
+    @test df.t_sum == [30.0]
+    @test_throws ArgumentError(
+        "summarize row term :t is defined by more than one function; " *
+        "bind the function once and reuse it",
+    ) load(Context(0, 10), p |> summarize([Sum(:t => f), Sum(:t => r -> 3r.x)]))
+end
+
 @testset "symmetric summarizers" begin
     # A summarizer symmetric in two columns folds under the isless-sorted
     # argument order but still emits the column the caller asked for, so

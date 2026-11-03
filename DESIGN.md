@@ -2383,7 +2383,10 @@ optional `key` giving a separate summary per key value (emitted sorted by key,
 or in declared order under a `keyset`; see "Declared key sets"). They treat the given summarizers as *prototypes*: they only ever
 mutate `fresh` copies, one per key group (and, for `summarizecycles`, per
 cycle). Before running, prototypes are **deduplicated by output-name tuple** —
-identical configurations collapse to one shared instance — and the surviving
+identical (`isequal`) configurations collapse to one shared instance, while
+two that share a name tuple but differ in a setting outside the name
+(`Variance(:x)` and `Variance(:x; corrected = false)`) are an `ArgumentError`
+naming the transform, never a silent choice of one — and the surviving
 output names must be pairwise disjoint; the requested (emitted) names must
 additionally be distinct from `:time` and the key columns. The same pass
 unwraps row terms (below) at any depth, dependencies included, and collects

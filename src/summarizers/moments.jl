@@ -73,8 +73,8 @@ variance negative.
 
 # Keywords
 - `corrected = true`: divide by `n - 1` (a single row gives `NaN`); `false`
-  divides by `n`. It is not part of the output name, so both forms of one column
-  cannot be requested together.
+  divides by `n`. It is not part of the output name, so requesting both forms of
+  one column is an `ArgumentError`.
 
 ```jldoctest
 df = DataFrame(time = 1:5, x = [1.0, 2.0, 2.0, 3.0, 9.0])

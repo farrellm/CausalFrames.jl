@@ -120,7 +120,8 @@ admissionkeys(ks::Union{Nothing,KeySet}) = ks
 admissionkeys(::KeySet{NoKey}) = nothing
 
 # Expand the requested summarizers into the full set to fold: dependencies
-# recursively, deduplicated by output-name tuple and ordered topologically
+# recursively, deduplicated by output-name tuple (an equal configuration
+# only; two under one name is an error) and ordered topologically
 # (post-order depth-first), so every state precedes its dependents. Output
 # names must be unique across the whole set, but only the *requested* names
 # are checked against :time and the key columns, since hidden dependencies
@@ -151,7 +152,18 @@ function prototypes(
             addterm!(terms, n, f, op)
         end
         outnames = keys(emptyvalue(s))
-        outnames in seen && return
+        # `seen` and `protos` grow together, so a name tuple's index is its
+        # prototype's. Only an equal configuration may share it: a setting
+        # outside the name (`corrected`, say) would otherwise be dropped.
+        i = findfirst(isequal(outnames), seen)
+        if i !== nothing
+            isequal(protos[i], s) || throw(
+                ArgumentError(
+                    "$op output column $(repr(first(outnames))) is produced by more than one summarizer",
+                ),
+            )
+            return
+        end
         outnames in visiting && throw(
             ArgumentError(
                 "$op: summarizer dependency cycle through $(repr(first(outnames)))"),
