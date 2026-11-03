@@ -1183,11 +1183,6 @@ end
     # (Float16) or 1.8e19 (Float32), and n·Σd² past a few hundred Float16 rows,
     # though the
     # statistics are in range; the dependents narrow back to the input type
-    run(xs, ys, ss) = DataFrame(
-        load(Context(0, 1000),
-            readtable((time = collect(eachindex(xs)), x = xs, y = ys)) |> summarize(ss),
-        ),
-    )
     ss = [Variance(:x), Std(:x), Covariance(:x, :y), Correlation(:x, :y),
         LinearRegression(:x, :y), LinearRegression(:x, :y; intercept = false, name = :o)]
     for (xs, ys) in
@@ -1195,7 +1190,7 @@ end
         (Float16[300; [(i * 3) % 8 for i in 1:19]], Float16[(i * 5) % 7 for i in 1:20]),
         (Float32[2e19; 1:19], Float32[(i * 5) % 7 for i in 1:20]))
         T = eltype(xs)
-        out = run(xs, ys, ss)
+        out = summarized(ss; x = xs, y = ys)
         @test all(c -> eltype(out[!, c]) == T, names(out, Not([:time, :n, :o_n])))
         x, y = Float64.(xs), Float64.(ys)
         @test only(out.x_variance) ≈ T(Statistics.var(x)) rtol = 2eps(T)
@@ -1213,7 +1208,7 @@ end
     for (xs, ys) in ((Float16[0, 512, 256], Float16[0, 2, 1]),
         (Float32[0, 4e19, 2e19], Float32[0, 2e19, 1e19]))
         T = eltype(xs)
-        out = run(xs, ys, [Variance(:x), Std(:x), Correlation(:x, :y)])
+        out = summarized([Variance(:x), Std(:x), Correlation(:x, :y)]; x = xs, y = ys)
         @test isinf(only(out.x_variance))
         @test only(out.x_std) ≈ T(Statistics.std(Float64.(xs))) rtol = 2eps(T)
         @test only(out.x_y_correlation) == 1
@@ -1235,11 +1230,10 @@ end
     # Errors are absolute (the statistics are scale-free) against an exact
     # answer over the *same* rounded inputs.
     q(v) = Rational{BigInt}.(v)
+    centred(b) = (m = sum(b) / length(b); Tuple(sum((b .- m) .^ j) for j in 2:4))
     function shape(w, k; corrected = true)
-        b = q(w)
-        n = length(b)
-        m = sum(b) / n
-        m2, m3, m4 = (sum((b .- m) .^ j) for j in 2:4)
+        n = length(w)
+        m2, m3, m4 = centred(q(w))
         if k === :skewness
             g1 = sqrt(big(n)) * BigFloat(m3) / BigFloat(m2)^1.5
             return Float64(corrected ? g1 * sqrt(big(n) * (n - 1)) / (n - 2) : g1)
@@ -1273,13 +1267,10 @@ end
     # the uncorrected forms, through summarize; integer input gives Float64
     xs = [3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5, 8]
     lifted = :y => r -> r.x + 1e12
-    out = DataFrame(
-        load(Context(0, 20),
-            readtable((time = collect(1:12), x = xs)) |>
-            summarize([Skewness(:x), Kurtosis(:x),
-                Skewness(lifted; corrected = false),
-                Kurtosis(lifted; corrected = false)])),
-    )
+    out = summarized(
+        [Skewness(:x), Kurtosis(:x),
+            Skewness(lifted; corrected = false), Kurtosis(lifted; corrected = false)];
+        x = xs)
     @test eltype(out.x_skewness) == Float64 && eltype(out.x_kurtosis) == Float64
     @test only(out.x_skewness) ≈ shape(xs, :skewness) atol = 1e-15
     @test only(out.x_kurtosis) ≈ shape(xs, :kurtosis) atol = 1e-15
@@ -1304,11 +1295,7 @@ end
     for xs in (Float16[(i * 3) % 8 for i in 1:300], Float16[(i * 7) % 40 for i in 1:20],
         Float32[0, 1e10, 2e10, 1e10, 4.5e10, 3e10, 0.5e10, 2e10])
         T = eltype(xs)
-        out = DataFrame(
-            load(Context(0, 400),
-                readtable((time = collect(eachindex(xs)), x = xs)) |>
-                summarize([Skewness(:x), Kurtosis(:x)])),
-        )
+        out = summarized([Skewness(:x), Kurtosis(:x)]; x = xs)
         @test eltype(out.x_skewness) == T && eltype(out.x_kurtosis) == T
         @test only(out.x_skewness) ≈ T(shape(xs, :skewness)) atol = 2eps(T)
         @test only(out.x_kurtosis) ≈ T(shape(xs, :kurtosis)) atol = 4eps(T)
@@ -1370,8 +1357,7 @@ end
     intypes = (time = Int, x = Float64)
     rs = [(time = i, x = (i < 7 ? 1e9 : -3e8) + 0.125 * (i % 5) + sin(i))
           for i in 1:12]
-    exactm(rs) = (b = q(getproperty.(rs, :x)); m = sum(b) / length(b);
-        Tuple(Float64(sum((b .- m) .^ j)) for j in 2:4))
+    exactm(rs) = Float64.(centred(q(getproperty.(rs, :x))))
     for k in 0:12
         l = CausalFrames.fresh(CausalFrames.CentralMoments{:x}(), intypes)
         r = CausalFrames.fresh(l)
@@ -1388,10 +1374,7 @@ end
     @test eltype(out.x_kurtosis) == Float64
     @test only(out.x_kurtosis) ≈ shape(Float64[1, 4, 2, 8, 1e-3, 5], :kurtosis)
     xs = [10^12 + j for j in (3, 1, 4, 1, 5, 9, 2, 6)]
-    out = DataFrame(
-        load(Context(0, 9),
-            readtable((time = collect(1:8), x = xs)) |> summarize(Kurtosis(:x))),
-    )
+    out = summarized(Kurtosis(:x); x = xs)
     @test only(out.x_kurtosis) ≈ shape(xs .- 10^12, :kurtosis) atol = 1e-15
 
     # BigFloat folds in plain storage (no compensation, no recentring), and
@@ -1401,7 +1384,7 @@ end
         bt = (time = Int, x = BigFloat)
         bs = [big(1e9) + big(i % 7) / 8 + big(sin(i)) for i in 1:10]
         bs[6:end] .-= big(3e8)
-        exactb = (b = bs; m = sum(b) / length(b); Tuple(sum((b .- m) .^ j) for j in 2:4))
+        exactb = centred(bs)
         for k in (0, 3, 10)
             l = CausalFrames.fresh(CausalFrames.CentralMoments{:x}(), bt)
             r = CausalFrames.fresh(l)

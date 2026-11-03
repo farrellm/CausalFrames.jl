@@ -176,15 +176,17 @@ function fresh(r::LinearRegression{P,Y}, ::NamedTuple) where {P,Y}
     return LinearRegressionState{first(ns),Base.tail(ns),an,sp,sy,qy,gn,dn,I}()
 end
 
-# The dependency values this regression reads, and the tuple type they are
-# *declared* to have. `typeof` of the values depends on them (a `missing`
-# reports `Missing`, not `Union{Missing,_}`), which would narrow the output
-# eltype and push the emission into runtime dispatch; `Base.promote_op` gives
-# the declared type, a compile-time constant.
+# The dependency values this regression reads (still `Widened`: `convdep`
+# unwraps each, since a tuple `map` stops inferring past 32 fields, a K = 6
+# fit), and the unwrapped types they are *declared* to have. `typeof` of the
+# values depends on them (a `missing` reports `Missing`, not
+# `Union{Missing,_}`), which would narrow the output eltype and push the
+# emission into runtime dispatch; the declared field types are a compile-time
+# constant.
 @inline depvalues(vals::NamedTuple, ::Val{NS}) where {NS} =
-    map(unwiden, values(NamedTuple{NS}(vals)))
-@inline deptypes(::Type{V}, ::Val{NS}) where {V<:NamedTuple,NS} =
-    Base.promote_op(depvalues, V, Val{NS})
+    values(NamedTuple{NS}(vals))
+@generated deptypes(::Type{V}, ::Val{NS}) where {V<:NamedTuple,NS} =
+    Tuple{map(n -> widenedvaluetype(fieldtype(V, n)), NS)...}
 
 # The statistics' shared element type: the declared types promoted, run through
 # the centered identity's arithmetic, then made floating point for NaN. The
@@ -210,7 +212,8 @@ end
 # returned if anything was missing, but the explicit `ismissing` split keeps
 # `convert` static; `convert` alone goes dynamic over tuples of two or more
 # Union-typed values (the K >= 2 cross products).
-@inline convdep(::Type{Vc}, x) where {Vc} = ismissing(x) ? zero(Vc) : convert(Vc, x)
+@inline convdep(::Type{Vc}, x) where {Vc} =
+    ismissing(x) ? zero(Vc) : convert(Vc, unwiden(x))
 @inline convall(::Type{Vc}, ::Tuple{}) where {Vc} = ()
 @inline convall(::Type{Vc}, t::Tuple) where {Vc} =
     (convdep(Vc, first(t)), convall(Vc, Base.tail(t))...)

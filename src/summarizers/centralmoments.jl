@@ -298,14 +298,14 @@ end
     V = comomenttype(T)
     R = maybemissing(Widened{P,NTuple{3,V}}, M)
     M && st.missings > 0 && return NamedTuple{(N,),Tuple{R}}((missing,))
-    if st.nonfinite > 0
-        nan = convert(V, NaN)
-        return NamedTuple{(N,),Tuple{R}}((Widened{P}((nan, nan, nan)),))
+    m = if st.nonfinite > 0
+        ntuple(_ -> convert(V, NaN), Val(3))
+    elseif st.n <= 1
+        ntuple(_ -> zero(V), Val(3))
+    else
+        convert(NTuple{3,V}, centralvalue(st.n, st.s1, st.s2, st.s3, st.s4))
     end
-    st.n <= 1 &&
-        return NamedTuple{(N,),Tuple{R}}((Widened{P}((zero(V), zero(V), zero(V))),))
-    m = centralvalue(st.n, st.s1, st.s2, st.s3, st.s4)
-    return NamedTuple{(N,),Tuple{R}}((Widened{P}(convert(NTuple{3,V}, m)),))
+    return NamedTuple{(N,),Tuple{R}}((Widened{P}(m),))
 end
 
 function widenstate(st::CentralMomentState{N,C}, intypes::NamedTuple) where {N,C}

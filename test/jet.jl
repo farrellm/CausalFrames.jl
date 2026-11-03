@@ -94,6 +94,13 @@ end
             (time = Int, x = T, z = T, y = T))
         JET.@test_opt CausalFrames.summaryvalues(states, Val(requested))
     end
+    # past 32 dependencies (K = 6 reads 35), where a tuple `map` stops inferring
+    xs = (:a, :b, :c, :d, :e, :f)
+    protos, requested = CausalFrames.prototypes(
+        CausalFrames.tosummarizers([LinearRegression(collect(xs), :y)]), Symbol[])
+    states = CausalFrames.newstates(protos,
+        NamedTuple{(:time, xs..., :y)}((Int, ntuple(_ -> MF, 7)...)))
+    JET.@test_opt CausalFrames.summaryvalues(states, Val(requested))
 
     # the rename a non-canonical symmetric summarizer folds through
     st = CausalFrames.fresh(DotProduct(:y, :x), (time = Int, x = Int, y = Int))

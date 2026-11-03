@@ -3,6 +3,12 @@
 # built from column keywords.
 chunks(cs...) = CausalPipeline(ctx -> collect(cs))
 onechunk(; cols...) = CausalPipeline(ctx -> [DataFrame(; cols...)])
+# `summarize(s)` over an in-memory table of the column keywords, timed 1, 2, ….
+summarized(s; cols...) = DataFrame(
+    load(Context(0, 10^6),
+        readtable((; time = collect(eachindex(first(values(cols)))), cols...)) |>
+        summarize(s)),
+)
 
 # A test-local multi-valued summarizer: the minimum and maximum of a column.
 # The column is a type parameter and the state's value type comes from the

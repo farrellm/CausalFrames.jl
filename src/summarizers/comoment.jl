@@ -279,14 +279,18 @@ end
     V = comomenttype(T)
     R = maybemissing(Widened{P,V}, M)
     M && st.missings > 0 && return NamedTuple{(N,),Tuple{R}}((missing,))
-    st.nonfinite > 0 &&
-        return NamedTuple{(N,),Tuple{R}}((Widened{P}(convert(V, NaN)),))
-    # One row deviates from its own mean by exactly 0, which sliding sums
-    # need not reproduce bit for bit (Σd² minus d·d leaves round-off), and a
-    # corrected single-row variance must be 0/0 = NaN, not ±Inf.
-    st.n <= 1 && return NamedTuple{(N,),Tuple{R}}((Widened{P}(zero(V)),))
-    c = comomentvalue(st.n, st.sab, st.sa, A === B ? st.sa : st.sb)
-    return NamedTuple{(N,),Tuple{R}}((Widened{P}(A === B ? max(c, zero(c)) : c),))
+    c = if st.nonfinite > 0
+        convert(V, NaN)
+    elseif st.n <= 1
+        # One row deviates from its own mean by exactly 0, which sliding sums
+        # need not reproduce bit for bit (Σd² minus d·d leaves round-off), and
+        # a corrected single-row variance must be 0/0 = NaN, not ±Inf.
+        zero(V)
+    else
+        m = comomentvalue(st.n, st.sab, st.sa, A === B ? st.sa : st.sb)
+        A === B ? max(m, zero(m)) : m
+    end
+    return NamedTuple{(N,),Tuple{R}}((Widened{P}(c),))
 end
 
 function widenstate(st::CoMomentState{N,A,B}, intypes::NamedTuple) where {N,A,B}
