@@ -514,3 +514,53 @@ What remains of a first call is the kernels (`foldgroups!`,
 `leadinsegment!`, `rollsegment!`), `rowsdataframe`'s per-row-type unzip and
 `summarize`'s keyed `sortedrows`, each one compile per schema and summarizer
 set.
+
+## Configuration dedup and renamed dependencies (issue #149), 2026-11-03
+
+PR #150 deduplicates prototypes by configuration rather than by output name,
+rejects two requested summarizers that share a name, and renames a clashing
+hidden dependency through the `Scoped` wrapper. A set without a clash gets no
+wrapper, so the question was whether the larger `prototypes` pass cost
+anything. Julia 1.13.3. The two sides ran from two worktrees, master and the
+branch, with identically built environments. The branch ran *master's* test
+files, so only `src/` differed.
+
+Per-file compile time from `timed_runtests.jl` (4 threads, `--depwarn=yes`),
+two rounds per side, with the first side alternated:
+
+| | master | branch |
+|---|---|---|
+| included files, compile | 784.2 s, 787.8 s | 788.8 s, 790.0 s |
+| `rolling.jl`, compile | 251.7 s, 253.7 s | 253.7 s, 252.9 s |
+| `summarizers.jl`, compile | 131.7 s, 133.5 s | 133.6 s, 132.0 s |
+| `windows.jl`, compile | 90.4 s, 90.4 s | 91.0 s, 91.3 s |
+
+The difference is +0.4%, within noise. Every file agreed to about a second.
+The one outlier, `rowterms.jl` at 53.5 s in one branch round, was timed alone
+four times per side, alternating, and came out at 51.8–52.4 s on master and
+52.3–53.0 s on the branch.
+
+A first-call harness ran seven fresh pipelines over 2,000 rows (`-t1`, four
+rounds per side, alternating), with no clash among their summarizers.
+Over the seven calls together, master took 10.28–10.89 s (mean 10.54) and
+the branch 10.45–10.63 s (mean 10.55). Each call's range overlapped the other
+side's, for example `addrollingcolumns` over `[Mean, Std, Skewness]` at
+2.82–3.06 s against 2.77–3.04 s. The outputs matched in names, sizes and
+element types. The harness data was random per process, so values were
+checked by the suite instead.
+
+The runtime A/B used `bench_run.jl` at `-t1` with four alternating rounds,
+over the `summarize`, `intervalize`, `windows` and `rolling` groups plus the
+controls `sources/drain` and `lastrow/keyed`. It showed a geomean of the
+minimum ratios of 1.005 over 56 benchmarks. Only the control `sources/drain`
+(+2.8%, identical allocations, untouched code) showed no overlap. Allocations
+rose by a constant 18–45 per load, regardless of data size, and the lead-in
+and chain benchmarks were unchanged. That is `prototypes`' graph bookkeeping:
+for a five-summarizer set it makes 207 allocations against 138 and takes
+52 μs against 49, once per pipeline built.
+
+The rename path itself, on the branch only (master folds just one of the two
+summarizers there), was measured after the harness's seven calls in the same
+process, so this is the cost on top of code already compiled.
+`summarize([PopSpread(), Variance(:x)])` compiled 0.30–0.35 s and the keyed
+`addrollingcolumns` of the same set 1.15–1.30 s, over four runs.
