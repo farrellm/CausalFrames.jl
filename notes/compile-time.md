@@ -473,3 +473,44 @@ The `/simplify` pass over it (abandoning moved into the plan's `InstanceRun`,
 wall (707.7 compile) before, 767.8 s (712.2) after, every file within noise.
 The one outlier, `barwindow.jl` (+4.7 s), measured 32.0–32.9 s compile on both
 sides when timed alone, alternating, twice each.
+
+## Issue #141 evaluated (2026-11-02)
+
+Issue #141 proposed widened Float16/Float32 kernels, more chunk-setup
+barriers in `rolling.jl`/`windows.jl`, and a larger precompile workload. It
+was closed as already done or not worth it. Julia 1.13, `-t1`, a fresh
+process after `using CausalFrames`, 1,000 rows over `readtable`:
+
+| First call | Int time | DateTime time (run second) |
+|---|---|---|
+| `summarize(Mean(:x))` | 0.52 s | 0.37 s |
+| `summarize([Mean, Variance, Std, Sum])` | 0.61 s | 0.46 s |
+| `summarize([Mean, Std]; key = :k)` | 0.68 s | 0.20 s |
+| `addrollingcolumns((w = …,), [Mean])` | 1.03 s | 0.76 s |
+| `addrollingcolumns(…, [Mean, Std, Sum]; key = :k)` | 1.63 s | 0.71 s |
+
+All of it is compilation; the DateTime calls reuse what the Int calls compiled.
+
+- **Precompile workload.** A call shaped like a workload path (its CSV
+  source, `:qty`, `summarize([Count(), Sum(:qty)]; key = :sym)` or its
+  `addrollingcolumns`) still compiled 0.92 s and 1.27 s, against 0.96 s and
+  1.40 s with the column renamed. The kernels are keyed by the user's schema,
+  row closures and summarizer tuple, so the workload caches only the shared
+  plumbing, which it already covers. Growing it buys little.
+- **Widened narrow-float kernels.** `rolling.jl` and `windows.jl` test no
+  Float16/Float32; and a kernel specializes on the column's element type
+  anyway, so sharing state types would not share compiled code. Widening is
+  #145's business, for correctness, not compile time.
+- **Rejected: skip the running-table replay on a fresh `rolltiers`.**
+  `rolltiers` was 1.28 s of the trace's 9.1 s (8 entries, `old::Nothing`
+  each), and it compiles `replaywindow!` → `admitgroup!` even with nothing to
+  replay. Constructing the empty `RunningTable` when `old === nothing` took
+  `rolltiers` off the list, but `leadinsegment!` grew from 1.07 to 1.76–1.91 s:
+  the lead-in kernel compiles the same admission code, which the replay had
+  compiled first. The net was about −5% on the `addrollingcolumns` calls,
+  within noise, so it was reverted.
+
+What remains of a first call is the kernels (`foldgroups!`,
+`leadinsegment!`, `rollsegment!`), `rowsdataframe`'s per-row-type unzip and
+`summarize`'s keyed `sortedrows`, each one compile per schema and summarizer
+set.
