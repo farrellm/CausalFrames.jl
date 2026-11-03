@@ -104,6 +104,13 @@ CausalFrames.fresh(o::AsMonoid, intypes::NamedTuple) =
 CausalFrames.dependencies(o::AsMonoid) =
     map(AsMonoid, CausalFrames.dependencies(o.inner))
 
+# A summarizer with a heap-allocated setting outside its output name, so two
+# equal ones built apart are not `===` (the prototypes dedup test).
+struct Weighted <: Summarizer
+    weights::Vector{Float64}
+end
+CausalFrames.emptyvalue(::Weighted) = (; weighted = 0.0)
+
 # A test-local summarizer whose output column is illegally named :time.
 struct BadTime <: Summarizer end
 CausalFrames.emptyvalue(::BadTime) = (; time = 0)

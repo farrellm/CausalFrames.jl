@@ -389,6 +389,16 @@ end
     @test df.x_variance ≈ [Statistics.var([1.0, 2, 4, 8])]
     @test df.x_std ≈ [Statistics.std([1.0, 2, 4, 8]; corrected = false)]
 
+    # equal configurations built apart still share: Base's `isequal` on a
+    # struct is `===`, which tells two equal `Vector` fields apart
+    protos, req = CausalFrames.prototypes(
+        Summarizer[Weighted([1.0, 2.0]), Weighted([1.0, 2.0])], Symbol[])
+    @test length(protos) == 1
+    @test_throws ArgumentError(
+        "summarize output column :weighted is produced by more than one summarizer",
+    ) CausalFrames.prototypes(
+        Summarizer[Weighted([1.0, 2.0]), Weighted([1.0, 3.0])], Symbol[])
+
     # a row term: one bound function is shared, two functions are the row-term
     # error, which comes first
     f = r -> 2r.x

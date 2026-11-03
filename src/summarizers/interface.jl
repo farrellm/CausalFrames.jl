@@ -162,7 +162,8 @@ widenstate(st::SummarizerState, ::NamedTuple) = st
 The summarizers whose values `s` reads in the two-argument [`value`](@ref).
 They are expanded recursively and deduplicated by output name, so a dependency
 also requested by the user is folded once (two that share an output name but
-are not `isequal` are an `ArgumentError`), and they appear in the output only
+are neither `isequal` nor equal field by field are an `ArgumentError`), and
+they appear in the output only
 if requested. Defaults to `()`.
 """
 dependencies(::Summarizer) = ()

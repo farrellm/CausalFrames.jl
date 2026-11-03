@@ -120,8 +120,8 @@ admissionkeys(ks::Union{Nothing,KeySet}) = ks
 admissionkeys(::KeySet{NoKey}) = nothing
 
 # Expand the requested summarizers into the full set to fold: dependencies
-# recursively, deduplicated by output-name tuple (an equal configuration
-# only; two under one name is an error) and ordered topologically
+# recursively, deduplicated by output-name tuple (an equal configuration,
+# `sameconfig`, only; two under one name is an error) and ordered topologically
 # (post-order depth-first), so every state precedes its dependents. Output
 # names must be unique across the whole set, but only the *requested* names
 # are checked against :time and the key columns, since hidden dependencies
@@ -157,11 +157,8 @@ function prototypes(
         # outside the name (`corrected`, say) would otherwise be dropped.
         i = findfirst(isequal(outnames), seen)
         if i !== nothing
-            isequal(protos[i], s) || throw(
-                ArgumentError(
-                    "$op output column $(repr(first(outnames))) is produced by more than one summarizer",
-                ),
-            )
+            sameconfig(protos[i], s) ||
+                throw(duplicatesummary(op, first(outnames)))
             return
         end
         outnames in visiting && throw(
@@ -174,11 +171,7 @@ function prototypes(
         end
         pop!(visiting)
         for n in outnames
-            n in used && throw(
-                ArgumentError(
-                    "$op output column $(repr(n)) is produced by more than one summarizer",
-                ),
-            )
+            n in used && throw(duplicatesummary(op, n))
             push!(used, n)
         end
         push!(seen, outnames)
@@ -202,6 +195,22 @@ function prototypes(
         end
     end
     return Tuple(protos), Tuple(requested), termtuple(terms)
+end
+
+# The summarizing transforms' error for an output column two summarizers produce.
+duplicatesummary(op::String, n::Symbol) = ArgumentError(
+    "$op output column $(repr(n)) is produced by more than one summarizer")
+
+# Whether two summarizers under one output-name tuple are one configuration:
+# `isequal`, or one immutable type whose fields are pairwise the same
+# configuration. Base's fallback `isequal` is `===`, which tells apart two
+# separately built `Vector` fields of equal content (a custom summarizer's
+# weights, a dependency rebuilt per `dependencies` call). Construction only.
+function sameconfig(@nospecialize(a), @nospecialize(b))
+    isequal(a, b) && return true
+    T = typeof(a)
+    (T === typeof(b) && isstructtype(T) && !ismutabletype(T)) || return false
+    return all(i -> sameconfig(getfield(a, i), getfield(b, i)), 1:fieldcount(T))
 end
 
 # The input's column element types, by name.
