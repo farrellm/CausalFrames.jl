@@ -111,6 +111,18 @@ struct Weighted <: Summarizer
 end
 CausalFrames.emptyvalue(::Weighted) = (; weighted = 0.0)
 
+# A dependent over the population variance, the shape of issue #145: beside a
+# requested `Variance(:x)` its dependency shares the name :x_variance with a
+# different configuration, so it must be renamed rather than deduplicated.
+struct PopSpread <: Summarizer end
+struct PopSpreadState <: CausalFrames.DerivedState end
+CausalFrames.emptyvalue(::PopSpread) = (; x_popspread = missing)
+CausalFrames.dependencies(::PopSpread) = (Variance(:x; corrected = false),)
+CausalFrames.fresh(::PopSpread, ::NamedTuple) = PopSpreadState()
+CausalFrames.value(::PopSpreadState, vals::NamedTuple) =
+    (; x_popspread = sqrt(vals.x_variance))
+CausalFrames.inputcolumns(::PopSpread) = ()
+
 # A test-local summarizer whose output column is illegally named :time.
 struct BadTime <: Summarizer end
 CausalFrames.emptyvalue(::BadTime) = (; time = 0)

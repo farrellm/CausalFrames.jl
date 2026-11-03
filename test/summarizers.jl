@@ -353,8 +353,8 @@ end
 end
 
 @testset "a setting outside the output name is not deduplicated away" begin
-    # issue #149: two configurations under one output name are an error, in
-    # either order, rather than the first silently winning
+    # issue #149: two requested configurations under one output name are an
+    # error, in either order, rather than the first silently winning
     p = readtable(DataFrame(time = 1:4, x = [1.0, 2, 4, 8], y = [3.0, 1, 4, 1]))
     for (a, b, n) in (
             (Variance(:x), Variance(:x; corrected = false), :x_variance),
@@ -399,7 +399,57 @@ end
     ) CausalFrames.prototypes(
         Summarizer[Weighted([1.0, 2.0]), Weighted([1.0, 3.0])], Symbol[])
 
+    # a hidden dependency clashing with a different summarizer is renamed, not
+    # an error: a wrapper's dependencies beside the plain summarizers...
+    x = [1.0, 2, 4, 8]
+    for ss in ([Opaque(Mean(:x)), Count()], [Count(), Opaque(Mean(:x))])
+        protos, req = CausalFrames.prototypes(Summarizer[ss...], Symbol[])
+        @test req == Tuple(only(keys(CausalFrames.emptyvalue(s))) for s in ss)
+        @test any(s -> s isa CausalFrames.Scoped, protos)
+        df = DataFrame(load(Context(0, 10), p |> summarize(ss)))
+        @test df.x_mean == [3.75]
+        @test df.count == [4]
+    end
+    # ...and a custom dependent over a population variance beside the sample
+    # one (issue #145's shape), whose dependency keeps its own setting
+    for ss in ([PopSpread(), Variance(:x)], [Variance(:x), PopSpread()])
+        df = DataFrame(load(Context(0, 10), p |> summarize(ss)))
+        @test df.x_variance ≈ [Statistics.var(x)]
+        @test df.x_popspread ≈ [Statistics.std(x; corrected = false)]
+    end
+    # the renamed dependency keeps its structure, so its fieldless state still
+    # takes no window tier
+    protos, _ = CausalFrames.prototypes(Summarizer[PopSpread(), Variance(:x)], Symbol[])
+    tg = CausalFrames.tiering(protos, (time = Int, x = Float64))
+    # (both wrapped: the dependency renamed, PopSpread reading it there)
+    inner(s) = s isa CausalFrames.Scoped ? s.inner : s
+    tiers = Dict(zip(map(inner, protos), CausalFrames.tiernames(tg)))
+    @test count(s -> s isa CausalFrames.Scoped, protos) == 2
+    @test tiers[Variance(:x; corrected = false)] == tiers[PopSpread()] ==
+          tiers[Variance(:x)] == :derived
+    # every summarizing transform, against each summarizer alone
+    clash = [Opaque(Std(:x)), Variance(:x; corrected = false), Count()]
+    q = readtable(DataFrame(time = 1:6, x = [1.0, 2, 4, 8, 3, 5], k = [1, 2, 1, 2, 1, 2]))
+    for f in (
+        ss -> summarize(ss; key = :k),
+        ss -> summarizecycles(ss),
+        ss -> addsummarycolumns(ss; key = :k),
+        ss -> addrollingcolumns((w = 3, b = Bars(2)), ss),
+        ss -> addrollingcolumns((w = 3,), ss; key = :k),
+        ss -> intervalize(clock(2), ss),
+        ss -> summarizewindows(clock(2), 3, ss; key = :k),
+    )
+        whole = DataFrame(load(Context(0, 10), q |> f(clash)))
+        for s in clash
+            alone = DataFrame(load(Context(0, 10), q |> f([s])))
+            for n in names(alone)
+                @test isequal(whole[!, n], alone[!, n])
+            end
+        end
+    end
+
     # a row term: one bound function is shared, two functions are the row-term
+    # error, which comes first    # a row term: one bound function is shared, two functions are the row-term
     # error, which comes first
     f = r -> 2r.x
     df = DataFrame(load(Context(0, 10), p |> summarize([Sum(:t => f), Sum(:t => f)])))

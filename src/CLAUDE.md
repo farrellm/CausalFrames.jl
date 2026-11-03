@@ -389,6 +389,19 @@ design rationale and performance constraints behind each module.
     combination). `prototypes` strips the carrier, so states, tiers and
     kernels never see it; don't add behaviour to `Termed` beyond `emptyvalue`.
     A custom summarizer's `rowterms` hook is collected beside the carrier's
+  - `scoped.jl` holds the private renaming `prototypes` gives a hidden
+    dependency whose output names a different summarizer already claims
+    (issue #149): dependents read values by name from one flat NamedTuple, so
+    two configurations can't share a name, and folding only the first was a
+    silent wrong answer. `ScopedPlain`/`ScopedMonoid`/`ScopedGroup` (the
+    `Scoped` union) keep the inner summarizer's structural supertype, since
+    `tiering` reads it, and their `ScopedState` delegates every state
+    operation, so a new state interface function must be delegated there
+    too: one left out fails only on a clash. The plan `(D, A, MD, MA)` is a type parameter, so the rename and
+    the dependency aliasing are generated and infer, and a fieldless inner
+    state leaves the wrapper a singleton (still the derived tier). Equal
+    configurations still share one node (`sameconfig`), and a set without a
+    clash gets no wrapper, so it compiles as before
   - `FitModel` (MLJ) is the one summarizer whose value is an object: its state
     buffers the folded rows in concretely typed vectors and fits at `value`
     time through the `fitmodel` hook (src/models.jl), building

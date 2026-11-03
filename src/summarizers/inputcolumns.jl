@@ -25,3 +25,5 @@ inputcolumns(
         LinearRegression,
         Quantile,Median,PercentRank,MeanAbsDev},
 ) = ()
+# A renamed dependency reads what its inner summarizer reads.
+inputcolumns(s::Scoped) = inputcolumns(s.inner)

@@ -2382,15 +2382,34 @@ The summarizing transforms take one summarizer or a collection, plus an
 optional `key` giving a separate summary per key value (emitted sorted by key,
 or in declared order under a `keyset`; see "Declared key sets"). They treat the given summarizers as *prototypes*: they only ever
 mutate `fresh` copies, one per key group (and, for `summarizecycles`, per
-cycle). Before running, prototypes are **deduplicated by output-name tuple** —
+cycle). Before running, prototypes are **deduplicated by configuration**:
 identical configurations (`isequal`, or one immutable type equal field by
 field, since Base's fallback `isequal` is `===` and would tell apart two equal
-`Vector` fields) collapse to one shared instance, while
-two that share a name tuple but differ in a setting outside the name
-(`Variance(:x)` and `Variance(:x; corrected = false)`) are an `ArgumentError`
-naming the transform, never a silent choice of one — and the surviving
-output names must be pairwise disjoint; the requested (emitted) names must
-additionally be distinct from `:time` and the key columns. The same pass
+`Vector` fields) with the same output names collapse to one shared instance.
+Two different configurations never share a name (issue #149):
+
+- The *requested* summarizers emit their own names, which must be pairwise
+  disjoint, so two that share one (`Variance(:x)` and `Variance(:x; corrected
+  = false)`, or `Max(:x)` and `MaxWithIndex(:x)`) are an `ArgumentError`
+  naming the transform, never a silent choice of one. The requested names must
+  additionally be distinct from `:time` and the key columns.
+- A *hidden* dependency keeps its names unless a requested summarizer, or a
+  hidden dependency met earlier in topological order, already claims one. It
+  is then **renamed** to private names (`#dep#i#name`), and the summarizers
+  depending on it read it there, so a wrapper's dependencies (a test's
+  `Opaque(Count())`) beside the plain `Count()`, or a custom dependent over
+  `Variance(:x; corrected = false)` beside a requested `Variance(:x)`, fold
+  apart and each reads its own. The rename is the internal `Scoped` wrapper,
+  one type per structural supertype so tiering is unchanged, over a
+  `ScopedState` that delegates every state operation; its two-argument
+  `value` aliases each renamed dependency back under the name the inner
+  summarizer reads, then renames the inner value's names. Both steps are
+  generated over names in type parameters, so they infer, and a fieldless
+  inner state keeps the wrapper a singleton, so a renamed dependent still takes
+  the derived tier. A set with no clash has no wrapper, so it compiles as
+  before.
+
+The same pass
 unwraps row terms (below) at any depth, dependencies included, and collects
 them by name.
 
@@ -2741,9 +2760,11 @@ no-intercept fits.
 Before running, the transforms expand the requested summarizers into the
 full set to fold: each one's dependencies recursively, in topological order
 by a post-order depth-first walk (dependencies may themselves be dependent;
-a dependency cycle is an `ArgumentError`), deduplicated by output-name tuple
-as above — so a dependency equal to a requested summarizer, or shared by two
-dependents, is folded once. The dependent's state is typically fieldless:
+a dependency cycle, a summarizer depending on an equal configuration of
+itself, is an `ArgumentError`), deduplicated by configuration as above — so a
+dependency equal to a requested summarizer, or shared by two dependents, is
+folded once, and one that clashes with a different summarizer's names is
+renamed. The dependent's state is typically fieldless:
 its `update!` is a no-op and the names it reads are baked into its type
 parameters, so the two-argument `value` infers. Its value's declared type
 should be computed from `vals`'s *field types* (via `Base.promote_op` over

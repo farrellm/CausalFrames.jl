@@ -47,6 +47,19 @@ using JET
     JET.@test_opt CausalFrames.foldrunning!(groups, states, nt, 3, keynames, outs)
 end
 
+@testset "renamed dependency emission" begin
+    # a hidden dependency renamed beside a different summarizer of its name
+    protos, requested = CausalFrames.prototypes(
+        CausalFrames.tosummarizers([PopSpread(), Variance(:x), Opaque(Mean(:x)), Count()]),
+        Symbol[])
+    @test count(s -> s isa CausalFrames.Scoped, protos) >= 2
+    outs = Val(requested)
+    states = CausalFrames.newstates(protos, (time = Int, x = Float64))
+    JET.@test_opt CausalFrames.foldall!(states, (time = [1, 2], x = [1.0, 2.0]))
+    JET.@test_opt CausalFrames.summaryvalues(states, outs)
+    JET.@test_opt CausalFrames.freshall!(states)
+end
+
 @testset "wide rows" begin
     # Past 32 columns, Base's tuple `map` falls back to dispatch (issue #98).
     nt = NamedTuple{Tuple(Symbol.(:c, 1:40))}(Tuple(rand(3) for _ in 1:40))
