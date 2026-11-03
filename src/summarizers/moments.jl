@@ -210,7 +210,9 @@ Correlation(a::ColumnSpec, b::ColumnSpec) =
 # DB, as the corrected covariance over the corrected standard deviations,
 # emitted as N and narrowed as `CovarianceState` narrows. It reads the
 # co-moments, not the narrowed `Covariance` and `Std`, whose Float16 values
-# can overflow where the correlation is in range.
+# can overflow where the correlation is in range. The divisor m cancels, but
+# keep it: DAB/(√DA·√DB) rounds both roots (-0.75 came out -0.7499999999999999)
+# and DAB/√(DA·DB) overflows the product past √floatmax.
 struct CorrelationState{N,DAB,DA,DB} <: DerivedState end
 
 clampcor(::Missing) = missing
