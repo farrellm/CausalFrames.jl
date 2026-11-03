@@ -1,7 +1,6 @@
 using CausalFrames.Acausal
 
 @testset "futurejoin" begin
-
     @testset "basic" begin
         left = onechunk(time = [1, 2, 3, 5], px = [10.0, 20.0, 30.0, 50.0])
         right = onechunk(time = [0, 2, 4], qty = [1, 2, 3])

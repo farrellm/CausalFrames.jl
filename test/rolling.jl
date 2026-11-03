@@ -1,5 +1,4 @@
 @testset "addrollingcolumns" begin
-
     @testset "basic" begin
         p = onechunk(time = [1, 2, 3, 5, 8], x = [10, 20, 30, 40, 50])
         df = DataFrame(load(Context(0, 10),
@@ -405,7 +404,6 @@
 end
 
 @testset "rolling fast paths" begin
-
     # Column-wise agreement, exact but for floats, which may carry sliding-sum
     # round-off on the running path (and NaN, e.g. a single-row corrected
     # variance, which isapprox rejects). One assertion per comparison, naming

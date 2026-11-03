@@ -1,6 +1,4 @@
 @testset "intervalize" begin
-    multichunk(chunks) = CausalPipeline(ctx -> chunks)
-
     @testset "keyless regular grid" begin
         # clock(5) over [0, 15) gives boundaries 0, 5, 10; complete intervals
         # [0, 5) -> 5 and [5, 10) -> 10; trailing [10, 15) dropped.
@@ -128,8 +126,8 @@
 
         # an interval spanning chunks, a widening inside it, and an empty
         # interval closed by a row that lands past the last boundary
-        q = multichunk([DataFrame(time = [1, 6], k = ["a", "b"], x = [1, 2]),
-            DataFrame(time = [8, 16], k = ["b", "a"], x = [2.5, 4.0])])
+        q = chunks(DataFrame(time = [1, 6], k = ["a", "b"], x = [1, 2]),
+            DataFrame(time = [8, 16], k = ["b", "a"], x = [2.5, 4.0]))
         df = DataFrame(
             load(Context(0, 20),
                 q |> intervalize(clock(5), [Count(), Sum(:x)]; key = :k,
@@ -219,8 +217,8 @@
 
     @testset "intervals and cycles span chunk boundaries" begin
         # the interval [5, 10) is split across two chunks (t = 7 and t = 8)
-        p = multichunk([DataFrame(time = [2, 7], x = [10, 20]),
-            DataFrame(time = [8, 12], x = [30, 40])])
+        p = chunks(DataFrame(time = [2, 7], x = [10, 20]),
+            DataFrame(time = [8, 12], x = [30, 40]))
         df = DataFrame(
             load(Context(0, 15),
                 p |> intervalize(clock(5), [Count(), Sum(:x)]; closelast = true)),
@@ -233,8 +231,8 @@
     @testset "schema widening carries the open interval and widens output" begin
         # Int in the first chunk, Float64 in the second; the [0, 5) interval
         # spans the promotion
-        p = multichunk([DataFrame(time = [1], x = [10]),
-            DataFrame(time = [6], x = [2.5])])
+        p = chunks(DataFrame(time = [1], x = [10]),
+            DataFrame(time = [6], x = [2.5]))
         df = DataFrame(
             load(Context(0, 10),
                 p |> intervalize(clock(5), Sum(:x); closelast = true)),
