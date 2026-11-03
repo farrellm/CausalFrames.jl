@@ -3,8 +3,10 @@
 # holding it.
 include("summarizers/interface.jl")
 include("summarizers/compensated.jl")
+include("summarizers/widen.jl")
 include("summarizers/sums.jl")
 include("summarizers/comoment.jl")
+include("summarizers/centralmoments.jl")
 include("summarizers/agesum.jl")
 include("summarizers/moments.jl")
 include("summarizers/regression.jl")

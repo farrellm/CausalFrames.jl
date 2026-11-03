@@ -1,6 +1,6 @@
 # Summarizers
 
-Contents: Row terms, `Count`, `CountDistinct`, `Sum`, `SumPower`, `Moment`, `Product`, `DotProduct`, `AgeWeightedSum`, `Mean`, `Variance`, `Std`, `Covariance`, `Correlation`, `LinearRegression`, `Quantile`, `Median`, `PercentRank`, `MeanAbsDev`, `SortedValues`, `WindowValues`, `Min`, `Max`, `MinIndex`, `MaxIndex`, `MinWithIndex`, `MaxWithIndex`, `First`, `Last`, `FitModel`, Summarizer interface.
+Contents: Row terms, `Count`, `CountDistinct`, `Sum`, `SumPower`, `Moment`, `Product`, `DotProduct`, `AgeWeightedSum`, `Mean`, `Variance`, `Std`, `Skewness`, `Kurtosis`, `Covariance`, `Correlation`, `LinearRegression`, `Quantile`, `Median`, `PercentRank`, `MeanAbsDev`, `SortedValues`, `WindowValues`, `Min`, `Max`, `MinIndex`, `MaxIndex`, `MinWithIndex`, `MaxWithIndex`, `First`, `Last`, `FitModel`, Summarizer interface.
 
 Summarizers are what the [summarizing transforms](summarizing.md) fold over
 rows. Each output column is named by suffix (`Sum(:mid)` produces `:mid_sum`)
@@ -226,6 +226,19 @@ variance negative.
   divides by `n`. It is not part of the output name, so both forms of one column
   cannot be requested together.
 
+```julia
+df = DataFrame(time = 1:5, x = [1.0, 2.0, 2.0, 3.0, 9.0])
+DataFrame(load(Context(0, 10), readtable(df) |> summarize(Variance(:x))))
+
+# output
+
+1×2 DataFrame
+ Row │ time   x_variance
+     │ Int64  Float64
+─────┼───────────────────
+   1 │    10        10.3
+```
+
 ## `Std`
 
     Std(column::ColumnSpec; corrected = true) -> Summarizer
@@ -239,6 +252,85 @@ negatives clamped to zero.
 
 #### Keywords
 - `corrected = true`: as for `Variance`.
+
+## `Skewness`
+
+    Skewness(column::ColumnSpec; corrected = true) -> Summarizer
+
+The skewness of `column`, in `:{column}_skewness` (`missing` for no rows,
+`NaN` if a value is NaN or ±Inf). With `corrected = true` it is the
+sample-adjusted `G1 = g1·√(n(n-1))/(n-2)`, as pandas' rolling `skew` and
+Excel's `SKEW` compute; with `false`, the moment estimator
+`g1 = m₃/m₂^(3/2)` over population moments, as `StatsBase.skewness`. `NaN`
+when every value is equal, and for fewer than three rows when corrected.
+Integer input gives `Float64`. Like `Variance`, the state folds
+deviations from a shift near the data, so a large level doesn't cancel.
+A row more than about `1e77` from the others overflows the fourth power, so
+the result is `NaN` or wrong while it is folded, and in
+`addrollingcolumns` and `summarizewindows` windows can stay
+wrong after it has left.
+
+#### Arguments
+- `column`: a column name, or a row term `name => f` (see `ColumnSpec`).
+
+#### Keywords
+- `corrected = true`: `G1` rather than `g1`. It is not part of the output
+  name, so both forms of one column cannot be requested together.
+
+```julia
+df = DataFrame(time = 1:5, x = [1.0, 2.0, 2.0, 3.0, 9.0])
+DataFrame(load(Context(0, 10), readtable(df) |> summarize(Skewness(:x))))
+
+# output
+
+1×2 DataFrame
+ Row │ time   x_skewness
+     │ Int64  Float64
+─────┼───────────────────
+   1 │    10     1.96936
+```
+
+## `Kurtosis`
+
+    Kurtosis(column::ColumnSpec; corrected = true) -> Summarizer
+
+The excess kurtosis of `column` (a normal distribution gives 0), in
+`:{column}_kurtosis` (`missing` for no rows, `NaN` if a value is NaN or ±Inf).
+With `corrected = true` it is the sample-adjusted
+`G2 = (n-1)((n+1)·g2 + 6)/((n-2)(n-3))`, as pandas' rolling `kurt`, Excel's
+`KURT` and TA-Lib's `KURTOSIS` compute; with `false`, the moment estimator
+`g2 = m₄/m₂² - 3` over population moments, as `StatsBase.kurtosis`. `NaN`
+when every value is equal, and for fewer than four rows when corrected.
+Integer input gives `Float64`. Like `Variance`, the state folds
+deviations from a shift near the data, so a large level doesn't cancel.
+A row more than about `1e77` from the others overflows the fourth power, so
+the result is `NaN` or wrong while it is folded, and in
+`addrollingcolumns` and `summarizewindows` windows can stay
+wrong after it has left.
+`Float16` input gives `Float16`, which tops out at 65504, while the kurtosis
+of `n` rows reaches about `n` (one spike among equal values): over more than
+about 65,000 rows it can be `Inf`. A `Float32` row term (`:x32 => r ->
+Float32(r.x)`, see `ColumnSpec`) avoids it.
+
+#### Arguments
+- `column`: a column name, or a row term `name => f` (see `ColumnSpec`).
+
+#### Keywords
+- `corrected = true`: `G2` rather than `g2`. It is not part of the output
+  name, so both forms of one column cannot be requested together.
+
+```julia
+df = DataFrame(time = 1:5, x = [1.0, 2.0, 2.0, 3.0, 9.0])
+DataFrame(load(Context(0, 10), readtable(df) |> summarize(Kurtosis(:x))))
+
+# output
+
+1×2 DataFrame
+ Row │ time   x_kurtosis
+     │ Int64  Float64
+─────┼───────────────────
+   1 │    10     4.06919
+```
 
 ## `Covariance`
 
@@ -328,9 +420,12 @@ coefficients are exact but `stderr` and the t statistics are `NaN`.
 With an intercept the fit is computed from the same centred accumulators as
 `Variance` and `Covariance`, so large levels don't cancel, plus
 `Count` and each column's `Sum` for the means. Without one it
-is computed from `Count`, `SumPower``(·, 2)` and
-`DotProduct`. Either way, regressions over overlapping columns, and the
-statistics beside them, share accumulators. With `K ≥ 2` each emitted row allocates a `K × K`
+is computed from `Count` and the raw cross products `Σab`, shared only
+with other regressions without an intercept. Either way, regressions over
+overlapping columns, and the statistics beside them, share accumulators.
+`Float16` and `Float32` input is accumulated as `Float64` and the statistics
+narrowed back, so a square past the type's `floatmax` doesn't overflow a fit
+that is in range. With `K ≥ 2` each emitted row allocates a `K × K`
 workspace; `K = 1` allocates nothing.
 
 ## `Quantile`

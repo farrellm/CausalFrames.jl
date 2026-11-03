@@ -2,7 +2,6 @@
     # A summarizer's output column takes its element type from the input
     # column: Min/Max/First/Last verbatim, Sum/SumPower via Base.sum's own
     # widening rule.
-    chunks(cs...) = CausalPipeline(ctx -> collect(cs))
     summarizeall(col) = DataFrame(
         load(Context(0, 9),
             chunks(DataFrame(time = [1, 2, 3], x = col)) |>
@@ -127,7 +126,6 @@
 end
 
 @testset "distinct counting" begin
-    chunks(cs...) = CausalPipeline(ctx -> collect(cs))
     summarized(p, ss; kwargs...) =
         DataFrame(load(Context(0, 9), p |> summarize(ss; kwargs...)))
 
@@ -195,7 +193,6 @@ end
 end
 
 @testset "statistical summarizers" begin
-    chunks(cs...) = CausalPipeline(ctx -> collect(cs))
     # x and y over three rows; the reference values are computed by hand:
     # sum(x)=6, prod(x)=6, sum(x^2)=14, mean(x)=2, and (corrected) var(x)=1;
     # dot(x,y)=19 and (corrected) cov(x,y)=-1.5.
@@ -301,12 +298,13 @@ end
     @test @inferred(CausalFrames.value(st, (count = 3, x_x_comoment = 2.0))) ===
           (x_variance = 1.0,)
     st = CausalFrames.fresh(Std(:x), (time = Int64, x = Int32))
-    @test @inferred(CausalFrames.value(st, (x_variance = 4.0,))) === (x_std = 2.0,)
+    @test @inferred(CausalFrames.value(st, (count = 3, x_x_comoment = 8.0))) ===
+          (x_std = 2.0,)
     st = CausalFrames.fresh(Covariance(:x, :y), (time = Int64, x = Int32, y = Int32))
     @test @inferred(CausalFrames.value(st, (count = 3, x_y_comoment = -3.0))) ===
           (x_y_covariance = -1.5,)
 
-    # nested dependency expansion (Std -> Variance -> raw sums) stays inferrable
+    # dependency expansion (Std -> co-moment -> shifted sums) stays inferrable
     # through the accumulate-then-project fold, and hidden dependencies are
     # folded but not emitted
     protos, requested =
@@ -349,7 +347,7 @@ end
     st = CausalFrames.fresh(Correlation(:x, :y), (time = Int64, x = Int32, y = Int32))
     @test @inferred(
         CausalFrames.value(st,
-            (x_y_covariance = -1.5, x_std = 1.0, y_std = 2.0))
+            (count = 3, x_y_comoment = -3.0, x_x_comoment = 2.0, y_y_comoment = 8.0))
     ) ===
           (x_y_correlation = -0.75,)
 end
@@ -358,7 +356,6 @@ end
     # A summarizer symmetric in two columns folds under the isless-sorted
     # argument order but still emits the column the caller asked for, so
     # Σab and Σba cost one accumulator between them rather than two.
-    chunks(cs...) = CausalPipeline(ctx -> collect(cs))
     stats(xcol, ycol, ss) = DataFrame(
         load(Context(0, 9),
             chunks(DataFrame(time = [1, 2, 3], x = xcol, y = ycol)) |>
@@ -449,7 +446,6 @@ end
 end
 
 @testset "linear regression" begin
-    chunks(cs...) = CausalPipeline(ctx -> collect(cs))
     # five points with a deliberate wobble, so the fit is not exact and the
     # standard error and t statistics have something to report
     xs = Float64[1, 2, 3, 4, 5]
@@ -615,8 +611,8 @@ end
     st = CausalFrames.fresh(LinearRegression(:x, :y; intercept = false), intypes)
     @test @inferred(
         CausalFrames.value(st,
-            (count = 5, x_sumpower_2 = Int64(55), y_sumpower_2 = Int64(200),
-                x_y_dotproduct = Int64(100)))
+            (count = 5, x_x_crossproduct = Int64(55), y_y_crossproduct = Int64(200),
+                x_y_crossproduct = Int64(100)))
     ).x_beta ≈ 100 / 55
     st = CausalFrames.fresh(LinearRegression([:x, :z], :y), intypes)
     @test @inferred(
@@ -671,15 +667,15 @@ end
     ]
     @test count(==(:x_y_comoment), folded) == 1
     @test !(:y_x_comoment in folded)
-    # without an intercept the fit is on the raw products, as SumPower and
-    # the canonical DotProduct
+    # without an intercept the fit is on the raw products, the canonical
+    # CrossProducts (folded wide, so not shared with SumPower or DotProduct)
     protos, _ = CausalFrames.prototypes(
         Summarizer[LinearRegression(:x, :y; intercept = false)], Symbol[])
     @test Set(
         keys(CausalFrames.emptyvalue(s))
         for s in protos if length(keys(CausalFrames.emptyvalue(s))) == 1
     ) ⊇
-          Set([(:x_sumpower_2,), (:y_sumpower_2,), (:x_y_dotproduct,)])
+          Set([(:x_x_crossproduct,), (:y_y_crossproduct,), (:x_y_crossproduct,)])
 
     # the whole accumulate-then-project fold stays inferrable
     protos, requested = CausalFrames.prototypes(
@@ -736,8 +732,9 @@ end
     @test all(s -> s isa GroupSummarizer,
         [Count(), Sum(:x), SumPower(:x, 2), DotProduct(:x, :y),
             CausalFrames.CoMoment{:x,:x}(), CausalFrames.CoMoment{:x,:y}(),
+            CausalFrames.CentralMoments{:x}(),
             AgeWeightedSum(:x), Moment(:x, 2), Mean(:x), Variance(:x), Std(:x),
-            Covariance(:x, :y), Correlation(:x, :y),
+            Skewness(:x), Kurtosis(:x), Covariance(:x, :y), Correlation(:x, :y),
             LinearRegression(:x, :y), LinearRegression([:x, :y], :y),
             Min(:x), Max(:x), First(:x), Last(:x), CountDistinct(:x),
             MinIndex(:x), MaxIndex(:x), MinWithIndex(:x), MaxWithIndex(:x)])
@@ -747,6 +744,7 @@ end
 
     monoids = [Count(), Sum(:x), SumPower(:x, 2), DotProduct(:x, :y),
         CausalFrames.CoMoment{:x,:x}(), CausalFrames.CoMoment{:x,:y}(),
+        CausalFrames.CentralMoments{:x}(),
         AgeWeightedSum(:x), Product(:x), Min(:x), Max(:x), First(:x), Last(:x),
         MinMax(:x), CountDistinct(:x), MinIndex(:x), MaxIndex(:x),
         MinWithIndex(:x), MaxWithIndex(:x)]
@@ -757,6 +755,7 @@ end
     # exercises the `fresh(st)` default.
     selfcontained = [Count(), Sum(:x), SumPower(:x, 2), DotProduct(:x, :y),
         CausalFrames.CoMoment{:x,:x}(), CausalFrames.CoMoment{:x,:y}(),
+        CausalFrames.CentralMoments{:x}(),
         AgeWeightedSum(:x), Product(:x), Min(:x), Max(:x), First(:x), Last(:x),
         MinMax(:x), CountDistinct(:x), MinIndex(:x), MaxIndex(:x),
         MinWithIndex(:x), MaxWithIndex(:x), Opaque(Sum(:x))]
@@ -782,7 +781,8 @@ end
     # the dependent summarizers carry no state of their own, so fresh! only
     # has to preserve the type (their value comes from `vals` at emission)
     for s in [Moment(:x, 2), Mean(:x), Variance(:x), Std(:x),
-        Covariance(:x, :y), Correlation(:x, :y), LinearRegression(:x, :y),
+        Skewness(:x), Kurtosis(:x), Covariance(:x, :y), Correlation(:x, :y),
+        LinearRegression(:x, :y),
         TestVar(:x)]
         st = CausalFrames.fresh(s, intypes)
         @test typeof(CausalFrames.fresh!(st)) === typeof(st)
@@ -792,6 +792,7 @@ end
     # on.
     for s in [Count(), Sum(:x), SumPower(:x, 2), DotProduct(:x, :y),
         CausalFrames.CoMoment{:x,:x}(), CausalFrames.CoMoment{:x,:y}(),
+        CausalFrames.CentralMoments{:x}(),
         AgeWeightedSum(:x), Product(:x), Min(:x), Max(:x), First(:x), Last(:x),
         CountDistinct(:x), MinIndex(:x), MaxIndex(:x), MinWithIndex(:x),
         MaxWithIndex(:x)]
@@ -1000,7 +1001,8 @@ end
             foreach(row -> CausalFrames.update!(l, row), rows[1:k])
             foreach(row -> CausalFrames.update!(r, row), rows[(k+1):end])
             CausalFrames.combine!(l, l, r)
-            @test only(CausalFrames.value(l)) ≈ exactcomoment(rows, a, b) rtol = 1e-12
+            @test CausalFrames.unwiden(only(CausalFrames.value(l))) ≈
+                  exactcomoment(rows, a, b) rtol = 1e-12
         end
     end
 
@@ -1021,7 +1023,6 @@ end
     @test eltype(out.w_x_variance) == Union{Missing,Float64}
 
     # integer input folds exactly, and widens to a float accumulator mid-stream
-    chunks(cs...) = CausalPipeline(ctx -> collect(cs))
     p = chunks(DataFrame(time = [1, 2], x = [10^9, 10^9 + 2], y = [3, 1]),
         DataFrame(time = [3, 4], x = [1e9 + 1, 1e9 + 5], y = [2.0, 7.0]))
     out = DataFrame(
@@ -1155,6 +1156,14 @@ end
         foreach(row -> CausalFrames.update!(st, row), rows)
         @test st.peak == 0 && !CausalFrames.needsrefold(st)
     end
+    # Float16 (folded at Float64): a flat covariance window left after a
+    # spread still asks
+    st = CausalFrames.freshwindowed(CausalFrames.CoMoment{:x,:y}(),
+        (time = Int, x = Float16, y = Float16))
+    f16 = [(time = 1, x = Float16(v), y = Float16(v)) for v in (0, 4, 0.5, 0.5, 0.5)]
+    foreach(row -> CausalFrames.update!(st, row), f16)
+    foreach(row -> CausalFrames.downdate!(st, row), f16[1:2])
+    @test CausalFrames.needsrefold(st)
     # combine! re-expresses the covariance's plain squares at the left shift
     s = CausalFrames.CoMoment{:x,:y}()
     l, r = CausalFrames.freshwindowed(s, intypes), CausalFrames.freshwindowed(s, intypes)
@@ -1167,6 +1176,308 @@ end
     @test l.qa ≈ sum(row -> (row.x - l.ka)^2, both) rtol = 1e-12
     @test l.qb ≈ sum(row -> (row.y - l.kb)^2, both) rtol = 1e-12
     @test l.peak == peak
+end
+
+@testset "co-moment folds Float16/Float32 at Float64" begin
+    # At their own precision a square passed floatmax past a deviation of 256
+    # (Float16) or 1.8e19 (Float32), and n·Σd² past a few hundred Float16 rows,
+    # though the
+    # statistics are in range; the dependents narrow back to the input type
+    ss = [Variance(:x), Std(:x), Covariance(:x, :y), Correlation(:x, :y),
+        LinearRegression(:x, :y), LinearRegression(:x, :y; intercept = false, name = :o)]
+    for (xs, ys) in
+        ((Float16[(i * 3) % 8 for i in 1:300], Float16[(i * 5) % 7 for i in 1:300]),
+        (Float16[300; [(i * 3) % 8 for i in 1:19]], Float16[(i * 5) % 7 for i in 1:20]),
+        (Float32[2e19; 1:19], Float32[(i * 5) % 7 for i in 1:20]))
+        T = eltype(xs)
+        out = summarized(ss; x = xs, y = ys)
+        @test all(c -> eltype(out[!, c]) == T, names(out, Not([:time, :n, :o_n])))
+        x, y = Float64.(xs), Float64.(ys)
+        @test only(out.x_variance) ≈ T(Statistics.var(x)) rtol = 2eps(T)
+        @test only(out.x_std) ≈ T(Statistics.std(x)) rtol = 2eps(T)
+        @test only(out.x_y_covariance) ≈ T(Statistics.cov(x, y)) rtol = 2eps(T)
+        @test only(out.x_y_correlation) ≈ T(Statistics.cor(x, y)) atol = 2eps(T)
+        @test only(out.x_beta) ≈ T(Statistics.cov(x, y) / Statistics.var(x)) rtol = 4eps(T)
+        # the fit through the origin reads raw products, folded wide too (#140)
+        @test only(out.o_x_beta) ≈ T(sum(x .* y) / sum(x .^ 2)) rtol = 4eps(T)
+        @test isfinite(only(out.o_r2)) && isfinite(only(out.o_stderr))
+    end
+    # Std and Correlation read the co-moments, not the narrowed Variance and
+    # Covariance: a variance past floatmax has a standard deviation and a
+    # correlation in range
+    for (xs, ys) in ((Float16[0, 512, 256], Float16[0, 2, 1]),
+        (Float32[0, 4e19, 2e19], Float32[0, 2e19, 1e19]))
+        T = eltype(xs)
+        out = summarized([Variance(:x), Std(:x), Correlation(:x, :y)]; x = xs, y = ys)
+        @test isinf(only(out.x_variance))
+        @test only(out.x_std) ≈ T(Statistics.std(Float64.(xs))) rtol = 2eps(T)
+        @test only(out.x_y_correlation) == 1
+        @test eltype(out.x_std) == T && eltype(out.x_y_correlation) == T
+    end
+    @test CausalFrames.fresh(CausalFrames.CoMoment{:x,:x}(), (x = Float32,)) isa
+          CausalFrames.CoMomentState{<:Any,:x,:x,Float64}
+    # a Float32 state widened mid-stream to Float64 widens its output too
+    p = chunks(DataFrame(time = 1:3, x = Float32[1, 4, 2]),
+        DataFrame(time = 4:6, x = [8.0, 1e-3, 5.0]))
+    out = DataFrame(load(Context(0, 9), p |> summarize([Variance(:x), Std(:x)])))
+    @test eltype(out.x_variance) == Float64 && eltype(out.x_std) == Float64
+    @test only(out.x_variance) ≈ Statistics.var(Float64[1, 4, 2, 8, 1e-3, 5])
+end
+
+@testset "Skewness and Kurtosis" begin
+    # Both read the unexported CentralMoments accumulator, which folds
+    # shifted power sums as CoMoment does, so a large level doesn't cancel.
+    # Errors are absolute (the statistics are scale-free) against an exact
+    # answer over the *same* rounded inputs.
+    q(v) = Rational{BigInt}.(v)
+    centred(b) = (m = sum(b) / length(b); Tuple(sum((b .- m) .^ j) for j in 2:4))
+    function shape(w, k; corrected = true)
+        n = length(w)
+        m2, m3, m4 = centred(q(w))
+        if k === :skewness
+            g1 = sqrt(big(n)) * BigFloat(m3) / BigFloat(m2)^1.5
+            return Float64(corrected ? g1 * sqrt(big(n) * (n - 1)) / (n - 2) : g1)
+        end
+        g2 = n * m4 / m2^2 - 3
+        return Float64(corrected ? (n - 1) * ((n + 1) * g2 + 6) / ((n - 2) * (n - 3)) :
+                       g2)
+    end
+    win(s, x, n) =
+        let st = CausalFrames.barwindow(s, n, (x = Float64,))
+            [(CausalFrames.update!(st, (; x = v)); only(CausalFrames.value(st)))
+             for v in x]
+        end
+    maxerr(v, x, n, k; kw...) =
+        maximum(i -> abs(v[i] - shape(x[(i-n+1):i], k; kw...)), n:length(x))
+
+    # the level doesn't matter, and neither does a series swinging through
+    # zero (c = 0), where x - K isn't exact: the deviation is folded as an
+    # exact pair, so a row folded under one shift and evicted under another
+    # leaves nothing behind
+    base = [1000 * sin(1.7i) * cos(0.3i^2) for i in 1:400]
+    for n in (4, 5, 20), c in (0.0, 1e6, 1e8, 1e10)
+        x = base .+ c
+        @test maxerr(win(Kurtosis(:x), x, n), x, n, :kurtosis) < 2e-14
+        @test maxerr(win(Skewness(:x), x, n), x, n, :skewness) < 2e-15
+    end
+    # ... and over a long drifting level the shift follows
+    y = [1e5 + 0.5i + sin(i) for i in 1:20_000]
+    @test maxerr(win(Kurtosis(:x), y, 6), y, 6, :kurtosis) < 1e-13
+
+    # the uncorrected forms, through summarize; integer input gives Float64
+    xs = [3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5, 8]
+    lifted = :y => r -> r.x + 1e12
+    out = summarized(
+        [Skewness(:x), Kurtosis(:x),
+            Skewness(lifted; corrected = false), Kurtosis(lifted; corrected = false)];
+        x = xs)
+    @test eltype(out.x_skewness) == Float64 && eltype(out.x_kurtosis) == Float64
+    @test only(out.x_skewness) ≈ shape(xs, :skewness) atol = 1e-15
+    @test only(out.x_kurtosis) ≈ shape(xs, :kurtosis) atol = 1e-15
+    @test only(out.y_skewness) ≈ shape(xs, :skewness; corrected = false) atol = 1e-15
+    @test only(out.y_kurtosis) ≈ shape(xs, :kurtosis; corrected = false) atol = 1e-15
+    # Float32 stays Float32, from sums folded at Float64 whose value names the
+    # input type; plain sums stand for their own type
+    st = CausalFrames.fresh(Kurtosis(:x), (time = Int, x = Float32))
+    @test @inferred(
+        CausalFrames.value(st,
+            (count = 5,
+                x_centralmoments = CausalFrames.Widened{Float32}((1.0, 0.0, 2.0))))
+    ) ===
+          (x_kurtosis = 32.0f0,)
+    @test @inferred(
+        CausalFrames.value(st, (count = 5, x_centralmoments = (1.0, 0.0, 2.0)))
+    ) === (x_kurtosis = 32.0,)  # g2 = 5·2/1² - 3 = 7, G2 = 4·(6·7 + 6)/(3·2)
+
+    # Float16 and Float32 fold at Float64, so their powers don't overflow:
+    # Float16 d⁴ passes floatmax past a deviation of 16, n·Σd² past a few
+    # hundred rows, and Float32 d⁴ past 4.3e9
+    for xs in (Float16[(i * 3) % 8 for i in 1:300], Float16[(i * 7) % 40 for i in 1:20],
+        Float32[0, 1e10, 2e10, 1e10, 4.5e10, 3e10, 0.5e10, 2e10])
+        T = eltype(xs)
+        out = summarized([Skewness(:x), Kurtosis(:x)]; x = xs)
+        @test eltype(out.x_skewness) == T && eltype(out.x_kurtosis) == T
+        @test only(out.x_skewness) ≈ T(shape(xs, :skewness)) atol = 2eps(T)
+        @test only(out.x_kurtosis) ≈ T(shape(xs, :kurtosis)) atol = 4eps(T)
+    end
+    @test CausalFrames.fresh(CausalFrames.CentralMoments{:x}(), (x = Float16,)) isa
+          CausalFrames.CentralMomentState{<:Any,:x,Float64}
+
+    # the two share one accumulator
+    protos, _ = CausalFrames.prototypes(
+        CausalFrames.tosummarizers([Skewness(:x), Kurtosis(:x)]), Symbol[])
+    @test count(p -> p isa CausalFrames.CentralMoments, protos) == 1
+
+    # no spread is NaN, at any level and however it was reached: a window gone
+    # flat after a spread refolds, so its sums are exactly 0 again
+    for level in (1e-6, 1.0, 1e8, 1e15)
+        @test all(isnan, skipmissing(win(Kurtosis(:x), fill(level, 30), 5)))
+        @test all(isnan, skipmissing(win(Skewness(:x), fill(level, 30), 5)))
+    end
+    x = [base[1:20]; fill(3e9 + 0.25, 10); fill(-0.1, 10)]
+    k = win(Kurtosis(:x), x, 4)
+    @test all(isnan, k[24:30]) && all(isnan, k[34:40])
+    @test all(isfinite, k[4:20])
+    # ... as are too few rows for the correction; uncorrected, two rows are
+    # g1 = 0 and g2 = -2
+    df = (time = [1, 2, 3], x = [1.0, 2.0, 4.0])
+    rows(s) = only(
+        eachcol(
+            select(
+                DataFrame(load(Context(0, 9),
+                    readtable(df) |> addsummarycolumns(s))), Not(:time, :x)),
+        ),
+    )
+    @test all(isnan, rows(Kurtosis(:x)))
+    @test isnan.(rows(Skewness(:x))) == [true, true, false]
+    @test isequal(rows(Kurtosis(:x; corrected = false))[1:2], [NaN, -2.0])
+    @test isequal(rows(Skewness(:x; corrected = false))[1:2], [NaN, 0.0])
+
+    # NaN and ±Inf rows are counted, not folded: NaN while in the window
+    x = [1.0, 2.0, Inf, 4.0, 7.0, 6.0, 0.0, NaN, 8.0, 9.0, 13.0, 10.0, 11.0] .+ 1e8
+    k = win(Kurtosis(:x), x, 4)
+    @test all(isnan, k[4:6]) && all(isnan, k[8:11])
+    @test k[7] ≈ shape(x[4:7], :kurtosis) atol = 1e-12
+    @test k[12] ≈ shape(x[9:12], :kurtosis) atol = 1e-12
+    @test k[13] ≈ shape(x[10:13], :kurtosis) atol = 1e-12
+
+    # missing rows likewise: missing while in the window
+    df = DataFrame(time = 1:9, x = [1.0, 5, 2, 8, missing, 3, 9, 4, 1])
+    out = DataFrame(
+        load(Context(0, 10),
+            readtable(df) |> addrollingcolumns((w = Bars(4),), Skewness(:x))),
+    )
+    @test eltype(out.w_x_skewness) == Union{Missing,Float64}
+    @test all(ismissing, out.w_x_skewness[[1:3; 5:8]])
+    @test out.w_x_skewness[4] ≈ shape([1.0, 5, 2, 8], :skewness) atol = 1e-15
+    @test out.w_x_skewness[9] ≈ shape([3.0, 9, 4, 1], :skewness) atol = 1e-15
+
+    # combine! re-expresses one side at the other's shift: states folded at
+    # far-apart levels combine to the exact answer
+    intypes = (time = Int, x = Float64)
+    rs = [(time = i, x = (i < 7 ? 1e9 : -3e8) + 0.125 * (i % 5) + sin(i))
+          for i in 1:12]
+    exactm(rs) = Float64.(centred(q(getproperty.(rs, :x))))
+    for k in 0:12
+        l = CausalFrames.fresh(CausalFrames.CentralMoments{:x}(), intypes)
+        r = CausalFrames.fresh(l)
+        foreach(row -> CausalFrames.update!(l, row), rs[1:k])
+        foreach(row -> CausalFrames.update!(r, row), rs[(k+1):end])
+        CausalFrames.combine!(l, l, r)
+        @test all(CausalFrames.unwiden(only(CausalFrames.value(l))) .≈ exactm(rs))
+    end
+
+    # integer input folds at Float64, and a Float32 state widens mid-stream
+    p = chunks(DataFrame(time = 1:3, x = Float32[1, 4, 2]),
+        DataFrame(time = 4:6, x = [8.0, 1e-3, 5.0]))
+    out = DataFrame(load(Context(0, 9), p |> summarize(Kurtosis(:x))))
+    @test eltype(out.x_kurtosis) == Float64
+    @test only(out.x_kurtosis) ≈ shape(Float64[1, 4, 2, 8, 1e-3, 5], :kurtosis)
+    xs = [10^12 + j for j in (3, 1, 4, 1, 5, 9, 2, 6)]
+    out = summarized(Kurtosis(:x); x = xs)
+    @test only(out.x_kurtosis) ≈ shape(xs .- 10^12, :kurtosis) atol = 1e-15
+
+    # BigFloat folds in plain storage (no compensation, no recentring), and
+    # combine! moves the shift by plain arithmetic; at 256 bits a far-apart
+    # combine is exact to far below Float64's eps
+    setprecision(BigFloat, 256) do
+        bt = (time = Int, x = BigFloat)
+        bs = [big(1e9) + big(i % 7) / 8 + big(sin(i)) for i in 1:10]
+        bs[6:end] .-= big(3e8)
+        exactb = centred(bs)
+        for k in (0, 3, 10)
+            l = CausalFrames.fresh(CausalFrames.CentralMoments{:x}(), bt)
+            r = CausalFrames.fresh(l)
+            foreach(v -> CausalFrames.update!(l, (; x = v)), bs[1:k])
+            foreach(v -> CausalFrames.update!(r, (; x = v)), bs[(k+1):end])
+            CausalFrames.combine!(l, l, r)
+            m = CausalFrames.unwiden(only(CausalFrames.value(l)))
+            @test m isa NTuple{3,BigFloat}
+            @test all(abs.(m .- exactb) .<= big(1e-60) .* abs.(exactb))
+        end
+        out = DataFrame(
+            load(Context(0, 20),
+                readtable((time = collect(1:10), x = bs)) |>
+                addrollingcolumns((w = Bars(5),), Kurtosis(:x))),
+        )
+        @test eltype(out.w_x_kurtosis) == Union{Missing,BigFloat}
+        @test all(
+            i -> abs(out.w_x_kurtosis[i] - shape(Float64.(bs[(i-4):i]), :kurtosis)) <
+                 1e-6, 5:10)
+    end
+
+    # evicting every row restarts the sums at exactly zero, and the state
+    # then folds afresh at a new level
+    st = CausalFrames.freshwindowed(CausalFrames.CentralMoments{:x}(), intypes)
+    for v in (1e8 + 0.1, 1e8 + 7.3)
+        CausalFrames.update!(st, (; x = v))
+    end
+    for v in (1e8 + 0.1, 1e8 + 7.3)
+        CausalFrames.downdate!(st, (; x = v))
+    end
+    @test st.n == 0 && st.peak == 0 &&
+          CausalFrames.unwiden(only(CausalFrames.value(st))) === (0.0, 0.0, 0.0)
+    w = [-2.0, 3.0, 0.5, 9.0]
+    foreach(v -> CausalFrames.update!(st, (; x = v)), w)
+    @test all(
+        CausalFrames.unwiden(only(CausalFrames.value(st))) .≈
+        exactm([(; x = v) for v in w]),
+    )
+
+    # an all-missing chunk widens to the real state, handing over its count:
+    # missing until both missing rows have left a Bars(3) window
+    p = concatenate(readtable(DataFrame(time = 1:2, x = fill(missing, 2))),
+        readtable(DataFrame(time = 3:7, x = [1.0, 2.0, 4.0, 8.0, 3.0])))
+    out = DataFrame(
+        load(Context(0, 10),
+            p |> addrollingcolumns((w = Bars(3),), Skewness(:x))),
+    )
+    @test all(ismissing, out.w_x_skewness[1:4])
+    @test out.w_x_skewness[5:7] ≈
+          [shape(w, :skewness) for w in ([1.0, 2, 4], [2.0, 4, 8], [4.0, 8, 3])]
+
+    # a dominant row's departure: every window path refolds and recovers
+    # (the 1e8 print in prices near 100, as for the co-moment)
+    y = [100.0 + ((i * 37) % 11) * 0.01 for i in 0:199]
+    y[101] = 1e8
+    roll(s, w; key = nothing) = DataFrame(
+        load(Context(0, 201),
+            readtable((time = collect(1:200),
+                k = [isodd(i) ? "a" : "b" for i in 1:200], y = y)) |>
+            addrollingcolumns((w = w,), s; key)),
+    ).w_y_kurtosis
+    ks = Kurtosis(:y)
+    err(v, wins) = maximum(((i, w),) -> abs(v[i] - shape(w, :kurtosis)), wins)
+    @test err(roll(ks, Bars(5)), ((i, y[(i-4):i]) for i in 106:200)) < 1e-12
+    @test err(roll(ks, 5), ((i, y[(i-5):i]) for i in 107:200)) < 1e-12
+    @test err(roll(ks, Bars(4); key = :k), ((i, y[(i-6):2:i]) for i in 109:200)) <
+          1e-12
+    @test err(roll(ks, 10; key = :k), ((i, y[(i-10):2:i]) for i in 113:200)) < 1e-12
+    # ... while the spike is live, it dominates: one reading apart from n - 1
+    # equal ones gives the bound n (here nearly)
+    @test roll(ks, Bars(5))[101] ≈ 5 rtol = 1e-6
+
+    # the ask itself, by the windowed state only
+    rs = [(time = i, x = 1e3 * sin(i)) for i in 1:40]
+    rs[30] = (time = 30, x = 1e12)
+    st = CausalFrames.freshwindowed(CausalFrames.CentralMoments{:x}(), intypes)
+    asks = map(eachindex(rs)) do i
+        CausalFrames.update!(st, rs[i])
+        i > 5 && CausalFrames.downdate!(st, rs[i-5])
+        CausalFrames.needsrefold(st)
+    end
+    @test !any(asks[1:34]) && asks[35]
+    st = CausalFrames.fresh(CausalFrames.CentralMoments{:x}(), intypes)
+    foreach(row -> CausalFrames.update!(st, row), rs)
+    @test st.peak == 0 && !CausalFrames.needsrefold(st)
+    # Float16 (folded at Float64): a flat window left after a spread still asks
+    st = CausalFrames.freshwindowed(CausalFrames.CentralMoments{:x}(),
+        (time = Int, x = Float16))
+    for v in Float16[0, 4, 0.5, 0.5, 0.5]
+        CausalFrames.update!(st, (time = 1, x = v))
+    end
+    foreach(v -> CausalFrames.downdate!(st, (time = 1, x = v)), Float16[0, 4])
+    @test CausalFrames.needsrefold(st)
 end
 
 @testset "sum refold after a dominant term leaves" begin
@@ -1272,7 +1583,6 @@ end
     # (a move and a multiply) rather than PowerTerm's runtime `^`. That must not
     # change the output name, the accumulator type or the term's *bits*. See
     # notes/sumpower-terms.md.
-    chunks(cs...) = CausalPipeline(ctx -> collect(cs))
     intypes = (time = Int64, x = Float64)
 
     # the specialized exponents pick the cheap terms, everything else does not
@@ -1413,7 +1723,6 @@ end
 end
 
 @testset "compensated float summation" begin
-    chunks(cs...) = CausalPipeline(ctx -> collect(cs))
     ftypes = (time = Int64, x = Float64, y = Float64)
     function fold(s, xs)
         st = CausalFrames.fresh(s, ftypes)
@@ -1628,6 +1937,8 @@ end
     @test CausalFrames.fresh(Product(:x), mall) isa CausalFrames.MissingState
     @test CausalFrames.fresh(CausalFrames.CoMoment{:x,:x}(), mall) isa
           CausalFrames.MissingState
+    @test CausalFrames.fresh(CausalFrames.CentralMoments{:x}(), mall) isa
+          CausalFrames.MissingState
 
     # widening hands the row count to the rebuilt state as missing terms, onto
     # both AgeWeightedSum states (rows age, so n is the count too)
@@ -1650,7 +1961,8 @@ end
     df = DataFrame(time = 1:3, x = fill(missing, 3), y = [1.0, 2.0, 3.0])
     ss = (Sum(:x), SumPower(:x, 3), DotProduct(:x, :y), AgeWeightedSum(:x),
         Product(:x), Mean(:x), Moment(:x, 2), Variance(:x), Std(:x),
-        Covariance(:x, :y), Correlation(:x, :y), MeanAbsDev(:x))
+        Covariance(:x, :y), Correlation(:x, :y), MeanAbsDev(:x), Skewness(:x),
+        Kurtosis(:x))
     ops = (addsummarycolumns(ss), summarize(ss),
         addrollingcolumns((w = Bars(2),), ss))
     for op in ops

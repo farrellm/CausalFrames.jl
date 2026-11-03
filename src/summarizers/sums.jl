@@ -23,19 +23,27 @@ struct PowerTerm{C}
     power::Int
 end
 struct PairProductTerm{A,B} end
+# `PairProductTerm`, folded at `widenfold` width (`CrossProduct`); P is the
+# input type it was built for, which its `Widened` value reports, so a wider
+# input rebuilds the term (`retermed`).
+struct WidePairTerm{A,B,P} end
+widepairterm(a::Symbol, b::Symbol, intypes::NamedTuple) =
+    WidePairTerm{a,b,nonmissingtype(dottype(intypes[a], intypes[b]))}()
 
 @inline termvalue(::ColumnTerm{C}, ::Type{A}, row) where {C,A} =
     convert(A, getproperty(row, C))
 @inline termvalue(t::PowerTerm{C}, ::Type{A}, row) where {C,A} =
     convert(A, getproperty(row, C))^t.power
-@inline termvalue(::PairProductTerm{Ca,Cb}, ::Type{A}, row) where {Ca,Cb,A} =
+@inline termvalue(::Union{PairProductTerm{Ca,Cb},WidePairTerm{Ca,Cb}}, ::Type{A},
+    row) where {Ca,Cb,A} =
     convert(A, getproperty(row, Ca)) * convert(A, getproperty(row, Cb))
 
 # Whether this row's term is `missing` (for a pair, either operand). Only
 # reached with the sum state's flag M set.
 @inline termmissing(::Union{ColumnTerm{C},PowerTerm{C}}, row) where {C} =
     ismissing(getproperty(row, C))
-@inline termmissing(::PairProductTerm{Ca,Cb}, row) where {Ca,Cb} =
+@inline termmissing(::Union{PairProductTerm{Ca,Cb},WidePairTerm{Ca,Cb}},
+    row) where {Ca,Cb} =
     ismissing(getproperty(row, Ca)) || ismissing(getproperty(row, Cb))
 
 # The accumulator type a term folds into, from the promoted input types;
@@ -45,6 +53,19 @@ acctype(t::PowerTerm{C}, intypes::NamedTuple) where {C} =
     powertype(intypes[C], t.power)
 acctype(::PairProductTerm{Ca,Cb}, intypes::NamedTuple) where {Ca,Cb} =
     dottype(intypes[Ca], intypes[Cb])
+acctype(::WidePairTerm{Ca,Cb}, intypes::NamedTuple) where {Ca,Cb} =
+    widenfoldmissing(dottype(intypes[Ca], intypes[Cb]))
+
+# The term a wider input calls for: the same, but for `WidePairTerm`'s P.
+retermed(term, ::NamedTuple) = term
+retermed(::WidePairTerm{Ca,Cb}, intypes::NamedTuple) where {Ca,Cb} =
+    widepairterm(Ca, Cb, intypes)
+
+# The fresh state for `term` over `intypes`, rebuilt for them first.
+function termfresh(term, N::Symbol, intypes::NamedTuple, storage = accstorage)
+    t = retermed(term, intypes)
+    return accumfresh(t, N, acctype(t, intypes), storage)
+end
 
 # The sum family's state. N names the output column, A is the accumulator type,
 # T the term functor's type (so update! inlines the term) and S the storage
@@ -111,10 +132,14 @@ end
 value(st::AccumState{N,A,T,M}) where {N,A,T,M} =
     NamedTuple{(N,),Tuple{maybemissing(A, M)}}((
         M && st.missings > 0 ? missing : accvalue(st.acc),))
+# `CrossProduct`'s value is `Widened`, for the regression to narrow by.
+value(st::AccumState{N,A,WidePairTerm{Ca,Cb,P},M}) where {N,A,Ca,Cb,P,M} =
+    NamedTuple{(N,),Tuple{maybemissing(Widened{P,A}, M)}}((
+        M && st.missings > 0 ? missing : Widened{P}(accvalue(st.acc)),))
 # A later chunk can widen the accumulator into a compensable float or onto the
 # missing-counting path.
 function widenstate(st::AccumState{N}, intypes::NamedTuple) where {N}
-    w = accumfresh(st.term, N, acctype(st.term, intypes))
+    w = termfresh(st.term, N, intypes)
     typeof(w) === typeof(st) && return st
     w.acc = widenacc(typeof(w.acc), st.acc)
     w.missings = st.missings
@@ -147,8 +172,8 @@ function widenstate(st::MissingState{N}, intypes::NamedTuple) where {N}
 end
 
 # The state a wider input calls for, from a MissingState's recipe.
-refresh(term::Union{ColumnTerm,PowerTerm,PairProductTerm}, N::Symbol,
-    intypes::NamedTuple) = accumfresh(term, N, acctype(term, intypes))
+refresh(term::Union{ColumnTerm,PowerTerm,PairProductTerm,WidePairTerm},
+    N::Symbol, intypes::NamedTuple) = termfresh(term, N, intypes)
 refresh(s::Summarizer, ::Symbol, intypes::NamedTuple) = fresh(s, intypes)
 
 # Fold `n` missing rows into a fresh state, whose type admits `missing`.
@@ -457,3 +482,22 @@ freshwindowed(::DotProduct{A,B}, intypes::NamedTuple) where {A,B} =
     isless(B, A) ? AliasState{dotname(A, B),dotname(B, A)}() :
     accumfresh(PairProductTerm{A,B}(), dotname(A, B),
         dottype(intypes[A], intypes[B]), trackedstorage)
+
+# The raw cross product Σab that `LinearRegression(intercept = false)` reads:
+# `DotProduct`'s sum, but folded at `widenfold` width, so Float16 and Float32
+# products don't pass floatmax while the fit is in range (the regression
+# narrows its statistics back). `DotProduct` and `SumPower` keep `Base.sum`'s
+# type, so the regression can't share them. Unexported, no docstring, and
+# requested only in canonical (`isless`) order, as `CoMoment` is.
+struct CrossProduct{A,B} <: GroupSummarizer end
+
+crossproduct(a::Symbol, b::Symbol) = CrossProduct{canonicalpair(a, b)...}()
+crossproductname(a, b) = Symbol(a, :_, b, :_crossproduct)
+
+emptyvalue(::CrossProduct{A,B}) where {A,B} =
+    NamedTuple{(crossproductname(A, B),)}((0,))
+fresh(::CrossProduct{A,B}, intypes::NamedTuple) where {A,B} =
+    termfresh(widepairterm(A, B, intypes), crossproductname(A, B), intypes)
+freshwindowed(::CrossProduct{A,B}, intypes::NamedTuple) where {A,B} =
+    termfresh(widepairterm(A, B, intypes), crossproductname(A, B), intypes,
+        trackedstorage)

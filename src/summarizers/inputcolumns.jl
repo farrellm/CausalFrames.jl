@@ -9,7 +9,9 @@ inputcolumns(::Sum{C}) where {C} = (C,)
 inputcolumns(::SumPower{C}) where {C} = (C,)
 inputcolumns(::Product{C}) where {C} = (C,)
 inputcolumns(::DotProduct{A,B}) where {A,B} = (A, B)
+inputcolumns(::CrossProduct{A,B}) where {A,B} = (A, B)
 inputcolumns(::CoMoment{A,B}) where {A,B} = (A, B)
+inputcolumns(::CentralMoments{C}) where {C} = (C,)
 inputcolumns(::AgeWeightedSum{C}) where {C} = (C,)
 inputcolumns(::SortedValues{C}) where {C} = (C,)
 inputcolumns(::WindowValues{C}) where {C} = (C,)
@@ -19,6 +21,7 @@ inputcolumns(
 ) where {C} = (C,)
 inputcolumns(::FitModel{N,P,Y}) where {N,P,Y} = (P..., Y)
 inputcolumns(
-    ::Union{Moment,Mean,Variance,Std,Covariance,Correlation,LinearRegression,
+    ::Union{Moment,Mean,Variance,Std,Skewness,Kurtosis,Covariance,Correlation,
+        LinearRegression,
         Quantile,Median,PercentRank,MeanAbsDev},
 ) = ()

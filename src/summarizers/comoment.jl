@@ -52,7 +52,10 @@ freshwindowed(s::CoMoment{A,B}, intypes::NamedTuple) where {A,B} =
 # left, and the residue left behind otherwise is at most ~eps·REFOLDRATIO of
 # the scale. Only the windowed state tracks (W false leaves peak, qa and qb at
 # 0): the ordinary one never downdates, and tracking cost `summarize` 8%.
-mutable struct CoMomentState{N,A,B,T,M,S,W} <: SummarizerState
+#
+# T is the fold type, `widenfold` of P, the input type the state was built
+# for, which its `Widened` value reports to the dependents (widen.jl).
+mutable struct CoMomentState{N,A,B,T,M,S,W,P} <: SummarizerState
     n::Int
     age::Int
     ka::T
@@ -74,12 +77,13 @@ function comomentfresh(s::CoMoment{A,B}, ::Type{T},
     N = comomentname(A, B)
     T === Missing && return MissingState{N}(s)
     M = Missing <: T
-    Tn = nonmissingtype(T)
-    return CoMomentState{N,A,B,Tn,M,accstorage(Tn),windowed && compensable(Tn)}()
+    P = nonmissingtype(T)
+    Tn = widenfold(P)
+    return CoMomentState{N,A,B,Tn,M,accstorage(Tn),windowed && compensable(Tn),P}()
 end
 
-CoMomentState{N,A,B,T,M,S,W}() where {N,A,B,T,M,S,W} =
-    CoMomentState{N,A,B,T,M,S,W}(0, 0, convert(T, 0), convert(T, 0), acczero(S),
+CoMomentState{N,A,B,T,M,S,W,P}() where {N,A,B,T,M,S,W,P} =
+    CoMomentState{N,A,B,T,M,S,W,P}(0, 0, convert(T, 0), convert(T, 0), acczero(S),
         acczero(S), acczero(S), convert(T, 0), convert(T, 0), convert(T, 0), 0, 0)
 
 # The co-moment from the shifted sums, with one rounding: the numerator is
@@ -192,11 +196,14 @@ end
 # squared for a covariance. A scale gone negative or to zero under round-off
 # asks too; a NaN one (an overflowed sum) doesn't, since refolding would not
 # change it. Read on every eviction, so the compensated pair is read as is.
+# The covariance divides the peak by the ratio before squaring, so
+# `REFOLDRATIO²` is never formed.
 @inline function needsrefold(st::CoMomentState{N,A,B,T,M,S,W}) where {N,A,B,T,M,S,W}
     W || return false
     r = convert(T, REFOLDRATIO)
     A === B && return st.peak > r * (st.sab.total + st.sab.comp)
-    return st.peak * st.peak > r * r * max(st.qa * st.qb, zero(T))
+    q = st.peak / r
+    return q * q > max(st.qa * st.qb, zero(T))
 end
 
 # Move the shifts to (ka, kb). With δ the move,
@@ -268,17 +275,22 @@ end
 # `missing` while a missing row is folded, else NaN while a nonfinite one is.
 # A variance (A === B) is clamped at zero, so round-off never makes it
 # negative.
-@inline function value(st::CoMomentState{N,A,B,T,M}) where {N,A,B,T,M}
+@inline function value(st::CoMomentState{N,A,B,T,M,S,W,P}) where {N,A,B,T,M,S,W,P}
     V = comomenttype(T)
-    R = maybemissing(V, M)
+    R = maybemissing(Widened{P,V}, M)
     M && st.missings > 0 && return NamedTuple{(N,),Tuple{R}}((missing,))
-    st.nonfinite > 0 && return NamedTuple{(N,),Tuple{R}}((convert(V, NaN),))
-    # One row deviates from its own mean by exactly 0, which sliding sums
-    # need not reproduce bit for bit (Σd² minus d·d leaves round-off), and a
-    # corrected single-row variance must be 0/0 = NaN, not ±Inf.
-    st.n <= 1 && return NamedTuple{(N,),Tuple{R}}((zero(V),))
-    c = comomentvalue(st.n, st.sab, st.sa, A === B ? st.sa : st.sb)
-    return NamedTuple{(N,),Tuple{R}}((A === B ? max(c, zero(c)) : c,))
+    c = if st.nonfinite > 0
+        convert(V, NaN)
+    elseif st.n <= 1
+        # One row deviates from its own mean by exactly 0, which sliding sums
+        # need not reproduce bit for bit (Σd² minus d·d leaves round-off), and
+        # a corrected single-row variance must be 0/0 = NaN, not ±Inf.
+        zero(V)
+    else
+        m = comomentvalue(st.n, st.sab, st.sa, A === B ? st.sa : st.sb)
+        A === B ? max(m, zero(m)) : m
+    end
+    return NamedTuple{(N,),Tuple{R}}((Widened{P}(c),))
 end
 
 function widenstate(st::CoMomentState{N,A,B}, intypes::NamedTuple) where {N,A,B}

@@ -75,6 +75,19 @@ variance negative.
 - `corrected = true`: divide by `n - 1` (a single row gives `NaN`); `false`
   divides by `n`. It is not part of the output name, so both forms of one column
   cannot be requested together.
+
+```jldoctest
+df = DataFrame(time = 1:5, x = [1.0, 2.0, 2.0, 3.0, 9.0])
+DataFrame(load(Context(0, 10), readtable(df) |> summarize(Variance(:x))))
+
+# output
+
+1×2 DataFrame
+ Row │ time   x_variance
+     │ Int64  Float64
+─────┼───────────────────
+   1 │    10        10.3
+```
 """
 struct Variance{C} <: GroupSummarizer
     corrected::Bool
@@ -109,18 +122,30 @@ end
 Std(column::ColumnSpec; corrected::Bool = true) =
     withterms(Std{colname(column)}(corrected), column)
 
-struct StdState{N,V} <: DerivedState end
+# The square root of the variance from the co-moment D, emitted as N and
+# narrowed as `CovarianceState` narrows. It reads the co-moment, not the
+# narrowed `Variance`: a Float16 variance past floatmax has a square root in
+# range.
+struct StdState{N,D,R} <: DerivedState end
 
 stdsqrt(::Missing) = missing
 stdsqrt(v) = sqrt(max(v, zero(v)))
+# The co-moment's value type behind its field type F, and the types of that
+# over an Int divisor and of its `stdsqrt`.
+comomentratio(::Type{F}) where {F} = ratiotype(widenedvaluetype(F), Int)
+sqrttype(::Type{F}) where {F} = Base.promote_op(sqrt, comomentratio(F))
 
-dependencies(s::Std{C}) where {C} = (Variance(C; corrected = s.corrected),)
+dependencies(::Std{C}) where {C} = (Count(), CoMoment{C,C}())
 emptyvalue(::Std{C}) where {C} = NamedTuple{(Symbol(C, :_std),)}((missing,))
 fresh(s::Std{C}, ::NamedTuple) where {C} =
-    StdState{outname(s),outname(Variance(C))}()
-@inline function value(::StdState{N,V}, vals::NamedTuple) where {N,V}
-    T = Base.promote_op(sqrt, fieldtype(typeof(vals), V))
-    return NamedTuple{(N,),Tuple{T}}((stdsqrt(vals[V]),))
+    StdState{outname(s),outname(CoMoment{C,C}()),s.corrected}()
+@inline function value(::StdState{N,D,R}, vals::NamedTuple) where {N,D,R}
+    E = narrowof(typeof(vals), Val((D,)))
+    V = narrowedtype(E, sqrttype(fieldtype(typeof(vals), D)))
+    return NamedTuple{(N,),Tuple{V}}((
+        narrowval(E,
+            stdsqrt(unwiden(vals[D]) / (vals.count - Int(R)))),
+    ))
 end
 
 """
@@ -144,7 +169,8 @@ end
 Covariance(a::ColumnSpec, b::ColumnSpec; corrected::Bool = true) =
     withterms(Covariance{colname(a),colname(b)}(corrected), a, b)
 
-# The co-moment D over the divisor `n - Int(R)`, emitted as N. R (the
+# The co-moment D over the divisor `n - Int(R)`, emitted as N and narrowed to
+# the type the co-moment's `Widened` value names (`narrowof`, widen.jl). R (the
 # corrected flag) is a type parameter so the state stays fieldless. Variance
 # uses it too, over the co-moment of a column with itself.
 struct CovarianceState{N,D,R} <: DerivedState end
@@ -159,8 +185,10 @@ emptyvalue(::Covariance{A,B}) where {A,B} =
 fresh(c::Covariance{A,B}, ::NamedTuple) where {A,B} =
     CovarianceState{outname(c),outname(canonicalcomoment(A, B)),c.corrected}()
 @inline function value(::CovarianceState{N,D,R}, vals::NamedTuple) where {N,D,R}
-    V = ratiotype(fieldtype(typeof(vals), D), Int)
-    return NamedTuple{(N,),Tuple{V}}((vals[D] / (vals.count - Int(R)),))
+    E = narrowof(typeof(vals), Val((D,)))
+    V = narrowedtype(E, comomentratio(fieldtype(typeof(vals), D)))
+    return NamedTuple{(N,),Tuple{V}}((
+        narrowval(E, unwiden(vals[D]) / (vals.count - Int(R))),))
 end
 
 """
@@ -178,24 +206,37 @@ struct Correlation{A,B} <: GroupSummarizer end
 Correlation(a::ColumnSpec, b::ColumnSpec) =
     withterms(Correlation{colname(a),colname(b)}(), a, b)
 
-struct CorrelationState{N,CV,SA,SB} <: DerivedState end
+# The correlation from the co-moment DAB of two columns and their own DA and
+# DB, as the corrected covariance over the corrected standard deviations,
+# emitted as N and narrowed as `CovarianceState` narrows. It reads the
+# co-moments, not the narrowed `Covariance` and `Std`, whose Float16 values
+# can overflow where the correlation is in range. The divisor m cancels, but
+# keep it: DAB/(√DA·√DB) rounds both roots (-0.75 came out -0.7499999999999999)
+# and DAB/√(DA·DB) overflows the product past √floatmax.
+struct CorrelationState{N,DAB,DA,DB} <: DerivedState end
 
 clampcor(::Missing) = missing
 clampcor(x) = clamp(x, -one(x), one(x))
 
 corname(a, b) = Symbol(a, :_, b, :_correlation)
 dependencies(::Correlation{A,B}) where {A,B} =
-    (Covariance(A, B), Std(A), Std(B))
+    (Count(), canonicalcomoment(A, B), CoMoment{A,A}(), CoMoment{B,B}())
 emptyvalue(::Correlation{A,B}) where {A,B} =
     NamedTuple{(corname(A, B),)}((missing,))
 fresh(c::Correlation{A,B}, ::NamedTuple) where {A,B} =
-    CorrelationState{outname(c),outname(Covariance(A, B)),outname(Std(A)),
-        outname(Std(B))}()
-@inline function value(::CorrelationState{N,CV,SA,SB},
-    vals::NamedTuple) where {N,CV,SA,SB}
-    Cvf = fieldtype(typeof(vals), CV)
-    Saf = fieldtype(typeof(vals), SA)
-    Sbf = fieldtype(typeof(vals), SB)
-    V = Base.promote_op(/, Cvf, Base.promote_op(*, Saf, Sbf))
-    return NamedTuple{(N,),Tuple{V}}((clampcor(vals[CV] / (vals[SA] * vals[SB])),))
+    CorrelationState{outname(c),outname(canonicalcomoment(A, B)),
+        outname(CoMoment{A,A}()),outname(CoMoment{B,B}())}()
+@inline function value(::CorrelationState{N,DAB,DA,DB},
+    vals::NamedTuple) where {N,DAB,DA,DB}
+    F = typeof(vals)
+    E = narrowof(F, Val((DAB, DA, DB)))
+    W = Base.promote_op(/, comomentratio(fieldtype(F, DAB)),
+        Base.promote_op(*, sqrttype(fieldtype(F, DA)), sqrttype(fieldtype(F, DB))))
+    m = vals.count - 1
+    sa = stdsqrt(unwiden(vals[DA]) / m)
+    sb = stdsqrt(unwiden(vals[DB]) / m)
+    return NamedTuple{(N,),Tuple{narrowedtype(E, W)}}((
+        narrowval(E,
+            clampcor(unwiden(vals[DAB]) / m / (sa * sb))),
+    ))
 end

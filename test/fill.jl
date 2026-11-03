@@ -1,6 +1,5 @@
 @testset "fill" begin
     ctx = Context(0, 10)
-    onechunk(; cols...) = CausalPipeline(_ -> [DataFrame(; cols...)])
 
     @testset "fillmissing" begin
         p = onechunk(time = [1, 2, 3], q = [1.0, missing, 3.0],

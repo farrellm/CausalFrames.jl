@@ -1947,6 +1947,8 @@ Concrete summarizers provided, for an input column of element type `T`:
 | `Mean(column)` | `:x_mean` | `sum` of `T` over `Int` | `missing` |
 | `Variance(column; corrected)` | `:x_variance` | division result | `missing` |
 | `Std(column; corrected)` | `:x_std` | `sqrt` of the variance | `missing` |
+| `Skewness(column; corrected)` | `:x_skewness` | `Float64` for integers, else `float(T)` | `missing` |
+| `Kurtosis(column; corrected)` | `:x_kurtosis` | `Float64` for integers, else `float(T)` | `missing` |
 | `Covariance(a, b; corrected)` | `:a_b_covariance` | division result | `missing` |
 | `Correlation(a, b)` | `:a_b_correlation` | division result | `missing` |
 | `LinearRegression(predictors, response; intercept, name)` | `:n`, `:r2`, `:stderr`, `:intercept_beta`, `:intercept_tstat`, and `:x_beta`/`:x_tstat` per predictor | `Int` for `:n`, the division result for the rest | `0` for `:n`, `missing` for the rest |
@@ -1956,7 +1958,8 @@ Concrete summarizers provided, for an input column of element type `T`:
 | `MeanAbsDev(column)` | `:x_meanabsdev` | as `Mean` | `missing` |
 | `WindowValues(column)` (unexported) | `:x_windowvalues` | the state itself, borrowed | `missing` |
 | `SortedValues(column)` (unexported) | `:x_sortedvalues` | the state itself, borrowed | `missing` |
-| `CoMoment{a,b}()` (unexported, internal) | `:a_b_comoment` | `Float64` for integers, else as `Ta * Tb` | `0` |
+| `CoMoment{a,b}()` (unexported, internal) | `:a_b_comoment` | `Float64` for integers, `Float16` and `Float32`, else as `Ta * Tb` | `0` |
+| `CentralMoments{c}()` (unexported, internal) | `:x_centralmoments` | the triple `(m2, m3, m4)` of `float(T)`, `Float64` for `Float16`/`Float32` | `missing` |
 | `Min(column)` | `:x_min` | `T` | `missing` |
 | `Max(column)` | `:x_max` | `T` | `missing` |
 | `MinIndex(column)` | `:x_minindex` | `Int` | `missing` |
@@ -2039,8 +2042,8 @@ cannot specialize on a runtime value, so every row pays a general power where a
 move or a multiply would do. `SumPower(c, 1)` and `SumPower(c, 2)` therefore
 borrow the terms that hold their exponent in the *type* — `ColumnTerm{c}` and
 `PairProductTerm{c,c}` — which is worth roughly 3× on the fold, and matters
-well beyond `SumPower` itself since `Moment(c, 2)` and every
-`LinearRegression` without an intercept depend on the squared power sum. This is
+well beyond `SumPower` itself since `Moment(c, 2)` depends on the squared power
+sum. This is
 an implementation detail: the output column keeps its own name and the
 accumulator type is unchanged (`powertype(T, 1) === sumtype(T)` and
 `powertype(T, 2) === dottype(T, T)`), so no schema changes. The term value is
@@ -2497,13 +2500,13 @@ is the built-in example: it depends on `Count()` and `SumPower(:x, n)` and
 emits their quotient. `Mean`, `Variance`, `Std`, and `Covariance` are the
 statistical dependents: `Mean(:x)` is `Sum(:x) / Count()`; `Variance(:x)` is
 `C / (n − corrected)` for the centred co-moment `C = Σ(x − x̄)²` and the row
-count `Count()`; `Std(:x)` is the square root of `Variance(:x)`;
+count `Count()`; `Std(:x)` is its square root, read from the same co-moment;
 `Covariance(:x, :y)` is the same over `Σ(x − x̄)(y − ȳ)`; and
-`Correlation(:x, :y)` is
-`Covariance(:x, :y) / (Std(:x) · Std(:y))`, clamped to `[-1, 1]`. Dependencies
-may themselves be dependent — `Std` depends on `Variance`, which depends on the
-co-moment, and `Correlation` depends on all three — and the topological
-expansion handles that.
+`Correlation(:x, :y)` is that covariance over the two standard deviations,
+each from its co-moment, clamped to `[-1, 1]`;
+`Skewness(:x)` and `Kurtosis(:x)` read the centred sums `Σ(x − x̄)^k` up to
+`k = 4` (below). Dependencies
+may themselves be dependent, and the topological expansion handles that.
 
 The co-moment is the unexported accumulator `CoMoment{a,b}`, requested only in
 canonical (`isless`) order. It does **not** use the raw-sum identity
@@ -2518,6 +2521,20 @@ round-off at the scale of the spread, since it is shift-invariant:
 
 - the shifts are set from the first row folded, and the sums restart at
   exactly zero when the state empties;
+- `Float16` and `Float32` fold at `Float64`: at their own precision a square
+  passes `floatmax` past a deviation of 256 (`Float16`) or `1.8e19`
+  (`Float32`), and the value's `n·Σd²` past a few hundred `Float16` rows,
+  though the variance itself is in range. Every dependent narrows only its
+  own value back to the inputs' promoted float type, so the output types are
+  unchanged. The widened accumulators say what they were built for: their
+  value is a `Widened{P}` (`widen.jl`), with `P` the input type folded, and a
+  dependent reads the type to narrow to from its dependency values' types
+  (`narrowof`, generated, so a constant). The fieldless dependent states
+  therefore carry no column or type parameter for it, and need no
+  `widenstate` when an input widens (issue #139); a plain dependency value
+  stands for its own type. `Std` and `Correlation` read the co-moments rather than the
+  narrowed `Variance` and `Covariance`, which overflow first: a `Float16`
+  `[0, 512]` has a variance past `floatmax` but a standard deviation of 362;
 - a float state *recentres* once more than half its rows arrived since the
   shift last moved, moving `K` to the row just folded and rewriting the sums
   (`Σd·d' − δ'Σd − δΣd' + nδδ'`). A steady window of `w` rows recentres every
@@ -2594,6 +2611,51 @@ undo either, so the state asks to be **refolded** instead:
   200 times less often. `AgeWeightedSum` asks on `Sum`'s test, so as often as
   `Sum`.
 
+`Skewness` and `Kurtosis` are dependents over `Count()` and the unexported
+`CentralMoments{c}`, the fourth-order, one-column sibling of `CoMoment`,
+valued as the centred sums `(m2, m3, m4)`, `m_k = Σ(x − x̄)^k`. Raw moments
+from `Moment(x, k)` would cancel as the variance did, to the fourth power, so
+it folds compensated `Σd^k`, `k = 1…4`, of shifted values `d = x − K`, with
+`CoMoment`'s rules for the first shift, recentring, restarting, `missing` and
+nonfinite rows, and `combine!`; the binomial expansion moves the shift. It
+differs in three ways:
+
+- it folds at `float(T)`, widened to `Float64` for integers, `Float16` and
+  `Float32`: an integer fourth power overflows `Int64` once a deviation passes
+  55,000, a `Float16` one past 16 and a `Float32` one past `4.3e9`, and
+  `n·Σd²` overflows `Float16` past a few hundred rows. `Skewness` and
+  `Kurtosis`, bounded by about `√n` and `n`, still come out in the input's
+  float type, from the accumulator's `Widened` value, as above;
+- the deviation `x − K` and the recentring move `δ` are exact pairs
+  (`twosum`), and every power and coefficient is folded as a double-double. The
+  rounding of `x − K` that the co-moment keeps (above) costs `eps · (D / s)⁴`
+  at the fourth power, and a row folded under one shift and evicted under
+  another rounds differently, so the residue accumulated: `6e-12` of a
+  four-row kurtosis over 400 rows of a series swinging through zero, where
+  Sterbenz no longer applies. With the pairs it is `1e-14` at every level,
+  zero crossings included. The value evaluates the expansion
+  `m4 = S4 − r(4S3 − r(6S2 − 3rS1))`, `r = S1 / n`, in double-double too,
+  with `m2` from the co-moment's own `comomentvalue`;
+- since a departed row then leaves only about `n · eps² · d⁴`, the windowed
+  state asks for a refold once the largest `d⁴` folded exceeds `2^20` (the
+  co-moment's ratio, squared) times the live `Σd⁴`. That is the co-moment's
+  ratio on `|d|`, and it asks about as often: over 10⁶ rows of a random walk,
+  351 times at `Bars(5)` against the variance's 213 and never at `Bars(20)`,
+  and 1.1–1.6 times as often on Cauchy steps. Comparing with `2^10` itself
+  asked up to 160 times as often. A window gone flat after a spread asks too,
+  so its sums are exactly `0` again.
+
+The statistics follow pandas' rolling `skew` and `kurt`, which is also Excel's
+`SKEW` and `KURT` and TA-Lib's `KURTOSIS`: `corrected = true` (the default, as
+for `Variance`) gives the sample-adjusted `G1 = g1·√(n(n−1))/(n−2)` and
+`G2 = (n−1)((n+1)g2 + 6)/((n−2)(n−3))`, and `false` gives the moment
+estimators `g1 = √n·m3/m2^(3/2)` and `g2 = n·m4/m2² − 3`, as `StatsBase`. The
+keyword is baked into the state type, as for `Variance`. Kurtosis is the
+excess (a normal distribution gives `0`). Both are `NaN` with no spread
+(`m2 = 0`: a point mass has no defensible shape) and, when corrected, for
+fewer than three (`Skewness`) or four (`Kurtosis`) rows, where the correction
+divides by zero.
+
 `Variance`, `Std`, and `Covariance` follow `Statistics`: a `corrected::Bool`
 keyword (default `true`) selects the divisor `n − Int(corrected)`, so the
 default is the unbiased `n − 1` estimator. `corrected` is baked into the state
@@ -2664,8 +2726,12 @@ costs one accumulator plus a free fieldless rename.
 The rule is about argument *order*. The co-moment behind `Variance` and
 `Covariance` has one representation for a squared term, `CoMoment{x,x}`, so
 `Covariance(:x, :x)` shares with `Variance(:x)` too. A no-intercept
-`LinearRegression` sends its raw squared terms to `SumPower(c, 2)` rather than
-`DotProduct(c, c)`, sharing with `Moment(c, 2)`.
+`LinearRegression` reads its raw products, squared terms included, from the
+unexported canonical `CrossProduct{a,b}`: `DotProduct`'s sum folded at
+`widenfold` width, as the co-moments are, so a `Float16`/`Float32` square
+doesn't overflow a fit in range (issue #140). `SumPower` and `DotProduct` keep
+`Base.sum`'s type, so a no-intercept fit shares with neither, only with other
+no-intercept fits.
 
 Before running, the transforms expand the requested summarizers into the
 full set to fold: each one's dependencies recursively, in topological order
@@ -2706,14 +2772,14 @@ declaring what a summarizer's states support beyond folding:
 this structure (see "Rolling windows" and "Window summarization"). The classification of the built-ins:
 
 - **Groups**: `Count`, `Sum`, `SumPower`, `DotProduct`, `AgeWeightedSum`,
-  and the internal `CoMoment` —
+  and the internal `CoMoment` and `CentralMoments` —
   subtraction is the exact inverse of addition for integer accumulators;
   float accumulators use the compensated, nonfinite-counting states (see
   above), leaving only the compensated round-off; and a `Missing`-admitting
   column counts its `missing` terms the same way, so it stays invertible
   rather than absorbing. The dependent summarizers (`Moment`, `Mean`,
-  `Variance`, `Std`, `Covariance`, `Correlation`, `LinearRegression`) are
-  groups too: their states are fieldless, so `combine!` and `downdate!` are
+  `Variance`, `Std`, `Skewness`, `Kurtosis`, `Covariance`, `Correlation`,
+  `LinearRegression`) are groups too: their states are fieldless, so `combine!` and `downdate!` are
   no-ops, and the window transforms give them no tier at all — their
   effective structure is that of their dependencies.
 - **Groups through a windowed state**: `Min`, `Max`, `First`, `Last`,
@@ -3097,7 +3163,7 @@ hand-off argument, `abandon!` is the cancellation hook, and pulling order
 | `ext/CausalFramesParquet2Ext.jl` | the Parquet2 backend: the preferred writer, the fallback reader |
 | `src/jls.jl` | the `Serialization`-backed persistence pair (`writejls`, `readjls`) |
 | `src/table.jl` | the in-memory source (`readtable`): the generic Tables.jl path, the eagerly resolved DataFrame path, and the frame path |
-| `src/summarizers.jl` | the include list for `src/summarizers/`: the `Summarizer`/`SummarizerState` interface (`interface.jl`), the compensated float arithmetic (`compensated.jl`), one file per summarizer family (`sums.jl`, `comoment.jl`, `agesum.jl`, `moments.jl`, `regression.jl`, `orderstats.jl`, `windowvalues.jl`, `extremes.jl`, `fitmodel.jl`), the derived states' no-op folds (`derived.jl`) and every built-in's `inputcolumns` (`inputcolumns.jl`) |
+| `src/summarizers.jl` | the include list for `src/summarizers/`: the `Summarizer`/`SummarizerState` interface (`interface.jl`), the compensated float arithmetic (`compensated.jl`), the `Float16`/`Float32` widening and narrowing (`widen.jl`), one file per summarizer family (`sums.jl`, `comoment.jl`, `centralmoments.jl`, `agesum.jl`, `moments.jl`, `regression.jl`, `orderstats.jl`, `windowvalues.jl`, `extremes.jl`, `fitmodel.jl`), the derived states' no-op folds (`derived.jl`) and every built-in's `inputcolumns` (`inputcolumns.jl`) |
 | `src/keys.jl` | `KeyDict`, the dictionary every keyed store uses, hashing its NamedTuple keys field by field |
 | `src/summarize.jl` | folding kernels and the summarization transforms |
 | `src/join.jl` | the as-of join transform (`asofjoin`) and the join engine it shares with `applymodels` and `futurejoin` |
@@ -3124,7 +3190,7 @@ Exports: `Context`, `CausalFrame`, `CausalPipeline`, `load`, `stream`,
 `reordercolumns`, `Summarizer`, `MonoidSummarizer`, `GroupSummarizer`,
 `SummarizerState`, `Count`, `CountDistinct`, `Sum`, `SumPower`,
 `AgeWeightedSum`, `Moment`, `Product`, `DotProduct`, `Mean`, `Variance`,
-`Std`, `Covariance`, `Correlation`, `LinearRegression`, `Quantile`, `Median`,
+`Std`, `Skewness`, `Kurtosis`, `Covariance`, `Correlation`, `LinearRegression`, `Quantile`, `Median`,
 `PercentRank`, `MeanAbsDev`, `Min`, `Max`, `MinIndex`, `MaxIndex`, `MinWithIndex`,
 `MaxWithIndex`, `First`, `Last`, `FitModel`, `FittedModel`,
 `applymodels`, `addpredictions`, `modelreports`, `summarize`,

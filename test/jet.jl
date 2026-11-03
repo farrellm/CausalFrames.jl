@@ -67,8 +67,8 @@ end
             x_y_comoment = 10.0, x_sum = 15.0, y_sum = 30.0))
     st = CausalFrames.fresh(LinearRegression(:x, :y; intercept = false), lr)
     JET.@test_opt CausalFrames.value(st,
-        (count = 5, x_sumpower_2 = 55.0, y_sumpower_2 = 200.0,
-            x_y_dotproduct = 100.0))
+        (count = 5, x_x_crossproduct = 55.0, y_y_crossproduct = 200.0,
+            x_y_crossproduct = 100.0))
     st = CausalFrames.fresh(LinearRegression([:x, :z], :y), lr)
     JET.@test_opt CausalFrames.value(st,
         (count = 5, x_x_comoment = 10.0, z_z_comoment = 10.0,
@@ -94,6 +94,13 @@ end
             (time = Int, x = T, z = T, y = T))
         JET.@test_opt CausalFrames.summaryvalues(states, Val(requested))
     end
+    # past 32 dependencies (K = 6 reads 35), where a tuple `map` stops inferring
+    xs = (:a, :b, :c, :d, :e, :f)
+    protos, requested = CausalFrames.prototypes(
+        CausalFrames.tosummarizers([LinearRegression(collect(xs), :y)]), Symbol[])
+    states = CausalFrames.newstates(protos,
+        NamedTuple{(:time, xs..., :y)}((Int, ntuple(_ -> MF, 7)...)))
+    JET.@test_opt CausalFrames.summaryvalues(states, Val(requested))
 
     # the rename a non-canonical symmetric summarizer folds through
     st = CausalFrames.fresh(DotProduct(:y, :x), (time = Int, x = Int, y = Int))
@@ -143,6 +150,46 @@ end
     end
     st = CausalFrames.fresh(Covariance(:y, :x), (time = Int, x = Float64, y = Float64))
     JET.@test_opt CausalFrames.value(st, (count = 3, x_y_comoment = -3.0))
+    # the type to narrow to is read from `Widened` dependency values' types,
+    # statically, alone or beside plain sums (issue #139)
+    W16 = CausalFrames.Widened{Float16}
+    JET.@test_opt CausalFrames.value(st, (count = 3, x_y_comoment = W16(-3.0)))
+    @test CausalFrames.value(st, (count = 3, x_y_comoment = W16(-3.0))) ===
+          (y_x_covariance = Float16(-1.5),)
+    st = CausalFrames.fresh(Correlation(:x, :y), (time = Int, x = Float16, y = Float16))
+    JET.@test_opt CausalFrames.value(st,
+        (count = 3, x_y_comoment = W16(-3.0), x_x_comoment = W16(2.0),
+            y_y_comoment = W16(8.0)))
+    st = CausalFrames.fresh(LinearRegression(:x, :y),
+        (time = Int, x = Float16, y = Float16))
+    vals = (count = 5, x_x_comoment = W16(10.0), y_y_comoment = W16(20.0),
+        x_y_comoment = W16(10.0), x_sum = Float16(15), y_sum = Float16(30))
+    JET.@test_opt CausalFrames.value(st, vals)
+    @test CausalFrames.value(st, vals).x_beta === Float16(1)
+end
+
+@testset "central-moment accumulator" begin
+    # Skewness's and Kurtosis's accumulator: integers fold at Float64, so the
+    # storages are compensated floats (plain or windowed), BigFloat's plain
+    # one, and the missing-counting flag
+    for T in (Int, Float64, BigFloat, Union{Missing,Float64}),
+        w in (false, true)
+
+        s = CausalFrames.CentralMoments{:x}()
+        intypes = (time = Int, x = T)
+        st = w ? CausalFrames.freshwindowed(s, intypes) : CausalFrames.fresh(s, intypes)
+        row = (time = 1, x = one(nonmissingtype(T)))
+        JET.@test_opt CausalFrames.update!(st, row)
+        JET.@test_opt CausalFrames.downdate!(st, row)
+        JET.@test_opt CausalFrames.value(st)
+        JET.@test_opt CausalFrames.needsrefold(st)
+        JET.@test_opt CausalFrames.combine!(st, st, CausalFrames.fresh(st))
+    end
+    for s in (Skewness(:x), Kurtosis(:x; corrected = false))
+        st = CausalFrames.fresh(s, (time = Int, x = Float64))
+        JET.@test_opt CausalFrames.value(st,
+            (count = 5, x_centralmoments = (2.0, 1.0, 3.0)))
+    end
 end
 
 @testset "missing-counting accumulators" begin

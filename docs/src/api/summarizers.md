@@ -108,6 +108,18 @@ Variance
 Std
 ```
 
+## `Skewness`
+
+```@docs
+Skewness
+```
+
+## `Kurtosis`
+
+```@docs
+Kurtosis
+```
+
 ## `Covariance`
 
 ```@docs

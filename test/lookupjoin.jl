@@ -1,5 +1,4 @@
 @testset "lookupjoin" begin
-    onechunk(; cols...) = CausalPipeline(ctx -> [DataFrame(; cols...)])
     ctx = Context(0, 10)
     loaddf(p) = DataFrame(load(ctx, p))
 

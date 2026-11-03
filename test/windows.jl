@@ -68,7 +68,6 @@ function windowsagree(a::DataFrame, b::DataFrame)
 end
 
 @testset "summarizewindows" begin
-    onechunk(; cols...) = CausalPipeline(ctx -> [DataFrame(; cols...)])
     # A source that clips its chunks to the context, as real sources do, so
     # the widened input context is what decides which early rows are seen.
     clipped(chunks) = CausalPipeline(

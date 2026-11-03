@@ -57,9 +57,12 @@ coefficients are exact but `stderr` and the t statistics are `NaN`.
 With an intercept the fit is computed from the same centred accumulators as
 [`Variance`](@ref) and [`Covariance`](@ref), so large levels don't cancel, plus
 [`Count`](@ref) and each column's [`Sum`](@ref) for the means. Without one it
-is computed from [`Count`](@ref), [`SumPower`](@ref)`(·, 2)` and
-[`DotProduct`](@ref). Either way, regressions over overlapping columns, and the
-statistics beside them, share accumulators. With `K ≥ 2` each emitted row allocates a `K × K`
+is computed from [`Count`](@ref) and the raw cross products `Σab`, shared only
+with other regressions without an intercept. Either way, regressions over
+overlapping columns, and the statistics beside them, share accumulators.
+`Float16` and `Float32` input is accumulated as `Float64` and the statistics
+narrowed back, so a square past the type's `floatmax` doesn't overflow a fit
+that is in range. With `K ≥ 2` each emitted row allocates a `K × K`
 workspace; `K = 1` allocates nothing.
 """
 struct LinearRegression{P,Y} <: GroupSummarizer
@@ -99,7 +102,9 @@ end
 # AN every accumulator name read, deduplicated (a predictor may be the
 # response); SP and SY the predictor and response sums, QY the response's power
 # sum, GN the packed upper triangle of the cross-product matrix, DN the
-# predictor-response cross products; I the intercept flag.
+# predictor-response cross products; I the intercept flag. The statistics
+# narrow to the type the accumulators' `Widened` values name (`narrowof`,
+# widen.jl: the cross products of Float16 and Float32 are folded at Float64).
 struct LinearRegressionState{NN,SN,AN,SP,SY,QY,GN,DN,I} <: DerivedState end
 
 regname(::Nothing, base::Symbol) = base
@@ -123,11 +128,10 @@ end
 # The cross products a fit reads. With an intercept they are the centred
 # co-moments, which Variance, Covariance and Correlation share and which don't
 # cancel under a large level. Without one the fit is on the raw products by
-# definition: the canonical dot product, with a squared term as SumPower(c, 2)
-# rather than DotProduct(c, c), the same value under a name Moment shares.
+# definition: the canonical `CrossProduct` (sums.jl), folded at `widenfold`
+# width as the co-moments are, so only other no-intercept fits share it.
 crossdep(a::Symbol, b::Symbol, intercept::Bool) =
-    intercept ? canonicalcomoment(a, b) :
-    a === b ? SumPower(a, 2) : canonicaldot(a, b)
+    intercept ? canonicalcomoment(a, b) : crossproduct(a, b)
 crossname(a::Symbol, b::Symbol, intercept::Bool) =
     outname(crossdep(a, b, intercept))
 
@@ -172,15 +176,17 @@ function fresh(r::LinearRegression{P,Y}, ::NamedTuple) where {P,Y}
     return LinearRegressionState{first(ns),Base.tail(ns),an,sp,sy,qy,gn,dn,I}()
 end
 
-# The dependency values this regression reads, and the tuple type they are
-# *declared* to have. `typeof` of the values depends on them (a `missing`
-# reports `Missing`, not `Union{Missing,_}`), which would narrow the output
-# eltype and push the emission into runtime dispatch; `Base.promote_op` gives
-# the declared type, a compile-time constant.
+# The dependency values this regression reads (still `Widened`: `convdep`
+# unwraps each, since a tuple `map` stops inferring past 32 fields, a K = 6
+# fit), and the unwrapped types they are *declared* to have. `typeof` of the
+# values depends on them (a `missing` reports `Missing`, not
+# `Union{Missing,_}`), which would narrow the output eltype and push the
+# emission into runtime dispatch; the declared field types are a compile-time
+# constant.
 @inline depvalues(vals::NamedTuple, ::Val{NS}) where {NS} =
     values(NamedTuple{NS}(vals))
-@inline deptypes(::Type{V}, ::Val{NS}) where {V<:NamedTuple,NS} =
-    Base.promote_op(depvalues, V, Val{NS})
+@generated deptypes(::Type{V}, ::Val{NS}) where {V<:NamedTuple,NS} =
+    Tuple{map(n -> widenedvaluetype(fieldtype(V, n)), NS)...}
 
 # The statistics' shared element type: the declared types promoted, run through
 # the centered identity's arithmetic, then made floating point for NaN. The
@@ -206,7 +212,8 @@ end
 # returned if anything was missing, but the explicit `ismissing` split keeps
 # `convert` static; `convert` alone goes dynamic over tuples of two or more
 # Union-typed values (the K >= 2 cross products).
-@inline convdep(::Type{Vc}, x) where {Vc} = ismissing(x) ? zero(Vc) : convert(Vc, x)
+@inline convdep(::Type{Vc}, x) where {Vc} =
+    ismissing(x) ? zero(Vc) : convert(Vc, unwiden(x))
 @inline convall(::Type{Vc}, ::Tuple{}) where {Vc} = ()
 @inline convall(::Type{Vc}, t::Tuple) where {Vc} =
     (convdep(Vc, first(t)), convall(Vc, Base.tail(t))...)
@@ -298,18 +305,21 @@ end
 
 @inline function value(::LinearRegressionState{NN,SN,AN,SP,SY,QY,GN,DN,I},
     vals::NamedTuple) where {NN,SN,AN,SP,SY,QY,GN,DN,I}
-    V = regtype(deptypes(typeof(vals), Val(AN)))
+    E = narrowof(typeof(vals), Val(AN))
+    W = regtype(deptypes(typeof(vals), Val(AN)))
+    V = narrowedtype(E, W)
     M = length(SN)
     nrow = NamedTuple{(NN,),Tuple{Int}}((vals.count,))
     if Missing <: V && anymissing(depvalues(vals, Val(AN)))
         return merge(nrow,
             NamedTuple{SN,NTuple{M,V}}(ntuple(_ -> missing, Val(M))))
     end
-    Vc = nonmissingtype(V)
+    Vc = nonmissingtype(W)
     stats = regstats(Vc, Val(I), Val(M), convert(Vc, vals.count),
         convall(Vc, depvalues(vals, Val(GN))),
         convall(Vc, depvalues(vals, Val(DN))),
         convall(Vc, depvalues(vals, Val(SP))),
         regscalar(Vc, vals, Val(SY)), regscalar(Vc, vals, Val(QY)))
-    return merge(nrow, NamedTuple{SN,NTuple{M,V}}(stats))
+    return merge(nrow,
+        NamedTuple{SN,NTuple{M,V}}(ntuple(i -> narrowval(E, stats[i]), Val(M))))
 end

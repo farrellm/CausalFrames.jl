@@ -179,6 +179,47 @@ end
     return compaddpair(s, p, e + f * y)
 end
 
+# Minimal double-double arithmetic over pairs (hi, lo), for the central
+# moments' exact deviations, shifts and read-back (centralmoments.jl).
+# A Neumaier compensation can outgrow a cancelled total, so the pair is
+# renormalized by `twosum`, which (unlike `fasttwosum`) needs no ordering.
+@inline dd(s::Compensated) = twosum(s.total, s.comp)
+@inline fasttwosum(a, b) = (s = a + b; (s, b - (s - a)))
+@inline function twosum(a, b)
+    s = a + b
+    bb = s - a
+    return s, (a - (s - bb)) + (b - bb)
+end
+@inline function ddadd((ah, al), (bh, bl))
+    s, e = twosum(ah, bh)
+    return fasttwosum(s, e + (al + bl))
+end
+@inline ddsub(a, (bh, bl)) = ddadd(a, (-bh, -bl))
+@inline function ddmul((ah, al), (bh, bl))
+    p, e = twoprod(ah, bh)
+    return fasttwosum(p, e + (ah * bl + al * bh))
+end
+# k a small integer, so k·hi is formed exactly as a pair.
+@inline function ddscale(k::Int, (h, l))
+    kf = convert(typeof(h), k)
+    p, e = twoprod(kf, h)
+    return fasttwosum(p, e + kf * l)
+end
+@inline function dddiv((ah, al), d)
+    q = ah / d
+    p, e = twoprod(q, d)
+    return fasttwosum(q, (((ah - p) - e) + al) / d)
+end
+
+# s + c·y, for c a double-double pair and y an accumulator in s's storage:
+# `accsubscaled`'s product with a pair coefficient, added (so an overflowed
+# product is counted as `compadd` counts it).
+@inline function addscaled(s::Compensated{A}, (h, l)::Tuple{A,A},
+    y::Compensated{A}) where {A}
+    p, e = twoprod(h, y.total)
+    return compaddpair(s, p, e + (h * y.comp + l * y.total))
+end
+
 # Whether no nonfinite term is folded, so the pair is the whole sum.
 @inline compfinite(s::Compensated) = s.nans == 0 && s.posinf == 0 && s.neginf == 0
 
