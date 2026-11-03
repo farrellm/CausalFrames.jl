@@ -299,6 +299,10 @@ With `corrected = true` it is the sample-adjusted
 when every value is equal, and for fewer than four rows when corrected.
 Integer input gives `Float64`. Like `Variance`, the state folds
 deviations from a shift near the data, so a large level doesn't cancel.
+`Float16` input gives `Float16`, which tops out at 65504, while the kurtosis
+of `n` rows reaches about `n` (one spike among equal values): over more than
+about 65,000 rows it can be `Inf`. A `Float32` row term (`:x32 => r ->
+Float32(r.x)`, see `ColumnSpec`) avoids it.
 
 #### Arguments
 - `column`: a column name, or a row term `name => f` (see `ColumnSpec`).
