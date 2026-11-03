@@ -449,7 +449,6 @@ end
     end
 
     # a row term: one bound function is shared, two functions are the row-term
-    # error, which comes first    # a row term: one bound function is shared, two functions are the row-term
     # error, which comes first
     f = r -> 2r.x
     df = DataFrame(load(Context(0, 10), p |> summarize([Sum(:t => f), Sum(:t => f)])))

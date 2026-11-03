@@ -52,7 +52,7 @@ end
     protos, requested = CausalFrames.prototypes(
         CausalFrames.tosummarizers([PopSpread(), Variance(:x), Opaque(Mean(:x)), Count()]),
         Symbol[])
-    @test count(s -> s isa CausalFrames.Scoped, protos) >= 2
+    @test count(s -> s isa CausalFrames.Scoped, protos) == 4
     outs = Val(requested)
     states = CausalFrames.newstates(protos, (time = Int, x = Float64))
     JET.@test_opt CausalFrames.foldall!(states, (time = [1, 2], x = [1.0, 2.0]))

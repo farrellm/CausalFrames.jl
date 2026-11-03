@@ -2404,7 +2404,8 @@ Two different configurations never share a name (issue #149):
   `ScopedState` that delegates every state operation; its two-argument
   `value` aliases each renamed dependency back under the name the inner
   summarizer reads, then renames the inner value's names. Both steps are
-  generated over names in type parameters, so they infer, and a fieldless
+  `NamedTuple{names}` projections over names in type parameters, so they
+  infer, and a fieldless
   inner state keeps the wrapper a singleton, so a renamed dependent still takes
   the derived tier. A set with no clash has no wrapper, so it compiles as
   before.

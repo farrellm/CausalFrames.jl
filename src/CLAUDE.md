@@ -397,8 +397,9 @@ design rationale and performance constraints behind each module.
     `Scoped` union) keep the inner summarizer's structural supertype, since
     `tiering` reads it, and their `ScopedState` delegates every state
     operation, so a new state interface function must be delegated there
-    too: one left out fails only on a clash. The plan `(D, A, MD, MA)` is a type parameter, so the rename and
-    the dependency aliasing are generated and infer, and a fieldless inner
+    too: one left out fails only on a clash. The plan `(D, A, MD, MA)` is a
+    type parameter, so the rename and the dependency aliasing are constant
+    `NamedTuple{names}` projections and infer, and a fieldless inner
     state leaves the wrapper a singleton (still the derived tier). Equal
     configurations still share one node (`sameconfig`), and a set without a
     clash gets no wrapper, so it compiles as before

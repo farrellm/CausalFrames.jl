@@ -37,43 +37,33 @@ scopeplan(::Scoped{P}) where {P} = P
 struct ScopedState{P,S<:SummarizerState} <: SummarizerState
     inner::S
 end
-scopestate(::Val{P}, st::SummarizerState) where {P} = ScopedState{P,typeof(st)}(st)
+ScopedState{P}(st::S) where {P,S<:SummarizerState} = ScopedState{P,S}(st)
 
 emptyvalue(s::Scoped) = renamevalue(Val(scopeplan(s)), emptyvalue(s.inner))
-fresh(s::Scoped, intypes::NamedTuple) =
-    scopestate(Val(scopeplan(s)), fresh(s.inner, intypes))
+fresh(s::Scoped, intypes::NamedTuple) = ScopedState{scopeplan(s)}(fresh(s.inner, intypes))
 freshwindowed(s::Scoped, intypes::NamedTuple) =
-    scopestate(Val(scopeplan(s)), freshwindowed(s.inner, intypes))
+    ScopedState{scopeplan(s)}(freshwindowed(s.inner, intypes))
 
-fresh(st::ScopedState{P}) where {P} = scopestate(Val(P), fresh(st.inner))
-@inline fresh!(st::ScopedState{P}) where {P} = scopestate(Val(P), fresh!(st.inner))
+fresh(st::ScopedState{P}) where {P} = ScopedState{P}(fresh(st.inner))
+@inline fresh!(st::ScopedState{P}) where {P} = ScopedState{P}(fresh!(st.inner))
 @inline update!(st::ScopedState, row) = update!(st.inner, row)
 @inline downdate!(st::ScopedState, row) = downdate!(st.inner, row)
 combine!(dest::ScopedState{P}, a::ScopedState{P}, b::ScopedState{P}) where {P} =
     combine!(dest.inner, a.inner, b.inner)
 widenstate(st::ScopedState{P}, intypes::NamedTuple) where {P} =
-    scopestate(Val(P), widenstate(st.inner, intypes))
+    ScopedState{P}(widenstate(st.inner, intypes))
 isinvertible(st::ScopedState) = isinvertible(st.inner)
 @inline needsrefold(st::ScopedState) = needsrefold(st.inner)
 @inline value(st::ScopedState{P}) where {P} = renamevalue(Val(P), value(st.inner))
 @inline value(st::ScopedState{P}, vals::NamedTuple) where {P} =
     renamevalue(Val(P), value(st.inner, aliasvalues(Val(P), vals)))
 
-# The inner value under the emitted names. Generated, so the renaming is
-# constant field accesses whatever order the inner value lists its names in.
-@generated function renamevalue(::Val{P}, v::NamedTuple) where {P}
-    D, A = P[1], P[2]
-    fields = [:(getfield(v, $(QuoteNode(d)))) for d in D]
-    return Expr(:block, Expr(:meta, :inline),
-        :(NamedTuple{$A}(($(fields...),))))
-end
+# The inner value under the emitted names: a projection onto the declared names
+# (in that order, whatever order the inner value lists them in), relabelled.
+@inline renamevalue(::Val{P}, v::NamedTuple) where {P} =
+    NamedTuple{P[2]}(values(NamedTuple{P[1]}(v)))
 
 # The values with each renamed dependency also under the name the inner
 # summarizer reads, overriding whatever else holds that name.
-@generated function aliasvalues(::Val{P}, vals::NamedTuple) where {P}
-    MD, MA = P[3], P[4]
-    isempty(MD) && return :vals
-    fields = [:(getfield(vals, $(QuoteNode(a)))) for a in MA]
-    return Expr(:block, Expr(:meta, :inline),
-        :(merge(vals, NamedTuple{$MD}(($(fields...),)))))
-end
+@inline aliasvalues(::Val{P}, vals::NamedTuple) where {P} =
+    isempty(P[3]) ? vals : merge(vals, renamevalue(Val((P[4], P[3])), vals))

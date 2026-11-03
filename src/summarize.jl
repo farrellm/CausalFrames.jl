@@ -142,7 +142,7 @@ function prototypes(
     # The expanded graph, in topological order: each node's summarizer, its
     # declared output names and its dependencies' node indices.
     nodes = Summarizer[]
-    names = Tuple{Vararg{Symbol}}[]
+    declared = Tuple{Vararg{Symbol}}[]
     children = Vector{Int}[]
     visiting = Summarizer[]  # walk in progress: cycle guard
     terms = Pair{Symbol,Any}[]
@@ -159,7 +159,7 @@ function prototypes(
         # type. An equal configuration is the same node: its dependencies are
         # a function of it.
         for i in eachindex(nodes)
-            names[i] == outnames && sameconfig(nodes[i], s) && return i
+            declared[i] == outnames && sameconfig(nodes[i], s) && return i
         end
         any(v -> sameconfig(v, s), visiting) && throw(
             ArgumentError(
@@ -169,12 +169,13 @@ function prototypes(
         deps = Int[expand(d) for d in dependencies(s)]
         pop!(visiting)
         push!(nodes, s)
-        push!(names, outnames)
+        push!(declared, outnames)
         push!(children, deps)
         return length(nodes)
     end
     requested = Symbol[]
     owner = Dict{Symbol,Int}()  # requested name => its node
+    isrequested = falses(0)     # by node, grown as `expand` adds nodes
     for s in ss
         outnames = keys(emptyvalue(s))
         for n in outnames
@@ -186,45 +187,47 @@ function prototypes(
             )
         end
         i = expand(s)
+        append!(isrequested, falses(length(nodes) - length(isrequested)))
+        isrequested[i] = true
         for n in outnames
-            get!(owner, n, i) == i || throw(duplicatesummary(op, n))
-            n in requested || push!(requested, n)
+            haskey(owner, n) || push!(requested, n)
+            get!(owner, n, i) == i || throw(
+                ArgumentError(
+                    "$op output column $(repr(n)) is produced by more than one summarizer",
+                ),
+            )
         end
     end
     # Every requested name is claimed up front, so a hidden dependency met
     # first never takes a name a later requested summarizer emits.
     claimed = Set{Symbol}(keys(owner))
-    emitted = Vector{Tuple{Vararg{Symbol}}}(undef, length(nodes))
+    emitted = copy(declared)
     for i in eachindex(nodes)
-        outnames = names[i]
-        if i in values(owner) || !any(in(claimed), outnames)
-            union!(claimed, outnames)
-            emitted[i] = outnames
+        isrequested[i] && continue
+        if any(in(claimed), declared[i])
+            emitted[i] = map(n -> privatename(i, n), declared[i])
         else
-            emitted[i] = map(n -> privatename(i, n), outnames)
+            union!(claimed, declared[i])
         end
     end
     protos = Summarizer[]
     for i in eachindex(nodes)
         MD, MA = Symbol[], Symbol[]
-        for c in children[i], (d, a) in zip(names[c], emitted[c])
+        for c in children[i], (d, a) in zip(declared[c], emitted[c])
             d === a || (push!(MD, d); push!(MA, a))
         end
         push!(protos,
-            isempty(MD) && emitted[i] === names[i] ? nodes[i] :
-            scoped(nodes[i], names[i], emitted[i], Tuple(MD), Tuple(MA)))
+            isempty(MD) && emitted[i] === declared[i] ? nodes[i] :
+            scoped(nodes[i], declared[i], emitted[i], Tuple(MD), Tuple(MA)))
     end
     return Tuple(protos), Tuple(requested), termtuple(terms)
 end
 
 # The private name of node `i`'s output `n`, for a renamed hidden dependency.
 # Values are never columns, and the node index keeps two renamed dependencies
-# apart, so it can collide with nothing.
+# apart, so it can collide with nothing. The `#scope#…#name` form is the one
+# `hoistednames` (src/barwindow.jl) gives hoisted bar terms.
 privatename(i::Int, n::Symbol) = Symbol("#dep#", i, "#", n)
-
-# The summarizing transforms' error for an output column two summarizers produce.
-duplicatesummary(op::String, n::Symbol) = ArgumentError(
-    "$op output column $(repr(n)) is produced by more than one summarizer")
 
 # Whether two summarizers under one output-name tuple are one configuration:
 # `isequal`, or one immutable type whose fields are pairwise the same
