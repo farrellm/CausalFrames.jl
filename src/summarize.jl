@@ -341,7 +341,12 @@ function sameconfig(@nospecialize(a), @nospecialize(b))
     isequal(a, b) && return true
     T = typeof(a)
     (T === typeof(b) && isstructtype(T) && !ismutabletype(T)) || return false
-    return all(i -> sameconfig(getfield(a, i), getfield(b, i)), 1:fieldcount(T))
+    return all(1:fieldcount(T)) do i
+        # a field left undefined (a partial `new()`) is the same only unset on
+        # both sides
+        isdefined(a, i) == isdefined(b, i) &&
+            (!isdefined(a, i) || sameconfig(getfield(a, i), getfield(b, i)))
+    end
 end
 
 # The input's column element types, by name.

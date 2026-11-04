@@ -174,6 +174,15 @@ CausalFrames.fresh(r::Relay, ::NamedTuple) =
     EchoState{first(keys(CausalFrames.emptyvalue(r.inner)))}()
 CausalFrames.inputcolumns(::Relay) = ()
 
+# A summarizer whose reference field may be left undefined, as a partial
+# `new()` leaves it.
+struct Partial <: Summarizer
+    w::Vector{Float64}
+    Partial() = new()
+    Partial(w) = new(w)
+end
+CausalFrames.emptyvalue(::Partial) = (; partial = 0.0)
+
 # A test-local summarizer whose output column is illegally named :time.
 struct BadTime <: Summarizer end
 CausalFrames.emptyvalue(::BadTime) = (; time = 0)

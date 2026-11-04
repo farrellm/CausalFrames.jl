@@ -398,6 +398,12 @@ end
         "summarize output column :weighted is produced by more than one summarizer",
     ) CausalFrames.prototypes(
         Summarizer[Weighted([1.0, 2.0]), Weighted([1.0, 3.0])], Symbol[])
+    # a field left undefined is compared, not read: the same only when unset
+    # on both sides
+    @test CausalFrames.sameconfig(Partial(), Partial())
+    @test !CausalFrames.sameconfig(Partial(), Partial([1.0]))
+    @test !CausalFrames.sameconfig(Partial([1.0]), Partial())
+    @test CausalFrames.sameconfig(Partial([1.0]), Partial([1.0]))
 
     # a hidden dependency clashing with a different summarizer is renamed, not
     # an error: a wrapper's dependencies beside the plain summarizers...
