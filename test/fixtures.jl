@@ -162,6 +162,18 @@ CausalFrames.value(::EchoState{N}, vals::V) where {N,V<:NamedTuple} =
     NamedTuple{(:echo,),Tuple{fieldtype(V, N)}}((vals[N],))
 CausalFrames.inputcolumns(::Echo) = ()
 
+# `Echo` (and valued as it is) that also hands on its dependency's row terms, as a wrapper over a
+# hoisting window must for the transforms to evaluate them.
+struct Relay{S<:Summarizer} <: Summarizer
+    inner::S
+end
+CausalFrames.emptyvalue(::Relay) = (; echo = missing)
+CausalFrames.dependencies(r::Relay) = (r.inner,)
+CausalFrames.rowterms(r::Relay) = CausalFrames.rowterms(r.inner)
+CausalFrames.fresh(r::Relay, ::NamedTuple) =
+    EchoState{first(keys(CausalFrames.emptyvalue(r.inner)))}()
+CausalFrames.inputcolumns(::Relay) = ()
+
 # A test-local summarizer whose output column is illegally named :time.
 struct BadTime <: Summarizer end
 CausalFrames.emptyvalue(::BadTime) = (; time = 0)

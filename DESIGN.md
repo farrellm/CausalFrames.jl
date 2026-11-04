@@ -2953,7 +2953,10 @@ state holding `s`'s states over the last `n` rows folded into it.
     term it hoists under its own scope (a `BarTerm` named for it) to the scope
     of its first private name, `#barterm##dep#2#lastn#d`, and its `Scoped`
     wrapper relabels the moved columns back for the window, in the input
-    types it is built from and in every row it folds. Unscoped, every window's terms joined the call's one
+    types it is built from and in every row it folds. A copy another
+    summarizer forwards (a wrapper handing on its dependency's `rowterms`)
+    moves with it: `prototypes` matches each forwarded `BarTerm` to the node
+    hoisting it, by name and function, once every node is named. Unscoped, every window's terms joined the call's one
     namespace, and two windows each reading a term `:d` through a different
     function (two instances of one indicator over different columns, say)
     failed as one term defined twice, though neither window could see the

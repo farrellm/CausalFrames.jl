@@ -363,6 +363,17 @@ end
         moved = Symbol("#barterm##dep#2#lastn#d")
         @test keys(terms) == (hd, moved)
         @test CF.inputcolumns(protos[2]) == (:d, moved)
+        # A wrapper forwarding the renamed owner's terms forwards them to
+        # where the owner moved them, rather than clashing with the requested
+        # owner's own term of that name.
+        relay = [hoisted, Relay(LastN(Mean(:d => triple), 3))]
+        protos, _, terms = CF.prototypes(CF.Summarizer[relay...], Symbol[])
+        @test keys(terms) == (hd, moved)
+        for t in (addsummarycolumns(relay), addrollingcolumns((w = 10,), relay))
+            out = DataFrame(load(Context(0, 10), readtable(df) |> t))
+            @test isequal(out[!, end-1], expected)
+            @test isequal(out[!, end], 1.5 .* expected)
+        end
 
         # The constructor's terms and the summarizer's own both count.
         protos, _, terms = CF.prototypes(

@@ -129,7 +129,9 @@ admissionkeys(::KeySet{NoKey}) = nothing
 # renamed privately (`scoped`, `privatename`) and its dependents read it
 # there, so a wrapper's dependency and a plain summarizer of the same name
 # fold apart rather than one silently replacing the other. A renamed
-# summarizer's hoisted bar terms move to its private scope with it. Row terms
+# summarizer's hoisted bar terms move to its private scope with it, and so do
+# the copies another summarizer forwards (a wrapper handing on its
+# dependency's `rowterms`), matched to their owner by name and function. Row terms
 # (`Termed`, or a summarizer's own `rowterms`) are unwrapped here, at any
 # depth, and collected by name. Returns the prototypes as a tuple (so the
 # states are a concrete tuple), the requested output names, in request order,
@@ -150,6 +152,10 @@ function prototypes(
     # The terms a summarizer hoists under its own scope, by node: collected
     # once the node is named, since a renamed node's move with it.
     hoisted = Tuple{Int,Symbol,Any}[]
+    # Hoisted terms a summarizer hands on for another's window (a wrapper
+    # forwarding its dependency's `rowterms`): they follow their owner, found
+    # by name and function among the nodes' own once every node is named.
+    forwarded = Pair{Symbol,Any}[]
     # Unspecialized: it runs once per summarizer, at construction.
     function expand(@nospecialize(t::Summarizer))
         s = unterm(t)
@@ -159,6 +165,8 @@ function prototypes(
         for x in (t === s ? (s,) : (t, s)), (n, f) in pairs(rowterms(x))
             if x === s && !isempty(outnames) && ishoisted(n, f, first(outnames))
                 push!(own, n => f)
+            elseif f isa BarTerm
+                push!(forwarded, n => f)
             else
                 addterm!(terms, n, f, op)
             end
@@ -245,6 +253,13 @@ function prototypes(
             a = hoistedname(first(emitted[i]), termname(f))
             n in TD[i] || (push!(TD[i], n); push!(TA[i], a))
             n = a
+        end
+        addterm!(terms, n, f, op)
+    end
+    for (n, f) in forwarded
+        j = findfirst(h -> h[2] === n && h[3] === f, hoisted)
+        if j !== nothing && isrenamed[hoisted[j][1]]
+            n = hoistedname(first(emitted[hoisted[j][1]]), termname(f))
         end
         addterm!(terms, n, f, op)
     end
