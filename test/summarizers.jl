@@ -352,6 +352,191 @@ end
           (x_y_correlation = -0.75,)
 end
 
+@testset "a setting outside the output name is not deduplicated away" begin
+    # issue #149: two requested configurations under one output name are an
+    # error, in either order, rather than the first silently winning
+    p = readtable(DataFrame(time = 1:4, x = [1.0, 2, 4, 8], y = [3.0, 1, 4, 1]))
+    for (a, b, n) in (
+            (Variance(:x), Variance(:x; corrected = false), :x_variance),
+            (Std(:x), Std(:x; corrected = false), :x_std),
+            (Covariance(:x, :y), Covariance(:x, :y; corrected = false), :x_y_covariance),
+        ),
+        ss in ([a, b], [b, a])
+
+        @test_throws ArgumentError(
+            "summarize output column $(repr(n)) is produced by more than one summarizer",
+        ) load(Context(0, 10), p |> summarize(ss))
+    end
+    # every summarizing transform names itself
+    @test_throws ArgumentError(
+        "addrollingcolumns output column :x_variance is produced by more than one summarizer",
+    ) load(
+        Context(0, 10),
+        p |> addrollingcolumns((w = 2,), [Variance(:x), Variance(:x; corrected = false)]),
+    )
+
+    # identical requests, and a hidden dependency shared by two requested
+    # summarizers, still fold once
+    protos, req = CausalFrames.prototypes(
+        Summarizer[Variance(:x), Variance(:x), Std(:x; corrected = false)], Symbol[])
+    @test req == (:x_variance, :x_std)
+    @test count(s -> s isa Variance, protos) == 1
+    @test count(s -> s isa CausalFrames.CoMoment, protos) == 1
+    df = DataFrame(
+        load(Context(0, 10),
+            p |> summarize([Variance(:x), Variance(:x), Std(:x; corrected = false)])),
+    )
+    @test df.x_variance ≈ [Statistics.var([1.0, 2, 4, 8])]
+    @test df.x_std ≈ [Statistics.std([1.0, 2, 4, 8]; corrected = false)]
+
+    # equal configurations built apart still share: Base's `isequal` on a
+    # struct is `===`, which tells two equal `Vector` fields apart
+    protos, req = CausalFrames.prototypes(
+        Summarizer[Weighted([1.0, 2.0]), Weighted([1.0, 2.0])], Symbol[])
+    @test length(protos) == 1
+    @test_throws ArgumentError(
+        "summarize output column :weighted is produced by more than one summarizer",
+    ) CausalFrames.prototypes(
+        Summarizer[Weighted([1.0, 2.0]), Weighted([1.0, 3.0])], Symbol[])
+    # a field left undefined is compared, not read: the same only when unset
+    # on both sides
+    @test CausalFrames.sameconfig(Partial(), Partial())
+    @test !CausalFrames.sameconfig(Partial(), Partial([1.0]))
+    @test !CausalFrames.sameconfig(Partial([1.0]), Partial())
+    @test CausalFrames.sameconfig(Partial([1.0]), Partial([1.0]))
+
+    # a hidden dependency clashing with a different summarizer is renamed, not
+    # an error: a wrapper's dependencies beside the plain summarizers...
+    x = [1.0, 2, 4, 8]
+    for ss in ([Opaque(Mean(:x)), Count()], [Count(), Opaque(Mean(:x))])
+        protos, req = CausalFrames.prototypes(Summarizer[ss...], Symbol[])
+        @test req == Tuple(only(keys(CausalFrames.emptyvalue(s))) for s in ss)
+        @test any(s -> s isa CausalFrames.Scoped, protos)
+        df = DataFrame(load(Context(0, 10), p |> summarize(ss)))
+        @test df.x_mean == [3.75]
+        @test df.count == [4]
+    end
+    # ...and a custom dependent over a population variance beside the sample
+    # one (issue #145's shape), whose dependency keeps its own setting
+    for ss in ([PopSpread(), Variance(:x)], [Variance(:x), PopSpread()])
+        df = DataFrame(load(Context(0, 10), p |> summarize(ss)))
+        @test df.x_variance ≈ [Statistics.var(x)]
+        @test df.x_popspread ≈ [Statistics.std(x; corrected = false)]
+    end
+    # the renamed dependency keeps its structure, so its fieldless state still
+    # takes no window tier
+    protos, _ = CausalFrames.prototypes(Summarizer[PopSpread(), Variance(:x)], Symbol[])
+    tg = CausalFrames.tiering(protos, (time = Int, x = Float64))
+    # (both wrapped: the dependency renamed, PopSpread reading it there)
+    inner(s) = s isa CausalFrames.Scoped ? s.inner : s
+    tiers = Dict(zip(map(inner, protos), CausalFrames.tiernames(tg)))
+    @test count(s -> s isa CausalFrames.Scoped, protos) == 2
+    @test tiers[Variance(:x; corrected = false)] == tiers[PopSpread()] ==
+          tiers[Variance(:x)] == :derived
+    # a renamed value keeps its declared `Union{Missing,_}` field types, so the
+    # emission over a `missing`-admitting column still infers concretely
+    clash = [Opaque(Std(:x)), Variance(:x; corrected = false), Count()]
+    protos, req = CausalFrames.prototypes(Summarizer[clash...], Symbol[])
+    S = typeof(CausalFrames.newstates(protos, (time = Int, x = Union{Missing,Float64})))
+    @test CausalFrames.valuetype(S, Val(req)) == @NamedTuple{
+        x_std::Union{Missing,Float64},
+        x_variance::Union{Missing,Float64},
+        count::Int,
+    }
+    # a dependent reading its dependency's dependency by name reads the one
+    # it depends on, though that one is renamed
+    for ss in ([Variance(:x), PopCheck()], [PopCheck(), Variance(:x)])
+        df = DataFrame(load(Context(0, 10), p |> summarize(ss)))
+        @test df.x_variance ≈ [Statistics.var(x)]
+        @test only(df.x_popcheck) ≈ 0 atol = 1e-12
+    end
+    # two configurations under one name at a dependent's nearest depth are an
+    # error, rather than one silently read: as direct dependencies...
+    pop = Variance(:x; corrected = false)
+    for both in (Both(Variance(:x), pop), Both(pop, Variance(:x)))
+        @test_throws ArgumentError(
+            "summarize: two different dependencies of :both declare :x_variance",
+        ) CausalFrames.prototypes(Summarizer[both], Symbol[])
+    end
+    # ...or met through different branches at the same depth
+    @test_throws ArgumentError(
+        "addrollingcolumns: two different dependencies of :both declare :x_variance",
+    ) load(
+        Context(0, 10),
+        p |> addrollingcolumns((w = 2,), [Both(PopSpread(), Echo(Variance(:x)))]),
+    )
+    # one configuration twice is one node, and a nearer declaration hides a
+    # deeper one
+    for both in (Both(pop, pop), Both(pop, PopSpread()))
+        df = DataFrame(load(Context(0, 10), p |> summarize([both, Variance(:x)])))
+        @test df.both == [2]
+        @test df.x_variance ≈ [Statistics.var(x)]
+    end
+    # a requested summarizer only reading a renamed dependency keeps its value
+    # as it is
+    @test CausalFrames.renamevalue(Val(((:a,), (:a,))), (a = 1,)) === (a = 1,)
+    # a moved term's row view serves `row.name` and `row[:name]`, as `update!`
+    # promises
+    r = CausalFrames.AliasedRow{(:b,),(:a,)}((b = 1, c = 2))
+    @test (r.a, r[:a], r.c, r[:c]) == (1, 1, 2, 2)
+    @test propertynames(r) == (:b, :c, :a)
+    # a row name that is aliased is listed once, read as the alias
+    r = CausalFrames.AliasedRow{(:b,),(:a,)}((a = 0, b = 1))
+    @test propertynames(r) == (:b, :a)
+    @test r.a == 1
+    # the rename's state delegates the whole state interface: every function
+    # with a `SummarizerState` or `DerivedState` fallback (which finds the ones
+    # without a plain-state fallback too, through the derived no-ops)
+    argtypes(m) = map(T -> T isa TypeVar ? T.ub : T,
+        Base.unwrap_unionall(m.sig).parameters[2:end])
+    isfallback(T) = T === SummarizerState || T === CausalFrames.DerivedState
+    scopedname = Base.unwrap_unionall(CausalFrames.ScopedState).name
+    isscoped(T) = (U = Base.unwrap_unionall(T); U isa DataType && U.name === scopedname)
+    interface = Set{Function}()
+    for n in names(CausalFrames; all = true)
+        f = isdefined(CausalFrames, n) ? getfield(CausalFrames, n) : nothing
+        f isa Function && any(m -> any(isfallback, argtypes(m)), methods(f)) &&
+            push!(interface, f)
+    end
+    known = (CausalFrames.fresh, CausalFrames.fresh!, CausalFrames.update!,
+        CausalFrames.downdate!,
+        CausalFrames.combine!, CausalFrames.widenstate, CausalFrames.isinvertible,
+        CausalFrames.needsrefold, CausalFrames.value)
+    @test issubset(known, interface)
+    for f in interface
+        @test (f, any(m -> any(isscoped, argtypes(m)), methods(f))) == (f, true)
+    end
+    # every summarizing transform, against each summarizer alone
+    q = readtable(DataFrame(time = 1:6, x = [1.0, 2, 4, 8, 3, 5], k = [1, 2, 1, 2, 1, 2]))
+    for f in (
+        ss -> summarize(ss; key = :k),
+        ss -> summarizecycles(ss),
+        ss -> addsummarycolumns(ss; key = :k),
+        ss -> addrollingcolumns((w = 3, b = Bars(2)), ss),
+        ss -> addrollingcolumns((w = 3,), ss; key = :k),
+        ss -> intervalize(clock(2), ss),
+        ss -> summarizewindows(clock(2), 3, ss; key = :k),
+    )
+        whole = DataFrame(load(Context(0, 10), q |> f(clash)))
+        for s in clash
+            alone = DataFrame(load(Context(0, 10), q |> f([s])))
+            for n in names(alone)
+                @test isequal(whole[!, n], alone[!, n])
+            end
+        end
+    end
+
+    # a row term: one bound function is shared, two functions are the row-term
+    # error, which comes first
+    f = r -> 2r.x
+    df = DataFrame(load(Context(0, 10), p |> summarize([Sum(:t => f), Sum(:t => f)])))
+    @test df.t_sum == [30.0]
+    @test_throws ArgumentError(
+        "summarize row term :t is defined by more than one function; " *
+        "bind the function once and reuse it",
+    ) load(Context(0, 10), p |> summarize([Sum(:t => f), Sum(:t => r -> 3r.x)]))
+end
+
 @testset "symmetric summarizers" begin
     # A summarizer symmetric in two columns folds under the isless-sorted
     # argument order but still emits the column the caller asked for, so

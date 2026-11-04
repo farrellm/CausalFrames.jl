@@ -160,9 +160,13 @@ widenstate(st::SummarizerState, ::NamedTuple) = st
     dependencies(s::Summarizer) -> Tuple
 
 The summarizers whose values `s` reads in the two-argument [`value`](@ref).
-They are expanded recursively and deduplicated by output name, so a dependency
+They are expanded recursively and deduplicated by configuration, so a dependency
 also requested by the user is folded once, and they appear in the output only
-if requested. Defaults to `()`.
+if requested. A dependency sharing an output name with a different
+configuration (neither `isequal` nor equal field by field) is folded apart
+under a private name, so `s` still reads its own. `s` may also read a
+dependency's own dependencies by name, each name resolving to the nearest
+dependency declaring it. Defaults to `()`.
 """
 dependencies(::Summarizer) = ()
 

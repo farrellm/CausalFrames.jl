@@ -2382,10 +2382,49 @@ The summarizing transforms take one summarizer or a collection, plus an
 optional `key` giving a separate summary per key value (emitted sorted by key,
 or in declared order under a `keyset`; see "Declared key sets"). They treat the given summarizers as *prototypes*: they only ever
 mutate `fresh` copies, one per key group (and, for `summarizecycles`, per
-cycle). Before running, prototypes are **deduplicated by output-name tuple** —
-identical configurations collapse to one shared instance — and the surviving
-output names must be pairwise disjoint; the requested (emitted) names must
-additionally be distinct from `:time` and the key columns. The same pass
+cycle). Before running, prototypes are **deduplicated by configuration**:
+identical configurations (`isequal`, or one immutable type equal field by
+field, since Base's `isequal` falls back to `==`, whose own fallback `===`
+would tell apart two equal `Vector` fields) with the same output names
+collapse to one shared instance.
+Two different configurations never share a name (issue #149):
+
+- The *requested* summarizers emit their own names, which must be pairwise
+  disjoint, so two that share one (`Variance(:x)` and `Variance(:x; corrected
+  = false)`, or `Max(:x)` and `MaxWithIndex(:x)`) are an `ArgumentError`
+  naming the transform, never a silent choice of one. The requested names must
+  additionally be distinct from `:time` and the key columns.
+- A *hidden* dependency keeps its names unless a requested summarizer, or a
+  hidden dependency met earlier in topological order, already claims one. It
+  is then **renamed** to private names (`#dep#i#name`), and the summarizers
+  depending on it read it there, so a wrapper's dependencies (a test's
+  `Opaque(Count())`) beside the plain `Count()`, or a custom dependent over
+  `Variance(:x; corrected = false)` beside a requested `Variance(:x)`, fold
+  apart and each reads its own. A summarizer reading a name resolves it to
+  its nearest dependency declaring it, breadth first, so one reading its
+  dependency's dependency by name (a dependent over that custom dependent,
+  reading `:x_variance` too) still gets the population variance. Two different
+  configurations declaring a name at a summarizer's nearest depth for it
+  (`Variance(:x)` and `Variance(:x; corrected = false)` as two dependencies,
+  or one under each of two dependencies) are an `ArgumentError`, since either
+  could be the one it reads; this rejects such a set even when the summarizer
+  reads neither. A renamed summarizer hoisting `barwindow`
+  terms moves them with it, to the scope of its first private name (see
+  "Hoisted row terms"). The rename is the internal `Scoped` wrapper,
+  one type per structural supertype so tiering is unchanged, over a
+  `ScopedState` that delegates every state operation; its two-argument
+  `value` aliases each renamed dependency back under the name the inner
+  summarizer reads, then renames the inner value's names (a value whose names
+  don't change is passed on as it is). Both steps are projections built over
+  the declared field types from names in type parameters, so they infer, and
+  a `Union{Missing,_}` field stays one rather than being typed by its value;
+  moved terms reach the window through a row view relabelling them for
+  `getproperty`, so no row is copied. A fieldless
+  inner state keeps the wrapper a singleton, so a renamed dependent still takes
+  the derived tier. A set with no clash has no wrapper, so it compiles as
+  before.
+
+The same pass
 unwraps row terms (below) at any depth, dependencies included, and collects
 them by name.
 
@@ -2736,9 +2775,14 @@ no-intercept fits.
 Before running, the transforms expand the requested summarizers into the
 full set to fold: each one's dependencies recursively, in topological order
 by a post-order depth-first walk (dependencies may themselves be dependent;
-a dependency cycle is an `ArgumentError`), deduplicated by output-name tuple
-as above — so a dependency equal to a requested summarizer, or shared by two
-dependents, is folded once. The dependent's state is typically fieldless:
+a dependency cycle, a summarizer depending on an equal configuration of
+itself, is an `ArgumentError`, as is nesting deeper than 64, which bounds a
+cycle that never repeats a configuration: a mutable summarizer, unequal to
+every other instance, or one depending on itself with a changed field),
+deduplicated by configuration as above — so a
+dependency equal to a requested summarizer, or shared by two dependents, is
+folded once, and one that clashes with a different summarizer's names is
+renamed. The dependent's state is typically fieldless:
 its `update!` is a no-op and the names it reads are baked into its type
 parameters, so the two-argument `value` infers. Its value's declared type
 should be computed from `vals`'s *field types* (via `Base.promote_op` over
@@ -2902,9 +2946,17 @@ state holding `s`'s states over the last `n` rows folded into it.
   `intypes` (one missing from it is an `ArgumentError`), stores it under its
   own name and evaluates nothing, and `barinputcolumns(s; hoistedby = o)`
   names the reserved columns.
-  - The scope is the outer summarizer's because output names are unique
+  - The scope is the outer summarizer's because emitted names are unique
     within a call, so two outer summarizers' windows never share a term
-    namespace. Unscoped, every window's terms joined the call's one
+    namespace. A hidden outer summarizer renamed beside a different one of
+    its name (issue #149) declares the same scope, so `prototypes` moves each
+    term it hoists under its own scope (a `BarTerm` named for it) to the scope
+    of its first private name, `#barterm##dep#2#lastn#d`, and its `Scoped`
+    wrapper relabels the moved columns back for the window, in the input
+    types it is built from and in every row it folds. A copy another
+    summarizer forwards (a wrapper handing on its dependency's `rowterms`)
+    moves with it: `prototypes` matches each forwarded `BarTerm` to the node
+    hoisting it, by name and function, once every node is named. Unscoped, every window's terms joined the call's one
     namespace, and two windows each reading a term `:d` through a different
     function (two instances of one indicator over different columns, say)
     failed as one term defined twice, though neither window could see the

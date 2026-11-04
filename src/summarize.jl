@@ -120,60 +120,97 @@ admissionkeys(ks::Union{Nothing,KeySet}) = ks
 admissionkeys(::KeySet{NoKey}) = nothing
 
 # Expand the requested summarizers into the full set to fold: dependencies
-# recursively, deduplicated by output-name tuple and ordered topologically
-# (post-order depth-first), so every state precedes its dependents. Output
-# names must be unique across the whole set, but only the *requested* names
-# are checked against :time and the key columns, since hidden dependencies
-# never reach the output. Row terms (`Termed`, or a summarizer's own
-# `rowterms`) are unwrapped here, at any depth, and collected by name. Returns
-# the prototypes as a tuple (so the states are a concrete tuple), the requested
-# output names, in request order, and the row terms as a NamedTuple of
-# functions.
+# recursively, deduplicated by configuration (`sameconfig`, which implies the
+# same dependencies) and ordered topologically (post-order depth-first), so
+# every state precedes its dependents. Then name them (issue #149): the
+# requested summarizers emit their own names, which must be pairwise disjoint
+# and distinct from :time and the key columns; a hidden dependency keeps its
+# names unless another summarizer in the set already claims one, when it is
+# renamed privately (`scoped`, `privatename`) and its dependents read it
+# there, so a wrapper's dependency and a plain summarizer of the same name
+# fold apart rather than one silently replacing the other. A renamed
+# summarizer's hoisted bar terms move to its private scope with it, and so do
+# the copies another summarizer forwards (a wrapper handing on its
+# dependency's `rowterms`), matched to their owner by name and function. Row terms
+# (`Termed`, or a summarizer's own `rowterms`) are unwrapped here, at any
+# depth, and collected by name. Returns the prototypes as a tuple (so the
+# states are a concrete tuple), the requested output names, in request order,
+# and the row terms as a NamedTuple of functions.
 function prototypes(
     ss::Vector{Summarizer},
     keycols::Vector{Symbol},
     op::String = "summarize",
 )
     isempty(ss) && throw(ArgumentError("$op requires at least one summarizer"))
-    protos = Summarizer[]
-    # A linear `in` over the few output-name tuples beats a Set keyed by an
-    # abstract type.
-    seen = Tuple{Vararg{Symbol}}[]      # finished, by output-name tuple
-    visiting = Tuple{Vararg{Symbol}}[]  # walk in progress: cycle guard
-    used = Set{Symbol}()
+    # The expanded graph, in topological order: each node's summarizer, its
+    # declared output names and its dependencies' node indices.
+    nodes = Summarizer[]
+    declared = Tuple{Vararg{Symbol}}[]
+    children = Vector{Int}[]
+    visiting = Summarizer[]  # walk in progress: cycle guard
     terms = Pair{Symbol,Any}[]
+    # The terms a summarizer hoists under its own scope, by node: collected
+    # once the node is named, since a renamed node's move with it.
+    hoisted = Tuple{Int,Symbol,Any}[]
+    # Hoisted terms a summarizer hands on for another's window (a wrapper
+    # forwarding its dependency's `rowterms`), by the forwarding node: they
+    # follow their owner, found by name and function among that node's
+    # dependencies' own once every node is named.
+    forwarded = Tuple{Int,Symbol,Any}[]
     # Unspecialized: it runs once per summarizer, at construction.
     function expand(@nospecialize(t::Summarizer))
         s = unterm(t)
-        # the constructor's terms, then the summarizer's own hook (the same
-        # terms again when `t` is unwrapped, which `addterm!` skips)
-        for x in (t, s), (n, f) in pairs(rowterms(x))
-            addterm!(terms, n, f, op)
-        end
         outnames = keys(emptyvalue(s))
-        outnames in seen && return
-        outnames in visiting && throw(
+        # the constructor's terms, then the summarizer's own hook
+        own = Pair{Symbol,Any}[]
+        fwd = Pair{Symbol,Any}[]
+        for x in (t === s ? (s,) : (t, s)), (n, f) in pairs(rowterms(x))
+            if x === s && !isempty(outnames) && ishoisted(n, f, first(outnames))
+                push!(own, n => f)
+            elseif f isa BarTerm
+                push!(fwd, n => f)
+            else
+                addterm!(terms, n, f, op)
+            end
+        end
+        i = expandnode(s, outnames)
+        for (n, f) in own
+            push!(hoisted, (i, n, f))
+        end
+        for (n, f) in fwd
+            push!(forwarded, (i, n, f))
+        end
+        return i
+    end
+    function expandnode(@nospecialize(s::Summarizer), outnames)
+        # A linear scan over the few nodes beats a Set keyed by an abstract
+        # type. An equal configuration is the same node: its dependencies are
+        # a function of it.
+        for i in eachindex(nodes)
+            declared[i] == outnames && sameconfig(nodes[i], s) && return i
+        end
+        any(v -> sameconfig(v, s), visiting) && throw(
             ArgumentError(
                 "$op: summarizer dependency cycle through $(repr(first(outnames)))"),
         )
-        push!(visiting, outnames)          # a stack: the walk is depth-first
-        for d in dependencies(s)
-            expand(d)
-        end
+        # A cycle through ever-new configurations (a mutable summarizer, or one
+        # depending on itself with a changed field) never repeats one.
+        length(visiting) >= MAXDEPENDENCYDEPTH && throw(
+            ArgumentError(
+                "$op: summarizer dependencies nest more than $MAXDEPENDENCYDEPTH " *
+                "deep through $(repr(first(outnames))), likely a dependency cycle",
+            ),
+        )
+        push!(visiting, s)          # a stack: the walk is depth-first
+        deps = Int[expand(d) for d in dependencies(s)]
         pop!(visiting)
-        for n in outnames
-            n in used && throw(
-                ArgumentError(
-                    "$op output column $(repr(n)) is produced by more than one summarizer",
-                ),
-            )
-            push!(used, n)
-        end
-        push!(seen, outnames)
-        push!(protos, s)
-        return
+        push!(nodes, s)
+        push!(declared, outnames)
+        push!(children, deps)
+        return length(nodes)
     end
     requested = Symbol[]
+    owner = Dict{Symbol,Int}()  # requested name => its node
     for s in ss
         outnames = keys(emptyvalue(s))
         for n in outnames
@@ -184,12 +221,154 @@ function prototypes(
                     "$op output column $(repr(n)) collides with a key column"),
             )
         end
-        expand(s)
+        i = expand(s)
         for n in outnames
-            n in requested || push!(requested, n)
+            haskey(owner, n) || push!(requested, n)
+            get!(owner, n, i) == i || throw(
+                ArgumentError(
+                    "$op output column $(repr(n)) is produced by more than one summarizer",
+                ),
+            )
         end
     end
+    # Every requested name is claimed up front, so a hidden dependency met
+    # first never takes a name a later requested summarizer emits.
+    claimed = Set{Symbol}(keys(owner))
+    isrequested = falses(length(nodes))
+    for i in values(owner)
+        isrequested[i] = true
+    end
+    emitted = copy(declared)
+    isrenamed = falses(length(nodes))
+    for i in eachindex(nodes)
+        isrequested[i] && continue
+        if any(in(claimed), declared[i])
+            emitted[i] = map(n -> privatename(i, n), declared[i])
+            isrenamed[i] = true
+        else
+            union!(claimed, declared[i])
+        end
+    end
+    # A renamed node's hoisted terms move to its emitted scope, its window
+    # reading them back under the declared one.
+    TD = [Symbol[] for _ in nodes]
+    TA = [Symbol[] for _ in nodes]
+    for (i, n, f) in hoisted
+        if isrenamed[i]
+            a = hoistedname(first(emitted[i]), termname(f))
+            n in TD[i] || (push!(TD[i], n); push!(TA[i], a))
+            n = a
+        end
+        addterm!(terms, n, f, op)
+    end
+    # Only the forwarder's own dependencies: an equal term hoisted by an
+    # unrelated renamed node must not move a copy the forwarder's window (built
+    # by the forwarder itself, not as a node) reads under its declared name.
+    for (i, n, f) in forwarded
+        below = descendants(i, children)
+        j = findfirst(h -> h[1] in below && h[2] === n && h[3] === f, hoisted)
+        if j !== nothing && isrenamed[hoisted[j][1]]
+            n = hoistedname(first(emitted[hoisted[j][1]]), termname(f))
+        end
+        addterm!(terms, n, f, op)
+    end
+    # Without a rename no node reads through an alias.
+    renamed = any(isrenamed)
+    protos = Summarizer[]
+    for i in eachindex(nodes)
+        MD, MA =
+            renamed ? dependencyaliases(i, nodes, children, declared, emitted, op) :
+            ((), ())
+        push!(protos,
+            isempty(MD) && !isrenamed[i] ? nodes[i] :
+            scoped(nodes[i], declared[i], emitted[i], MD, MA,
+                Tuple(TD[i]), Tuple(TA[i])))
+    end
     return Tuple(protos), Tuple(requested), termtuple(terms)
+end
+
+# The nodes node `i` depends on, at any depth.
+function descendants(i::Int, children::Vector{Vector{Int}})
+    found = Set{Int}()
+    stack = copy(children[i])
+    while !isempty(stack)
+        c = pop!(stack)
+        c in found && continue
+        push!(found, c)
+        append!(stack, children[c])
+    end
+    return found
+end
+
+# Deeper than any real summarizer nests; the bound on a cycle that never
+# repeats a configuration.
+const MAXDEPENDENCYDEPTH = 64
+
+# The renamed dependencies node `i` reads, as the names it reads them by and
+# the names they are emitted under. Each name resolves to the nearest
+# dependency declaring it, breadth first, a direct one over a transitive one,
+# so a summarizer reading a dependency's dependency by name gets the one it
+# depends on, renamed or not. Two different configurations declaring a name at
+# its nearest depth are an error: either could be the one the node reads, and
+# picking one was a silent wrong answer. A clash always renames one of them,
+# so the check runs only when something is renamed, as this function does.
+function dependencyaliases(i::Int, nodes, children, declared, emitted, op::String)
+    MD, MA = Symbol[], Symbol[]
+    resolved = Set{Symbol}()
+    seen = Set{Int}()
+    level = children[i]
+    while !isempty(level)
+        names = Symbol[]
+        next = Int[]
+        for c in level
+            c in seen && continue
+            push!(seen, c)
+            for (d, a) in zip(declared[c], emitted[c])
+                d in resolved && continue
+                # `seen` makes every node here distinct, so a repeat is a
+                # second configuration
+                d in names && throw(
+                    ArgumentError(
+                        "$op: two different dependencies of $(nodelabel(nodes[i], declared[i])) " *
+                        "declare $(repr(d))",
+                    ),
+                )
+                push!(names, d)
+                d === a || d in MD || (push!(MD, d); push!(MA, a))
+            end
+            append!(next, children[c])
+        end
+        union!(resolved, names)
+        level = next
+    end
+    return Tuple(MD), Tuple(MA)
+end
+
+# A node as an error message names it: its first output name, else its type.
+nodelabel(@nospecialize(s::Summarizer), outnames) =
+    isempty(outnames) ? string(nameof(typeof(s))) : repr(first(outnames))
+
+# The private name of node `i`'s output `n`, for a renamed hidden dependency.
+# Values are never columns, and the node index keeps two renamed dependencies
+# apart, so it can collide with nothing. Its hoisted terms move to the scope
+# of its first private name (`hoistedname`).
+privatename(i::Int, n::Symbol) = Symbol("#dep#", i, "#", n)
+
+# Whether two summarizers under one output-name tuple are one configuration:
+# `isequal`, or one immutable type whose fields are pairwise the same
+# configuration. Base's `isequal` falls back to `==`, whose own fallback is
+# `===`, which tells apart two separately built `Vector` fields of equal content (a custom summarizer's
+# weights, a dependency rebuilt per `dependencies` call). Construction only.
+function sameconfig(@nospecialize(a), @nospecialize(b))
+    isequal(a, b) && return true
+    T = typeof(a)
+    (T === typeof(b) && isstructtype(T) && !ismutabletype(T)) || return false
+    return all(1:fieldcount(T)) do i
+        # a field left undefined (a partial `new()`) is the same only unset on
+        # both sides
+        isdefined(a, i) == isdefined(b, i) &&
+            (!isdefined(a, i) || sameconfig(getfield(a, i), getfield(b, i)))
+    end
 end
 
 # The input's column element types, by name.

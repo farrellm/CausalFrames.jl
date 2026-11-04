@@ -104,6 +104,105 @@ CausalFrames.fresh(o::AsMonoid, intypes::NamedTuple) =
 CausalFrames.dependencies(o::AsMonoid) =
     map(AsMonoid, CausalFrames.dependencies(o.inner))
 
+# A summarizer with a heap-allocated setting outside its output name, so two
+# equal ones built apart are not `===` (the prototypes dedup test).
+struct Weighted <: Summarizer
+    weights::Vector{Float64}
+end
+CausalFrames.emptyvalue(::Weighted) = (; weighted = 0.0)
+
+# A dependent over the population variance, the shape of issue #145: beside a
+# requested `Variance(:x)` its dependency shares the name :x_variance with a
+# different configuration, so it must be renamed rather than deduplicated.
+struct PopSpread <: Summarizer end
+struct PopSpreadState <: CausalFrames.DerivedState end
+CausalFrames.emptyvalue(::PopSpread) = (; x_popspread = missing)
+CausalFrames.dependencies(::PopSpread) = (Variance(:x; corrected = false),)
+CausalFrames.fresh(::PopSpread, ::NamedTuple) = PopSpreadState()
+CausalFrames.value(::PopSpreadState, vals::NamedTuple) =
+    (; x_popspread = sqrt(vals.x_variance))
+CausalFrames.inputcolumns(::PopSpread) = ()
+
+# A dependent reading a dependency's dependency by name: PopSpread's population
+# variance, which a requested `Variance(:x)` renames out from under it.
+struct PopCheck <: Summarizer end
+struct PopCheckState <: CausalFrames.DerivedState end
+CausalFrames.emptyvalue(::PopCheck) = (; x_popcheck = missing)
+CausalFrames.dependencies(::PopCheck) = (PopSpread(),)
+CausalFrames.fresh(::PopCheck, ::NamedTuple) = PopCheckState()
+CausalFrames.value(::PopCheckState, vals::NamedTuple) =
+    (; x_popcheck = sqrt(vals.x_variance) - vals.x_popspread)
+CausalFrames.inputcolumns(::PopCheck) = ()
+
+# A dependent over two given summarizers, valued by its dependency count, so
+# two configurations under one name can meet at one depth below it.
+struct Both{A<:Summarizer,B<:Summarizer} <: Summarizer
+    a::A
+    b::B
+end
+struct BothState <: CausalFrames.DerivedState end
+CausalFrames.emptyvalue(::Both) = (; both = 0)
+CausalFrames.dependencies(s::Both) = (s.a, s.b)
+CausalFrames.fresh(::Both, ::NamedTuple) = BothState()
+CausalFrames.value(::BothState, ::NamedTuple) = (; both = 2)
+CausalFrames.inputcolumns(::Both) = ()
+
+# A dependent reporting its dependency's first value as `:echo`, so a hidden
+# dependency of any output name can clash with a requested one.
+struct Echo{S<:Summarizer} <: Summarizer
+    inner::S
+end
+struct EchoState{N} <: CausalFrames.DerivedState end
+CausalFrames.emptyvalue(::Echo) = (; echo = missing)
+CausalFrames.dependencies(e::Echo) = (e.inner,)
+CausalFrames.fresh(e::Echo, ::NamedTuple) =
+    EchoState{first(keys(CausalFrames.emptyvalue(e.inner)))}()
+# The declared field type, not the value's, so the emission stays inferred.
+CausalFrames.value(::EchoState{N}, vals::V) where {N,V<:NamedTuple} =
+    NamedTuple{(:echo,),Tuple{fieldtype(V, N)}}((vals[N],))
+CausalFrames.inputcolumns(::Echo) = ()
+
+# `Echo` (and valued as it is) that also hands on its dependency's row terms, as a wrapper over a
+# hoisting window must for the transforms to evaluate them.
+struct Relay{S<:Summarizer} <: Summarizer
+    inner::S
+end
+CausalFrames.emptyvalue(::Relay) = (; echo = missing)
+CausalFrames.dependencies(r::Relay) = (r.inner,)
+CausalFrames.rowterms(r::Relay) = CausalFrames.rowterms(r.inner)
+CausalFrames.fresh(r::Relay, ::NamedTuple) =
+    EchoState{first(keys(CausalFrames.emptyvalue(r.inner)))}()
+CausalFrames.inputcolumns(::Relay) = ()
+
+# A wrapper that builds `inner`'s state itself rather than declaring it a
+# dependency, forwarding its row terms, and reports its first value as `:carry`.
+struct Carry{S<:Summarizer} <: Summarizer
+    inner::S
+end
+struct CarryState{W<:SummarizerState} <: SummarizerState
+    inner::W
+end
+CausalFrames.emptyvalue(::Carry) = (; carry = missing)
+CausalFrames.rowterms(c::Carry) = CausalFrames.rowterms(c.inner)
+CausalFrames.inputcolumns(c::Carry) = CausalFrames.inputcolumns(c.inner)
+CausalFrames.fresh(c::Carry, intypes::NamedTuple) =
+    CarryState(CausalFrames.fresh(c.inner, intypes))
+CausalFrames.fresh(st::CarryState) = CarryState(CausalFrames.fresh(st.inner))
+CausalFrames.update!(st::CarryState, row) = CausalFrames.update!(st.inner, row)
+function CausalFrames.value(st::CarryState)
+    v = CausalFrames.value(st.inner)
+    return NamedTuple{(:carry,),Tuple{fieldtype(typeof(v), 1)}}((v[1],))
+end
+
+# A summarizer whose reference field may be left undefined, as a partial
+# `new()` leaves it.
+struct Partial <: Summarizer
+    w::Vector{Float64}
+    Partial() = new()
+    Partial(w) = new(w)
+end
+CausalFrames.emptyvalue(::Partial) = (; partial = 0.0)
+
 # A test-local summarizer whose output column is illegally named :time.
 struct BadTime <: Summarizer end
 CausalFrames.emptyvalue(::BadTime) = (; time = 0)
@@ -221,6 +320,18 @@ end
 struct Loopy <: Summarizer end
 CausalFrames.dependencies(::Loopy) = (Loopy(),)
 CausalFrames.emptyvalue(::Loopy) = (; loopy = missing)
+
+# Cycles that never repeat a configuration: a mutable summarizer (each instance
+# its own) depending on a new instance, and one depending on itself with a
+# changed field.
+mutable struct MutableLoopy <: Summarizer end
+CausalFrames.dependencies(::MutableLoopy) = (MutableLoopy(),)
+CausalFrames.emptyvalue(::MutableLoopy) = (; loopy = missing)
+struct Unwinding <: Summarizer
+    n::Int
+end
+CausalFrames.dependencies(s::Unwinding) = (Unwinding(s.n + 1),)
+CausalFrames.emptyvalue(::Unwinding) = (; unwinding = missing)
 
 # A deterministic linear-congruential sequence of n values in 0:(m - 1), so
 # property tests need no RNG dependency and failures reproduce exactly.
