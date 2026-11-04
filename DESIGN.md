@@ -2409,8 +2409,8 @@ Two different configurations never share a name (issue #149):
   or one under each of two dependencies) are an `ArgumentError`, since either
   could be the one it reads; this rejects such a set even when the summarizer
   reads neither. A renamed summarizer hoisting `barwindow`
-  terms moves them with it, to the scope of its first private name (see
-  "Hoisted row terms"). The rename is the internal `Scoped` wrapper,
+  terms shares its scope with the summarizer it clashes with, so a different
+  function it hoists moves apart (see "Hoisted row terms"). The rename is the internal `Scoped` wrapper,
   one type per structural supertype so tiering is unchanged, over a
   `ScopedState` that delegates every state operation; its two-argument
   `value` aliases each renamed dependency back under the name the inner
@@ -2947,16 +2947,25 @@ state holding `s`'s states over the last `n` rows folded into it.
   own name and evaluates nothing, and `barinputcolumns(s; hoistedby = o)`
   names the reserved columns.
   - The scope is the outer summarizer's because emitted names are unique
-    within a call, so two outer summarizers' windows never share a term
-    namespace. A hidden outer summarizer renamed beside a different one of
-    its name (issue #149) declares the same scope, so `prototypes` moves each
-    term it hoists under its own scope (a `BarTerm` named for it) to the scope
-    of its first private name, `#barterm##dep#2#lastn#d`, and its `Scoped`
-    wrapper relabels the moved columns back for the window, in the input
-    types it is built from and in every row it folds. A copy another
-    summarizer forwards (a wrapper handing on its dependency's `rowterms`)
-    moves with it: `prototypes` matches each forwarded `BarTerm` to the node
-    hoisting it, by name and function, once every node is named. Unscoped, every window's terms joined the call's one
+    within a call, so two outer summarizers' windows usually never share a
+    term namespace. Not always: a hidden outer summarizer renamed beside a
+    different one of its name (issue #149) declares the same scope, and so
+    does a wrapper building its inner summarizer's window itself (the scope
+    is the inner one's name) or an owner passing another summarizer as
+    `hoistedby` (issue #151). So `prototypes` places hoisted terms once
+    every summarizer is expanded: each reserved name keeps the first
+    function hoisted under it, and a different function under it moves to a
+    name of its own, `#barterm#lastn#d#2`. Every summarizer whose `rowterms`
+    returned the moved function (its own window's, or a copy it forwards)
+    gets a `Scoped` wrapper relabelling the moved column back for its
+    window, in the input types it is built from and in every row it folds;
+    one function under one name is evaluated once, however many summarizers
+    hoist it. The decision is by function, not by a summarizer's name, so it
+    holds whatever `hoistedby` was, and a call where no two functions share
+    a name gets no wrapper. (Before #151 a renamed owner moved only the terms
+    named for its own declared scope, and a forwarded copy followed by name
+    and function matching, so any other scope collided as one term defined
+    twice.) Unscoped, every window's terms joined the call's one
     namespace, and two windows each reading a term `:d` through a different
     function (two instances of one indicator over different columns, say)
     failed as one term defined twice, though neither window could see the

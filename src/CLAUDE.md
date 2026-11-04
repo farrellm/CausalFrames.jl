@@ -661,9 +661,12 @@ design rationale and performance constraints behind each module.
   `BarTerm`, which `termvalues` holds to the window's typing rule up front)
   into the transform's `terminput` under reserved `hoistednames`, scoped by
   the outer summarizer's first output name (`#barterm#lastn#d`) so two
-  windows' terms never share a namespace (a renamed hidden owner's move to its
-  private name in `prototypes`, which is why they are collected only after
-  naming), after which `hoistedby = outer` makes the window read them from
+  windows' terms rarely share a namespace. When two summarizers do hoist
+  different functions under one name (a renamed hidden owner, a wrapper
+  building its inner summarizer's window, a foreign `hoistedby`),
+  `prototypes` moves every function after the first to `movedname` and
+  aliases it back through `Scoped`, deciding by function, never by matching
+  term names against a summarizer's scope (issue #151); after which `hoistedby = outer` makes the window read them from
   those columns (`HoistedTerms`) instead of evaluating them.
   Never key a hoisted term by its own name: a wrapper that drops `rowterms`
   would then have the window read a real input column of that name as the

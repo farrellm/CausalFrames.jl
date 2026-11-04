@@ -128,10 +128,11 @@ admissionkeys(::KeySet{NoKey}) = nothing
 # names unless another summarizer in the set already claims one, when it is
 # renamed privately (`scoped`, `privatename`) and its dependents read it
 # there, so a wrapper's dependency and a plain summarizer of the same name
-# fold apart rather than one silently replacing the other. A renamed
-# summarizer's hoisted bar terms move to its private scope with it, and so do
-# the copies another summarizer forwards (a wrapper handing on its
-# dependency's `rowterms`), matched to their owner by name and function. Row terms
+# fold apart rather than one silently replacing the other. Hoisted bar terms
+# keep their reserved names unless two summarizers hoist different functions
+# under one (issue #151), when each function after the first moves to a name
+# of its own (`movedname`) and the summarizers reading it read it back under
+# the reserved name through `scoped`. Row terms
 # (`Termed`, or a summarizer's own `rowterms`) are unwrapped here, at any
 # depth, and collected by name. Returns the prototypes as a tuple (so the
 # states are a concrete tuple), the requested output names, in request order,
@@ -149,36 +150,23 @@ function prototypes(
     children = Vector{Int}[]
     visiting = Summarizer[]  # walk in progress: cycle guard
     terms = Pair{Symbol,Any}[]
-    # The terms a summarizer hoists under its own scope, by node: collected
-    # once the node is named, since a renamed node's move with it.
+    # Hoisted bar terms, by the node whose `rowterms` returns them (its own
+    # window's, or ones it forwards for a window it builds itself or a
+    # dependency's): placed once every node is expanded, since two nodes may
+    # hoist different functions under one reserved name.
     hoisted = Tuple{Int,Symbol,Any}[]
-    # Hoisted terms a summarizer hands on for another's window (a wrapper
-    # forwarding its dependency's `rowterms`), by the forwarding node: they
-    # follow their owner, found by name and function among that node's
-    # dependencies' own once every node is named.
-    forwarded = Tuple{Int,Symbol,Any}[]
     # Unspecialized: it runs once per summarizer, at construction.
     function expand(@nospecialize(t::Summarizer))
         s = unterm(t)
         outnames = keys(emptyvalue(s))
         # the constructor's terms, then the summarizer's own hook
-        own = Pair{Symbol,Any}[]
-        fwd = Pair{Symbol,Any}[]
+        bar = Pair{Symbol,Any}[]
         for x in (t === s ? (s,) : (t, s)), (n, f) in pairs(rowterms(x))
-            if x === s && !isempty(outnames) && ishoisted(n, f, first(outnames))
-                push!(own, n => f)
-            elseif f isa BarTerm
-                push!(fwd, n => f)
-            else
-                addterm!(terms, n, f, op)
-            end
+            addterm!(f isa BarTerm ? bar : terms, n, f, op)
         end
         i = expandnode(s, outnames)
-        for (n, f) in own
+        for (n, f) in bar
             push!(hoisted, (i, n, f))
-        end
-        for (n, f) in fwd
-            push!(forwarded, (i, n, f))
         end
         return i
     end
@@ -249,26 +237,23 @@ function prototypes(
             union!(claimed, declared[i])
         end
     end
-    # A renamed node's hoisted terms move to its emitted scope, its window
-    # reading them back under the declared one.
+    # Each reserved name keeps the first function hoisted under it. Another
+    # function under that name (a renamed owner's, or that of an owner scoped
+    # by a summarizer whose name it shares) moves to a name of its own, which
+    # every node hoisting it reads back under the reserved one, so each window
+    # reads the function its own `rowterms` returned. A function under one
+    # name is evaluated once, however many nodes hoist it.
     TD = [Symbol[] for _ in nodes]
     TA = [Symbol[] for _ in nodes]
+    functions = Dict{Symbol,Vector{Any}}()  # reserved name => its functions
     for (i, n, f) in hoisted
-        if isrenamed[i]
-            a = hoistedname(first(emitted[i]), termname(f))
+        fs = get!(() -> Any[], functions, n)
+        g = findfirst(h -> h === f, fs)
+        g === nothing && (push!(fs, f); g = length(fs))
+        if g > 1
+            a = movedname(n, g)
             n in TD[i] || (push!(TD[i], n); push!(TA[i], a))
             n = a
-        end
-        addterm!(terms, n, f, op)
-    end
-    # Only the forwarder's own dependencies: an equal term hoisted by an
-    # unrelated renamed node must not move a copy the forwarder's window (built
-    # by the forwarder itself, not as a node) reads under its declared name.
-    for (i, n, f) in forwarded
-        below = descendants(i, children)
-        j = findfirst(h -> h[1] in below && h[2] === n && h[3] === f, hoisted)
-        if j !== nothing && isrenamed[hoisted[j][1]]
-            n = hoistedname(first(emitted[hoisted[j][1]]), termname(f))
         end
         addterm!(terms, n, f, op)
     end
@@ -280,25 +265,16 @@ function prototypes(
             renamed ? dependencyaliases(i, nodes, children, declared, emitted, op) :
             ((), ())
         push!(protos,
-            isempty(MD) && !isrenamed[i] ? nodes[i] :
+            isempty(MD) && !isrenamed[i] && isempty(TD[i]) ? nodes[i] :
             scoped(nodes[i], declared[i], emitted[i], MD, MA,
                 Tuple(TD[i]), Tuple(TA[i])))
     end
     return Tuple(protos), Tuple(requested), termtuple(terms)
 end
 
-# The nodes node `i` depends on, at any depth.
-function descendants(i::Int, children::Vector{Vector{Int}})
-    found = Set{Int}()
-    stack = copy(children[i])
-    while !isempty(stack)
-        c = pop!(stack)
-        c in found && continue
-        push!(found, c)
-        append!(stack, children[c])
-    end
-    return found
-end
+# The column a hoisted term's `g`th function under the reserved name `n` moves
+# to: `#barterm#lastn#d#2`.
+movedname(n::Symbol, g::Int) = Symbol(n, "#", g)
 
 # Deeper than any real summarizer nests; the bound on a cycle that never
 # repeats a configuration.
@@ -350,8 +326,7 @@ nodelabel(@nospecialize(s::Summarizer), outnames) =
 
 # The private name of node `i`'s output `n`, for a renamed hidden dependency.
 # Values are never columns, and the node index keeps two renamed dependencies
-# apart, so it can collide with nothing. Its hoisted terms move to the scope
-# of its first private name (`hoistedname`).
+# apart, so it can collide with nothing.
 privatename(i::Int, n::Symbol) = Symbol("#dep#", i, "#", n)
 
 # Whether two summarizers under one output-name tuple are one configuration:

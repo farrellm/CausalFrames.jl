@@ -351,8 +351,12 @@ end
         @test isequal(out.w_other, 1.5 .* expected)
         @test CF.rowterms(LastN{:other}(Mean(:d => triple), 3)) ===
               NamedTuple{(Symbol("#barterm#other#d"),)}((CF.BarTerm{:d}(triple),))
-        # A hidden owner sharing a requested one's output name is renamed, and
-        # its terms move to its private scope with it (issue #149).
+        # Two summarizers hoisting different functions under one reserved name
+        # each read their own: the first keeps the name, the other moves to a
+        # name of its own and its `Scoped` wrapper reads it back there (issues
+        # #149, #151). A hidden owner renamed beside a requested one of its
+        # output name shares its scope too.
+        moved = Symbol(hd, "#2")
         clash = [hoisted, Echo(LastN(Mean(:d => triple), 3))]
         for t in (addsummarycolumns(clash), addrollingcolumns((w = 10,), clash))
             out = DataFrame(load(Context(0, 10), readtable(df) |> t))
@@ -360,12 +364,11 @@ end
             @test isequal(out[!, end], 1.5 .* expected)
         end
         protos, _, terms = CF.prototypes(CF.Summarizer[clash...], Symbol[])
-        moved = Symbol("#barterm##dep#2#lastn#d")
         @test keys(terms) == (hd, moved)
         @test CF.inputcolumns(protos[2]) == (:d, moved)
-        # A wrapper forwarding the renamed owner's terms forwards them to
-        # where the owner moved them, rather than clashing with the requested
-        # owner's own term of that name.
+        @test count(s -> s isa CF.Scoped, protos) == 2
+        # A wrapper forwarding the renamed owner's terms reads where they
+        # moved, and the moved function is evaluated once for both.
         relay = [hoisted, Relay(LastN(Mean(:d => triple), 3))]
         protos, _, terms = CF.prototypes(CF.Summarizer[relay...], Symbol[])
         @test keys(terms) == (hd, moved)
@@ -374,20 +377,43 @@ end
             @test isequal(out[!, end-1], expected)
             @test isequal(out[!, end], 1.5 .* expected)
         end
-        # A forwarder follows only its own dependencies: a term equal to the
-        # one a renamed unrelated owner hoists stays under its declared name,
-        # where it clashes with the requested owner's, rather than moving
-        # away while the forwarder's window still reads the declared name.
-        unrelated = CF.Summarizer[hoisted, Echo(LastN(Mean(:d => triple), 3)),
-            Carry(LastN(Mean(:d => triple), 3))]
-        err = try
-            CF.prototypes(unrelated, Symbol[])
-        catch e
-            e
+        # With nothing renamed: a wrapper building its inner summarizer's
+        # window itself hoists under the inner one's scope, beside a plain
+        # owner of that scope, and an owner scoped by another summarizer
+        # beside that one. The same function under one name is shared.
+        quadruple = r -> 4r.x
+        # A `Bars` window emits nothing until it is full.
+        barsexpected = [fill(missing, 4); expected[5:end]]
+        cases = (
+            ([Carry(LastN(Mean(:d => triple), 3)), hoisted], (1.5, 1.0)),
+            (
+                [hoisted, Carry(LastN(Mean(:d => triple), 3)),
+                    Echo(LastN(Mean(:d => triple), 3))], (1.0, 1.5, 1.5)),
+            (
+                [LastNAs{:other}(Mean(:d => triple), 3),
+                    LastN{:other}(Mean(:d => quadruple), 3)], (1.5, 2.0)),
+            ([Carry(LastN(Mean(:d => double), 3)), hoisted], (1.0, 1.0)),
+        )
+        for (k, (ss, scales)) in enumerate(cases)
+            protos, _, terms = CF.prototypes(CF.Summarizer[ss...], Symbol[])
+            @test length(terms) == length(unique(values(terms)))
+            runs = Any[(summarize(ss), [expected[end]]),
+                (addsummarycolumns(ss), expected),
+                (addrollingcolumns((w = 10,), ss), expected)]
+            # one case through a count window too, to bound compile time
+            k == 1 && push!(runs, (addrollingcolumns((w = Bars(5),), ss), barsexpected))
+            for (t, want) in runs
+                out = DataFrame(load(Context(0, 10), readtable(df) |> t))
+                for (j, scale) in enumerate(scales)
+                    @test isequal(out[!, end-length(scales)+j], scale .* want)
+                end
+            end
         end
-        @test err isa ArgumentError
-        @test occursin("row term $(repr(hd)) is defined by more than one function",
-            err.msg)
+        # Two functions under one reserved name within one summarizer are
+        # still one term defined twice: it has one window to read it.
+        @test_throws ArgumentError CF.prototypes(
+            CF.Summarizer[CF.Termed(hoisted,
+                NamedTuple{(hd,)}((CF.BarTerm{:d}(triple),)))], Symbol[])
 
         # The constructor's terms and the summarizer's own both count.
         protos, _, terms = CF.prototypes(

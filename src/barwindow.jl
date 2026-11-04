@@ -116,16 +116,15 @@ end
 # wrapper left out `barterms`, and scoped by the outer summarizer (its first
 # output name, unique within a call), so that two outer summarizers' windows
 # never share a term namespace: `#barterm#lastn#d` for `:lastn`'s term `:d`.
-# A hidden owner renamed by `prototypes` (issue #149) is unique by its private
-# name instead: its terms move there, and its `Scoped` wrapper aliases them
-# back under these names for the window.
+# Unique only when the outer summarizer passes itself as `hoistedby`: when two
+# summarizers hoist different functions under one name (a renamed hidden owner
+# beside a requested one, issue #149, or a wrapper building its inner
+# summarizer's window, scoped by the inner one's name, issue #151),
+# `prototypes` moves all but the first apart and their `Scoped` wrappers alias
+# them back under these names for the window.
 hoistednames(owner::Summarizer, ks::Tuple{Vararg{Symbol}}) =
     map(k -> hoistedname(first(keys(emptyvalue(owner))), k), ks)
 hoistedname(scope::Symbol, k::Symbol) = Symbol("#barterm#", scope, "#", k)
-
-# Whether `owner`'s row term `n => f` is one it hoists under its own scope.
-ishoisted(n::Symbol, f, scope::Symbol) =
-    f isa BarTerm && n === hoistedname(scope, termname(f))
 
 """
     barterms(s::Summarizer; hoistedby::Summarizer) -> NamedTuple
