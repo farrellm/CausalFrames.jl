@@ -427,8 +427,17 @@ end
     @test count(s -> s isa CausalFrames.Scoped, protos) == 2
     @test tiers[Variance(:x; corrected = false)] == tiers[PopSpread()] ==
           tiers[Variance(:x)] == :derived
-    # every summarizing transform, against each summarizer alone
+    # a renamed value keeps its declared `Union{Missing,_}` field types, so the
+    # emission over a `missing`-admitting column still infers concretely
     clash = [Opaque(Std(:x)), Variance(:x; corrected = false), Count()]
+    protos, req = CausalFrames.prototypes(Summarizer[clash...], Symbol[])
+    S = typeof(CausalFrames.newstates(protos, (time = Int, x = Union{Missing,Float64})))
+    @test CausalFrames.valuetype(S, Val(req)) == @NamedTuple{
+        x_std::Union{Missing,Float64},
+        x_variance::Union{Missing,Float64},
+        count::Int,
+    }
+    # every summarizing transform, against each summarizer alone
     q = readtable(DataFrame(time = 1:6, x = [1.0, 2, 4, 8, 3, 5], k = [1, 2, 1, 2, 1, 2]))
     for f in (
         ss -> summarize(ss; key = :k),

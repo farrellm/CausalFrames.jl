@@ -60,8 +60,15 @@ isinvertible(st::ScopedState) = isinvertible(st.inner)
 
 # The inner value under the emitted names: a projection onto the declared names
 # (in that order, whatever order the inner value lists them in), relabelled.
-@inline renamevalue(::Val{P}, v::NamedTuple) where {P} =
-    NamedTuple{P[2]}(values(NamedTuple{P[1]}(v)))
+# Generated over the declared field types, so a `Union{Missing,_}` field keeps
+# its type: relabelling through `values` types the result by the values, which
+# leaves it abstract and the emission dispatching.
+@generated function renamevalue(::Val{P}, v::NamedTuple) where {P}
+    D, A = P[1], P[2]
+    T = NamedTuple{A,Tuple{(fieldtype(v, d) for d in D)...}}
+    fields = (:(getfield(v, $(QuoteNode(d)))) for d in D)
+    return Expr(:block, Expr(:meta, :inline), Expr(:new, T, fields...))
+end
 
 # The values with each renamed dependency also under the name the inner
 # summarizer reads, overriding whatever else holds that name.
