@@ -2384,8 +2384,9 @@ or in declared order under a `keyset`; see "Declared key sets"). They treat the 
 mutate `fresh` copies, one per key group (and, for `summarizecycles`, per
 cycle). Before running, prototypes are **deduplicated by configuration**:
 identical configurations (`isequal`, or one immutable type equal field by
-field, since Base's fallback `isequal` is `===` and would tell apart two equal
-`Vector` fields) with the same output names collapse to one shared instance.
+field, since Base's `isequal` falls back to `==`, whose own fallback `===`
+would tell apart two equal `Vector` fields) with the same output names
+collapse to one shared instance.
 Two different configurations never share a name (issue #149):
 
 - The *requested* summarizers emit their own names, which must be pairwise

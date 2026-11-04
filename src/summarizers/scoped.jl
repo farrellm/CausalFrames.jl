@@ -27,7 +27,7 @@ const Scoped{P} = Union{ScopedPlain{P},ScopedMonoid{P},ScopedGroup{P}}
 # `s` emitting `A` for its declared names `D`, reading `MD` from `MA` and the
 # columns `TD` from `TA`.
 function scoped(@nospecialize(s::Summarizer), D::Tuple, A::Tuple, MD::Tuple, MA::Tuple,
-    TD::Tuple = (), TA::Tuple = ())
+    TD::Tuple, TA::Tuple)
     P = (D, A, MD, MA, TD, TA)
     W =
         s isa GroupSummarizer ? ScopedGroup :
@@ -108,6 +108,8 @@ end
 AliasedRow{from,to}(row::R) where {from,to,R} = AliasedRow{from,to,R}(row)
 @inline Base.getproperty(r::AliasedRow{from,to}, c::Symbol) where {from,to} =
     getproperty(getfield(r, :row), aliasedname(Val(from), Val(to), c))
+# `row[:name]`, as `update!` promises.
+@inline Base.getindex(r::AliasedRow, c::Symbol) = getproperty(r, c)
 Base.propertynames(r::AliasedRow{from,to}) where {from,to} =
     (propertynames(getfield(r, :row))..., to...)
 

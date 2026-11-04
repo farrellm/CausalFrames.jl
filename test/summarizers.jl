@@ -447,6 +447,10 @@ end
     # a requested summarizer only reading a renamed dependency keeps its value
     # as it is
     @test CausalFrames.renamevalue(Val(((:a,), (:a,))), (a = 1,)) === (a = 1,)
+    # a moved term's row view serves `row.name` and `row[:name]`, as `update!`
+    # promises
+    r = CausalFrames.AliasedRow{(:b,),(:a,)}((b = 1, c = 2))
+    @test (r.a, r[:a], r.c, r[:c]) == (1, 1, 2, 2)
     # every summarizing transform, against each summarizer alone
     q = readtable(DataFrame(time = 1:6, x = [1.0, 2, 4, 8, 3, 5], k = [1, 2, 1, 2, 1, 2]))
     for f in (

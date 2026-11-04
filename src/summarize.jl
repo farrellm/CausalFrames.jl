@@ -157,7 +157,7 @@ function prototypes(
         # the constructor's terms, then the summarizer's own hook
         own = Pair{Symbol,Any}[]
         for x in (t === s ? (s,) : (t, s)), (n, f) in pairs(rowterms(x))
-            if x === s && ishoisted(n, f, first(outnames))
+            if x === s && !isempty(outnames) && ishoisted(n, f, first(outnames))
                 push!(own, n => f)
             else
                 addterm!(terms, n, f, op)
@@ -198,7 +198,6 @@ function prototypes(
     end
     requested = Symbol[]
     owner = Dict{Symbol,Int}()  # requested name => its node
-    isrequested = falses(0)     # by node, grown as `expand` adds nodes
     for s in ss
         outnames = keys(emptyvalue(s))
         for n in outnames
@@ -210,8 +209,6 @@ function prototypes(
             )
         end
         i = expand(s)
-        append!(isrequested, falses(length(nodes) - length(isrequested)))
-        isrequested[i] = true
         for n in outnames
             haskey(owner, n) || push!(requested, n)
             get!(owner, n, i) == i || throw(
@@ -224,6 +221,10 @@ function prototypes(
     # Every requested name is claimed up front, so a hidden dependency met
     # first never takes a name a later requested summarizer emits.
     claimed = Set{Symbol}(keys(owner))
+    isrequested = falses(length(nodes))
+    for i in values(owner)
+        isrequested[i] = true
+    end
     emitted = copy(declared)
     for i in eachindex(nodes)
         isrequested[i] && continue
@@ -245,9 +246,11 @@ function prototypes(
         end
         addterm!(terms, n, f, op)
     end
+    # Without a rename no node reads through an alias.
+    renamed = any(i -> emitted[i] !== declared[i], eachindex(nodes))
     protos = Summarizer[]
     for i in eachindex(nodes)
-        MD, MA = dependencyaliases(i, children, declared, emitted)
+        MD, MA = renamed ? dependencyaliases(i, children, declared, emitted) : ((), ())
         push!(protos,
             isempty(MD) && emitted[i] === declared[i] ? nodes[i] :
             scoped(nodes[i], declared[i], emitted[i], MD, MA,
@@ -298,8 +301,8 @@ privatename(i::Int, n::Symbol) = Symbol("#dep#", i, "#", n)
 
 # Whether two summarizers under one output-name tuple are one configuration:
 # `isequal`, or one immutable type whose fields are pairwise the same
-# configuration. Base's fallback `isequal` is `===`, which tells apart two
-# separately built `Vector` fields of equal content (a custom summarizer's
+# configuration. Base's `isequal` falls back to `==`, whose own fallback is
+# `===`, which tells apart two separately built `Vector` fields of equal content (a custom summarizer's
 # weights, a dependency rebuilt per `dependencies` call). Construction only.
 function sameconfig(@nospecialize(a), @nospecialize(b))
     isequal(a, b) && return true
