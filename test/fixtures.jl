@@ -134,6 +134,19 @@ CausalFrames.value(::PopCheckState, vals::NamedTuple) =
     (; x_popcheck = sqrt(vals.x_variance) - vals.x_popspread)
 CausalFrames.inputcolumns(::PopCheck) = ()
 
+# A dependent over two given summarizers, valued by its dependency count, so
+# two configurations under one name can meet at one depth below it.
+struct Both{A<:Summarizer,B<:Summarizer} <: Summarizer
+    a::A
+    b::B
+end
+struct BothState <: CausalFrames.DerivedState end
+CausalFrames.emptyvalue(::Both) = (; both = 0)
+CausalFrames.dependencies(s::Both) = (s.a, s.b)
+CausalFrames.fresh(::Both, ::NamedTuple) = BothState()
+CausalFrames.value(::BothState, ::NamedTuple) = (; both = 2)
+CausalFrames.inputcolumns(::Both) = ()
+
 # A dependent reporting its dependency's first value as `:echo`, so a hidden
 # dependency of any output name can clash with a requested one.
 struct Echo{S<:Summarizer} <: Summarizer

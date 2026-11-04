@@ -444,6 +444,28 @@ end
         @test df.x_variance ≈ [Statistics.var(x)]
         @test only(df.x_popcheck) ≈ 0 atol = 1e-12
     end
+    # two configurations under one name at a dependent's nearest depth are an
+    # error, rather than one silently read: as direct dependencies...
+    pop = Variance(:x; corrected = false)
+    for both in (Both(Variance(:x), pop), Both(pop, Variance(:x)))
+        @test_throws ArgumentError(
+            "summarize: two different dependencies of :both declare :x_variance",
+        ) CausalFrames.prototypes(Summarizer[both], Symbol[])
+    end
+    # ...or met through different branches at the same depth
+    @test_throws ArgumentError(
+        "addrollingcolumns: two different dependencies of :both declare :x_variance",
+    ) load(
+        Context(0, 10),
+        p |> addrollingcolumns((w = 2,), [Both(PopSpread(), Echo(Variance(:x)))]),
+    )
+    # one configuration twice is one node, and a nearer declaration hides a
+    # deeper one
+    for both in (Both(pop, pop), Both(pop, PopSpread()))
+        df = DataFrame(load(Context(0, 10), p |> summarize([both, Variance(:x)])))
+        @test df.both == [2]
+        @test df.x_variance ≈ [Statistics.var(x)]
+    end
     # a requested summarizer only reading a renamed dependency keeps its value
     # as it is
     @test CausalFrames.renamevalue(Val(((:a,), (:a,))), (a = 1,)) === (a = 1,)

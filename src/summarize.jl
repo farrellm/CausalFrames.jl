@@ -226,10 +226,12 @@ function prototypes(
         isrequested[i] = true
     end
     emitted = copy(declared)
+    isrenamed = falses(length(nodes))
     for i in eachindex(nodes)
         isrequested[i] && continue
         if any(in(claimed), declared[i])
             emitted[i] = map(n -> privatename(i, n), declared[i])
+            isrenamed[i] = true
         else
             union!(claimed, declared[i])
         end
@@ -239,7 +241,7 @@ function prototypes(
     TD = [Symbol[] for _ in nodes]
     TA = [Symbol[] for _ in nodes]
     for (i, n, f) in hoisted
-        if emitted[i] !== declared[i]
+        if isrenamed[i]
             a = hoistedname(first(emitted[i]), termname(f))
             n in TD[i] || (push!(TD[i], n); push!(TA[i], a))
             n = a
@@ -247,12 +249,14 @@ function prototypes(
         addterm!(terms, n, f, op)
     end
     # Without a rename no node reads through an alias.
-    renamed = any(i -> emitted[i] !== declared[i], eachindex(nodes))
+    renamed = any(isrenamed)
     protos = Summarizer[]
     for i in eachindex(nodes)
-        MD, MA = renamed ? dependencyaliases(i, children, declared, emitted) : ((), ())
+        MD, MA =
+            renamed ? dependencyaliases(i, nodes, children, declared, emitted, op) :
+            ((), ())
         push!(protos,
-            isempty(MD) && emitted[i] === declared[i] ? nodes[i] :
+            isempty(MD) && !isrenamed[i] ? nodes[i] :
             scoped(nodes[i], declared[i], emitted[i], MD, MA,
                 Tuple(TD[i]), Tuple(TA[i])))
     end
@@ -267,9 +271,11 @@ const MAXDEPENDENCYDEPTH = 64
 # the names they are emitted under. Each name resolves to the nearest
 # dependency declaring it, breadth first, a direct one over a transitive one,
 # so a summarizer reading a dependency's dependency by name gets the one it
-# depends on, renamed or not. Within one depth a renamed one wins, as the
-# alias overrides the flat values.
-function dependencyaliases(i::Int, children, declared, emitted)
+# depends on, renamed or not. Two different configurations declaring a name at
+# its nearest depth are an error: either could be the one the node reads, and
+# picking one was a silent wrong answer. A clash always renames one of them,
+# so the check runs only when something is renamed, as this function does.
+function dependencyaliases(i::Int, nodes, children, declared, emitted, op::String)
     MD, MA = Symbol[], Symbol[]
     resolved = Set{Symbol}()
     seen = Set{Int}()
@@ -282,6 +288,14 @@ function dependencyaliases(i::Int, children, declared, emitted)
             push!(seen, c)
             for (d, a) in zip(declared[c], emitted[c])
                 d in resolved && continue
+                # `seen` makes every node here distinct, so a repeat is a
+                # second configuration
+                d in names && throw(
+                    ArgumentError(
+                        "$op: two different dependencies of $(nodelabel(nodes[i], declared[i])) " *
+                        "declare $(repr(d))",
+                    ),
+                )
                 push!(names, d)
                 d === a || d in MD || (push!(MD, d); push!(MA, a))
             end
@@ -292,6 +306,10 @@ function dependencyaliases(i::Int, children, declared, emitted)
     end
     return Tuple(MD), Tuple(MA)
 end
+
+# A node as an error message names it: its first output name, else its type.
+nodelabel(@nospecialize(s::Summarizer), outnames) =
+    isempty(outnames) ? string(nameof(typeof(s))) : repr(first(outnames))
 
 # The private name of node `i`'s output `n`, for a renamed hidden dependency.
 # Values are never columns, and the node index keeps two renamed dependencies

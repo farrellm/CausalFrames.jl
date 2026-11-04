@@ -31,5 +31,5 @@ function inputcolumns(s::Scoped)
     cols = inputcolumns(s.inner)
     _, _, _, _, TD, TA = scopeplan(s)
     (cols === nothing || isempty(TD)) && return cols
-    return map(c -> (j = findfirst(==(c), TD); j === nothing ? c : TA[j]), cols)
+    return map(c -> aliasedname(Val(TA), Val(TD), c), cols)
 end

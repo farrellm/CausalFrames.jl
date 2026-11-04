@@ -2403,8 +2403,12 @@ Two different configurations never share a name (issue #149):
   apart and each reads its own. A summarizer reading a name resolves it to
   its nearest dependency declaring it, breadth first, so one reading its
   dependency's dependency by name (a dependent over that custom dependent,
-  reading `:x_variance` too) still gets the population variance; within one
-  depth a renamed dependency wins. A renamed summarizer hoisting `barwindow`
+  reading `:x_variance` too) still gets the population variance. Two different
+  configurations declaring a name at a summarizer's nearest depth for it
+  (`Variance(:x)` and `Variance(:x; corrected = false)` as two dependencies,
+  or one under each of two dependencies) are an `ArgumentError`, since either
+  could be the one it reads; this rejects such a set even when the summarizer
+  reads neither. A renamed summarizer hoisting `barwindow`
   terms moves them with it, to the scope of its first private name (see
   "Hoisted row terms"). The rename is the internal `Scoped` wrapper,
   one type per structural supertype so tiering is unchanged, over a
