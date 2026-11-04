@@ -123,6 +123,32 @@ CausalFrames.value(::PopSpreadState, vals::NamedTuple) =
     (; x_popspread = sqrt(vals.x_variance))
 CausalFrames.inputcolumns(::PopSpread) = ()
 
+# A dependent reading a dependency's dependency by name: PopSpread's population
+# variance, which a requested `Variance(:x)` renames out from under it.
+struct PopCheck <: Summarizer end
+struct PopCheckState <: CausalFrames.DerivedState end
+CausalFrames.emptyvalue(::PopCheck) = (; x_popcheck = missing)
+CausalFrames.dependencies(::PopCheck) = (PopSpread(),)
+CausalFrames.fresh(::PopCheck, ::NamedTuple) = PopCheckState()
+CausalFrames.value(::PopCheckState, vals::NamedTuple) =
+    (; x_popcheck = sqrt(vals.x_variance) - vals.x_popspread)
+CausalFrames.inputcolumns(::PopCheck) = ()
+
+# A dependent reporting its dependency's first value as `:echo`, so a hidden
+# dependency of any output name can clash with a requested one.
+struct Echo{S<:Summarizer} <: Summarizer
+    inner::S
+end
+struct EchoState{N} <: CausalFrames.DerivedState end
+CausalFrames.emptyvalue(::Echo) = (; echo = missing)
+CausalFrames.dependencies(e::Echo) = (e.inner,)
+CausalFrames.fresh(e::Echo, ::NamedTuple) =
+    EchoState{first(keys(CausalFrames.emptyvalue(e.inner)))}()
+# The declared field type, not the value's, so the emission stays inferred.
+CausalFrames.value(::EchoState{N}, vals::V) where {N,V<:NamedTuple} =
+    NamedTuple{(:echo,),Tuple{fieldtype(V, N)}}((vals[N],))
+CausalFrames.inputcolumns(::Echo) = ()
+
 # A test-local summarizer whose output column is illegally named :time.
 struct BadTime <: Summarizer end
 CausalFrames.emptyvalue(::BadTime) = (; time = 0)
@@ -240,6 +266,18 @@ end
 struct Loopy <: Summarizer end
 CausalFrames.dependencies(::Loopy) = (Loopy(),)
 CausalFrames.emptyvalue(::Loopy) = (; loopy = missing)
+
+# Cycles that never repeat a configuration: a mutable summarizer (each instance
+# its own) depending on a new instance, and one depending on itself with a
+# changed field.
+mutable struct MutableLoopy <: Summarizer end
+CausalFrames.dependencies(::MutableLoopy) = (MutableLoopy(),)
+CausalFrames.emptyvalue(::MutableLoopy) = (; loopy = missing)
+struct Unwinding <: Summarizer
+    n::Int
+end
+CausalFrames.dependencies(s::Unwinding) = (Unwinding(s.n + 1),)
+CausalFrames.emptyvalue(::Unwinding) = (; unwinding = missing)
 
 # A deterministic linear-congruential sequence of n values in 0:(m - 1), so
 # property tests need no RNG dependency and failures reproduce exactly.

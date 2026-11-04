@@ -25,5 +25,11 @@ inputcolumns(
         LinearRegression,
         Quantile,Median,PercentRank,MeanAbsDev},
 ) = ()
-# A renamed dependency reads what its inner summarizer reads.
-inputcolumns(s::Scoped) = inputcolumns(s.inner)
+# A renamed dependency reads what its inner summarizer reads, its moved hoisted
+# terms under the names they moved to.
+function inputcolumns(s::Scoped)
+    cols = inputcolumns(s.inner)
+    _, _, _, _, TD, TA = scopeplan(s)
+    (cols === nothing || isempty(TD)) && return cols
+    return map(c -> (j = findfirst(==(c), TD); j === nothing ? c : TA[j]), cols)
+end

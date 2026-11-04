@@ -215,9 +215,18 @@ time,sym,qty
         emptyframe() |> summarize(Moment(:qty, 2))))
     @test ismissing(only(df.qty_moment_2))
 
-    # a dependency cycle is an error
-    @test_throws ArgumentError load(Context(0, 9),
-        readcsv(path; types = tt) |> summarize(Loopy()))
+    # a dependency cycle is an error, one that never repeats a configuration
+    # too, past the depth bound
+    @test_throws ArgumentError(
+        "summarize: summarizer dependency cycle through :loopy",
+    ) load(Context(0, 9), readcsv(path; types = tt) |> summarize(Loopy()))
+    for s in (MutableLoopy(), Unwinding(1))
+        name = repr(only(keys(CausalFrames.emptyvalue(s))))
+        @test_throws ArgumentError(
+            "summarize: summarizer dependencies nest more than 64 deep through " *
+            "$name, likely a dependency cycle",
+        ) CausalFrames.prototypes(Summarizer[s], Symbol[])
+    end
 
     # a hidden dependency never reaches the output, so its name may coincide
     # with a key column

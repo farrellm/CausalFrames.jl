@@ -351,6 +351,18 @@ end
         @test isequal(out.w_other, 1.5 .* expected)
         @test CF.rowterms(LastN{:other}(Mean(:d => triple), 3)) ===
               NamedTuple{(Symbol("#barterm#other#d"),)}((CF.BarTerm{:d}(triple),))
+        # A hidden owner sharing a requested one's output name is renamed, and
+        # its terms move to its private scope with it (issue #149).
+        clash = [hoisted, Echo(LastN(Mean(:d => triple), 3))]
+        for t in (addsummarycolumns(clash), addrollingcolumns((w = 10,), clash))
+            out = DataFrame(load(Context(0, 10), readtable(df) |> t))
+            @test isequal(out[!, end-1], expected)
+            @test isequal(out[!, end], 1.5 .* expected)
+        end
+        protos, _, terms = CF.prototypes(CF.Summarizer[clash...], Symbol[])
+        moved = Symbol("#barterm##dep#2#lastn#d")
+        @test keys(terms) == (hd, moved)
+        @test CF.inputcolumns(protos[2]) == (:d, moved)
 
         # The constructor's terms and the summarizer's own both count.
         protos, _, terms = CF.prototypes(

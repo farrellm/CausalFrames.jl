@@ -60,6 +60,19 @@ end
     JET.@test_opt CausalFrames.freshall!(states)
 end
 
+@testset "renamed hoisting owner" begin
+    # a renamed window owner reads its moved terms through an aliased row
+    double, triple = r -> 2r.x, r -> 3r.x
+    protos, requested, terms = CausalFrames.prototypes(
+        CausalFrames.tosummarizers([
+            LastN(Mean(:d => double), 3), Echo(LastN(Mean(:d => triple), 3))]),
+        Symbol[])
+    nt = CausalFrames.terminput(DataFrame(time = 1:4, x = [1.0, 2, 4, 8]), terms, "jet")
+    states = CausalFrames.newstates(protos, CausalFrames.chunktypes(nt))
+    JET.@test_opt CausalFrames.foldall!(states, nt)
+    JET.@test_opt CausalFrames.summaryvalues(states, Val(requested))
+end
+
 @testset "wide rows" begin
     # Past 32 columns, Base's tuple `map` falls back to dispatch (issue #98).
     nt = NamedTuple{Tuple(Symbol.(:c, 1:40))}(Tuple(rand(3) for _ in 1:40))

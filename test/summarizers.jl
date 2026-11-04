@@ -437,6 +437,16 @@ end
         x_variance::Union{Missing,Float64},
         count::Int,
     }
+    # a dependent reading its dependency's dependency by name reads the one
+    # it depends on, though that one is renamed
+    for ss in ([Variance(:x), PopCheck()], [PopCheck(), Variance(:x)])
+        df = DataFrame(load(Context(0, 10), p |> summarize(ss)))
+        @test df.x_variance ≈ [Statistics.var(x)]
+        @test only(df.x_popcheck) ≈ 0 atol = 1e-12
+    end
+    # a requested summarizer only reading a renamed dependency keeps its value
+    # as it is
+    @test CausalFrames.renamevalue(Val(((:a,), (:a,))), (a = 1,)) === (a = 1,)
     # every summarizing transform, against each summarizer alone
     q = readtable(DataFrame(time = 1:6, x = [1.0, 2, 4, 8, 3, 5], k = [1, 2, 1, 2, 1, 2]))
     for f in (

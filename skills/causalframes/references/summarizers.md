@@ -987,7 +987,9 @@ They are expanded recursively and deduplicated by configuration, so a dependency
 also requested by the user is folded once, and they appear in the output only
 if requested. A dependency sharing an output name with a different
 configuration (neither `isequal` nor equal field by field) is folded apart
-under a private name, so `s` still reads its own. Defaults to `()`.
+under a private name, so `s` still reads its own. `s` may also read a
+dependency's own dependencies by name, each name resolving to the nearest
+dependency declaring it. Defaults to `()`.
 
 ---
 

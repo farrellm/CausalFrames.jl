@@ -128,7 +128,8 @@ admissionkeys(::KeySet{NoKey}) = nothing
 # names unless another summarizer in the set already claims one, when it is
 # renamed privately (`scoped`, `privatename`) and its dependents read it
 # there, so a wrapper's dependency and a plain summarizer of the same name
-# fold apart rather than one silently replacing the other. Row terms
+# fold apart rather than one silently replacing the other. A renamed
+# summarizer's hoisted bar terms move to its private scope with it. Row terms
 # (`Termed`, or a summarizer's own `rowterms`) are unwrapped here, at any
 # depth, and collected by name. Returns the prototypes as a tuple (so the
 # states are a concrete tuple), the requested output names, in request order,
@@ -146,15 +147,29 @@ function prototypes(
     children = Vector{Int}[]
     visiting = Summarizer[]  # walk in progress: cycle guard
     terms = Pair{Symbol,Any}[]
+    # The terms a summarizer hoists under its own scope, by node: collected
+    # once the node is named, since a renamed node's move with it.
+    hoisted = Tuple{Int,Symbol,Any}[]
     # Unspecialized: it runs once per summarizer, at construction.
     function expand(@nospecialize(t::Summarizer))
         s = unterm(t)
-        # the constructor's terms, then the summarizer's own hook (the same
-        # terms again when `t` is unwrapped, which `addterm!` skips)
-        for x in (t, s), (n, f) in pairs(rowterms(x))
-            addterm!(terms, n, f, op)
-        end
         outnames = keys(emptyvalue(s))
+        # the constructor's terms, then the summarizer's own hook
+        own = Pair{Symbol,Any}[]
+        for x in (t === s ? (s,) : (t, s)), (n, f) in pairs(rowterms(x))
+            if x === s && ishoisted(n, f, first(outnames))
+                push!(own, n => f)
+            else
+                addterm!(terms, n, f, op)
+            end
+        end
+        i = expandnode(s, outnames)
+        for (n, f) in own
+            push!(hoisted, (i, n, f))
+        end
+        return i
+    end
+    function expandnode(@nospecialize(s::Summarizer), outnames)
         # A linear scan over the few nodes beats a Set keyed by an abstract
         # type. An equal configuration is the same node: its dependencies are
         # a function of it.
@@ -164,6 +179,14 @@ function prototypes(
         any(v -> sameconfig(v, s), visiting) && throw(
             ArgumentError(
                 "$op: summarizer dependency cycle through $(repr(first(outnames)))"),
+        )
+        # A cycle through ever-new configurations (a mutable summarizer, or one
+        # depending on itself with a changed field) never repeats one.
+        length(visiting) >= MAXDEPENDENCYDEPTH && throw(
+            ArgumentError(
+                "$op: summarizer dependencies nest more than $MAXDEPENDENCYDEPTH " *
+                "deep through $(repr(first(outnames))), likely a dependency cycle",
+            ),
         )
         push!(visiting, s)          # a stack: the walk is depth-first
         deps = Int[expand(d) for d in dependencies(s)]
@@ -210,23 +233,67 @@ function prototypes(
             union!(claimed, declared[i])
         end
     end
+    # A renamed node's hoisted terms move to its emitted scope, its window
+    # reading them back under the declared one.
+    TD = [Symbol[] for _ in nodes]
+    TA = [Symbol[] for _ in nodes]
+    for (i, n, f) in hoisted
+        if emitted[i] !== declared[i]
+            a = hoistedname(first(emitted[i]), termname(f))
+            n in TD[i] || (push!(TD[i], n); push!(TA[i], a))
+            n = a
+        end
+        addterm!(terms, n, f, op)
+    end
     protos = Summarizer[]
     for i in eachindex(nodes)
-        MD, MA = Symbol[], Symbol[]
-        for c in children[i], (d, a) in zip(declared[c], emitted[c])
-            d === a || (push!(MD, d); push!(MA, a))
-        end
+        MD, MA = dependencyaliases(i, children, declared, emitted)
         push!(protos,
             isempty(MD) && emitted[i] === declared[i] ? nodes[i] :
-            scoped(nodes[i], declared[i], emitted[i], Tuple(MD), Tuple(MA)))
+            scoped(nodes[i], declared[i], emitted[i], MD, MA,
+                Tuple(TD[i]), Tuple(TA[i])))
     end
     return Tuple(protos), Tuple(requested), termtuple(terms)
 end
 
+# Deeper than any real summarizer nests; the bound on a cycle that never
+# repeats a configuration.
+const MAXDEPENDENCYDEPTH = 64
+
+# The renamed dependencies node `i` reads, as the names it reads them by and
+# the names they are emitted under. Each name resolves to the nearest
+# dependency declaring it, breadth first, a direct one over a transitive one,
+# so a summarizer reading a dependency's dependency by name gets the one it
+# depends on, renamed or not. Within one depth a renamed one wins, as the
+# alias overrides the flat values.
+function dependencyaliases(i::Int, children, declared, emitted)
+    MD, MA = Symbol[], Symbol[]
+    resolved = Set{Symbol}()
+    seen = Set{Int}()
+    level = children[i]
+    while !isempty(level)
+        names = Symbol[]
+        next = Int[]
+        for c in level
+            c in seen && continue
+            push!(seen, c)
+            for (d, a) in zip(declared[c], emitted[c])
+                d in resolved && continue
+                push!(names, d)
+                d === a || d in MD || (push!(MD, d); push!(MA, a))
+            end
+            append!(next, children[c])
+        end
+        union!(resolved, names)
+        level = next
+    end
+    return Tuple(MD), Tuple(MA)
+end
+
 # The private name of node `i`'s output `n`, for a renamed hidden dependency.
 # Values are never columns, and the node index keeps two renamed dependencies
-# apart, so it can collide with nothing. The `#scope#…#name` form is the one
-# `hoistednames` (src/barwindow.jl) gives hoisted bar terms.
+# apart, so it can collide with nothing. Its hoisted terms move to the scope
+# of its first private name (`hoistedname`).
 privatename(i::Int, n::Symbol) = Symbol("#dep#", i, "#", n)
 
 # Whether two summarizers under one output-name tuple are one configuration:
