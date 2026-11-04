@@ -398,14 +398,14 @@ design rationale and performance constraints behind each module.
     `tiering` reads it, and their `ScopedState` delegates every state
     operation, so a new state interface function must be delegated there
     too: a test finds the interface by its `SummarizerState`/`DerivedState`
-    fallbacks and checks each is delegated, so give a new one a fallback. The plan `(D, A, MD, MA, TD, TA)`
-    is a type parameter, so the rename and the dependency aliasing are
-    constant projections and infer; `renamevalue` builds them with
-    `Expr(:new)` over the declared field types, since relabelling through
-    `values` typed a `Union{Missing,_}` field by its value and left the
-    emission dispatching. A fieldless inner state leaves the wrapper a
-    singleton (still the derived tier). `dependencyaliases` resolves each
-    name a node reads to its nearest dependency breadth first, so a
+    fallbacks and checks each is delegated, so give a new one a fallback. The
+    plan `(D, A, MD, MA, TD, TA)` is a type parameter, so the rename and the
+    dependency aliasing are constant projections and infer; `renamevalue`
+    builds them with `Expr(:new)` over the declared field types, since
+    relabelling through `values` typed a `Union{Missing,_}` field by its value
+    and left the emission dispatching. A fieldless inner state leaves the
+    wrapper a singleton (still the derived tier). `dependencyaliases` resolves
+    each name a node reads to its nearest dependency breadth first, so a
     transitive read gets the right configuration too. A renamed owner's
     hoisted bar terms move to its private scope (`TD` → `TA`): `fresh`/
     `widenstate` relabel the input types, and `update!`/`downdate!` hand the
@@ -413,8 +413,8 @@ design rationale and performance constraints behind each module.
     property-access row and a merged copy per row would box wide or
     `missing`-admitting rows. Equal configurations still share one node
     (`sameconfig`); a cycle never repeating one (a mutable summarizer) is
-    caught by `MAXDEPENDENCYDEPTH`. A set without a clash gets no wrapper,
-    so it compiles as before
+    caught by `MAXDEPENDENCYDEPTH`. A set without a clash gets no wrapper, so
+    it compiles as before
   - `FitModel` (MLJ) is the one summarizer whose value is an object: its state
     buffers the folded rows in concretely typed vectors and fits at `value`
     time through the `fitmodel` hook (src/models.jl), building
@@ -659,11 +659,12 @@ design rationale and performance constraints behind each module.
   state's `inputcolumns`, sharing `storedcolumns`' union (`readcolumns`);
   `barterms` is its `rowterms`, hoisting the window's terms (wrapped in
   `BarTerm`, which `termvalues` holds to the window's typing rule up front)
-  into the transform's `terminput` under reserved `hoistednames`, scoped by the outer
-  summarizer's first output name (`#barterm#lastn#d`) so two windows' terms
-  never share a namespace (a renamed hidden owner's move to its private name
-  in `prototypes`, which is why they are collected only after naming), after which `hoistedby = outer` makes the window
-  read them from those columns (`HoistedTerms`) instead of evaluating them.
+  into the transform's `terminput` under reserved `hoistednames`, scoped by
+  the outer summarizer's first output name (`#barterm#lastn#d`) so two
+  windows' terms never share a namespace (a renamed hidden owner's move to its
+  private name in `prototypes`, which is why they are collected only after
+  naming), after which `hoistedby = outer` makes the window read them from
+  those columns (`HoistedTerms`) instead of evaluating them.
   Never key a hoisted term by its own name: a wrapper that drops `rowterms`
   would then have the window read a real input column of that name as the
   term, silently

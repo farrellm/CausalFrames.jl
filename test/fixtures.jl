@@ -174,6 +174,26 @@ CausalFrames.fresh(r::Relay, ::NamedTuple) =
     EchoState{first(keys(CausalFrames.emptyvalue(r.inner)))}()
 CausalFrames.inputcolumns(::Relay) = ()
 
+# A wrapper that builds `inner`'s state itself rather than declaring it a
+# dependency, forwarding its row terms, and reports its first value as `:carry`.
+struct Carry{S<:Summarizer} <: Summarizer
+    inner::S
+end
+struct CarryState{W<:SummarizerState} <: SummarizerState
+    inner::W
+end
+CausalFrames.emptyvalue(::Carry) = (; carry = missing)
+CausalFrames.rowterms(c::Carry) = CausalFrames.rowterms(c.inner)
+CausalFrames.inputcolumns(c::Carry) = CausalFrames.inputcolumns(c.inner)
+CausalFrames.fresh(c::Carry, intypes::NamedTuple) =
+    CarryState(CausalFrames.fresh(c.inner, intypes))
+CausalFrames.fresh(st::CarryState) = CarryState(CausalFrames.fresh(st.inner))
+CausalFrames.update!(st::CarryState, row) = CausalFrames.update!(st.inner, row)
+function CausalFrames.value(st::CarryState)
+    v = CausalFrames.value(st.inner)
+    return NamedTuple{(:carry,),Tuple{fieldtype(typeof(v), 1)}}((v[1],))
+end
+
 # A summarizer whose reference field may be left undefined, as a partial
 # `new()` leaves it.
 struct Partial <: Summarizer

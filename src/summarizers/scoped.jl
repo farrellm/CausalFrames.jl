@@ -38,6 +38,10 @@ end
 
 scopeplan(::Scoped{P}) where {P} = P
 
+# The summarizer a renamed one wraps, as error messages name it.
+unscoped(s::Summarizer) = s
+unscoped(s::Scoped) = s.inner
+
 # Delegates every state operation to `inner`. A new interface function must be
 # delegated below too: test/summarizers.jl finds the interface by its
 # `SummarizerState`/`DerivedState` fallbacks and checks each is delegated.

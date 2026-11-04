@@ -289,7 +289,7 @@ function newbarwindow(@nospecialize(protos::Tuple), @nospecialize(outs::Val),
     for (p, tier) in zip(protos, tiernames(tg))
         tier === :refold && throw(
             ArgumentError(
-                "barwindow summarizers must be MonoidSummarizers, got $(typeof(p))",
+                "barwindow summarizers must be MonoidSummarizers, got $(typeof(unscoped(p)))",
             ),
         )
     end

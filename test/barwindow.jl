@@ -374,6 +374,20 @@ end
             @test isequal(out[!, end-1], expected)
             @test isequal(out[!, end], 1.5 .* expected)
         end
+        # A forwarder follows only its own dependencies: a term equal to the
+        # one a renamed unrelated owner hoists stays under its declared name,
+        # where it clashes with the requested owner's, rather than moving
+        # away while the forwarder's window still reads the declared name.
+        unrelated = CF.Summarizer[hoisted, Echo(LastN(Mean(:d => triple), 3)),
+            Carry(LastN(Mean(:d => triple), 3))]
+        err = try
+            CF.prototypes(unrelated, Symbol[])
+        catch e
+            e
+        end
+        @test err isa ArgumentError
+        @test occursin("row term $(repr(hd)) is defined by more than one function",
+            err.msg)
 
         # The constructor's terms and the summarizer's own both count.
         protos, _, terms = CF.prototypes(

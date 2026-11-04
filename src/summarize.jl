@@ -153,20 +153,22 @@ function prototypes(
     # once the node is named, since a renamed node's move with it.
     hoisted = Tuple{Int,Symbol,Any}[]
     # Hoisted terms a summarizer hands on for another's window (a wrapper
-    # forwarding its dependency's `rowterms`): they follow their owner, found
-    # by name and function among the nodes' own once every node is named.
-    forwarded = Pair{Symbol,Any}[]
+    # forwarding its dependency's `rowterms`), by the forwarding node: they
+    # follow their owner, found by name and function among that node's
+    # dependencies' own once every node is named.
+    forwarded = Tuple{Int,Symbol,Any}[]
     # Unspecialized: it runs once per summarizer, at construction.
     function expand(@nospecialize(t::Summarizer))
         s = unterm(t)
         outnames = keys(emptyvalue(s))
         # the constructor's terms, then the summarizer's own hook
         own = Pair{Symbol,Any}[]
+        fwd = Pair{Symbol,Any}[]
         for x in (t === s ? (s,) : (t, s)), (n, f) in pairs(rowterms(x))
             if x === s && !isempty(outnames) && ishoisted(n, f, first(outnames))
                 push!(own, n => f)
             elseif f isa BarTerm
-                push!(forwarded, n => f)
+                push!(fwd, n => f)
             else
                 addterm!(terms, n, f, op)
             end
@@ -174,6 +176,9 @@ function prototypes(
         i = expandnode(s, outnames)
         for (n, f) in own
             push!(hoisted, (i, n, f))
+        end
+        for (n, f) in fwd
+            push!(forwarded, (i, n, f))
         end
         return i
     end
@@ -256,8 +261,12 @@ function prototypes(
         end
         addterm!(terms, n, f, op)
     end
-    for (n, f) in forwarded
-        j = findfirst(h -> h[2] === n && h[3] === f, hoisted)
+    # Only the forwarder's own dependencies: an equal term hoisted by an
+    # unrelated renamed node must not move a copy the forwarder's window (built
+    # by the forwarder itself, not as a node) reads under its declared name.
+    for (i, n, f) in forwarded
+        below = descendants(i, children)
+        j = findfirst(h -> h[1] in below && h[2] === n && h[3] === f, hoisted)
         if j !== nothing && isrenamed[hoisted[j][1]]
             n = hoistedname(first(emitted[hoisted[j][1]]), termname(f))
         end
@@ -276,6 +285,19 @@ function prototypes(
                 Tuple(TD[i]), Tuple(TA[i])))
     end
     return Tuple(protos), Tuple(requested), termtuple(terms)
+end
+
+# The nodes node `i` depends on, at any depth.
+function descendants(i::Int, children::Vector{Vector{Int}})
+    found = Set{Int}()
+    stack = copy(children[i])
+    while !isempty(stack)
+        c = pop!(stack)
+        c in found && continue
+        push!(found, c)
+        append!(stack, children[c])
+    end
+    return found
 end
 
 # Deeper than any real summarizer nests; the bound on a cycle that never
