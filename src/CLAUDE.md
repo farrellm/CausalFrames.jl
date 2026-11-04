@@ -397,7 +397,8 @@ design rationale and performance constraints behind each module.
     `Scoped` union) keep the inner summarizer's structural supertype, since
     `tiering` reads it, and their `ScopedState` delegates every state
     operation, so a new state interface function must be delegated there
-    too: one left out fails only on a clash. The plan `(D, A, MD, MA, TD, TA)`
+    too: a test finds the interface by its `SummarizerState`/`DerivedState`
+    fallbacks and checks each is delegated, so give a new one a fallback. The plan `(D, A, MD, MA, TD, TA)`
     is a type parameter, so the rename and the dependency aliasing are
     constant projections and infer; `renamevalue` builds them with
     `Expr(:new)` over the declared field types, since relabelling through

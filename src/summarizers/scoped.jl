@@ -38,6 +38,9 @@ end
 
 scopeplan(::Scoped{P}) where {P} = P
 
+# Delegates every state operation to `inner`. A new interface function must be
+# delegated below too: test/summarizers.jl finds the interface by its
+# `SummarizerState`/`DerivedState` fallbacks and checks each is delegated.
 struct ScopedState{P,S<:SummarizerState} <: SummarizerState
     inner::S
 end

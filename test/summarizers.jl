@@ -484,6 +484,28 @@ end
     r = CausalFrames.AliasedRow{(:b,),(:a,)}((a = 0, b = 1))
     @test propertynames(r) == (:b, :a)
     @test r.a == 1
+    # the rename's state delegates the whole state interface: every function
+    # with a `SummarizerState` or `DerivedState` fallback (which finds the ones
+    # without a plain-state fallback too, through the derived no-ops)
+    argtypes(m) = map(T -> T isa TypeVar ? T.ub : T,
+        Base.unwrap_unionall(m.sig).parameters[2:end])
+    isfallback(T) = T === SummarizerState || T === CausalFrames.DerivedState
+    scopedname = Base.unwrap_unionall(CausalFrames.ScopedState).name
+    isscoped(T) = (U = Base.unwrap_unionall(T); U isa DataType && U.name === scopedname)
+    interface = Set{Function}()
+    for n in names(CausalFrames; all = true)
+        f = isdefined(CausalFrames, n) ? getfield(CausalFrames, n) : nothing
+        f isa Function && any(m -> any(isfallback, argtypes(m)), methods(f)) &&
+            push!(interface, f)
+    end
+    known = (CausalFrames.fresh, CausalFrames.fresh!, CausalFrames.update!,
+        CausalFrames.downdate!,
+        CausalFrames.combine!, CausalFrames.widenstate, CausalFrames.isinvertible,
+        CausalFrames.needsrefold, CausalFrames.value)
+    @test issubset(known, interface)
+    for f in interface
+        @test (f, any(m -> any(isscoped, argtypes(m)), methods(f))) == (f, true)
+    end
     # every summarizing transform, against each summarizer alone
     q = readtable(DataFrame(time = 1:6, x = [1.0, 2, 4, 8, 3, 5], k = [1, 2, 1, 2, 1, 2]))
     for f in (
