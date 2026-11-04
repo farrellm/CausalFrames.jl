@@ -406,8 +406,9 @@ design rationale and performance constraints behind each module.
     and left the emission dispatching. A fieldless inner state leaves the
     wrapper a singleton (still the derived tier). `dependencyaliases` resolves
     each name a node reads to its nearest dependency breadth first, so a
-    transitive read gets the right configuration too. A renamed owner's
-    hoisted bar terms move to its private scope (`TD` → `TA`): `fresh`/
+    transitive read gets the right configuration too. A hoisted bar term
+    whose function moved off its reserved name (`movedname`, issue #151) is
+    read back under it (`TD` → `TA`): `fresh`/
     `widenstate` relabel the input types, and `update!`/`downdate!` hand the
     window an `AliasedRow`, a `getproperty` view, since rows arrive as any
     property-access row and a merged copy per row would box wide or

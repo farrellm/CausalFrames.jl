@@ -246,7 +246,16 @@ function prototypes(
     TD = [Symbol[] for _ in nodes]
     TA = [Symbol[] for _ in nodes]
     functions = Dict{Symbol,Vector{Any}}()  # reserved name => its functions
+    # node and reserved name => the function it hoists: a node reached twice
+    # (under two `Termed` carriers, say) has one window to read the name
+    bynode = Dict{Tuple{Int,Symbol},Any}()
     for (i, n, f) in hoisted
+        get!(bynode, (i, n), f) === f || throw(
+            ArgumentError(
+                "$op row term $(repr(n)) is defined by more than one function; " *
+                "bind the function once and reuse it",
+            ),
+        )
         fs = get!(() -> Any[], functions, n)
         g = findfirst(h -> h === f, fs)
         g === nothing && (push!(fs, f); g = length(fs))
@@ -257,7 +266,7 @@ function prototypes(
         end
         addterm!(terms, n, f, op)
     end
-    # Without a rename no node reads through an alias.
+    # Without a rename no node reads a dependency through an alias.
     renamed = any(isrenamed)
     protos = Summarizer[]
     for i in eachindex(nodes)

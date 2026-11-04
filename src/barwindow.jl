@@ -114,9 +114,8 @@ end
 # The columns hoisted row terms are evaluated into: names of their own, so that
 # no input column of a term's name can stand in for it, as one would if a
 # wrapper left out `barterms`, and scoped by the outer summarizer (its first
-# output name, unique within a call), so that two outer summarizers' windows
-# never share a term namespace: `#barterm#lastn#d` for `:lastn`'s term `:d`.
-# Unique only when the outer summarizer passes itself as `hoistedby`: when two
+# output name), so that two outer summarizers' windows rarely share a term
+# namespace: `#barterm#lastn#d` for `:lastn`'s term `:d`. Unique only when the outer summarizer passes itself as `hoistedby`: when two
 # summarizers hoist different functions under one name (a renamed hidden owner
 # beside a requested one, issue #149, or a wrapper building its inner
 # summarizer's window, scoped by the inner one's name, issue #151),

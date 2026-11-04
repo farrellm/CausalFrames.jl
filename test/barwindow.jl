@@ -414,6 +414,12 @@ end
         @test_throws ArgumentError CF.prototypes(
             CF.Summarizer[CF.Termed(hoisted,
                 NamedTuple{(hd,)}((CF.BarTerm{:d}(triple),)))], Symbol[])
+        # So are they under two carriers of one node: it is still one window.
+        @test_throws ArgumentError CF.prototypes(
+            CF.Summarizer[
+                CF.Termed(Count(), NamedTuple{(hd,)}((CF.BarTerm{:d}(triple),))),
+                CF.Termed(Count(), NamedTuple{(hd,)}((CF.BarTerm{:d}(double),)))],
+            Symbol[])
 
         # The constructor's terms and the summarizer's own both count.
         protos, _, terms = CF.prototypes(
