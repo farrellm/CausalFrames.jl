@@ -564,3 +564,27 @@ summarizers there), was measured after the harness's seven calls in the same
 process, so this is the cost on top of code already compiled.
 `summarize([PopSpread(), Variance(:x)])` compiled 0.30–0.35 s and the keyed
 `addrollingcolumns` of the same set 1.15–1.30 s, over four runs.
+
+## Hoisted terms placed by function (issue #151, 2026-11-04)
+
+`prototypes` now moves a hoisted bar term apart only when two summarizers
+hoist different functions under one reserved name, in place of moving a
+renamed owner's own-scoped terms and matching forwarded copies by name. A
+`Scoped` wrapper still appears only on such a conflict, so a call without one
+compiles as before.
+
+`timed_runtests.jl` (Julia 1.13.3, 4 threads, `--depwarn=yes`), one run per
+side: included files 786.4 s compile on master, 798.0 s on the branch. The
+whole difference is `barwindow.jl` (31.6 → 39.6 s), which gained the issue's
+cases; every other file moved by under 3 s either way, within noise
+(`rolling.jl` 242.9 → 245.5, `summarizers.jl` 146.4 → 147.7, `operators.jl`
+30.8 → 29.5). The `Bars` window case runs for one summarizer set only, to bound
+that cost.
+
+Master's `barwindow.jl`, minus the five assertions whose expectations changed
+(the moved name and the "unrelated" error), timed alone, alternating, two
+rounds per side: 35.3–35.5 s compile on master, 35.9–36.0 s on the branch.
+The extra ~0.5 s is likely the wrapper the forwarding `Relay` now gets in its
+rename case, a type it didn't compile before. A run with failing assertions
+reads ~4 s slower from compiling Test's failure printing, so compare only
+passing files.

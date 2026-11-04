@@ -174,6 +174,24 @@ CausalFrames.fresh(r::Relay, ::NamedTuple) =
     EchoState{first(keys(CausalFrames.emptyvalue(r.inner)))}()
 CausalFrames.inputcolumns(::Relay) = ()
 
+# `LastN`, but hoisting its window's terms under another summarizer's scope:
+# the outer summarizer `LastN{H}` rather than itself, so its reserved term
+# names are `H`'s, which nothing keeps unique within a call.
+struct LastNAs{H,S<:Summarizer} <: Summarizer
+    inner::S
+    n::Int
+end
+LastNAs{H}(inner::S, n::Int) where {H,S} = LastNAs{H,S}(inner, n)
+scopeowner(s::LastNAs{H}) where {H} = LastN{H}(s.inner, s.n)
+CausalFrames.emptyvalue(::LastNAs) = (; lastn = missing)
+CausalFrames.rowterms(s::LastNAs) =
+    CausalFrames.barterms(s.inner; hoistedby = scopeowner(s))
+CausalFrames.inputcolumns(s::LastNAs) =
+    CausalFrames.barinputcolumns(s.inner; hoistedby = scopeowner(s))
+CausalFrames.fresh(s::LastNAs, intypes::NamedTuple) =
+    LastNState{:lastn}(
+        CausalFrames.barwindow(s.inner, s.n, intypes; hoistedby = scopeowner(s)))
+
 # A wrapper that builds `inner`'s state itself rather than declaring it a
 # dependency, forwarding its row terms, and reports its first value as `:carry`.
 struct Carry{S<:Summarizer} <: Summarizer

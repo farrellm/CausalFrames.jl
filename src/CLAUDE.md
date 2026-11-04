@@ -406,8 +406,9 @@ design rationale and performance constraints behind each module.
     and left the emission dispatching. A fieldless inner state leaves the
     wrapper a singleton (still the derived tier). `dependencyaliases` resolves
     each name a node reads to its nearest dependency breadth first, so a
-    transitive read gets the right configuration too. A renamed owner's
-    hoisted bar terms move to its private scope (`TD` → `TA`): `fresh`/
+    transitive read gets the right configuration too. A hoisted bar term
+    whose function moved off its reserved name (`movedname`, issue #151) is
+    read back under it (`TD` → `TA`): `fresh`/
     `widenstate` relabel the input types, and `update!`/`downdate!` hand the
     window an `AliasedRow`, a `getproperty` view, since rows arrive as any
     property-access row and a merged copy per row would box wide or
@@ -661,9 +662,12 @@ design rationale and performance constraints behind each module.
   `BarTerm`, which `termvalues` holds to the window's typing rule up front)
   into the transform's `terminput` under reserved `hoistednames`, scoped by
   the outer summarizer's first output name (`#barterm#lastn#d`) so two
-  windows' terms never share a namespace (a renamed hidden owner's move to its
-  private name in `prototypes`, which is why they are collected only after
-  naming), after which `hoistedby = outer` makes the window read them from
+  windows' terms rarely share a namespace. When two summarizers do hoist
+  different functions under one name (a renamed hidden owner, a wrapper
+  building its inner summarizer's window, a foreign `hoistedby`),
+  `prototypes` moves every function after the first to `movedname` and
+  aliases it back through `Scoped`, deciding by function, never by matching
+  term names against a summarizer's scope (issue #151); after which `hoistedby = outer` makes the window read them from
   those columns (`HoistedTerms`) instead of evaluating them.
   Never key a hoisted term by its own name: a wrapper that drops `rowterms`
   would then have the window read a real input column of that name as the
