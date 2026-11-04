@@ -110,8 +110,9 @@ AliasedRow{from,to}(row::R) where {from,to,R} = AliasedRow{from,to,R}(row)
     getproperty(getfield(r, :row), aliasedname(Val(from), Val(to), c))
 # `row[:name]`, as `update!` promises.
 @inline Base.getindex(r::AliasedRow, c::Symbol) = getproperty(r, c)
+# Each name once: a row name among `to` reads the aliased column instead.
 Base.propertynames(r::AliasedRow{from,to}) where {from,to} =
-    (propertynames(getfield(r, :row))..., to...)
+    (Iterators.filter(∉(to), propertynames(getfield(r, :row)))..., to...)
 
 # The column `c` is read from: `from[j]` for `c === to[j]`, else `c`. A chain of
 # comparisons, so a constant `c` folds it away.

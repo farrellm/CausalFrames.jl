@@ -479,6 +479,11 @@ end
     # promises
     r = CausalFrames.AliasedRow{(:b,),(:a,)}((b = 1, c = 2))
     @test (r.a, r[:a], r.c, r[:c]) == (1, 1, 2, 2)
+    @test propertynames(r) == (:b, :c, :a)
+    # a row name that is aliased is listed once, read as the alias
+    r = CausalFrames.AliasedRow{(:b,),(:a,)}((a = 0, b = 1))
+    @test propertynames(r) == (:b, :a)
+    @test r.a == 1
     # every summarizing transform, against each summarizer alone
     q = readtable(DataFrame(time = 1:6, x = [1.0, 2, 4, 8, 3, 5], k = [1, 2, 1, 2, 1, 2]))
     for f in (
