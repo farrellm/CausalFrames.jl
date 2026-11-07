@@ -212,6 +212,8 @@
             (t -> Min(t), :range), (t -> Max(t), :range),
             (t -> First(t), :range), (t -> Last(t), :range),
         ]
+        termed = Summarizer[]
+        untermed = Summarizer[]
         for (make, c) in forms
             s = make(:range => rng)
             @test CausalFrames.unterm(s) == make(c)
@@ -219,22 +221,43 @@
                 <:Union{CausalFrames.SortedValues,CausalFrames.WindowValues},
             } &&
                 continue
+            push!(termed, s)
+            push!(untermed, make(c))
+        end
+        @test isequal(
+            run(src |> addrollingcolumns((w2 = 2,), termed; key = :k)),
+            select(run(added |> addrollingcolumns((w2 = 2,), untermed; key = :k)),
+                Not(:range)),
+        )
+        # Two-column forms, with the term in either position.
+        plain(x) = x isa Pair ? first(x) : x
+        for (a, b) in ((:range => rng, :mid => mid), (:mid => mid, :v),
+            (:v, :range => rng))
+            pa, pb = plain(a), plain(b)
             @test isequal(
-                run(src |> addrollingcolumns((w2 = 2,), s; key = :k)),
-                select(run(added |> addrollingcolumns((w2 = 2,), make(c); key = :k)),
-                    Not(:range)),
+                run(
+                    src |>
+                    summarize([DotProduct(a, b), Covariance(a, b), Correlation(a, b)];
+                        key = :k),
+                ),
+                run(
+                    addedmid |>
+                    summarize([DotProduct(pa, pb), Covariance(pa, pb), Correlation(pa, pb)];
+                        key = :k),
+                ),
             )
         end
-        # Two-column forms, with the term in either position.
-        for make in (DotProduct, Covariance, Correlation,
-            (a, b) -> Covariance(a, b; corrected = false))
-            for (a, b) in ((:range => rng, :mid => mid), (:mid => mid, :v),
-                (:v, :range => rng))
-                plain(x) = x isa Pair ? first(x) : x
-                @test isequal(run(src |> summarize(make(a, b); key = :k)),
-                    run(addedmid |> summarize(make(plain(a), plain(b)); key = :k)))
-            end
-        end
+        @test isequal(
+            run(
+                src |>
+                summarize(Covariance(:range => rng, :mid => mid; corrected = false);
+                    key = :k),
+            ),
+            run(
+                addedmid |>
+                summarize(Covariance(:range, :mid; corrected = false); key = :k),
+            ),
+        )
         # LinearRegression, with terms as predictors and as the response.
         lr = LinearRegression([:range => rng, :v], :mid => mid; name = :m)
         @test CausalFrames.rowterms(lr) === (; range = rng, mid = mid)

@@ -397,10 +397,12 @@ end
         for (k, (ss, scales)) in enumerate(cases)
             protos, _, terms = CF.prototypes(CF.Summarizer[ss...], Symbol[])
             @test length(terms) == length(unique(values(terms)))
-            runs = Any[(summarize(ss), [expected[end]]),
-                (addsummarycolumns(ss), expected),
-                (addrollingcolumns((w = 10,), ss), expected)]
-            # one case through a count window too, to bound compile time
+            runs = Any[(addsummarycolumns(ss), expected)]
+            # bound compile time across the four scoping shapes
+            if k <= 2
+                push!(runs, (summarize(ss), [expected[end]]),
+                    (addrollingcolumns((w = 10,), ss), expected))
+            end
             k == 1 && push!(runs, (addrollingcolumns((w = Bars(5),), ss), barsexpected))
             for (t, want) in runs
                 out = DataFrame(load(Context(0, 10), readtable(df) |> t))

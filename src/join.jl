@@ -237,13 +237,14 @@ end
 # since `pullright!` may replace the store and the buffer.
 function matchchunk!(js::JoinState, @nospecialize(cfg::JoinConfig),
     nt::NamedTuple)
-    n = length(nt.time)
+    lnt = NamedTuple{(:time, cfg.keycols...)}(nt)
+    n = length(lnt.time)
     resize!(js.matches, n)
     resize!(js.found, n)
     fill!(js.found, false)   # the only reset needed; matches slots are guarded
     i = 1
     while true
-        i, js.rpos, needpull = segment!(js.store, js.matches, js.found, nt, i,
+        i, js.rpos, needpull = segment!(js.store, js.matches, js.found, lnt, i,
             js.rnt, js.rpos, js.right.done, cfg.keynames, cfg.cmp,
             cfg.tolerance)
         needpull || break
@@ -374,7 +375,10 @@ end
 # Function barrier: `fieldtype` fixes the column's element type. Unmatched
 # slots are undefined rather than `missing` (a Vector{Union{Missing,V}} boxes
 # every row when V is not isbits), so `found` guards every read.
-matchcolumn(matches::Vector{V}, found::Vector{Bool}, ::Val{N}) where {V,N} =
-    Union{Missing,fieldtype(V, N)}[
-        @inbounds(found[i]) ? getproperty(@inbounds(matches[i]), N) : missing
-        for i in eachindex(matches)]
+function matchcolumn(matches::Vector{V}, found::Vector{Bool}, ::Val{N}) where {V,N}
+    out = Vector{Union{Missing,fieldtype(V, N)}}(undef, length(matches))
+    @inbounds for i in eachindex(matches)
+        out[i] = found[i] ? getproperty(matches[i], N) : missing
+    end
+    return out
+end

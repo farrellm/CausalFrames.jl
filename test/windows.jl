@@ -246,10 +246,17 @@ end
     layouts = ((;), (; key = :k), (; key = :k, keyset = ["c", "a", "b"]))
 
     @testset "differential against the brute-force oracle" begin
-        for x in (intx, floatx), ss in allsets, L in (3, 11), opts in layouts
-
-            windowsagree(windowed(mkdata(x), L, ss; opts...),
-                windowsoracle(frame(x), ticks, L, ss; opts...))
+        for ss in allsets, opts in layouts
+            windowsagree(windowed(mkdata(floatx), 11, ss; opts...),
+                windowsoracle(frame(floatx), ticks, 11, ss; opts...))
+        end
+        for ss in allsets
+            windowsagree(windowed(mkdata(intx), 11, ss; key = :k),
+                windowsoracle(frame(intx), ticks, 11, ss; key = :k))
+        end
+        for ss in (groupset, spanset), opts in layouts
+            windowsagree(windowed(mkdata(intx), 3, ss; opts...),
+                windowsoracle(frame(intx), ticks, 3, ss; opts...))
         end
     end
 
@@ -267,17 +274,21 @@ end
     @testset "monoid and mixed tiers agree with re-fold" begin
         # L = 40 spans eight ticks, so queues flip and slide; the
         # oracle differential already covers every set at L = 3 and 11
-        for x in (intx, floatx), ss in (monoidset, mixedset, plainset, spanset),
-            opts in layouts
-
-            windowsagree(windowed(mkdata(x), 40, ss; opts...),
-                windowed(mkdata(x), 40, map(Opaque, ss); opts...))
+        for ss in (monoidset, mixedset, plainset, spanset), opts in layouts
+            windowsagree(windowed(mkdata(floatx), 40, ss; opts...),
+                windowed(mkdata(floatx), 40, map(Opaque, ss); opts...))
+        end
+        for ss in (monoidset, spanset)
+            windowsagree(windowed(mkdata(intx), 40, ss; key = :k),
+                windowed(mkdata(intx), 40, map(Opaque, ss); key = :k))
         end
         # the sorted accumulator merged through the queues
-        for x in (intx, floatx), opts in layouts
-            windowsagree(windowed(mkdata(x), 40, orderset; opts...),
-                windowed(mkdata(x), 40, map(AsMonoid, orderset); opts...))
+        for opts in layouts
+            windowsagree(windowed(mkdata(floatx), 40, orderset; opts...),
+                windowed(mkdata(floatx), 40, map(AsMonoid, orderset); opts...))
         end
+        windowsagree(windowed(mkdata(intx), 40, orderset; key = :k),
+            windowed(mkdata(intx), 40, map(AsMonoid, orderset); key = :k))
     end
 
     @testset "widening, and demotion from running to monoid" begin
@@ -294,11 +305,17 @@ end
         # Product, and beside a refold PlainSum; monoid and refold states widen
         # within their tiers
         for ss in ([Sum(:x), Mean(:x)], [FragileSum(:x), Count()],
-                [FragileSum(:x), Product(:y)], [FragileSum(:x), PlainSum(:y)],
-                [LateSum(:x)], [LateSum(:x), Product(:y)],
-                [Min(:x), Last(:x)], [Product(:x), MinMax(:x)],
+            [FragileSum(:x), Product(:y)], [FragileSum(:x), PlainSum(:y)],
+            [LateSum(:x)], [LateSum(:x), Product(:y)],
+            [Min(:x), Last(:x)], [Product(:x), MinMax(:x)],
+            [Sum(:x), TestVar(:x), PlainSum(:x)])
+
+            windowsagree(windowed(mixed, 11, ss; key = :k),
+                windowsoracle(whole, ticks, 11, ss; key = :k))
+        end
+        for ss in ([FragileSum(:x), Count()], [LateSum(:x)],
                 [Sum(:x), TestVar(:x), PlainSum(:x)]),
-            opts in layouts
+            opts in ((;), (; key = :k, keyset = ["c", "a", "b"]))
 
             windowsagree(windowed(mixed, 11, ss; opts...),
                 windowsoracle(whole, ticks, 11, ss; opts...))

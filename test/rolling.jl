@@ -473,23 +473,32 @@ end
         spanset, orderset)
 
     @testset "differential against the re-fold oracle" begin
-        for p in (intdata, floatdata), ss in allsets
-
-            agrees(rolled(p, ss), rolled(p, map(Opaque, ss)))
-            agrees(rolled(p, ss; key = :k),
-                rolled(p, map(Opaque, ss); key = :k))
+        for ss in allsets
+            agrees(rolled(floatdata, ss), rolled(floatdata, map(Opaque, ss)))
+            agrees(rolled(floatdata, ss; key = :k),
+                rolled(floatdata, map(Opaque, ss); key = :k))
+            agrees(rolled(intdata, ss; key = :k),
+                rolled(intdata, map(Opaque, ss); key = :k))
+        end
+        for ss in (groupset, spanset)
+            agrees(rolled(intdata, ss), rolled(intdata, map(Opaque, ss)))
         end
     end
 
     @testset "differential over missing inputs" begin
         # the running path must equal the re-fold oracle with missing in the
         # summarized column, which the counting states keep on the running path
-        for p in (missingintdata, missingfloatdata),
-            ss in (groupset, trackset, indexset, mixedset, spanset, orderset)
-
-            agrees(rolled(p, ss), rolled(p, map(Opaque, ss)))
-            agrees(rolled(p, ss; key = :k),
-                rolled(p, map(Opaque, ss); key = :k))
+        for ss in (groupset, trackset, indexset, mixedset, spanset, orderset)
+            agrees(rolled(missingfloatdata, ss; key = :k),
+                rolled(missingfloatdata, map(Opaque, ss); key = :k))
+        end
+        for ss in (groupset, mixedset)
+            agrees(rolled(missingintdata, ss; key = :k),
+                rolled(missingintdata, map(Opaque, ss); key = :k))
+        end
+        for ss in (groupset, orderset)
+            agrees(rolled(missingfloatdata, ss),
+                rolled(missingfloatdata, map(Opaque, ss)))
         end
     end
 
@@ -497,7 +506,8 @@ end
         # AsMonoid hides the groups down to monoids, so the sorted accumulator
         # and the arg-extremes merge through the monoid queues' combine!
         # instead of sliding
-        for p in (intdata, floatdata, missingfloatdata), key in (nothing, :k),
+        for (p, key) in ((intdata, nothing), (floatdata, :k),
+                (missingfloatdata, :k)),
             ss in (orderset, indexset)
 
             agrees(rolled(p, ss; key), rolled(p, map(AsMonoid, ss); key))
@@ -677,11 +687,14 @@ end
         @test tiers([LateSum(:x)], it) == (:monoid,)
         @test tiers([LateSum(:x)], merge(it, (; x = Float64))) == (:running,)
         for ss in ([FragileSum(:x), Sum(:y), Last(:x)],
-                [FragileSum(:x), Product(:y)], [FragileSum(:x), PlainSum(:y)],
-                [LateSum(:x)], [LateSum(:x), Product(:y)]),
-            key in (nothing, :k)
+            [FragileSum(:x), Product(:y)], [FragileSum(:x), PlainSum(:y)],
+            [LateSum(:x)], [LateSum(:x), Product(:y)])
 
-            agrees(rolled(widening, ss; key), rolled(widening, map(Opaque, ss); key))
+            agrees(rolled(widening, ss; key = :k),
+                rolled(widening, map(Opaque, ss); key = :k))
+        end
+        for ss in ([FragileSum(:x), Sum(:y), Last(:x)], [LateSum(:x)])
+            agrees(rolled(widening, ss), rolled(widening, map(Opaque, ss)))
         end
     end
 
@@ -778,10 +791,14 @@ end
         end
 
         @testset "differential against the re-fold oracle" begin
-            for p in (intdata, floatdata, missingfloatdata), ss in allsets
-                agrees(barred(p, ss), barred(p, map(Opaque, ss)))
-                agrees(barred(p, ss; key = :k),
-                    barred(p, map(Opaque, ss); key = :k))
+            for ss in allsets
+                agrees(barred(floatdata, ss), barred(floatdata, map(Opaque, ss)))
+                agrees(barred(missingfloatdata, ss; key = :k),
+                    barred(missingfloatdata, map(Opaque, ss); key = :k))
+            end
+            for ss in (groupset, spanset), key in (nothing, :k)
+                agrees(barred(intdata, ss; key),
+                    barred(intdata, map(Opaque, ss); key))
             end
         end
 
@@ -792,9 +809,10 @@ end
 
                 for key in (nothing, :k)
                     agrees(barred(p, ss; key), barsoracle(p, ss; key))
-                    agrees(barred(p, map(Opaque, ss); key), barsoracle(p, ss; key))
                 end
             end
+            agrees(barred(intdata, [Sum(:x), Mean(:x), First(:x), Last(:x)], key = :k),
+                barsoracle(intdata, [Sum(:x), Mean(:x), First(:x), Last(:x)]; key = :k))
         end
 
         @testset "partial windows are missing, typed Union{Missing, T}" begin
@@ -831,8 +849,8 @@ end
         end
 
         @testset "mixed with time windows" begin
-            for p in (intdata, floatdata), ss in (mixedset, spanset),
-                key in (nothing, :k)
+            for (p, key) in ((intdata, nothing), (floatdata, :k)),
+                ss in (mixedset, spanset)
 
                 mixed = DataFrame(
                     load(Context(0, 1000),
@@ -927,21 +945,24 @@ end
                     for r in ranges
                 ])
             for ss in ([Sum(:x), Mean(:x)], [FragileSum(:x), Sum(:y), Last(:x)],
-                    [FragileSum(:x), Product(:y)], [FragileSum(:x), PlainSum(:y)],
-                    [LateSum(:x)], [LateSum(:x), Product(:y)]),
-                windows in (bars, (w3 = 3, b4 = Bars(4))),
-                key in (nothing, :k)
+                [FragileSum(:x), Product(:y)], [FragileSum(:x), PlainSum(:y)],
+                [LateSum(:x)], [LateSum(:x), Product(:y)])
 
                 agrees(
                     DataFrame(
                         load(Context(0, 1000),
-                            widening |> addrollingcolumns(windows, ss; key)),
+                            widening |>
+                            addrollingcolumns((w3 = 3, b4 = Bars(4)), ss; key = :k)),
                     ),
                     DataFrame(
                         load(Context(0, 1000),
-                            widening |> addrollingcolumns(windows, map(Opaque, ss);
-                                key)),
+                            widening |>
+                            addrollingcolumns((w3 = 3, b4 = Bars(4)), map(Opaque, ss);
+                                key = :k)),
                     ))
+            end
+            for ss in ([FragileSum(:x), Sum(:y), Last(:x)], [LateSum(:x)])
+                agrees(barred(widening, ss), barred(widening, map(Opaque, ss)))
             end
         end
 

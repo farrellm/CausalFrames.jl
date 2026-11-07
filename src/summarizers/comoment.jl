@@ -209,7 +209,7 @@ end
 # Move the shifts to (ka, kb). With δ the move,
 # Σ(a - ka - δa)(b - kb - δb) = Σab - δb·Σa - δa·Σb + n·δa·δb, each term folded
 # into the compensated sums exactly (to eps² of the term).
-@inline function recentre!(st::CoMomentState{N,A,B,T,M,S,W}, ka::T,
+@noinline function recentre!(st::CoMomentState{N,A,B,T,M,S,W}, ka::T,
     kb::T) where {N,A,B,T,M,S,W}
     n = convert(T, st.n)
     sa = st.sa

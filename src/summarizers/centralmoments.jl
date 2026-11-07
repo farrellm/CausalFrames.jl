@@ -115,7 +115,7 @@ end
     return (s1 + sign * d, s2 + sign * d2, s3 + sign * (d2 * d),
         s4 + sign * (d2 * d2))
 end
-@inline function foldpowers(s1::Compensated{A}, s2::Compensated{A},
+@noinline function foldpowers(s1::Compensated{A}, s2::Compensated{A},
     s3::Compensated{A}, s4::Compensated{A}, (dh, dl)::Tuple{A,A},
     sign::Int) where {A}
     p2, e2, p3, e3, p4, e4 = powerpairs(dh, dl)
@@ -135,7 +135,7 @@ end
 #   Σ(d-δ)²  = S2 - 2δ·S1 + nδ²
 #   Σ(d-δ)³  = S3 - 3δ·S2 + 3δ²·S1 - nδ³
 #   Σ(d-δ)⁴  = S4 - 4δ·S3 + 6δ²·S2 - 4δ³·S1 + nδ⁴
-@inline function shiftpowers(n::Int, s1, s2, s3, s4, δ)
+@noinline function shiftpowers(n::Int, s1, s2, s3, s4, δ)
     δ2 = δ * δ
     δ3 = δ2 * δ
     return (s1 - n * δ, s2 - 2δ * s1 + n * δ2, s3 - 3δ * s2 + 3δ2 * s1 - n * δ3,
@@ -145,7 +145,7 @@ end
 # The compensated form takes δ as a pair and carries every coefficient as a
 # double-double (`dd*` and `addscaled`, in compensated.jl), folding each
 # product into the sums error-free, as `CoMoment`'s `recentre!` does.
-@inline function shiftpowers(n::Int, s1::Compensated{A}, s2::Compensated{A},
+@noinline function shiftpowers(n::Int, s1::Compensated{A}, s2::Compensated{A},
     s3::Compensated{A}, s4::Compensated{A}, δ::Tuple{A,A}) where {A}
     δ2 = ddmul(δ, δ)
     δ3 = ddmul(δ2, δ)
@@ -224,7 +224,7 @@ end
 
 # Move the shift to the row k just folded, whose deviation δ = k - st.k is the
 # shift's move.
-@inline function recentre!(st::CentralMomentState, k, δ)
+@noinline function recentre!(st::CentralMomentState, k, δ)
     st.s1, st.s2, st.s3, st.s4 = shiftpowers(st.n, st.s1, st.s2, st.s3, st.s4, δ)
     st.k = k
     st.age = 0
@@ -274,7 +274,7 @@ end
     m4 = s4 - r * (4 * s3 - r * (6 * s2 - 3 * r * s1))
     return (max(m2, zero(m2)), m3, max(m4, zero(m4)))
 end
-@inline function centralvalue(n::Int, s1::Compensated{A}, s2::Compensated{A},
+@noinline function centralvalue(n::Int, s1::Compensated{A}, s2::Compensated{A},
     s3::Compensated{A}, s4::Compensated{A}) where {A}
     compfinite(s1) && compfinite(s2) && compfinite(s3) && compfinite(s4) ||
         return centralvalue(n, compvalue(s1), compvalue(s2), compvalue(s3),

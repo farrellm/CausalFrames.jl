@@ -399,8 +399,8 @@ const JETTIERSETS = (
         CausalFrames.setvaltype!(rs, cfg, tg)
         wins = map((lb, e, T) -> (lb, e, Vector{T}(undef, 3)), lookbacks,
             rs.emptyrows, rs.valtypes)
-        JET.@test_opt CausalFrames.rollsegment!(wins, tiers, lnt, 1, snt, 1,
-            true, lookbacks, kn, outs)
+        JET.@test_opt CausalFrames.rollsegment!(wins, tiers, tg.derived,
+            tg.perm, lnt, 1, snt, 1, true, lookbacks, kn, outs)
         JET.@test_opt CausalFrames.leadinsegment!(tiers, snt, 1, 6, lookbacks,
             kn)
     end
@@ -428,10 +428,10 @@ end
             ), cfg)
         CausalFrames.preparewindows!(st, cfg, types)
         RT, emptyrow = CausalFrames.windowtypes(st, cfg)
-        JET.@test_opt CausalFrames.windowrows!(RT[], st.tiers, 1, nt, ticks,
-            st.prevkeys, 5, kn, outs, emptyrow, ks)
-        JET.@test_opt CausalFrames.flushwindows!(RT[], st.tiers, 1, ticks,
-            st.prevkeys, 5, kn, outs, emptyrow, ks)
+        JET.@test_opt CausalFrames.windowrows!(RT[], st.tiers, st.derived,
+            st.perm, 1, nt, ticks, st.prevkeys, 5, kn, outs, emptyrow, ks)
+        JET.@test_opt CausalFrames.flushwindows!(RT[], st.tiers, st.derived,
+            st.perm, 1, ticks, st.prevkeys, 5, kn, outs, emptyrow, ks)
     end
 end
 

@@ -85,23 +85,38 @@ function (p::RowGroupProducer)()
     return pullclipped!(p.clip, p.groups, p.sort)
 end
 
+struct RowGroupFrames
+    dataset::Parquet2.Dataset
+    clip::SourceClip
+    kept::Vector{String}
+    rgs::Vector{Int}
+end
+
+Base.iterate(f::RowGroupFrames, i::Int = 1) =
+    i > length(f.rgs) ? nothing :
+    (rowgroupframe(f.dataset[f.rgs[i]], f.clip, f.kept), i + 1)
+
 # Open the file and pick its row groups by their statistics. In a time-ordered
 # file the groups before the window are skipped and the first one after it ends
 # the read. A `sort = true` read can't rely on the order, so it reads every
 # group overlapping the window.
 function open!(p::RowGroupProducer)
-    p.dataset = Parquet2.Dataset(p.clip.path)
-    filenames = String[String(n) for n in Base.names(p.dataset)]
+    ds = Parquet2.Dataset(p.clip.path)
+    p.dataset = ds
+    filenames = String[String(n) for n in Base.names(ds)]
     p.timecol = timesourcename(filenames, p.clip.time, p.clip.rename)
     kept = keptfilecolumns(p.clip, filenames)
-    placed = Iterators.map(rg -> (rg, rowgroupwindow(p, rg)),
-        1:Parquet2.nrowgroups(p.dataset))
-    picked =
-        p.sort ? Iterators.filter(g -> g[2] === :overlaps, placed) :
-        Iterators.filter(g -> g[2] !== :before,
-            Iterators.takewhile(g -> g[2] !== :after, placed))
-    p.groups = PullCursor(
-        Iterators.map(g -> rowgroupframe(p.dataset[g[1]], p.clip, kept), picked))
+    rgs = Int[]
+    for rg in 1:Parquet2.nrowgroups(ds)
+        w = rowgroupwindow(p, rg)
+        if p.sort
+            w === :overlaps && push!(rgs, rg)
+        else
+            w === :after && break
+            w === :before || push!(rgs, rg)
+        end
+    end
+    p.groups = PullCursor(RowGroupFrames(ds, p.clip, kept, rgs))
     return nothing
 end
 

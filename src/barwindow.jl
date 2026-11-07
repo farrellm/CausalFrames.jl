@@ -65,8 +65,9 @@ end
 Rows leave the window oldest first, so a wrapped [`downdate!`](@ref) sees the
 order it expects. [`widenstate`](@ref) re-types the state and keeps its window.
 """
-function barwindow(s::Summarizer, n::Integer, intypes::NamedTuple;
-    hoistedby::Union{Nothing,Summarizer} = nothing)
+function barwindow(@nospecialize(s::Summarizer), n::Integer,
+    @nospecialize(intypes::NamedTuple);
+    @nospecialize(hoistedby::Union{Nothing,Summarizer} = nothing))
     checkpositive(n, "barwindow count")
     protos, requested, terms =
         prototypes(Summarizer[s], Symbol[], "barwindow")
@@ -74,20 +75,20 @@ function barwindow(s::Summarizer, n::Integer, intypes::NamedTuple;
         Int(n), intypes)
 end
 
-windowterms(terms::NamedTuple, ::Nothing) = terms
-windowterms(terms::NamedTuple, owner::Summarizer) =
+windowterms(@nospecialize(terms::NamedTuple), ::Nothing) = terms
+windowterms(@nospecialize(terms::NamedTuple), @nospecialize(owner::Summarizer)) =
     HoistedTerms{keys(terms),hoistednames(owner, keys(terms))}()
 
 # A window's hoisted row terms, by name: columns of its rows, already
 # evaluated under the names H.
 struct HoistedTerms{K,H} end
 
-termnames(terms::NamedTuple) = keys(terms)
+termnames(@nospecialize(terms::NamedTuple)) = keys(terms)
 termnames(::HoistedTerms{K}) where {K} = K
 
 # The row terms against the input types, at construction and on every
 # widening (a later chunk may add a column of a term's name).
-function checkbarterms(terms, intypes::NamedTuple)
+function checkbarterms(@nospecialize(terms), @nospecialize(intypes::NamedTuple))
     for k in termnames(terms)
         haskey(intypes, k) && throw(
             ArgumentError(
@@ -97,8 +98,9 @@ function checkbarterms(terms, intypes::NamedTuple)
     return checkhoisted(terms, intypes)
 end
 
-checkhoisted(::NamedTuple, ::NamedTuple) = nothing
-function checkhoisted(::HoistedTerms{K,H}, intypes::NamedTuple) where {K,H}
+checkhoisted(@nospecialize(::NamedTuple), @nospecialize(::NamedTuple)) = nothing
+function checkhoisted(::HoistedTerms{K,H},
+    @nospecialize(intypes::NamedTuple)) where {K,H}
     for (k, h) in zip(K, H)
         haskey(intypes, h) || throw(
             ArgumentError(
@@ -121,7 +123,7 @@ end
 # summarizer's window, scoped by the inner one's name, issue #151),
 # `prototypes` moves all but the first apart and their `Scoped` wrappers alias
 # them back under these names for the window.
-hoistednames(owner::Summarizer, ks::Tuple{Vararg{Symbol}}) =
+hoistednames(@nospecialize(owner::Summarizer), ks::Tuple{Vararg{Symbol}}) =
     map(k -> hoistedname(first(keys(emptyvalue(owner))), k), ks)
 hoistedname(scope::Symbol, k::Symbol) = Symbol("#barterm#", scope, "#", k)
 
@@ -160,7 +162,8 @@ keys(terms), only(terms).f === double
 ((Symbol("#barterm#lastsum#d"),), true)
 ```
 """
-function barterms(s::Summarizer; hoistedby::Summarizer)
+function barterms(@nospecialize(s::Summarizer);
+    @nospecialize(hoistedby::Summarizer))
     terms = prototypes(Summarizer[s], Symbol[], "barterms")[3]
     return NamedTuple{hoistednames(hoistedby, keys(terms))}(
         map((k, f) -> BarTerm{k}(f), keys(terms), values(terms)))
@@ -220,8 +223,8 @@ term = Covariance(:x, :d => r -> 2r.x)
 ((:x, :y), nothing, (:d, :x, Symbol("#barterm#lastcov#d")))
 ```
 """
-function barinputcolumns(s::Summarizer;
-    hoistedby::Union{Nothing,Summarizer} = nothing)
+function barinputcolumns(@nospecialize(s::Summarizer);
+    @nospecialize(hoistedby::Union{Nothing,Summarizer} = nothing))
     protos, _, terms = prototypes(Summarizer[s], Symbol[], "barinputcolumns")
     cols = readcolumns(protos)
     (cols === nothing || isempty(terms)) && return cols
@@ -239,12 +242,14 @@ end
 # methods differ only in where a term's value comes from: evaluated from the
 # whole input row, or (hoisted) read under its hoisted name and stored under
 # its own. With no terms, the row is cut on input.
-function barwindowtypes(::NamedTuple{()}, intypes::NamedTuple, protos::Tuple)
+function barwindowtypes(::NamedTuple{()}, @nospecialize(intypes::NamedTuple),
+    @nospecialize(protos::Tuple))
     base = storedbase(intypes, protos, ())
     return base, base
 end
 
-function barwindowtypes(terms::NamedTuple, intypes::NamedTuple, protos::Tuple)
+function barwindowtypes(@nospecialize(terms::NamedTuple),
+    @nospecialize(intypes::NamedTuple), @nospecialize(protos::Tuple))
     R0 = storerowtype(intypes)
     termtypes = map((k, f) -> checktermtype(k, termtype(f, R0)), keys(terms),
         values(terms))
@@ -252,8 +257,9 @@ function barwindowtypes(terms::NamedTuple, intypes::NamedTuple, protos::Tuple)
     merge(storedbase(intypes, protos, ()), NamedTuple{keys(terms)}(termtypes))
 end
 
-function barwindowtypes(::HoistedTerms{K,hs}, intypes::NamedTuple,
-    protos::Tuple) where {K,hs}
+function barwindowtypes(::HoistedTerms{K,hs},
+    @nospecialize(intypes::NamedTuple),
+    @nospecialize(protos::Tuple)) where {K,hs}
     base = storedbase(intypes, protos, hs)
     # `termvalues` typed each chunk's column concretely (`BarTerm`), but a
     # widening promotes them across chunks (`Int` and `String` give `Any`),
@@ -270,7 +276,8 @@ checktermtype(k::Symbol, T) =
     throw(ArgumentError("barwindow row term $(repr(k)) must infer a concrete type, got $T"))
 
 # The stored input columns, those named `hoisted` aside.
-storedbase(intypes::NamedTuple, protos::Tuple, hoisted::Tuple{Vararg{Symbol}}) =
+storedbase(@nospecialize(intypes::NamedTuple), @nospecialize(protos::Tuple),
+    hoisted::Tuple{Vararg{Symbol}}) =
     projectinput(Base.structdiff(intypes, NamedTuple{hoisted}),
         storedcolumns(protos, Symbol[]))
 
@@ -305,7 +312,7 @@ valvalue(::Val{X}) where {X} = X
 # `running` holds windowed group states, `queue` the other
 # monoids (`nothing` when there are none), `derived` the fieldless dependents.
 # The ring holds n + 1 rows, so the row leaving is still there to downdate.
-mutable struct BarWindowState{R,R0,O,V,SR<:Tuple,Q,SD<:Tuple,P,PR<:Tuple,
+mutable struct BarWindowState{R,R0,O,V,SR<:Tuple,Q,SD<:Tuple,P,
     TM} <: SummarizerState
     const n::Int
     const ring::RowRing{R}
@@ -313,14 +320,14 @@ mutable struct BarWindowState{R,R0,O,V,SR<:Tuple,Q,SD<:Tuple,P,PR<:Tuple,
     const queue::Q
     const derived::SD
     const perm::Val{P}
-    const protos::PR   # for widenstate
-    const terms::TM    # a NamedTuple of functions, or HoistedTerms
+    const protos::Tuple  # for widenstate
+    const terms::TM      # a NamedTuple of functions, or HoistedTerms
 end
 
 BarWindowState{R,R0,O,V}(n::Int, ring::RowRing{R}, running::SR, queue::Q,
-    derived::SD, perm::Val{P}, protos::PR,
-    terms::TM) where {R,R0,O,V,SR,Q,SD,P,PR,TM} =
-    BarWindowState{R,R0,O,V,SR,Q,SD,P,PR,TM}(n, ring, running, queue, derived,
+    derived::SD, perm::Val{P}, protos::Tuple,
+    terms::TM) where {R,R0,O,V,SR,Q,SD,P,TM} =
+    BarWindowState{R,R0,O,V,SR,Q,SD,P,TM}(n, ring, running, queue, derived,
         perm, protos, terms)
 
 # The window's own tuple folds. The transforms' helpers (`updateall!`,
@@ -378,9 +385,14 @@ mutable struct BarQueue{S<:Tuple}
     out::S     # scratch: the value's combine, borrowed until the next one
 end
 
-BarQueue(protos::S, n::Int) where {S<:Tuple} =
-    BarQueue{S}([map(fresh, protos) for _ in 1:n], 1, 0, map(fresh, protos),
-        map(fresh, protos), map(fresh, protos))
+function BarQueue(protos::S, n::Int) where {S<:Tuple}
+    front = Vector{S}(undef, n)
+    for i in 1:n
+        @inbounds front[i] = map(fresh, protos)
+    end
+    return BarQueue{S}(front, 1, 0, map(fresh, protos), map(fresh, protos),
+        map(fresh, protos))
+end
 
 @inline queuepush!(::Nothing, row) = nothing
 @inline queuepush!(q::BarQueue, row) = barupdate!(q.back, row)
