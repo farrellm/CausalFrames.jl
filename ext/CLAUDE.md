@@ -135,7 +135,7 @@ error — a wrong answer is unacceptable, a slower one is fine:
 - `test/runtests.jl` loads both packages, so `backend = :duckdb`/`:parquet2`
   covers all four read/write combinations in one process. The cases that
   depend on a backend being *absent* — no backend loaded, exactly one loaded —
-  have to run in subprocesses, via `insubprocess` in `test/parquet.jl`
+  have to run in subprocesses, via `insubprocess` in `test/fixtures.jl`
 - A new backend is wired in `Project.toml` under `[weakdeps]` and
   `[extensions]`, plus `[extras]`/`[targets]` so the tests can load it; the
   module name must match both the file name and the extension key

@@ -541,8 +541,8 @@ end
 end
 @inline groupisless(a::Pair, b::Pair) = keyisless(first(a), first(b))
 
-# For the once-per-run drains (`summarize`'s and `lastrow`'s flush); the
-# per-cycle drain reuses `closecycle!`'s buffer. `lastrow` passes a bare KeyDict.
+# For `lastrow`'s once-per-run flush, over a bare KeyDict; `summarize`'s flush
+# (`sortedrows`) and the per-cycle drain reuse the table's `sortinto!` buffer.
 sortedgroups(d::AbstractDict) = sort!(collect(d); lt = groupisless)
 sortedgroups(gt::GroupTable) = sortedgroups(gt.table)
 
@@ -677,7 +677,7 @@ mutable struct SummaryFold
     stateprotos::Any       # state tuple serving as the template for fresh copies
     groups::Any            # a state tuple, GroupTable or DenseGroups (`newgroups`)
     cycletime::Any         # summarizecycles: the open cycle's time
-    const cfg::FoldConfig  # abstract, a dispatch per chunk
+    const cfg::FoldConfig  # untyped fields, a dispatch per chunk
     const keycols::Vector{Symbol}  # checked against the first chunk
     const terms::NamedTuple  # the row terms, from `prototypes`
     const newcols::Tuple{Vararg{Symbol}}  # output columns appended to the input

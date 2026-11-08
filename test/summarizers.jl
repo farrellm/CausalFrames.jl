@@ -506,7 +506,7 @@ end
     for f in interface
         @test (f, any(m -> any(isscoped, argtypes(m)), methods(f))) == (f, true)
     end
-    # every summarizing transform, against each summarizer alone
+    # every summarizing transform, against the clashing summarizers apart
     q = readtable(DataFrame(time = 1:6, x = [1.0, 2, 4, 8, 3, 5], k = [1, 2, 1, 2, 1, 2]))
     for f in (
         ss -> summarize(ss; key = :k),
