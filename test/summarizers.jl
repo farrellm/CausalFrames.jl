@@ -506,7 +506,7 @@ end
     for f in interface
         @test (f, any(m -> any(isscoped, argtypes(m)), methods(f))) == (f, true)
     end
-    # every summarizing transform, against the clashing summarizers apart
+    # every summarizing transform, against each summarizer alone
     q = readtable(DataFrame(time = 1:6, x = [1.0, 2, 4, 8, 3, 5], k = [1, 2, 1, 2, 1, 2]))
     for f in (
         ss -> summarize(ss; key = :k),
@@ -518,8 +518,8 @@ end
         ss -> summarizewindows(clock(2), 3, ss; key = :k),
     )
         whole = DataFrame(load(Context(0, 10), q |> f(clash)))
-        for ss in ([Std(:x), Count()], [Variance(:x; corrected = false)])
-            alone = DataFrame(load(Context(0, 10), q |> f(ss)))
+        for s in clash
+            alone = DataFrame(load(Context(0, 10), q |> f([s])))
             for n in names(alone)
                 @test isequal(whole[!, n], alone[!, n])
             end

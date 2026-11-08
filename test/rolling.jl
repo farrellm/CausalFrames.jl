@@ -809,10 +809,9 @@ end
 
                 for key in (nothing, :k)
                     agrees(barred(p, ss; key), barsoracle(p, ss; key))
+                    agrees(barred(p, map(Opaque, ss); key), barsoracle(p, ss; key))
                 end
             end
-            agrees(barred(intdata, [Sum(:x), Mean(:x), First(:x), Last(:x)], key = :k),
-                barsoracle(intdata, [Sum(:x), Mean(:x), First(:x), Last(:x)]; key = :k))
         end
 
         @testset "partial windows are missing, typed Union{Missing, T}" begin
