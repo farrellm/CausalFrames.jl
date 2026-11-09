@@ -781,15 +781,6 @@ end
           DataFrame(load(ctx, readcsv(csvpath; types = tt)))
 end
 
-# Runs `script` in a fresh Julia, which is the only way to see the package with
-# a backend *missing* — this process has both loaded. Serial by construction:
-# concurrent Julia processes race the precompile cache.
-function insubprocess(script::String)
-    return read(
-        `$(Base.julia_cmd()) --startup-file=no --project=$(Base.active_project()) -e $script`,
-        String)
-end
-
 @testset "parquet operators without a backend" begin
     # Loading CausalFrames alone must not pull in either backend, and both
     # operators must name both packages.
@@ -827,7 +818,7 @@ end
     using CausalFrames, DataFrames
     dir = mktempdir()
     src = joinpath(dir, "src.parquet")
-    scan(Context(0, 100), clock(1) |> addcolumns(r -> (; x = r.time * 1.5)) |>
+    scan(Context(0, 100), readtable(DataFrame(time = 0:99, x = (0:99) .* 1.5)) |>
                           writeparquet(src))
     df = DataFrame(load(Context(10, 20), readparquet(src)))
     @assert nrow(df) == 10 "got \\\$(nrow(df)) rows"

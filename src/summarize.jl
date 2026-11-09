@@ -415,11 +415,12 @@ concreteterm(T) = isconcretetype(T)
 # every column a summarizer reads, or `nothing` (keep all) when one may read
 # any. A stored row carries every kept column, so an unread column costs a copy
 # per row, and an unread `Union{Missing,T}` one boxes every row (issue #98).
-storedcolumns(protos::Tuple, keycols) = readcolumns(protos, Symbol[:time; keycols])
+storedcolumns(@nospecialize(protos::Tuple), keycols) =
+    readcolumns(protos, Symbol[:time; keycols])
 
 # `cols` and the union of `protos`' `inputcolumns`, or `nothing` when one may
 # read any column.
-function readcolumns(protos::Tuple, cols::Vector{Symbol} = Symbol[])
+function readcolumns(@nospecialize(protos::Tuple), cols::Vector{Symbol} = Symbol[])
     for s in protos
         ins = inputcolumns(s)
         ins === nothing && return nothing
@@ -443,8 +444,9 @@ promotetypes(a::NamedTuple, b::NamedTuple) =
               for k in keys(b)),
     )
 
-newstates(protos::Tuple, intypes::NamedTuple) = map(s -> fresh(s, intypes), protos)
-widenstates(states::Tuple, intypes::NamedTuple) =
+newstates(@nospecialize(protos::Tuple), @nospecialize(intypes::NamedTuple)) =
+    map(s -> fresh(s, intypes), protos)
+widenstates(@nospecialize(states::Tuple), @nospecialize(intypes::NamedTuple)) =
     map(st -> widenstate(st, intypes), states)
 
 # The per-key state tuples of the keyed transforms, plus two buffers that make
@@ -539,8 +541,8 @@ end
 end
 @inline groupisless(a::Pair, b::Pair) = keyisless(first(a), first(b))
 
-# For the once-per-run drains (`summarize`'s and `lastrow`'s flush); the
-# per-cycle drain reuses `closecycle!`'s buffer. `lastrow` passes a bare KeyDict.
+# For `lastrow`'s once-per-run flush, over a bare KeyDict; `summarize`'s flush
+# (`sortedrows`) and the per-cycle drain reuse the table's `sortinto!` buffer.
 sortedgroups(d::AbstractDict) = sort!(collect(d); lt = groupisless)
 sortedgroups(gt::GroupTable) = sortedgroups(gt.table)
 
@@ -604,13 +606,24 @@ struct DenseGroups{S<:Tuple}
     folded::Vector{Bool}
 end
 
-densegroups(stateprotos::S, n::Int) where {S<:Tuple} =
-    DenseGroups{S}(S[map(fresh, stateprotos) for _ in 1:n], fill(false, n))
+function densegroups(stateprotos::S, n::Int) where {S<:Tuple}
+    states = Vector{S}(undef, n)
+    for i in 1:n
+        @inbounds states[i] = map(fresh, stateprotos)
+    end
+    return DenseGroups{S}(states, fill(false, n))
+end
 
 newgroups(ks::KeySet, stateprotos::Tuple, ::NamedTuple) =
     densegroups(stateprotos, length(ks.keys))
-widengroups(dg::DenseGroups, ::S, intypes::NamedTuple, ::KeySet) where {S<:Tuple} =
-    DenseGroups{S}(S[widenstates(gs, intypes) for gs in dg.states], dg.folded)
+function widengroups(dg::DenseGroups, ::S, intypes::NamedTuple,
+    ::KeySet) where {S<:Tuple}
+    states = Vector{S}(undef, length(dg.states))
+    for i in eachindex(dg.states)
+        @inbounds states[i] = widenstates(dg.states[i], intypes)
+    end
+    return DenseGroups{S}(states, dg.folded)
+end
 
 # A declared key set's key names, which a row's key is looked up by.
 declarednames(::KeySet{NamedTuple{KN,T}}) where {KN,T} = Val(KN)
@@ -647,13 +660,12 @@ function closedense!(rows::Vector{RT}, dg::DenseGroups, ks::KeySet, t, outs::Val
     return rows
 end
 
-# A summarizing transform's configuration, held in `SummaryFold`'s abstract
-# field, so the chunk iterators and per-chunk drivers compile once for every
-# summarizer set.
-struct FoldConfig{P<:Tuple,G,O}
-    protos::P
-    grouping::G  # summaryspec's: the key names' `Val`, or a KeySet
-    outs::Val{O}
+# A summarizing transform's configuration, held in `SummaryFold` so the chunk
+# iterators and per-chunk drivers compile once for every summarizer set.
+struct FoldConfig
+    protos::Tuple
+    grouping::Any  # summaryspec's: the key names' `Val`, or a KeySet
+    outs::Val
 end
 
 # Per-run state shared by the summarization transforms (and intervalize), in
@@ -665,7 +677,7 @@ mutable struct SummaryFold
     stateprotos::Any       # state tuple serving as the template for fresh copies
     groups::Any            # a state tuple, GroupTable or DenseGroups (`newgroups`)
     cycletime::Any         # summarizecycles: the open cycle's time
-    const cfg::FoldConfig  # abstract, a dispatch per chunk
+    const cfg::FoldConfig  # untyped fields, a dispatch per chunk
     const keycols::Vector{Symbol}  # checked against the first chunk
     const terms::NamedTuple  # the row terms, from `prototypes`
     const newcols::Tuple{Vararg{Symbol}}  # output columns appended to the input
@@ -892,9 +904,15 @@ end
 
 # The grid of empty values for no data: a row per time per declared key, the
 # empty key for a keyless grid.
-function emptygrid(times, keys, e::NamedTuple)
+function emptygrid(@nospecialize(times), @nospecialize(keys),
+    @nospecialize(e::NamedTuple))
     RT = gridrowtype(eltype(times), eltype(keys), typeof(e))
-    return rowsframe(RT[convert(RT, gridrow(t, k, e)) for t in times for k in keys])
+    rows = Vector{RT}(undef, length(times) * length(keys))
+    i = 0
+    for t in times, k in keys
+        @inbounds rows[i+=1] = convert(RT, gridrow(t, k, e))
+    end
+    return rowsframe(rows)
 end
 
 """
@@ -944,8 +962,13 @@ function summarizeflush(fold::SummaryFold, stop)
 end
 
 # `summarize`'s keyed output, a row per key, sorted.
-sortedrows(gt::GroupTable, stop, outs::Val) =
-    rowsframe([summaryrow(stop, k, gs, outs) for (k, gs) in sortedgroups(gt)])
+function sortedrows(gt::GroupTable{K,S}, stop, outs::Val) where {K,S}
+    rows = rowtype(typeof(stop), K, S, outs)[]
+    for (k, gs) in sortinto!(gt.scratch, gt.table)
+        push!(rows, summaryrow(stop, k, gs, outs))
+    end
+    return rowsframe(rows)
+end
 
 """
     summarizecycles(summarizers; key = nothing,

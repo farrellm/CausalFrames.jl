@@ -59,7 +59,7 @@ function summarizewindows(clk::CausalPipeline, lookback, summarizers;
         summaryspec(summarizers, key, "summarizewindows"; keyset, grid = true)
     cfg = WindowConfig(keycols, keynames, lookback, protos, outs, ks, terms,
         storedcolumns(protos, keycols))
-    contexts = ctx -> (widenstart(ctx, lookback, "summarizewindows lookback"), ctx)
+    contexts = ctx -> (widenstart(ctx, cfg.lookback, "summarizewindows lookback"), ctx)
     # Each tick's window lies within the widened run, but a keyed tick's
     # vanish rows are decided against the tick before it, which a run from a
     # later start never saw.
@@ -78,33 +78,36 @@ end
 summarizewindows(p::CausalPipeline, clk::CausalPipeline, lookback, summarizers;
     kwargs...) = summarizewindows(clk, lookback, summarizers; kwargs...)(p)
 
-# The declared key set (`Nothing` when sparse, `nokeyset` when keyless) is a
-# type parameter, so it costs no per-row branch.
-struct WindowConfig{KN,LB,P<:Tuple,O,KS<:Union{Nothing,KeySet},TM<:NamedTuple}
+struct WindowConfig
     keycols::Vector{Symbol}
-    keynames::Val{KN}
-    lookback::LB
-    protos::P
-    outs::Val{O}
-    ks::KS
-    terms::TM  # the row terms, from `prototypes`
+    keynames::Val
+    lookback::Any
+    protos::Tuple
+    outs::Val
+    ks::Union{Nothing,KeySet}
+    terms::NamedTuple  # the row terms, from `prototypes`
     stored::Union{Nothing,Tuple{Vararg{Symbol}}}  # from `storedcolumns`
 end
 
 # Per-run state. The untyped fields are per-chunk setup; per-row work sits
 # behind the kernels' function barrier.
 mutable struct WindowState{T}
-    const cfg::WindowConfig  # abstract, a dispatch per chunk
+    const cfg::WindowConfig
     cur::IntervalCursor{T}
     ticks::Vector{T}    # pulled ticks not yet closed
     types::Union{Nothing,NamedTuple}  # promotion of every input schema seen
     tiers::Any          # WindowTiers for the realized state types
+    derived::Any        # derived tier's state tuple
+    perm::Any           # tier permutation Val
     valtype::Any        # the emitted value type
+    rowtype::Any        # the emitted row type
+    emptyrow::Any       # the empty row
     head::Int           # first buffered row not yet evicted
     prevkeys::Any       # Vector{K}: keys emitted with rows at the previous tick
     checked::Bool       # key columns validated against the input
     WindowState{T}(cur, cfg::WindowConfig) where {T} = new{T}(cfg, cur, T[],
-        nothing, nothing, nothing, 1, nothing, false)
+        nothing, nothing, nothing, nothing, nothing, nothing, nothing, 1,
+        nothing, false)
 end
 
 # The window structures for one tiering (tiers.jl), R being the stored row type.
@@ -115,18 +118,22 @@ end
 # with its last row, an emptied key's queue is dropped, the refold table is
 # filled at the tick from the live rows), so the first tier present, the
 # primary, gives the keys to emit.
-struct WindowTiers{R,B,G,MQ,GT,TG<:Tiering,SC}
-    buffer::B        # Vector{R}, or nothing
-    running::G       # RunningTable{K,SR}, or nothing
-    monoids::MQ      # KeyDict{K,MonoidQueues{ST,R,T}}, or nothing
-    refold::GT       # GroupTable{K,SF}, or nothing
-    tg::TG           # the partition of the states into tiers
-    scratch::SC      # Vector{Pair{K,V}} over the primary's dict: the sort buffer
+struct WindowTiers{R,B,G,MQ,GT,SR<:Tuple,ST<:Tuple,SF<:Tuple,SC}
+    buffer::B         # Vector{R}, or nothing
+    running::G        # RunningTable{K,SR}, or nothing
+    monoids::MQ       # KeyDict{K,MonoidQueues{ST,R,T}}, or nothing
+    refold::GT        # GroupTable{K,SF}, or nothing
+    runningprotos::SR # the running tier's templates
+    monoidprotos::ST  # the monoid tier's templates
+    refoldprotos::SF  # the refold tier's templates
+    scratch::SC       # Vector{Pair{K,V}} over the primary's dict: the sort buffer
 end
 
-WindowTiers{R}(buffer::B, running::G, monoids::MQ, refold::GT, tg::TG,
-    scratch::SC) where {R,B,G,MQ,GT,TG,SC} =
-    WindowTiers{R,B,G,MQ,GT,TG,SC}(buffer, running, monoids, refold, tg, scratch)
+WindowTiers{R}(buffer::B, running::G, monoids::MQ, refold::GT,
+    runningprotos::SR, monoidprotos::ST, refoldprotos::SF,
+    scratch::SC) where {R,B,G,MQ,GT,SR,ST,SF,SC} =
+    WindowTiers{R,B,G,MQ,GT,SR,ST,SF,SC}(buffer, running, monoids, refold,
+        runningprotos, monoidprotos, refoldprotos, scratch)
 
 @inline primarygroups(t::WindowTiers) =
     primarygroups(t.running, t.monoids, t.refold)
@@ -140,28 +147,40 @@ WindowTiers{R}(buffer::B, running::G, monoids::MQ, refold::GT, tg::TG,
 # running tier to the monoid tier. The refold table is filled only at ticks, so it
 # starts empty.
 function preparewindows!(st::WindowState, @nospecialize(cfg::WindowConfig),
-    types::NamedTuple)
+    @nospecialize(types::NamedTuple))
     tg = tiering(cfg.protos, types)
     K = storekeytype(types, cfg.keynames)
     R = storerowtype(types)
     st.prevkeys =
         st.prevkeys === nothing ? K[] : convert(Vector{K}, st.prevkeys)
     old = st.tiers
-    # The live rows start at the old head, if the old tiers buffered rows.
-    oldhead = old === nothing || old.buffer === nothing ? 1 : st.head
-    buffer = rebuildbuffer(tg, R, old)
-    running =
-        isempty(tg.running) ? nothing :
-        replayrunning!(RunningTable{K,typeof(tg.running)}(), buffer, oldhead,
-            tg.running, cfg.keynames)
-    monoids = rebuildmonoids(tg, K, R, types.time, old, oldhead, cfg.keynames,
-        (cfg.lookback,))
     refold = isempty(tg.refold) ? nothing : GroupTable{K,typeof(tg.refold)}()
-    st.head = buffer === nothing ? 1 : oldhead
+    if old === nothing
+        buffer = isempty(tg.running) && isempty(tg.refold) ? nothing : R[]
+        running =
+            isempty(tg.running) ? nothing : RunningTable{K,typeof(tg.running)}()
+        monoids =
+            isempty(tg.monoid) ? nothing :
+            KeyDict{K,queuestype(tg.monoid, R, types.time)}()
+        st.head = 1
+    else
+        oldhead = old.buffer === nothing ? 1 : st.head
+        buffer = rebuildbuffer(tg, R, old)
+        running =
+            isempty(tg.running) ? nothing :
+            replayrunning!(RunningTable{K,typeof(tg.running)}(), buffer, oldhead,
+                tg.running, cfg.keynames)
+        monoids = rebuildmonoids(tg, K, R, types.time, old, oldhead,
+            cfg.keynames, (cfg.lookback,))
+        st.head = buffer === nothing ? 1 : oldhead
+    end
     groups = primarygroups(running, monoids, refold)
-    st.tiers = WindowTiers{R}(buffer, running, monoids, refold, tg,
-        Pair{K,valtype(groups)}[])
+    st.tiers = WindowTiers{R}(buffer, running, monoids, refold, tg.running,
+        tg.monoid, tg.refold, Pair{K,valtype(groups)}[])
+    st.derived = tg.derived
+    st.perm = tg.perm
     st.valtype = tieredvaluetype(tg, cfg.protos, cfg.outs)
+    st.rowtype, st.emptyrow = windowtypes(st, cfg)
     return nothing
 end
 
@@ -187,10 +206,10 @@ function windowchunk!(st::WindowState{T}, @nospecialize(cfg::WindowConfig),
     st.types = types
     moved && preparewindows!(st, cfg, types)
     pullpast!(st.ticks, st.cur, last(nt.time))
-    RT, emptyrow = windowtypes(st, cfg)
-    rows = RT[]
-    st.head, closed = windowrows!(rows, st.tiers, st.head, nt, st.ticks,
-        st.prevkeys, cfg.lookback, cfg.keynames, cfg.outs, emptyrow, cfg.ks)
+    rows = st.rowtype[]
+    st.head, closed = windowrows!(rows, st.tiers, st.derived, st.perm, st.head,
+        nt, st.ticks, st.prevkeys, cfg.lookback, cfg.keynames, cfg.outs,
+        st.emptyrow, cfg.ks)
     deleteat!(st.ticks, 1:closed)
     exhausted(st.cur) && isempty(st.ticks) && releasewindows!(st)
     return rowsframe(rows)
@@ -221,10 +240,10 @@ function windowflush!(st::WindowState{T}, @nospecialize(cfg::WindowConfig)) wher
         cfg.ks === nothing && return nothing
         return emptygrid(st.ticks, cfg.ks.keys, emptyvalues(cfg.protos, cfg.outs))
     end
-    RT, emptyrow = windowtypes(st, cfg)
-    rows = RT[]
-    st.head = flushwindows!(rows, st.tiers, st.head, st.ticks, st.prevkeys,
-        cfg.lookback, cfg.keynames, cfg.outs, emptyrow, cfg.ks)
+    rows = st.rowtype[]
+    st.head = flushwindows!(rows, st.tiers, st.derived, st.perm, st.head,
+        st.ticks, st.prevkeys, cfg.lookback, cfg.keynames, cfg.outs,
+        st.emptyrow, cfg.ks)
     empty!(st.ticks)
     return rowsframe(rows)
 end
@@ -235,9 +254,9 @@ end
 # each row at time s, every pending tick τ <= s is closed first (windows are
 # half-open, so the row is in none of them), then the row is admitted. Returns
 # the eviction head and the number of ticks closed.
-function windowrows!(rows::Vector{RT}, tiers::WindowTiers{R}, head::Int,
-    nt::NamedTuple, ticks::Vector{T}, prevkeys::Vector, lookback,
-    keynames::Val, outs::Val, emptyrow,
+function windowrows!(rows::Vector{RT}, tiers::WindowTiers{R}, derived::Tuple,
+    perm::Val, head::Int, nt::NamedTuple, ticks::Vector{T}, prevkeys::Vector,
+    lookback, keynames::Val, outs::Val, emptyrow,
     ks::Union{Nothing,KeySet}) where {RT,R,T}
     admitks = admissionkeys(ks)
     bi = 1
@@ -245,8 +264,8 @@ function windowrows!(rows::Vector{RT}, tiers::WindowTiers{R}, head::Int,
     for i in eachindex(nt.time)
         s = @inbounds nt.time[i]
         while bi <= nb && @inbounds(ticks[bi]) <= s
-            head = closewindow!(rows, @inbounds(ticks[bi]), tiers, head,
-                prevkeys, lookback, keynames, outs, emptyrow, ks)
+            head = closewindow!(rows, @inbounds(ticks[bi]), tiers, derived,
+                perm, head, prevkeys, lookback, keynames, outs, emptyrow, ks)
             bi += 1
         end
         admitwindow!(tiers, rowat(R, nt, i), keynames, admitks, (lookback,))
@@ -254,12 +273,12 @@ function windowrows!(rows::Vector{RT}, tiers::WindowTiers{R}, head::Int,
     return head, bi - 1
 end
 
-function flushwindows!(rows::Vector, tiers::WindowTiers, head::Int,
-    ticks::Vector, prevkeys::Vector, lookback, keynames::Val, outs::Val,
-    emptyrow, ks::Union{Nothing,KeySet})
+function flushwindows!(rows::Vector, tiers::WindowTiers, derived::Tuple,
+    perm::Val, head::Int, ticks::Vector, prevkeys::Vector, lookback,
+    keynames::Val, outs::Val, emptyrow, ks::Union{Nothing,KeySet})
     for τ in ticks
-        head = closewindow!(rows, τ, tiers, head, prevkeys, lookback, keynames,
-            outs, emptyrow, ks)
+        head = closewindow!(rows, τ, tiers, derived, perm, head, prevkeys,
+            lookback, keynames, outs, emptyrow, ks)
     end
     return head
 end
@@ -273,8 +292,8 @@ end
     ks::Union{Nothing,KeySet}, lookbacks::Tuple)
     pushrow!(tiers.buffer, row)
     k = keyvalues(row, keynames)
-    admitwinrunning!(tiers.running, tiers.tg.running, k, row, ks, keynames)
-    admitwinmonoid!(tiers.monoids, tiers.tg.monoid, k, row,
+    admitwinrunning!(tiers.running, tiers.runningprotos, k, row, ks, keynames)
+    admitwinmonoid!(tiers.monoids, tiers.monoidprotos, k, row,
         tiers.running === nothing ? ks : nothing, keynames, lookbacks)
     tiers.running === nothing && tiers.monoids === nothing &&
         checkdeclared(ks, row, keynames)
@@ -298,19 +317,25 @@ end
     return nothing
 end
 
+@noinline function stepwindow!(tiers::WindowTiers, head::Int, τ, lookback,
+    keynames::Val)
+    head = evicthead!(tiers.buffer, head, τ, lookback, tiers.running, keynames)
+    head = compacthead!(tiers.buffer, head)
+    closemonoids!(tiers.monoids, τ, lookback)
+    foldrefold!(tiers.refold, tiers.buffer, head, tiers.refoldprotos, keynames)
+    return head
+end
+
 # Close tick τ: evict the rows that have left its window, downdating them out of
 # the running tier; expire each key's queue to the window start, dropping
 # emptied ones; fold the live rows into the refold table; emit; then retire the
 # refold states to the pool.
-@noinline function closewindow!(rows::Vector, τ, tiers::WindowTiers, head::Int,
-    prevkeys::Vector, lookback, keynames::Val, outs::Val, emptyrow,
-    ks::Union{Nothing,KeySet})
-    head = evicthead!(tiers.buffer, head, τ, lookback, tiers.running, keynames)
-    head = compacthead!(tiers.buffer, head)
-    closemonoids!(tiers.monoids, τ, lookback)
-    foldrefold!(tiers.refold, tiers.buffer, head, tiers.tg.refold, keynames)
+@noinline function closewindow!(rows::Vector, τ, tiers::WindowTiers,
+    derived::Tuple, perm::Val, head::Int, prevkeys::Vector, lookback,
+    keynames::Val, outs::Val, emptyrow, ks::Union{Nothing,KeySet})
+    head = stepwindow!(tiers, head, τ, lookback, keynames)
     emitgroups!(rows, τ, primarygroups(tiers), tiers.scratch, prevkeys, tiers,
-        outs, emptyrow, ks)
+        derived, perm, outs, emptyrow, ks)
     retirerefold!(tiers.refold)
     return head
 end
@@ -354,35 +379,41 @@ end
 @inline tierstates(::GroupTable{K,S}, k, states::S) where {K,S<:Tuple} = states
 @inline tierstates(gt::GroupTable, k, g) = gt.table[k]
 
-@inline tiervalues(tiers::WindowTiers, k, g, outs::Val) = summaryvalues(
-    mergestates(tiers.tg.perm,
+@inline tiervalues(tiers::WindowTiers, derived::Tuple, perm::Val, k, g,
+    outs::Val) = summaryvalues(
+    mergestates(perm,
         (tierstates(tiers.running, k, g), tierstates(tiers.monoids, k, g),
-            tierstates(tiers.refold, k, g), tiers.tg.derived)), outs)
+            tierstates(tiers.refold, k, g), derived)), outs)
 
 # Emit one tick from the primary tier's groups: without a declared keyset, the
 # present keys sorted into the reused scratch, then `emitwindow!`; with one
 # (keyless included), `emitdense!`.
 @inline function emitgroups!(rows::Vector, τ, groups::AbstractDict,
-    scratch::Vector{<:Pair}, prevkeys::Vector, tiers::WindowTiers, outs::Val,
-    emptyrow, ::Nothing)
+    scratch::Vector{<:Pair}, prevkeys::Vector, tiers::WindowTiers,
+    derived::Tuple, perm::Val, outs::Val, emptyrow, ::Nothing)
     sortinto!(scratch, groups)
-    return emitwindow!(rows, τ, scratch, prevkeys, tiers, outs, emptyrow)
+    return emitwindow!(rows, τ, scratch, prevkeys, tiers, derived, perm, outs,
+        emptyrow)
 end
 @inline emitgroups!(rows::Vector, τ, groups::AbstractDict, scratch,
-    prevkeys::Vector, tiers::WindowTiers, outs::Val, emptyrow, ks::KeySet) =
-    emitdense!(rows, τ, groups, ks, tiers, outs, emptyrow)
+    prevkeys::Vector, tiers::WindowTiers, derived::Tuple, perm::Val, outs::Val,
+    emptyrow, ks::KeySet) =
+    emitdense!(rows, τ, groups, ks, tiers, derived, perm, outs, emptyrow)
 
 # One row per declared key, in declared order: the key's summary when it has a
 # group, else the empty values. The declared key is looked up as given: a
 # `KeyDict` matches it field by field, whatever its field types.
 function emitdense!(rows::Vector{RT}, τ, groups::AbstractDict, ks::KeySet,
-    tiers::WindowTiers, outs::Val, emptyrow) where {RT}
+    tiers::WindowTiers, derived::Tuple, perm::Val, outs::Val,
+    emptyrow) where {RT}
     # `haskey` then indexing, not `get(groups, k, nothing)`: a refold primary's
     # entry is a state tuple, which a Union with Nothing would box.
     for k in ks.keys
         if haskey(groups, k)
             push!(rows,
-                convert(RT, gridrow(τ, k, tiervalues(tiers, k, groups[k], outs))))
+                convert(RT,
+                    gridrow(τ, k,
+                        tiervalues(tiers, derived, perm, k, groups[k], outs))))
         else
             push!(rows, convert(RT, gridrow(τ, k, emptyrow)))
         end
@@ -395,7 +426,8 @@ end
 # keys then become `prevkeys`. Both lists are sorted by `keyisless`, so one
 # merge walk suffices.
 function emitwindow!(rows::Vector{RT}, τ, present::Vector{<:Pair},
-    prevkeys::Vector{K}, tiers::WindowTiers, outs::Val, emptyrow) where {RT,K}
+    prevkeys::Vector{K}, tiers::WindowTiers, derived::Tuple, perm::Val,
+    outs::Val, emptyrow) where {RT,K}
     j = 1
     np = length(prevkeys)
     for (k, g) in present
@@ -404,7 +436,8 @@ function emitwindow!(rows::Vector{RT}, τ, present::Vector{<:Pair},
             j += 1
         end
         j <= np && keyisequal(@inbounds(prevkeys[j]), k) && (j += 1)
-        push!(rows, convert(RT, gridrow(τ, k, tiervalues(tiers, k, g, outs))))
+        push!(rows,
+            convert(RT, gridrow(τ, k, tiervalues(tiers, derived, perm, k, g, outs))))
     end
     while j <= np
         push!(rows, convert(RT, gridrow(τ, @inbounds(prevkeys[j]), emptyrow)))

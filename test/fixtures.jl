@@ -506,3 +506,12 @@ function testcolumns(loadwith, source::String, c::Vector)
     @test_throws "$source has no column :nope" readwith(; time = :nope, columns = ())
     return nothing
 end
+
+# Runs `script` in a fresh Julia, which is the only way to see the package with
+# a backend *missing* — this process has both loaded. Serial by construction:
+# concurrent Julia processes race the precompile cache.
+function insubprocess(script::String)
+    return read(
+        `$(Base.julia_cmd()) --startup-file=no --project=$(Base.active_project()) -e $script`,
+        String)
+end

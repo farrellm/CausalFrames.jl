@@ -189,7 +189,7 @@ function fillprepared!(st::ForwardFillState, ::Val{KN}, ::Val{FN}, tolerance,
             st.cells === nothing ? D() :
             widened ? widencellstore(D, st.cells) : st.cells
         st.cells = store
-        fillkeyed!(nt.time, groups, nt, Val(KN), store, tolerance)
+        fillkeyed!(nt.time, groups, NamedTuple{KN}(nt), Val(KN), store, tolerance)
     end
     attach!(c, outs, Val(FN))
     return nothing
@@ -339,5 +339,11 @@ end
 
 # Function barrier: the output eltype is a compile-time constant. An all-Missing
 # column works too, since `promote_type(Union{}, V)` is `V`.
-fillcolumn(col::AbstractVector{T}, v::V) where {T,V} =
-    promote_type(nonmissingtype(T), V)[ismissing(x) ? v : x for x in col]
+function fillcolumn(col::AbstractVector{T}, v::V) where {T,V}
+    out = Vector{promote_type(nonmissingtype(T), V)}(undef, length(col))
+    @inbounds for i in eachindex(col)
+        x = col[i]
+        out[i] = ismissing(x) ? v : x
+    end
+    return out
+end

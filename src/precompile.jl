@@ -101,8 +101,10 @@
                 key = :sym),
         )
         # a Bars window beside a time window: per-key rings plus the buffer
-        ld(p |> addrollingcolumns((b3 = Bars(3), w2 = 2),
-            [Sum(:v), Mean(:v)]; key = :sym))
+        ld(
+            p |> addrollingcolumns((b3 = Bars(3), w2 = 2),
+                [Sum(:v), Mean(:v), Kurtosis(:v), Covariance(:v, :qty)]; key = :sym),
+        )
         ld(
             clock(1) |> addrollingcolumns(
                 (w1 = 1, w3 = 3), [Count(), Min(:qty)];
