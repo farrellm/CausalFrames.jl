@@ -57,10 +57,14 @@ end
 
 # A key's empty structure for `nwindows` look-backs, its type taken from the
 # store's value type so the kernels' `get!` infers it.
-newqueues(::Type{MonoidQueues{S,R,T}}, stateprotos::S,
-    nwindows::Int) where {S,R,T} =
-    MonoidQueues{S,R,T}(R[], T[], 0,
-        [PartialQueue(stateprotos) for _ in 1:nwindows])
+function newqueues(::Type{MonoidQueues{S,R,T}}, stateprotos::S,
+    nwindows::Int) where {S,R,T}
+    queues = Vector{PartialQueue{S}}(undef, nwindows)
+    for w in 1:nwindows
+        @inbounds queues[w] = PartialQueue(stateprotos)
+    end
+    return MonoidQueues{S,R,T}(R[], T[], 0, queues)
+end
 
 # The store's value type.
 queuestype(::S, ::Type{R}, ::Type{T}) where {S<:Tuple,R,T} = MonoidQueues{S,R,T}

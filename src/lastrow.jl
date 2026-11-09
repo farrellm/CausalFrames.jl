@@ -110,8 +110,14 @@ end
 
 # Function barrier: the rows are concretely typed, so `rowsdataframe` builds
 # typed columns directly and the slot reads don't dispatch through `st.store::Any`.
-emitlast(slots::Vector{V}, ordered::Vector{<:Pair}, stop) where {V} =
-    [retime(@inbounds(slots[j]), stop) for (_, j) in ordered]
+function emitlast(slots::Vector{V}, ordered::Vector{<:Pair}, stop) where {V}
+    RT = Base.promote_op(retime, V, typeof(stop))
+    out = Vector{RT}(undef, length(ordered))
+    @inbounds for (i, (_, j)) in enumerate(ordered)
+        out[i] = retime(slots[j], stop)
+    end
+    return out
+end
 
 # Set the row's time to the emission time. `merge` keeps `:time` in its input
 # position, so the output schema is the input's.

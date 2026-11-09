@@ -316,7 +316,13 @@ design rationale and performance constraints behind each module.
     fold and eviction, and it accumulated (6e-12 of a four-row kurtosis on a
     series through zero). The refold ask compares the largest `d⁴` with
     `REFOLDRATIO²·Σd⁴`, the co-moment's ratio on `|d|`; `REFOLDRATIO` alone
-    asked up to 160 times as often, for residues of only `n·eps²·d⁴`
+    asked up to 160 times as often, for residues of only `n·eps²·d⁴`. The
+    recentring (`recentre!`, both states', and `shiftpowers`) is `@noinline`:
+    it runs once per many rows, and inlined, its double-double algebra was
+    copied into every kernel specialization, about 27 s of the test suite's
+    compile. The per-row `foldpowers` and the per-value `centralvalue` stay
+    inline; a barrier there cost up to 26% at runtime for no measurable
+    compile saving (`notes/compile-time.md`)
   - `AgeWeightedSum` (`Σ k·y`, k the row's age) can't be a term functor, since
     its update reads its own `S₁`, so it has its own plain and compensated
     states, reusing the `Compensated` helpers and counting `missing` through
@@ -446,7 +452,9 @@ design rationale and performance constraints behind each module.
   the binary transforms), and `checknewcolumns`, every appending transform's
   check that its output columns are new; and `rowsdataframe`, every
   summarizing transform's (and `addcolumns`') rows-to-frame step, generated
-  per row type over DataFrames' vector-of-columns constructor, which compiles
+  per row type over DataFrames' vector-of-columns constructor (a
+  `@nospecialize` form read the names at runtime and cost 1 µs per chunk for
+  no measurable compile saving), which compiles
   once where `DataFrame(rows)` compiles Tables.jl's path per row type (and is
   faster). `prototypes` expands dependencies topologically and
   returns the requested output names, which ride through the kernels in a
@@ -484,10 +492,11 @@ design rationale and performance constraints behind each module.
   kind; there is no keyless `foldintervals!`, since `nokeyset` makes that grid
   dense. `preparechunk!`
   checks the key columns against the first chunk for all of them. The
-  transform's `FoldConfig` (`protos`, `grouping`, `outs`) sits in
-  `SummaryFold`'s abstract `cfg` field, so `preparechunk!` and every chunk step
-  and flush (`summarizechunk!`, `summarizeflush`, `cyclechunk!`, `cycleflush`,
-  `runningchunk!`, intervalize's) read it untyped and reach the kernels by a
+  transform's `FoldConfig` (`protos`, `grouping`, `outs`, all untyped
+  fields of one concrete struct) sits in `SummaryFold`'s `cfg` field, so
+  `preparechunk!` and every chunk step and flush (`summarizechunk!`,
+  `summarizeflush`, `cyclechunk!`, `cycleflush`, `runningchunk!`,
+  intervalize's) read it untyped and reach the kernels by a
   dispatch per chunk: the chunk iterators and drivers compile once, and only
   the kernels (and `sortedrows`, `summarize`'s keyed emission) specialize per
   summarizer set.
@@ -613,9 +622,10 @@ design rationale and performance constraints behind each module.
   `barwindow.jl`)
 - `src/tiers.jl` — the per-accumulator window tiers shared by
   `addrollingcolumns` and `summarizewindows`. `tiering` partitions the realized
-  states once per run and per widening (each tier's templates picked by the
-  generated `tierpick` past a `Val` of the permutation: a tuple generator there
-  compiled a widening `grow_to!` chain per state type): running (a group whose `freshwindowed`
+  states once per run and per widening (`@nospecialize`, an explicit loop over
+  the states into untyped vectors, converted to tuples once: a tuple generator
+  there compiled a widening `grow_to!` chain per state type, and a generated
+  per-tier pick compiled per permutation): running (a group whose `freshwindowed`
   state is `isinvertible`), monoid (another monoid), refold (anything else), and
   no tier for a singleton-typed (fieldless, dependent) state, unless every
   state is one, when they keep their structural tier so something tracks
@@ -689,12 +699,19 @@ design rationale and performance constraints behind each module.
   over five minutes to compile, against 8 s erased. The chunk step reads
   `cfg` back through the gate, and the per-chunk driver (`rollchunk!`,
   `pullsummarized!`, `setvaltype!`, `admitleadin!`, `assemble`,
-  `assembleempty`) takes it `@nospecialize`, so the iterator and the driver
-  compile once for every summarizer set; only the kernels and `rolltiers`'
-  typed half (past the schema's type values) specialize. The kernels' inlining
-  is load-bearing: a `@noinline` barrier around `emitroll!`'s `summaryvalues`
-  saved 5% of their compile time and cost the refold benchmark 12% at runtime
-  (`notes/compile-time.md`). Summarizing its own input (`LeadInGate.self`),
+  `assembleempty`) takes the concrete `RollingConfig`, whose fields are
+  untyped, so the iterator and the driver compile once for every summarizer
+  set (no `@nospecialize` needed on it); only the kernels and, on a widening,
+  `widenrolltiers` (past the schema's type values) specialize; a first build
+  takes the `@nospecialize` fast path in `rolltiers`. The tiers carry only
+  the three folding tiers' templates; the derived states and the permutation
+  ride on `RollingState` beside them. The kernels' inlining is load-bearing:
+  a `@noinline` barrier around `emitroll!`'s `summaryvalues` saved 5% of their
+  compile time and cost the refold benchmark 12% at runtime, and barriers
+  around the per-row admission step (`steproll!`, `summarizewindows`'
+  `admitwindow!`) cost the running and Bars benchmarks up to 19% for a
+  compile saving within noise; the per-window running tables stay an `NTuple`
+  for the same reason, a `Vector` costing 5–11% (`notes/compile-time.md`). Summarizing its own input (`LeadInGate.self`),
   the lead-in's first chunk takes the augmented side's checks. One
   kernel, `rollsegment!`, over a `RollTiers` (a shared row buffer with
   per-window eviction heads, per-window running tables, per-key monoid queues
@@ -751,15 +768,16 @@ design rationale and performance constraints behind each module.
   output is sparse, plus one *vanish* row of empty values when a key's window
   empties, decided against the previous tick's *emitted* keys; that row stops
   a per-key as-of consumer (`applymodels`) from using a stale summary. A
-  declared `keyset` rides in `WindowConfig`'s type (`Nothing` otherwise) and
+  declared `keyset` (`nothing` otherwise) is passed to the kernels as an
+  argument, so they specialize on it per chunk with no per-row branch, and
   replaces the sort and vanish merge with `emitdense!`, a lookup per declared
   key per tick; keyless output is `emitdense!` over `nokeyset`, as in
   `intervalize`, and `admissionkeys` skips its admission check. The
   declaration is checked where the primary tier makes a group or queue (a key's
   first row); a refold primary groups only at ticks, so it checks on admission
-  instead. As in `addrollingcolumns`, the chunk step and flush read `cfg`
-  through `WindowState`'s abstract field and the per-chunk driver takes it
-  `@nospecialize`, so only the kernels specialize per summarizer set
+  instead. As in `addrollingcolumns`, `WindowConfig`'s fields are untyped
+  (the struct itself concrete), so the chunk step and flush read them with a
+  dispatch per chunk and only the kernels specialize per summarizer set
 - `src/models.jl` — the MLJ operators (`applymodels`, `addpredictions`,
   `modelreports`) and the five hooks the extension implements (`ismodel`,
   `fitmodel`, `predictmodel`, `savefitresult`, `restorefitresult`). It names no

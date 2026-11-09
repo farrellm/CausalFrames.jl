@@ -133,14 +133,14 @@ function addrollingcolumns(windows, summarizers; key = nothing,
         storedcolumns(protos, keycols))
     # A `Bars` window counts rows back from the run's start.
     startfree = !any(isbars, lookbacks)
-    contexts = ctx -> (rollingcontext(ctx, lookbacks), ctx)
+    contexts = ctx -> (rollingcontext(ctx, cfg.lookbacks), ctx)
     return function (@nospecialize(p::CausalPipeline),)
         # Summarizing its own input, both sides read `p`, which the plan runs
         # once when it may (issue #105): a run per side made a chain of d
         # stages run its source 2^d times (issue #98).
         summarized = from === nothing ? p : from
         return pipenode((summarized, p); contexts, startfree) do ctx, ins
-            sctx = rollingcontext(ctx, lookbacks)
+            sctx = rollingcontext(ctx, cfg.lookbacks)
             leadin = sctx.start < ctx.start ? ctx.start : nothing
             gate = LeadInGate(RollingState(openinput(ins, 1)), cfg,
                 PullCursor(openinput(ins, 2)), from === nothing, leadin)
@@ -187,15 +187,15 @@ lookbackstart(ctx::Context, lb) =
 
 isbars(lb) = lb isa Bars
 
-struct RollingConfig{KN,LB<:Tuple,P<:Tuple,O,TM<:NamedTuple}
+struct RollingConfig
     windownames::Tuple{Vararg{Symbol}}
-    lookbacks::LB
+    lookbacks::Tuple
     keycols::Vector{Symbol}
-    keynames::Val{KN}
-    protos::P
-    outs::Val{O}
+    keynames::Val
+    protos::Tuple
+    outs::Val
     prefixednames::Vector{Symbol}
-    terms::TM          # the row terms, from `prototypes`
+    terms::NamedTuple  # the row terms, from `prototypes`
     stored::Union{Nothing,Tuple{Vararg{Symbol}}}  # from `storedcolumns`
 end
 
@@ -207,13 +207,15 @@ mutable struct RollingState
     spos::Int          # index of the next unadmitted summarized row in snt
     stypes::Union{Nothing,NamedTuple}  # promotion of summarized schemas seen
     tiers::Any         # RollTiers for the realized state types
+    derived::Any       # derived tier's state tuple
+    perm::Any          # tier permutation Val
     valtypes::Any      # per window, the output value NamedTuple type
     emptyrows::Any     # per window, its empty row: emptyvalues, or all missing
     vals::Any          # per-window value vectors for the chunk in progress
     passthrough::Bool  # the summarized stream produced no chunks at all
     checked::Bool      # augmented-side name/key validation done
     RollingState(schunks) = new(PullCursor(schunks), nothing, 1,
-        nothing, nothing, nothing, nothing, nothing, false, false)
+        nothing, nothing, nothing, nothing, nothing, nothing, nothing, false, false)
 end
 
 # The window structures for one tiering (tiers.jl), R being the stored row
@@ -227,14 +229,16 @@ end
 # queues own their rows, so a call with only monoid and derived states keeps no
 # buffer and no rings (`nothing`), nor does a call without time windows keep a
 # buffer.
-struct RollTiers{R,B,RG,G,MQ,TG<:Tiering}
+struct RollTiers{R,B,RG,G,MQ,SR<:Tuple,ST<:Tuple,SF<:Tuple}
     buffer::B              # Vector{R}, or nothing
     winheads::Vector{Int}  # per window, the first buffered row inside it
     rings::RG              # KeyDict{K,RowRing{R}}, or nothing
     barcap::Int            # the rings' capacity
     running::G             # NTuple{W,RunningTable{K,SR}}, or nothing
     monoids::MQ            # KeyDict{K,MonoidQueues{ST,R,T}}, or nothing
-    tg::TG                 # the partition of the states into tiers
+    runningprotos::SR      # the running tier's templates
+    monoidprotos::ST       # the monoid tier's templates
+    refoldprotos::SF       # the refold tier's templates
 end
 
 # Build the tiers for the realized types, from scratch or, after a widening,
@@ -243,17 +247,40 @@ end
 # correct for every transition, including one that demotes an accumulator from
 # the running tier to the monoid tier. Type-unstable, once per run and per
 # widening.
-rolltiers(tg::Tiering, types::NamedTuple, keynames::Val, lookbacks::Tuple, old) =
-    rolltiers(tg, storekeytype(types, keynames), storerowtype(types), types.time,
-        keynames, lookbacks, old)
-
-# The barrier past the schema's type values, so the build is inferred.
-function rolltiers(tg::Tiering, ::Type{K}, ::Type{R}, ::Type{T}, keynames::Val,
-    lookbacks::Tuple, old) where {K,R,T}
+function rolltiers(@nospecialize(tg::Tiering), @nospecialize(types::NamedTuple),
+    @nospecialize(keynames::Val), @nospecialize(lookbacks::Tuple),
+    @nospecialize(old))
+    K = storekeytype(types, keynames)
+    R = storerowtype(types)
+    T = types.time
     nwindows = length(lookbacks)
     anybars = any(isbars, lookbacks)
     barcap = anybars ? maximum(lb -> isbars(lb) ? lb.n : 0, lookbacks) + 1 : 0
-    oldbuffered = old !== nothing && old.buffer !== nothing
+    needbuf = !(isempty(tg.running) && isempty(tg.refold))
+    if old === nothing
+        buffer = needbuf && !all(isbars, lookbacks) ? R[] : nothing
+        winheads = buffer === nothing ? Int[] : ones(Int, nwindows)
+        rings = anybars && needbuf ? KeyDict{K,RowRing{R}}() : nothing
+        if isempty(tg.running)
+            running = nothing
+        else
+            RT = RunningTable{K,typeof(tg.running)}
+            running = ntuple(w -> RT(), Val(nwindows))
+        end
+        monoids =
+            isempty(tg.monoid) ? nothing :
+            KeyDict{K,queuestype(tg.monoid, R, T)}()
+        return RollTiers{R}(buffer, winheads, rings, barcap, running, monoids,
+            tg.running, tg.monoid, tg.refold)
+    end
+    return widenrolltiers(tg, K, R, T, keynames, lookbacks, old, nwindows,
+        anybars, barcap)
+end
+
+function widenrolltiers(tg::Tiering, ::Type{K}, ::Type{R}, ::Type{T},
+    keynames::Val, lookbacks::Tuple, old, nwindows::Int, anybars::Bool,
+    barcap::Int) where {K,R,T}
+    oldbuffered = old.buffer !== nothing
     oldhead = oldbuffered ? minimum(old.winheads) : 1
     # A time window's rows are in the buffer; a Bars window's in the rings.
     buffer = all(isbars, lookbacks) ? nothing : rebuildbuffer(tg, R, old)
@@ -261,29 +288,32 @@ function rolltiers(tg::Tiering, ::Type{K}, ::Type{R}, ::Type{T}, keynames::Val,
         buffer === nothing ? Int[] :
         oldbuffered ? copy(old.winheads) : ones(Int, nwindows)
     # Each key's live rows, when a Bars window needs them from the old tiers.
-    suffixes =
-        anybars && old !== nothing ? barsuffixes(K, R, old, oldhead, keynames) :
-        nothing
+    suffixes = anybars ? barsuffixes(K, R, old, oldhead, keynames) : nothing
     rings =
         anybars && !(isempty(tg.running) && isempty(tg.refold)) ?
         rebuildrings(K, R, barcap, suffixes) : nothing
-    running =
-        isempty(tg.running) ? nothing :
-        ntuple(
-            w -> replaywindow!(RunningTable{K,typeof(tg.running)}(), lookbacks[w],
-                buffer, buffer === nothing ? 1 : winheads[w], rings, tg.running,
+    if isempty(tg.running)
+        running = nothing
+    else
+        RT = RunningTable{K,typeof(tg.running)}
+        running = ntuple(
+            w -> replaywindow!(RT(), lookbacks[w], buffer,
+                buffer === nothing ? 1 : winheads[w], rings, tg.running,
                 keynames), Val(nwindows))
+    end
     monoids =
         suffixes === nothing ?
         rebuildmonoids(tg, K, R, T, old, oldhead, keynames, lookbacks) :
         suffixmonoids(tg, K, R, T, suffixes, keynames, lookbacks)
-    return RollTiers{R}(buffer, winheads, rings, barcap, running, monoids, tg)
+    return RollTiers{R}(buffer, winheads, rings, barcap, running, monoids,
+        tg.running, tg.monoid, tg.refold)
 end
 
 RollTiers{R}(buffer::B, winheads::Vector{Int}, rings::RG, barcap::Int,
-    running::G, monoids::MQ, tg::TG) where {R,B,RG,G,MQ,TG} =
-    RollTiers{R,B,RG,G,MQ,TG}(buffer, winheads, rings, barcap, running, monoids,
-        tg)
+    running::G, monoids::MQ, runningprotos::SR, monoidprotos::ST,
+    refoldprotos::SF) where {R,B,RG,G,MQ,SR,ST,SF} =
+    RollTiers{R,B,RG,G,MQ,SR,ST,SF}(buffer, winheads, rings, barcap, running,
+        monoids, runningprotos, monoidprotos, refoldprotos)
 
 # A window's running table, replayed from the rows the window holds: a time
 # window's from the buffer (from its head), a Bars window's from each key's
@@ -365,7 +395,7 @@ end
 # Summarizing its own input, the lead-in's first chunk has the augmented
 # input's columns and is pulled before any augmented chunk, so it takes the
 # augmented side's checks.
-function pullsummarized!(rs::RollingState, @nospecialize(cfg::RollingConfig),
+function pullsummarized!(rs::RollingState, cfg::RollingConfig,
     self::Bool = false)
     chunk = pull!(rs.summarized)
     if chunk === nothing
@@ -387,6 +417,8 @@ function pullsummarized!(rs::RollingState, @nospecialize(cfg::RollingConfig),
     if moved
         tg = tiering(cfg.protos, types)
         rs.tiers = rolltiers(tg, types, cfg.keynames, cfg.lookbacks, rs.tiers)
+        rs.derived = tg.derived
+        rs.perm = tg.perm
         setvaltype!(rs, cfg, tg)
     end
     return nothing
@@ -395,7 +427,7 @@ end
 # Cache each window's output value type and empty row, re-typing any
 # half-filled value vectors. A time window's empty row is the empty values; a
 # Bars window's is all missing, which its type admits instead.
-function setvaltype!(rs::RollingState, @nospecialize(cfg::RollingConfig),
+function setvaltype!(rs::RollingState, cfg::RollingConfig,
     @nospecialize(tg::Tiering))
     V = tieredvaluetype(tg, cfg.protos, cfg.outs)
     VB = barsvaluetype(tg, cfg.outs)
@@ -409,7 +441,7 @@ function setvaltype!(rs::RollingState, @nospecialize(cfg::RollingConfig),
 end
 
 # The augmented side's key and output-name checks, once per run.
-function checkaugmented!(rs::RollingState, @nospecialize(cfg::RollingConfig),
+function checkaugmented!(rs::RollingState, cfg::RollingConfig,
     c::DataFrame)
     rs.checked && return nothing
     checkkeycolumns(cfg.keycols, c, "addrollingcolumns", "the augmented input")
@@ -418,12 +450,12 @@ function checkaugmented!(rs::RollingState, @nospecialize(cfg::RollingConfig),
     return nothing
 end
 
-function rollchunk!(rs::RollingState, @nospecialize(cfg::RollingConfig),
+function rollchunk!(rs::RollingState, cfg::RollingConfig,
     c::DataFrame)
     checkaugmented!(rs, cfg, c)
     rs.snt === nothing && !rs.summarized.done && pullsummarized!(rs, cfg)
     rs.passthrough && return assembleempty(cfg, c)
-    lnt = Tables.columntable(c)
+    lnt = NamedTuple{(:time, cfg.keycols...)}(Tables.columntable(c))
     # Pre-filled so a mid-chunk widening never converts an undefined slot.
     rs.vals = map((T, e) -> newvals(T, e, nrow(c)), rs.valtypes, rs.emptyrows)
     i = 1
@@ -431,8 +463,9 @@ function rollchunk!(rs::RollingState, @nospecialize(cfg::RollingConfig),
     # rebuild the tiers and re-type the value vectors.
     while true
         wins = map(tuple, cfg.lookbacks, rs.emptyrows, rs.vals)
-        i, rs.spos, needpull = rollsegment!(wins, rs.tiers, lnt, i, rs.snt,
-            rs.spos, rs.summarized.done, cfg.lookbacks, cfg.keynames, cfg.outs)
+        i, rs.spos, needpull = rollsegment!(wins, rs.tiers, rs.derived, rs.perm,
+            lnt, i, rs.snt, rs.spos, rs.summarized.done, cfg.lookbacks,
+            cfg.keynames, cfg.outs)
         needpull || break
         pullsummarized!(rs, cfg)
     end
@@ -442,7 +475,7 @@ end
 # Admit every summarized row before `start` ahead of the first augmented pull,
 # evicting as it goes, so the windows hold only the rows a row at or after
 # `start` can still see. Type-unstable, once per chunk of the lead-in.
-function admitleadin!(rs::RollingState, @nospecialize(cfg::RollingConfig),
+function admitleadin!(rs::RollingState, cfg::RollingConfig,
     start, self::Bool)
     rs.snt === nothing && pullsummarized!(rs, cfg, self)
     while rs.snt !== nothing
@@ -500,31 +533,40 @@ end
 # tiers' states for the row's key. `wins` holds each window's look-back, empty
 # row and value vector, peeled together since a Bars window's value type
 # differs.
-function rollsegment!(wins::Tuple, tiers::RollTiers{R}, lnt::NamedTuple, i::Int,
-    snt::NamedTuple, spos::Int, sdone::Bool, lookbacks::Tuple,
-    keynames::Val, outs::Val) where {R}
+@inline function steproll!(tiers::RollTiers{R}, t, snt::NamedTuple,
+    spos::Int, slen::Int, sdone::Bool, lookbacks::Tuple,
+    keynames::Val) where {R}
+    while spos <= slen && @inbounds(snt.time[spos]) <= t
+        admitroll!(tiers, rowat(R, snt, spos), keynames, lookbacks)
+        spos += 1
+    end
+    spos > slen && !sdone && return (spos, true)
+    # A row outside a window stays outside it. A row admitted already
+    # outside a short window is downdated right back out here.
+    evictroll!(t, tiers, tiers.buffer, keynames, 1, lookbacks...)
+    # Compacting per row keeps the buffer at the window's size, not the
+    # chunk's.
+    compactbuffer!(tiers.buffer, tiers.winheads)
+    return (spos, false)
+end
+
+function rollsegment!(wins::Tuple, tiers::RollTiers{R}, derived::Tuple,
+    perm::Val, lnt::NamedTuple, i::Int, snt::NamedTuple, spos::Int,
+    sdone::Bool, lookbacks::Tuple, keynames::Val, outs::Val) where {R}
     n = length(lnt.time)
     slen = length(snt.time)
     # One refold state tuple for the segment, zeroed between windows after
     # `summaryvalues` copies the result out, so re-folding allocates per
     # segment, not per row.
-    scratch = map(fresh, tiers.tg.refold)
+    scratch = map(fresh, tiers.refoldprotos)
     while i <= n
         t = @inbounds lnt.time[i]
-        while spos <= slen && @inbounds(snt.time[spos]) <= t
-            admitroll!(tiers, rowat(R, snt, spos), keynames, lookbacks)
-            spos += 1
-        end
-        spos > slen && !sdone && return (i, spos, true)
-        # A row outside a window stays outside it. A row admitted already
-        # outside a short window is downdated right back out here.
-        evictroll!(t, tiers, tiers.buffer, keynames, 1, lookbacks...)
-        # Compacting per row keeps the buffer at the window's size, not the
-        # chunk's.
-        compactbuffer!(tiers.buffer, tiers.winheads)
+        spos, needpull = steproll!(tiers, t, snt, spos, slen, sdone, lookbacks,
+            keynames)
+        needpull && return (i, spos, true)
         k = keyat(lnt, i, keynames)
-        scratch = emitroll!(i, t, k, tiers, keyqueues(tiers.monoids, k),
-            scratch, keynames, outs, 1, wins...)
+        scratch = emitroll!(i, t, k, tiers, derived, perm,
+            keyqueues(tiers.monoids, k), scratch, keynames, outs, 1, wins...)
         i += 1
     end
     return (i, spos, false)
@@ -553,8 +595,8 @@ end
     lookbacks::Tuple)
     pushrow!(tiers.buffer, row)
     k = keyvalues(row, keynames)
-    admitrunning!(tiers.running, tiers.tg.running, k, row)
-    admitmonoid!(tiers.monoids, tiers.tg.monoid, k, row, lookbacks)
+    admitrunning!(tiers.running, tiers.runningprotos, k, row)
+    admitmonoid!(tiers.monoids, tiers.monoidprotos, k, row, lookbacks)
     admitrings!(tiers.rings, tiers.running, tiers.barcap, k, row, lookbacks)
     return nothing
 end
@@ -584,6 +626,8 @@ end
 end
 
 # The per-window tables are a homogeneous tuple, so Int indexing is type-stable.
+# Not a Vector: that cost the running and Bars benchmarks 5-11% at runtime
+# (notes/compile-time.md).
 @inline admitrunning!(::Nothing, stateprotos, k, row) = nothing
 @inline function admitrunning!(tables::Tuple, stateprotos::Tuple, k, row)
     for w in 1:length(tables)
@@ -686,10 +730,11 @@ end
 # One window per recursion step, each a (look-back, empty row, value vector).
 # A `nothing` from any tier is the empty (or partial) window; otherwise the
 # tiers' states are merged into topological order and summarized.
-@inline emitroll!(i::Int, t, k, tiers::RollTiers, mq, scratch, keynames::Val,
-    outs::Val, w::Int) = scratch
-@inline function emitroll!(i::Int, t, k, tiers::RollTiers, mq, scratch,
-    keynames::Val, outs::Val, w::Int, win::Tuple, rest...)
+@inline emitroll!(i::Int, t, k, tiers::RollTiers, derived::Tuple, perm::Val,
+    mq, scratch, keynames::Val, outs::Val, w::Int) = scratch
+@inline function emitroll!(i::Int, t, k, tiers::RollTiers, derived::Tuple,
+    perm::Val, mq, scratch, keynames::Val, outs::Val, w::Int, win::Tuple,
+    rest...)
     lb, emptyrow, v = win
     rs = runningstates(tiers.running, w, k, lb)
     ts = monoidstates(mq, w, t, lb)
@@ -698,15 +743,15 @@ end
         @inbounds v[i] = emptyrow
     else
         @inbounds v[i] = summaryvalues(
-            mergestates(tiers.tg.perm, (rs, ts, fs, tiers.tg.derived)), outs)
+            mergestates(perm, (rs, ts, fs, derived)), outs)
     end
-    return emitroll!(i, t, k, tiers, mq, scratch, keynames, outs, w + 1,
-        rest...)
+    return emitroll!(i, t, k, tiers, derived, perm, mq, scratch, keynames, outs,
+        w + 1, rest...)
 end
 
 # --- output assembly -------------------------------------------------------
 
-function assemble(@nospecialize(cfg::RollingConfig), rs::RollingState,
+function assemble(cfg::RollingConfig, rs::RollingState,
     c::DataFrame)
     for (wname, v) in zip(cfg.windownames, rs.vals)
         wdf = rowsdataframe(v)
@@ -719,7 +764,7 @@ end
 
 # A summarized stream with no chunks: every window is empty, so every row gets
 # the empty values, or missing under a Bars window.
-function assembleempty(@nospecialize(cfg::RollingConfig), c::DataFrame)
+function assembleempty(cfg::RollingConfig, c::DataFrame)
     e = emptyvalues(cfg.protos, cfg.outs)
     for (wname, lb) in zip(cfg.windownames, cfg.lookbacks), (name, val) in pairs(e)
         c[!, prefixedname(wname, name)] =

@@ -133,9 +133,8 @@ function predictchunk!(js::JoinState, @nospecialize(cfg::JoinConfig),
         )
         js.checked = true
     end
-    nt = Tables.columntable(c)
-    matchchunk!(js, cfg, nt)
-    c[!, name] = predictcolumn(js.matches, js.found, Val(column), nt, op)
+    matchchunk!(js, cfg, Tables.columntable(c))
+    c[!, name] = predictcolumn(js.matches, js.found, Val(column), c, op)
     return c
 end
 
@@ -144,7 +143,7 @@ end
 # applied once to its rows (one dynamic call per model per chunk), and the
 # results are scattered into one column of the promoted element type.
 function predictcolumn(matches::Vector{V}, found::Vector{Bool}, ::Val{C},
-    nt::NamedTuple, op::Symbol) where {V,C}
+    c::DataFrame, op::Symbol) where {V,C}
     FM = nonmissingtype(fieldtype(V, C))
     groups = IdDict{FM,Vector{Int}}()
     for i in eachindex(matches)
@@ -157,8 +156,10 @@ function predictcolumn(matches::Vector{V}, found::Vector{Bool}, ::Val{C},
         )
         push!(get!(Vector{Int}, groups, m), i)
     end
-    preds = Pair{Vector{Int},AbstractVector}[
-        idx => predictgroup(m, nt, idx, op) for (m, idx) in groups]
+    preds = Pair{Vector{Int},AbstractVector}[]
+    for (m, idx) in groups
+        push!(preds, idx => predictgroup(m, c, idx, op))
+    end
     E = mapreduce(pr -> eltype(last(pr)), promote_type, preds; init = Union{})
     out = Vector{Union{Missing,E}}(missing, length(matches))
     for (idx, pr) in preds
@@ -167,15 +168,15 @@ function predictcolumn(matches::Vector{V}, found::Vector{Bool}, ::Val{C},
     return out
 end
 
-function predictgroup(fm::FittedModel{P}, nt::NamedTuple, idx::Vector{Int},
+function predictgroup(fm::FittedModel{P}, c::DataFrame, idx::Vector{Int},
     op::Symbol) where {P}
     for p in P
-        hasproperty(nt, p) || throw(
+        hasproperty(c, p) || throw(
             ArgumentError(
                 "applymodels: predictor column $(repr(p)) not found in the input"),
         )
     end
-    X = NamedTuple{P}(map(p -> view(getproperty(nt, p), idx), P))
+    X = NamedTuple{P}(map(p -> view(c[!, p], idx), P))
     pr = predictmodel(fm.model, fm.fitresult, op, X)
     pr isa AbstractVector || throw(ArgumentError("applymodels: $op returned a \
         $(typeof(pr)), not a vector; multi-target models are not supported"))

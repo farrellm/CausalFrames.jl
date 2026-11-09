@@ -43,31 +43,30 @@ end
 # A state with no fields holds nothing to fold and takes the derived tier,
 # unless every state is fieldless (a custom summarizer ignoring its rows): then
 # they keep their structural tiers, so some tier tracks which windows are empty.
-function tiering(protos::Tuple, intypes::NamedTuple)
+function tiering(@nospecialize(protos::Tuple), @nospecialize(intypes::NamedTuple))
     states = newstates(protos, intypes)
     windowed = map(s -> freshwindowed(s, intypes), protos)
-    stateless = map(st -> Base.issingletontype(typeof(st)), states)
-    folding = !all(stateless)
-    codes = map(protos, windowed, stateless) do p, w, sl
-        folding && sl ? DERIVEDTIER :
-        p isa GroupSummarizer && isinvertible(w) ? RUNNINGTIER :
-        p isa MonoidSummarizer ? MONOIDTIER : REFOLDTIER
+    folding = any(st -> !Base.issingletontype(typeof(st)), states)
+    running, monoid, refold, derived = Any[], Any[], Any[], Any[]
+    perm = Tuple{Int,Int}[]
+    for i in eachindex(protos)
+        p, w, st = protos[i], windowed[i], states[i]
+        if folding && Base.issingletontype(typeof(st))
+            push!(derived, st)
+            push!(perm, (DERIVEDTIER, length(derived)))
+        elseif p isa GroupSummarizer && isinvertible(w)
+            push!(running, w)
+            push!(perm, (RUNNINGTIER, length(running)))
+        elseif p isa MonoidSummarizer
+            push!(monoid, st)
+            push!(perm, (MONOIDTIER, length(monoid)))
+        else
+            push!(refold, st)
+            push!(perm, (REFOLDTIER, length(refold)))
+        end
     end
-    counts = zeros(Int, length(TIERNAMES))
-    perm = map(c -> (c, counts[c] += 1), codes)
-    return tiered(Val(perm), windowed, states)
-end
-
-# The barrier past the runtime permutation: with it a constant, each tier's
-# templates are picked by `tierpick` without inferring a growing tuple.
-tiered(perm::Val, windowed::Tuple, states::Tuple) =
-    Tiering(tierpick(perm, Val(RUNNINGTIER), windowed),
-        tierpick(perm, Val(MONOIDTIER), states), tierpick(perm, Val(REFOLDTIER), states),
-        tierpick(perm, Val(DERIVEDTIER), states), perm)
-
-# The elements of `src` whose tier is `C`, in topological order.
-@generated function tierpick(::Val{P}, ::Val{C}, src::Tuple) where {P,C}
-    return Expr(:tuple, (:(getfield(src, $i)) for i in eachindex(P) if P[i][1] == C)...)
+    return Tiering(Tuple(running), Tuple(monoid), Tuple(refold), Tuple(derived),
+        Val(Tuple(perm)))
 end
 
 # Each state's tier, in topological order: `barwindow` refuses a refold tier

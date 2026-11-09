@@ -212,6 +212,8 @@
             (t -> Min(t), :range), (t -> Max(t), :range),
             (t -> First(t), :range), (t -> Last(t), :range),
         ]
+        termed = Summarizer[]
+        untermed = Summarizer[]
         for (make, c) in forms
             s = make(:range => rng)
             @test CausalFrames.unterm(s) == make(c)
@@ -219,21 +221,36 @@
                 <:Union{CausalFrames.SortedValues,CausalFrames.WindowValues},
             } &&
                 continue
-            @test isequal(
-                run(src |> addrollingcolumns((w2 = 2,), s; key = :k)),
-                select(run(added |> addrollingcolumns((w2 = 2,), make(c); key = :k)),
-                    Not(:range)),
-            )
+            push!(termed, s)
+            push!(untermed, make(c))
         end
-        # Two-column forms, with the term in either position.
-        for make in (DotProduct, Covariance, Correlation,
-            (a, b) -> Covariance(a, b; corrected = false))
-            for (a, b) in ((:range => rng, :mid => mid), (:mid => mid, :v),
-                (:v, :range => rng))
-                plain(x) = x isa Pair ? first(x) : x
-                @test isequal(run(src |> summarize(make(a, b); key = :k)),
-                    run(addedmid |> summarize(make(plain(a), plain(b)); key = :k)))
-            end
+        @test isequal(
+            run(src |> addrollingcolumns((w2 = 2,), termed; key = :k)),
+            select(run(added |> addrollingcolumns((w2 = 2,), untermed; key = :k)),
+                Not(:range)),
+        )
+        # Two-column forms, with the term in either position. The uncorrected
+        # Covariance takes the columns reversed, so its output name differs.
+        plain(x) = x isa Pair ? first(x) : x
+        for (a, b) in ((:range => rng, :mid => mid), (:mid => mid, :v),
+            (:v, :range => rng))
+            pa, pb = plain(a), plain(b)
+            @test isequal(
+                run(
+                    src |>
+                    summarize(
+                        [DotProduct(a, b), Covariance(a, b), Correlation(a, b),
+                            Covariance(b, a; corrected = false)];
+                        key = :k),
+                ),
+                run(
+                    addedmid |>
+                    summarize(
+                        [DotProduct(pa, pb), Covariance(pa, pb), Correlation(pa, pb),
+                            Covariance(pb, pa; corrected = false)];
+                        key = :k),
+                ),
+            )
         end
         # LinearRegression, with terms as predictors and as the response.
         lr = LinearRegression([:range => rng, :v], :mid => mid; name = :m)
