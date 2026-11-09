@@ -108,13 +108,11 @@
                 CausalPipeline(ctx -> [s]) |> selectcolumns(k..., :x);
                 key = k, rightprefix = "r_"),
         ]
-        for t in ops, keys in ([:k1], [Symbol(:k, j) for j in 1:6])
+        # Four Union-typed key fields is where Base's NamedTuple hash stopped
+        # inferring (#116), so every operator is checked there too.
+        keysets = ([:k1], [:k1, :k2, :k3, :k4], [Symbol(:k, j) for j in 1:6])
+        for t in ops, keys in keysets
             keyallocs(t, keys, 10) # compile
-            @test keyallocs(t, keys, 8000) - keyallocs(t, keys, 2000) < 200
-        end
-        for t in (ops[3], ops[6])
-            keys = [:k1, :k2, :k3, :k4]
-            keyallocs(t, keys, 10)
             @test keyallocs(t, keys, 8000) - keyallocs(t, keys, 2000) < 200
         end
     end

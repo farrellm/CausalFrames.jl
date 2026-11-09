@@ -229,7 +229,8 @@
             select(run(added |> addrollingcolumns((w2 = 2,), untermed; key = :k)),
                 Not(:range)),
         )
-        # Two-column forms, with the term in either position.
+        # Two-column forms, with the term in either position. The uncorrected
+        # Covariance takes the columns reversed, so its output name differs.
         plain(x) = x isa Pair ? first(x) : x
         for (a, b) in ((:range => rng, :mid => mid), (:mid => mid, :v),
             (:v, :range => rng))
@@ -237,27 +238,20 @@
             @test isequal(
                 run(
                     src |>
-                    summarize([DotProduct(a, b), Covariance(a, b), Correlation(a, b)];
+                    summarize(
+                        [DotProduct(a, b), Covariance(a, b), Correlation(a, b),
+                            Covariance(b, a; corrected = false)];
                         key = :k),
                 ),
                 run(
                     addedmid |>
-                    summarize([DotProduct(pa, pb), Covariance(pa, pb), Correlation(pa, pb)];
+                    summarize(
+                        [DotProduct(pa, pb), Covariance(pa, pb), Correlation(pa, pb),
+                            Covariance(pb, pa; corrected = false)];
                         key = :k),
                 ),
             )
         end
-        @test isequal(
-            run(
-                src |>
-                summarize(Covariance(:range => rng, :mid => mid; corrected = false);
-                    key = :k),
-            ),
-            run(
-                addedmid |>
-                summarize(Covariance(:range, :mid; corrected = false); key = :k),
-            ),
-        )
         # LinearRegression, with terms as predictors and as the response.
         lr = LinearRegression([:range => rng, :v], :mid => mid; name = :m)
         @test CausalFrames.rowterms(lr) === (; range = rng, mid = mid)
