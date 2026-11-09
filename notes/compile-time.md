@@ -604,8 +604,11 @@ the source and 80 s from cutting test cases. Most of the cuts thinned the
 dropping, for example, integer data on the keyless path and keyless
 widening around the code the PR rewrote; those are kept here. The cuts kept
 are the equivalent ones: `rowterms.jl`'s per-summarizer calls batched into
-one call checking every column, the Kurtosis/Skewness edge cases batched,
-and two of `keys.jl`'s three key-count cases.
+one call checking every column and the Kurtosis/Skewness edge cases
+batched. (Two cuts first kept here were not equivalent and were restored on
+review: `keys.jl`'s four-key no-allocation case for four of its six
+operators, ~3 s, and the uncorrected `Covariance` with the term in two of
+its three positions, now batched into each position's call at no cost.)
 
 **Runtime.** Against master, the PR ran 8–26% slower on every benchmark
 reaching a per-row `@noinline` barrier it added: `moments/windows` 1.26,
@@ -669,3 +672,45 @@ and `moments` benchmark within ±3% with overlapping ranges, except
 | `moments/windows` | 1.26 | 0.99 | 0.98 |
 | `moments/running` | 1.12 | 0.99 | 0.99 |
 | `windows/running` | 1.12 | 1.00 | 0.98 |
+
+### Re-verified on review (2026-11-09)
+
+Re-measured from scratch: three worktrees (master `b232bf3`, the PR at
+`b67499b`, and the PR plus the review fixes) with identically built
+environments, Julia 1.13.3, swap full.
+
+Compile, `timed_runtests.jl`, 4 threads, `--depwarn=yes`, run in the order
+master, PR, fixes, fixes, PR, master to spread drift evenly:
+
+| | master | PR | PR + fixes |
+|---|---|---|---|
+| included files | 814.6, 810.5 | 680.4, 681.8 | 680.8, 681.9 |
+| `rolling.jl` | 252.7, 249.1 | 215.9, 216.3 | 214.8, 215.5 |
+| `summarizers.jl` | 150.4, 150.8 | 103.9, 104.7 | 104.8, 105.1 |
+| `rowterms.jl` | 51.6, 50.8 | 25.4, 25.6 | 24.6, 24.9 |
+| `keys.jl` | 21.6, 21.0 | 16.5, 16.3 | 16.3, 16.7 |
+
+So −131 s (−16%), as claimed (−119 s source, −13 s tests). The review
+fixes (the `@nospecialize` removals below, a dead `sortedgroups` method)
+are compile-neutral. A later run with the restored tests read 724.6, but
+the files those tests don't touch drifted up 5–7% with it; normalized by
+them, `keys.jl` costs ~3 s more and `rowterms.jl` nothing measurable.
+
+Runtime, `-t1`, all 67 benchmarks of `rolling`, `windows`, `summarize`,
+`intervalize`, `lastrow`, `join` and the ad-hoc `moments` group (Skewness
+and Kurtosis under `summarize`, `addsummarycolumns`, `summarizewindows`,
+`addrollingcolumns`), 4 rounds with the order rotated, minimums. PR over
+master: geomean 0.992; the only non-overlapping range is `summarize/keyless`
+at 0.945, faster; `moments/summarize` 0.93 as claimed. Several single
+ratios sit outside ±3% (`rolling/leadin-chain4-keyed-tworuns` 1.15,
+`windows/running-dense` 1.07, `intervalize/keyless` 0.84), each with
+overlapping ranges and set by one outlying round. Allocations rise by a
+constant per run (about +15 on `rolling`, +50 on `join`), nothing per row.
+
+`@nospecialize(cfg::RollingConfig)` and `@nospecialize(cfg::WindowConfig)`
+did nothing once both types lost their parameters: the drivers'
+specializations were the same before and after removing them (one each,
+on the concrete config). Fixes over PR: geomean 0.999 with identical
+allocation counts on every benchmark; the `rolling/mixed-keyed-*` cases
+that read ~1.07 re-ran at 0.995–1.03 over 6 rounds. The parametric
+`JoinConfig`'s annotations do work and stay.
