@@ -544,7 +544,6 @@ end
 # For `lastrow`'s once-per-run flush, over a bare KeyDict; `summarize`'s flush
 # (`sortedrows`) and the per-cycle drain reuse the table's `sortinto!` buffer.
 sortedgroups(d::AbstractDict) = sort!(collect(d); lt = groupisless)
-sortedgroups(gt::GroupTable) = sortedgroups(gt.table)
 
 # The row types the kernels emit, by inference: calling `value` on an unfolded
 # state won't do, since Min/Max/First/Last leave their value undefined.

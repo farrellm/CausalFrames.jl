@@ -492,10 +492,11 @@ design rationale and performance constraints behind each module.
   kind; there is no keyless `foldintervals!`, since `nokeyset` makes that grid
   dense. `preparechunk!`
   checks the key columns against the first chunk for all of them. The
-  transform's `FoldConfig` (`protos`, `grouping`, `outs`) sits in
-  `SummaryFold`'s abstract `cfg` field, so `preparechunk!` and every chunk step
-  and flush (`summarizechunk!`, `summarizeflush`, `cyclechunk!`, `cycleflush`,
-  `runningchunk!`, intervalize's) read it untyped and reach the kernels by a
+  transform's `FoldConfig` (`protos`, `grouping`, `outs`, all untyped
+  fields of one concrete struct) sits in `SummaryFold`'s `cfg` field, so
+  `preparechunk!` and every chunk step and flush (`summarizechunk!`,
+  `summarizeflush`, `cyclechunk!`, `cycleflush`, `runningchunk!`,
+  intervalize's) read it untyped and reach the kernels by a
   dispatch per chunk: the chunk iterators and drivers compile once, and only
   the kernels (and `sortedrows`, `summarize`'s keyed emission) specialize per
   summarizer set.
@@ -698,8 +699,9 @@ design rationale and performance constraints behind each module.
   over five minutes to compile, against 8 s erased. The chunk step reads
   `cfg` back through the gate, and the per-chunk driver (`rollchunk!`,
   `pullsummarized!`, `setvaltype!`, `admitleadin!`, `assemble`,
-  `assembleempty`) takes it `@nospecialize`, so the iterator and the driver
-  compile once for every summarizer set; only the kernels and, on a widening,
+  `assembleempty`) takes the concrete `RollingConfig`, whose fields are
+  untyped, so the iterator and the driver compile once for every summarizer
+  set (no `@nospecialize` needed on it); only the kernels and, on a widening,
   `widenrolltiers` (past the schema's type values) specialize; a first build
   takes the `@nospecialize` fast path in `rolltiers`. The tiers carry only
   the three folding tiers' templates; the derived states and the permutation
@@ -773,9 +775,9 @@ design rationale and performance constraints behind each module.
   `intervalize`, and `admissionkeys` skips its admission check. The
   declaration is checked where the primary tier makes a group or queue (a key's
   first row); a refold primary groups only at ticks, so it checks on admission
-  instead. As in `addrollingcolumns`, the chunk step and flush read `cfg`
-  through `WindowState`'s abstract field and the per-chunk driver takes it
-  `@nospecialize`, so only the kernels specialize per summarizer set
+  instead. As in `addrollingcolumns`, `WindowConfig`'s fields are untyped
+  (the struct itself concrete), so the chunk step and flush read them with a
+  dispatch per chunk and only the kernels specialize per summarizer set
 - `src/models.jl` — the MLJ operators (`applymodels`, `addpredictions`,
   `modelreports`) and the five hooks the extension implements (`ismodel`,
   `fitmodel`, `predictmodel`, `savefitresult`, `restorefitresult`). It names no

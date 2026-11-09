@@ -395,7 +395,7 @@ end
 # Summarizing its own input, the lead-in's first chunk has the augmented
 # input's columns and is pulled before any augmented chunk, so it takes the
 # augmented side's checks.
-function pullsummarized!(rs::RollingState, @nospecialize(cfg::RollingConfig),
+function pullsummarized!(rs::RollingState, cfg::RollingConfig,
     self::Bool = false)
     chunk = pull!(rs.summarized)
     if chunk === nothing
@@ -427,7 +427,7 @@ end
 # Cache each window's output value type and empty row, re-typing any
 # half-filled value vectors. A time window's empty row is the empty values; a
 # Bars window's is all missing, which its type admits instead.
-function setvaltype!(rs::RollingState, @nospecialize(cfg::RollingConfig),
+function setvaltype!(rs::RollingState, cfg::RollingConfig,
     @nospecialize(tg::Tiering))
     V = tieredvaluetype(tg, cfg.protos, cfg.outs)
     VB = barsvaluetype(tg, cfg.outs)
@@ -441,7 +441,7 @@ function setvaltype!(rs::RollingState, @nospecialize(cfg::RollingConfig),
 end
 
 # The augmented side's key and output-name checks, once per run.
-function checkaugmented!(rs::RollingState, @nospecialize(cfg::RollingConfig),
+function checkaugmented!(rs::RollingState, cfg::RollingConfig,
     c::DataFrame)
     rs.checked && return nothing
     checkkeycolumns(cfg.keycols, c, "addrollingcolumns", "the augmented input")
@@ -450,7 +450,7 @@ function checkaugmented!(rs::RollingState, @nospecialize(cfg::RollingConfig),
     return nothing
 end
 
-function rollchunk!(rs::RollingState, @nospecialize(cfg::RollingConfig),
+function rollchunk!(rs::RollingState, cfg::RollingConfig,
     c::DataFrame)
     checkaugmented!(rs, cfg, c)
     rs.snt === nothing && !rs.summarized.done && pullsummarized!(rs, cfg)
@@ -475,7 +475,7 @@ end
 # Admit every summarized row before `start` ahead of the first augmented pull,
 # evicting as it goes, so the windows hold only the rows a row at or after
 # `start` can still see. Type-unstable, once per chunk of the lead-in.
-function admitleadin!(rs::RollingState, @nospecialize(cfg::RollingConfig),
+function admitleadin!(rs::RollingState, cfg::RollingConfig,
     start, self::Bool)
     rs.snt === nothing && pullsummarized!(rs, cfg, self)
     while rs.snt !== nothing
@@ -751,7 +751,7 @@ end
 
 # --- output assembly -------------------------------------------------------
 
-function assemble(@nospecialize(cfg::RollingConfig), rs::RollingState,
+function assemble(cfg::RollingConfig, rs::RollingState,
     c::DataFrame)
     for (wname, v) in zip(cfg.windownames, rs.vals)
         wdf = rowsdataframe(v)
@@ -764,7 +764,7 @@ end
 
 # A summarized stream with no chunks: every window is empty, so every row gets
 # the empty values, or missing under a Bars window.
-function assembleempty(@nospecialize(cfg::RollingConfig), c::DataFrame)
+function assembleempty(cfg::RollingConfig, c::DataFrame)
     e = emptyvalues(cfg.protos, cfg.outs)
     for (wname, lb) in zip(cfg.windownames, cfg.lookbacks), (name, val) in pairs(e)
         c[!, prefixedname(wname, name)] =

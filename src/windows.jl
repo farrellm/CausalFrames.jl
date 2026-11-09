@@ -146,7 +146,7 @@ WindowTiers{R}(buffer::B, running::G, monoids::MQ, refold::GT,
 # for every transition, including one that demotes an accumulator from the
 # running tier to the monoid tier. The refold table is filled only at ticks, so it
 # starts empty.
-function preparewindows!(st::WindowState, @nospecialize(cfg::WindowConfig),
+function preparewindows!(st::WindowState, cfg::WindowConfig,
     @nospecialize(types::NamedTuple))
     tg = tiering(cfg.protos, types)
     K = storekeytype(types, cfg.keynames)
@@ -189,10 +189,10 @@ end
 windowkeytype(::Nothing, st::WindowState) = eltype(st.prevkeys)
 windowkeytype(::KeySet{K}, st::WindowState) where {K} = K
 
-windowtypes(st::WindowState{T}, @nospecialize(cfg::WindowConfig)) where {T} =
+windowtypes(st::WindowState{T}, cfg::WindowConfig) where {T} =
     gridtypes(T, windowkeytype(cfg.ks, st), st.valtype, cfg.protos, cfg.outs)
 
-function windowchunk!(st::WindowState{T}, @nospecialize(cfg::WindowConfig),
+function windowchunk!(st::WindowState{T}, cfg::WindowConfig,
     c::DataFrame) where {T}
     if !st.checked
         checkkeycolumns(cfg.keycols, c, "summarizewindows")
@@ -232,7 +232,7 @@ function releasewindows!(st::WindowState)
     return nothing
 end
 
-function windowflush!(st::WindowState{T}, @nospecialize(cfg::WindowConfig)) where {T}
+function windowflush!(st::WindowState{T}, cfg::WindowConfig) where {T}
     pullpast!(st.ticks, st.cur, nothing)
     isempty(st.ticks) && return nothing
     if st.tiers === nothing

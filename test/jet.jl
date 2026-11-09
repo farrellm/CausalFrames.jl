@@ -32,7 +32,7 @@ using JET
         m = Union{Missing,String}[missing, "u", "v"], x = [1.0, 2.0, 3.0])
     untypes = map(eltype, unt)
     ugroups = CausalFrames.newgroups(unames, states, untypes)
-    JET.@test_opt CausalFrames.sortedgroups(ugroups)
+    JET.@test_opt CausalFrames.sortedgroups(ugroups.table)
     JET.@test_opt CausalFrames.foldgroups!(ugroups, states, unt, unames)
 
     JET.@test_opt CausalFrames.foldgroups!(states, states, nt, Val(()))
