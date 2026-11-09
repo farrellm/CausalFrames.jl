@@ -1506,17 +1506,20 @@ end
     # ... as are too few rows for the correction; uncorrected, two rows are
     # g1 = 0 and g2 = -2
     df = (time = [1, 2, 3], x = [1.0, 2.0, 4.0])
-    rows(s) = only(
-        eachcol(
-            select(
-                DataFrame(load(Context(0, 9),
-                    readtable(df) |> addsummarycolumns(s))), Not(:time, :x)),
-        ),
+    corr = DataFrame(
+        load(Context(0, 9),
+            readtable(df) |> addsummarycolumns([Kurtosis(:x), Skewness(:x)])),
     )
-    @test all(isnan, rows(Kurtosis(:x)))
-    @test isnan.(rows(Skewness(:x))) == [true, true, false]
-    @test isequal(rows(Kurtosis(:x; corrected = false))[1:2], [NaN, -2.0])
-    @test isequal(rows(Skewness(:x; corrected = false))[1:2], [NaN, 0.0])
+    uncorr = DataFrame(
+        load(Context(0, 9),
+            readtable(df) |>
+            addsummarycolumns([Kurtosis(:x; corrected = false),
+                Skewness(:x; corrected = false)])),
+    )
+    @test all(isnan, corr.x_kurtosis)
+    @test isnan.(corr.x_skewness) == [true, true, false]
+    @test isequal(uncorr.x_kurtosis[1:2], [NaN, -2.0])
+    @test isequal(uncorr.x_skewness[1:2], [NaN, 0.0])
 
     # NaN and ±Inf rows are counted, not folded: NaN while in the window
     x = [1.0, 2.0, Inf, 4.0, 7.0, 6.0, 0.0, NaN, 8.0, 9.0, 13.0, 10.0, 11.0] .+ 1e8
