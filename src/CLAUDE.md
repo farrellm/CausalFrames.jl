@@ -18,11 +18,13 @@ design rationale and performance constraints behind each module.
   `head`'s early exit. `LeadInDrop`/`dropleadin!` drop the rows before a
   start, for `warmup`, `forwardfill`'s `tolerance` and a shared run's
   later-starting side
-- `src/share.jl` — the `CausalPipeline{F}` node and the plan of one
+- `src/share.jl` — the `CausalPipeline` node and the plan of one
   evaluation (issue #105). A node is immutable (a `mutable struct` of `const`
-  fields, for cheap identity): its run function `(ctx, ins) -> iterator`, its
-  inputs (an erased `Vector{CausalPipeline}`, so a pipeline's type never nests
-  its inputs'), `contexts` (each input's context from its own), the
+  fields, for cheap identity), with its `run` function erased to `Any` (along
+  with `SourceRun` and `UnaryRun`), so `CausalPipeline` is one concrete type
+  and nothing ever specializes on a node's run closure: its run function `(ctx,
+  ins) -> iterator`, its inputs (`Vector{CausalPipeline}`, so a pipeline's type
+  never nests its inputs'), `contexts` (each input's context from its own), the
   `startfree`/`stopfree` flags and a source's `rescans` (planning only: never
   split its runs); build it with `pipesource`, `pipenode` or
   `pipetransform() do upstream, ctx … end`, each and-ing the operator's own
@@ -59,12 +61,10 @@ design rationale and performance constraints behind each module.
   `abandon!` is a no-op. The flags'
   per-operator table is in DESIGN.md's "Shared runs"; a wrong `true` is a
   silent wrong answer, so every flag is covered by `test/sharing.jl`'s
-  property test. Everything that takes a pipeline once per build or per
-  evaluation (the builders, `UnaryTransform`, the curried operators' closures,
-  the planner, `load`/`scan`/`stream`) takes it `@nospecialize`: specialized
-  on each `CausalPipeline{F}`, the planner alone compiled ~80 ms per node
-  type, and `operators.jl` + `join.jl` went from 37 to 56 s; erased, they take
-  35 s, since a run function no longer captures (and nests) its inputs' types
+  property test. The builders (`pipesource`, `pipenode`, `pipetransform`) take
+  `run`, `inputs` and `contexts` `@nospecialize`, and `CausalPipeline` itself is
+  non-parametric so operators, `|>`, the planner and `load`/`scan`/`stream`
+  compile once across every pipeline graph
 - `src/compaction.jl` — `compactdead!`, the one dead-prefix rule for every
   FIFO that pops by advancing a head (the window transforms' row buffer, the
   monoid queues' rows, the windowed extremes' deque, `WindowValues`,
@@ -456,7 +456,12 @@ design rationale and performance constraints behind each module.
   `@nospecialize` form read the names at runtime and cost 1 µs per chunk for
   no measurable compile saving), which compiles
   once where `DataFrame(rows)` compiles Tables.jl's path per row type (and is
-  faster). `prototypes` expands dependencies topologically and
+  faster). Single-row flushes (`summarizeflush`, `lastrowflush!`) use
+  `rowdataframe`, which builds one-element typed columns via `typedone` without
+  compiling `unzipcolumns` per row type, and `emptygrid` builds its no-data
+  grid column-wise for the same reason. `promotefields` is `@generated` so it
+  folds to a constant type without compiling a `Base.ntuple` closure per
+  `(VT, E)` pair. `prototypes` expands dependencies topologically and
   returns the requested output names, which ride through the kernels in a
   `Val` to project hidden dependencies out of the output, plus the row terms
   it unwrapped. Every summarizing transform (these three, `intervalize`,
@@ -503,7 +508,10 @@ design rationale and performance constraints behind each module.
   The per-key states live in a `GroupTable{K,S}` (both parameters concrete,
   `K` the promoted schema's `storekeytype`, re-keyed by `widengroups` when a
   key column widens),
-  which also holds the reused emission buffer and the pool of retired state
+  which also holds a reused `SortedBuffer{K,S}` (sorting `Pair{K,Int}` indices
+  against a parallel value vector so `Base.sort!` compiles once per key type
+  `K` instead of per `(K, S)`, also used by `summarizewindows` and
+  `sortedgroups`) and the pool of retired state
   tuples that `closecycle!` retires into and `groupstates!` zeroes back out
   of: the keyed cycle fold closes a table per timestamp, and rebuilding it per
   cycle would be the package's heaviest allocation site. A declared `keyset`
@@ -562,7 +570,8 @@ design rationale and performance constraints behind each module.
   `stop` via `merge`, which keeps the column position. The key names reach
   `storekeytype` and `lastsegment!` through `LastRowState`'s abstract
   `keynames` field, so the chunk iterator and driver compile once for every
-  key; the flush builds its frame with `rowsdataframe`
+  key; the keyless flush builds its one row with `rowdataframe` and the keyed
+  flush builds with `rowsdataframe`
 - `src/sortcycles.jl` — `sortcycles`, the within-timestamp stable sort. A
   `chunkmap` whose only state is the open cycle, held as a `Vector{DataFrame}`
   of pieces and concatenated once when a later time (or flush) closes it, so a
@@ -692,7 +701,8 @@ design rationale and performance constraints behind each module.
   (`afterleadin`), `admitleadin!` reads the whole
   lead-in through the summarized side with its own kernel,
   `leadinsegment!`, evicting against the newest admitted time (the monoid
-  queues expire on admission anyway); an output pull first would queue the
+  queues expire on admission anyway), guarded by `hasleadin` so calls with no
+  rows before `start` skip compiling `leadinsegment!`; an output pull first would queue the
   lead-in at full input width. `afterleadin`'s `LeadInGate` keeps abstract
   fields on purpose: a wrapper capturing its input's iterator type nests every
   earlier stage's type in a chain's, and `chain8-keyed` then took inference
@@ -701,9 +711,11 @@ design rationale and performance constraints behind each module.
   `pullsummarized!`, `setvaltype!`, `admitleadin!`, `assemble`,
   `assembleempty`) takes the concrete `RollingConfig`, whose fields are
   untyped, so the iterator and the driver compile once for every summarizer
-  set (no `@nospecialize` needed on it); only the kernels and, on a widening,
-  `widenrolltiers` (past the schema's type values) specialize; a first build
-  takes the `@nospecialize` fast path in `rolltiers`. The tiers carry only
+  set (no `@nospecialize` needed on it; `RollingConfig`'s constructor is
+  `@nospecialize` too); only the kernels specialize, while `rolltiers`,
+  `widenrolltiers` and the per-chunk helpers (`allocvals`, `packwins`,
+  `setvaltype!`) stay erased (with a single-window fast path in
+  `allocvals`/`packwins`). The tiers carry only
   the three folding tiers' templates; the derived states and the permutation
   ride on `RollingState` beside them. The kernels' inlining is load-bearing:
   a `@noinline` barrier around `emitroll!`'s `summaryvalues` saved 5% of their

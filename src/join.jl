@@ -36,9 +36,9 @@ the same time, the last one wins. For a table with no time column, use
 - `righttime = nothing`: a name under which to keep the matched right row's
   time; by default it is dropped.
 """
-function asofjoin(right::CausalPipeline; key = nothing, tolerance = nothing,
-    strict::Bool = false, leftprefix = nothing,
-    rightprefix = nothing,
+function asofjoin(right::CausalPipeline; @nospecialize(key = nothing),
+    @nospecialize(tolerance = nothing), strict::Bool = false,
+    @nospecialize(leftprefix = nothing), @nospecialize(rightprefix = nothing),
     righttime::Union{Nothing,Symbol} = nothing)
     return jointransform(right, Backward(), "asofjoin";
         key, tolerance, strict, leftprefix, rightprefix, righttime)
@@ -49,8 +49,9 @@ asofjoin(left::CausalPipeline, right::CausalPipeline; kwargs...) =
 # The as-of joins' shared construction: `asofjoin` matches backward and
 # `Acausal.futurejoin` forward, the direction supplying the comparison
 # (`joincmp`) and the right input's window (`rightcontext`).
-function jointransform(right::CausalPipeline, direction, op::String; key,
-    tolerance, strict::Bool, leftprefix, rightprefix,
+function jointransform(right::CausalPipeline, @nospecialize(direction), op::String;
+    @nospecialize(key), @nospecialize(tolerance), strict::Bool,
+    @nospecialize(leftprefix), @nospecialize(rightprefix),
     righttime::Union{Nothing,Symbol})
     keycols = keycolumns(key, op)
     righttime === :time && throw(ArgumentError("$op righttime may not be :time; \
@@ -97,7 +98,8 @@ JoinConfig(direction, op::String, keycols::Vector{Symbol}; tolerance = nothing,
 
 # The join engine's node over `(left, right)`, its chunks
 # `step(js, js.cfg, chunk)` per left chunk; `applymodels` shares it.
-function joinnode(right::CausalPipeline, cfg::JoinConfig, step)
+function joinnode(right::CausalPipeline, @nospecialize(cfg::JoinConfig),
+    @nospecialize(step))
     (; direction, tolerance, op) = cfg
     contexts = ctx -> (ctx, rightcontext(direction, ctx, tolerance, op))
     startfree, stopfree = joinfreedom(direction, tolerance)

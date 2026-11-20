@@ -43,7 +43,7 @@ DataFrame(load(Context(2020, 2030), p))
    4 │  2021      4      1   2021      1
 ```
 """
-function sortcycles(by; rev::Bool = false)
+function sortcycles(@nospecialize(by); rev::Bool = false)
     spec = sortspec(by)
     # A concrete ordering, not a runtime Bool, so the sort specializes.
     order = rev ? Base.Order.Reverse : Base.Order.Forward
@@ -53,7 +53,8 @@ function sortcycles(by; rev::Bool = false)
             flush = () -> sortcycleflush!(st, spec, order))
     end
 end
-sortcycles(p::CausalPipeline, by; kwargs...) = sortcycles(by; kwargs...)(p)
+sortcycles(p::CausalPipeline, @nospecialize(by); kwargs...) =
+    sortcycles(by; kwargs...)(p)
 
 # Eager validation: a function, a name, or a non-empty collection of names,
 # normalized to a tuple of Symbols. A mistyped `sortcycles(p)` gets a message.

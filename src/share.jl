@@ -21,14 +21,18 @@
 # (a source) and its docstring are in pipeline.jl. Immutable after
 # construction: identity is the node's, cheap to hash, and planning never
 # writes to it.
-mutable struct CausalPipeline{F}
-    const run::F       # (ctx, ins::RunInputs) -> iterator of DataFrame chunks
+mutable struct CausalPipeline
+    const run::Any     # (ctx, ins::RunInputs) -> iterator of DataFrame chunks
     const inputs::Vector{CausalPipeline}  # erased, so types don't nest
     const contexts::Any  # ctx -> each input's context (a Context: all of them)
     const startfree::Bool  # rows don't depend on where the run starts
     const stopfree::Bool   # rows don't depend on where the run stops
     const rescans::Bool    # every run reads its source from the beginning
     const sharing::Union{Nothing,Bool}  # `sharing`'s override; nothing: automatic
+    CausalPipeline(@nospecialize(run), inputs::Vector{CausalPipeline},
+        @nospecialize(contexts), startfree::Bool, stopfree::Bool,
+        rescans::Bool, sharing::Union{Nothing,Bool}) =
+        new(run, inputs, contexts, startfree, stopfree, rescans, sharing)
 end
 
 # The builders run once per pipeline built and never per chunk, so none of
@@ -43,8 +47,9 @@ pipesource(@nospecialize(run); startfree::Bool = true, stopfree::Bool = true,
         stopfree, rescans, nothing)
 
 # A source's run function, ignoring the (absent) inputs.
-struct SourceRun{R}
-    run::R
+struct SourceRun
+    run::Any
+    SourceRun(@nospecialize(run)) = new(run)
 end
 (s::SourceRun)(ctx::Context, _) = s.run(ctx)
 
@@ -53,9 +58,9 @@ end
 # context each input is read over, a single `Context` for all of them. Its own
 # `startfree`/`stopfree` say whether the operator keeps its inputs' freedom;
 # the node's are those and-ed with every input's.
-function pipenode(@nospecialize(run), @nospecialize(inputs); contexts = identity,
-    startfree::Bool = true, stopfree::Bool = true,
-    sharing::Union{Nothing,Bool} = nothing)
+function pipenode(@nospecialize(run), @nospecialize(inputs);
+    @nospecialize(contexts = identity), startfree::Bool = true,
+    stopfree::Bool = true, sharing::Union{Nothing,Bool} = nothing)
     ins = CausalPipeline[]
     for p in inputs
         p = p::CausalPipeline
@@ -69,8 +74,8 @@ end
 # A unary transform's shell: `run(upstream, ctx)` builds its chunks from the
 # input's, read over `contexts(ctx)`. Written as a do block, so a transform
 # reads `pipetransform() do upstream, ctx … end`.
-pipetransform(@nospecialize(run); contexts = identity, startfree::Bool = true,
-    stopfree::Bool = true) =
+pipetransform(@nospecialize(run); @nospecialize(contexts = identity),
+    startfree::Bool = true, stopfree::Bool = true) =
     UnaryTransform(UnaryRun(run), contexts, startfree, stopfree)
 
 # The transform `pipetransform` returns, and its node's run function.
@@ -83,8 +88,9 @@ end
 (t::UnaryTransform)(@nospecialize(p::CausalPipeline)) =
     pipenode(t.run, (p,); t.contexts, t.startfree, t.stopfree)
 
-struct UnaryRun{R}
-    run::R
+struct UnaryRun
+    run::Any
+    UnaryRun(@nospecialize(run)) = new(run)
 end
 (u::UnaryRun)(ctx::Context, ins) = u.run(openinput(ins, 1), ctx)
 

@@ -6,18 +6,30 @@
 
 # --- shared plumbing -------------------------------------------------------
 
-tosummarizers(s::Summarizer) = Summarizer[s]
-tosummarizers(ss) = collect(Summarizer, ss)
+tosummarizers(@nospecialize(s::Summarizer)) = Summarizer[s]
+function tosummarizers(@nospecialize(ss))
+    out = Summarizer[]
+    for s in ss
+        push!(out, s)
+    end
+    return out
+end
 
 tokeycolumns(::Nothing) = Symbol[]
 tokeycolumns(k::Symbol) = Symbol[k]
 # A string is one name, not a collection of characters.
 tokeycolumns(k::AbstractString) = Symbol[Symbol(k)]
-tokeycolumns(ks) = collect(Symbol, ks)
+function tokeycolumns(@nospecialize(ks))
+    out = Symbol[]
+    for k in ks
+        push!(out, Symbol(k))
+    end
+    return out
+end
 
 # A keyed transform's `key`, normalized and checked eagerly: the time column
 # orders the stream, so it is never a key.
-function keycolumns(key, op::String)
+function keycolumns(@nospecialize(key), op::String)
     keycols = tokeycolumns(key)
     allunique(keycols) || throw(ArgumentError("$op key columns must be unique"))
     :time in keycols && throw(ArgumentError("$op key may not be :time"))
@@ -431,23 +443,56 @@ end
 
 # The input projected to the stored columns, in the input's order. A missing
 # column is left for `fresh` to report, as it would be without the projection.
-projectinput(nt::NamedTuple, ::Nothing) = nt
-projectinput(nt::NamedTuple, cols::Tuple) =
-    NamedTuple{Tuple(k for k in keys(nt) if k in cols)}(nt)
+projectinput(@nospecialize(nt::NamedTuple), ::Nothing) = nt
+function projectinput(@nospecialize(nt::NamedTuple), @nospecialize(cols::Tuple))
+    ks = Symbol[]
+    for k in keys(nt)
+        k in cols && push!(ks, k)
+    end
+    return NamedTuple{Tuple(ks)}(nt)
+end
 
 # A column's element type may differ between chunks, so the state types track
-# the promotion of every input type seen.
-promotetypes(::Nothing, b::NamedTuple) = b
-promotetypes(a::NamedTuple, b::NamedTuple) =
-    NamedTuple{keys(b)}(
-        Tuple(haskey(a, k) ? promote_type(a[k], b[k]) : b[k]
-              for k in keys(b)),
-    )
+# the promotion of every input type seen. Most chunks share the prior schema,
+# so the `===` fast path skips the loop and allocates nothing.
+promotetypes(::Nothing, @nospecialize(b::NamedTuple)) = b
+function promotetypes(@nospecialize(a::NamedTuple), @nospecialize(b::NamedTuple))
+    a === b && return a
+    ks = keys(b)
+    n = length(ks)
+    ts = Vector{Any}(undef, n)
+    for i in 1:n
+        k = ks[i]
+        @inbounds ts[i] = haskey(a, k) ? promote_type(a[k], b[k]) : b[k]
+    end
+    return NamedTuple{ks}(Tuple(ts))
+end
 
-newstates(@nospecialize(protos::Tuple), @nospecialize(intypes::NamedTuple)) =
-    map(s -> fresh(s, intypes), protos)
-widenstates(@nospecialize(states::Tuple), @nospecialize(intypes::NamedTuple)) =
-    map(st -> widenstate(st, intypes), states)
+function newstates(@nospecialize(protos::Tuple), @nospecialize(intypes::NamedTuple))
+    n = length(protos)
+    out = Vector{Any}(undef, n)
+    for i in 1:n
+        @inbounds out[i] = fresh(protos[i], intypes)
+    end
+    return Tuple(out)
+end
+function widenstates(@nospecialize(states::Tuple), @nospecialize(intypes::NamedTuple))
+    n = length(states)
+    out = Vector{Any}(undef, n)
+    for i in 1:n
+        @inbounds out[i] = widenstate(states[i], intypes)
+    end
+    return Tuple(out)
+end
+
+# A reusable key-order sort buffer over a `KeyDict{K,V}`: sorting `Pair{K,Int}`
+# indices instead of `Pair{K,V}` compiles `Base.sort!` once per key type `K`
+# rather than once per state tuple `V`, and swaps smaller elements.
+struct SortedBuffer{K,V}
+    keys::Vector{Pair{K,Int}}
+    vals::Vector{V}
+end
+SortedBuffer{K,V}() where {K,V} = SortedBuffer{K,V}(Pair{K,Int}[], V[])
 
 # The per-key state tuples of the keyed transforms, plus two buffers that make
 # closing the table allocation-free. Both type parameters are concrete (the key
@@ -457,29 +502,40 @@ widenstates(@nospecialize(states::Tuple), @nospecialize(intypes::NamedTuple)) =
 # tier reuses the pool.
 mutable struct GroupTable{K,S<:Tuple}
     table::KeyDict{K,S}
-    scratch::Vector{Pair{K,S}}  # key-ordered emission buffer, reused
+    scratch::SortedBuffer{K,S}  # key-ordered emission buffer, reused
     pool::Vector{S}             # retired state tuples, zeroed on reuse
 end
 
 GroupTable{K,S}() where {K,S<:Tuple} =
-    GroupTable{K,S}(KeyDict{K,S}(), Pair{K,S}[], S[])
+    GroupTable{K,S}(KeyDict{K,S}(), SortedBuffer{K,S}(), S[])
 
 # A summarizing fold's groups, built for the first schema by the transform's
 # grouping: the state tuple itself when keyless (`Val(())`), or a `GroupTable`
 # keyed by the key columns' promoted types, which every row's key converts to.
 # A declared `KeySet` makes `DenseGroups` (below).
-newgroups(::Val{()}, stateprotos::Tuple, ::NamedTuple) = map(fresh, stateprotos)
-newgroups(keynames::Val, stateprotos::S, types::NamedTuple) where {S<:Tuple} =
-    GroupTable{storekeytype(types, keynames),S}()
+function newgroups(::Val{()}, @nospecialize(stateprotos::Tuple),
+    @nospecialize(::NamedTuple))
+    n = length(stateprotos)
+    out = Vector{Any}(undef, n)
+    for i in 1:n
+        @inbounds out[i] = fresh(stateprotos[i])
+    end
+    return Tuple(out)
+end
+newgroups(@nospecialize(keynames::Val), @nospecialize(stateprotos::Tuple),
+    @nospecialize(types::NamedTuple)) =
+    GroupTable{storekeytype(types, keynames),typeof(stateprotos)}()
 
 # The groups rebuilt for a widened schema. `stateprotos` must already be
 # widened: it fixes a new table's value type, which an empty table couldn't. A
 # table's keys widen with the schema too (a key column may come to admit
 # `missing`), and its pool is dropped, since retired tuples have the old type.
-widengroups(states::Tuple, ::Tuple, intypes::NamedTuple, ::Val{()}) =
+widengroups(@nospecialize(states::Tuple), @nospecialize(::Tuple),
+    @nospecialize(intypes::NamedTuple), ::Val{()}) =
     widenstates(states, intypes)
-function widengroups(gt::GroupTable, stateprotos::Tuple, intypes::NamedTuple,
-    keynames::Val)
+function widengroups(@nospecialize(gt::GroupTable),
+    @nospecialize(stateprotos::Tuple), @nospecialize(intypes::NamedTuple),
+    @nospecialize(keynames::Val))
     widened = newgroups(keynames, stateprotos, intypes)
     for (k, gs) in gt.table
         widened.table[k] = widenstates(gs, intypes)
@@ -543,7 +599,27 @@ end
 
 # For `lastrow`'s once-per-run flush, over a bare KeyDict; `summarize`'s flush
 # (`sortedrows`) and the per-cycle drain reuse the table's `sortinto!` buffer.
-sortedgroups(d::AbstractDict) = sort!(collect(d); lt = groupisless)
+# Non-`Int` value dicts sort `Pair{K,Int}` indices so `Base.sort!` compiles once
+# per key type `K` rather than per `(K, V)`.
+sortedgroups(d::AbstractDict{K,Int}) where {K} = sort!(collect(d); lt = groupisless)
+function sortedgroups(d::AbstractDict{K,V}) where {K,V}
+    n = length(d)
+    keys = Vector{Pair{K,Int}}(undef, n)
+    vals = Vector{V}(undef, n)
+    i = 0
+    @inbounds for (k, v) in d
+        i += 1
+        keys[i] = k => i
+        vals[i] = v
+    end
+    sort!(keys; lt = groupisless)
+    out = Vector{Pair{K,V}}(undef, n)
+    @inbounds for j in 1:n
+        k, idx = keys[j]
+        out[j] = k => vals[idx]
+    end
+    return out
+end
 
 # The row types the kernels emit, by inference: calling `value` on an unfolded
 # state won't do, since Min/Max/First/Last leave their value undefined.
@@ -562,15 +638,15 @@ promotedvaluetype(::Type{S}, protos::Tuple, outs::Val) where {S} =
     promotefields(valuetype(S, outs), typeof(emptyvalues(protos, outs)))
 
 # Field-wise promotion of the value type VT with the NamedTuple type E of the
-# same names, or their Union should VT not be a concrete NamedTuple.
-function promotefields(::Type{VT}, ::Type{E}) where {VT,E<:NamedTuple}
+# same names, or their Union should VT not be a concrete NamedTuple. Generated
+# so it folds to a constant Type without compiling a `Base.ntuple` closure per
+# `(VT, E)` pair.
+@generated function promotefields(::Type{VT}, ::Type{E}) where {VT,E<:NamedTuple}
     (VT <: NamedTuple && isconcretetype(VT) && fieldnames(VT) == fieldnames(E)) ||
-        return Union{VT,E}
-    return NamedTuple{fieldnames(E),
-        Tuple{
-            ntuple(i -> promote_type(fieldtype(VT, i), fieldtype(E, i)),
-                fieldcount(E))...,
-        }}
+        return :(Union{VT,E})
+    ts = [:(promote_type($(fieldtype(VT, i)), $(fieldtype(E, i))))
+          for i in 1:fieldcount(E)]
+    return :(NamedTuple{$(QuoteNode(fieldnames(E))),Tuple{$(ts...)}})
 end
 
 # The value type of a count window (`Bars`, `barwindow`), which emits all
@@ -613,10 +689,12 @@ function densegroups(stateprotos::S, n::Int) where {S<:Tuple}
     return DenseGroups{S}(states, fill(false, n))
 end
 
-newgroups(ks::KeySet, stateprotos::Tuple, ::NamedTuple) =
+newgroups(@nospecialize(ks::KeySet), @nospecialize(stateprotos::Tuple),
+    @nospecialize(::NamedTuple)) =
     densegroups(stateprotos, length(ks.keys))
-function widengroups(dg::DenseGroups, ::S, intypes::NamedTuple,
-    ::KeySet) where {S<:Tuple}
+function widengroups(@nospecialize(dg::DenseGroups), @nospecialize(sp::Tuple),
+    @nospecialize(intypes::NamedTuple), @nospecialize(::KeySet))
+    S = typeof(sp)
     states = Vector{S}(undef, length(dg.states))
     for i in eachindex(dg.states)
         @inbounds states[i] = widenstates(dg.states[i], intypes)
@@ -665,6 +743,8 @@ struct FoldConfig
     protos::Tuple
     grouping::Any  # summaryspec's: the key names' `Val`, or a KeySet
     outs::Val
+    FoldConfig(@nospecialize(protos::Tuple), @nospecialize(grouping),
+        @nospecialize(outs::Val)) = new(protos, grouping, outs)
 end
 
 # Per-run state shared by the summarization transforms (and intervalize), in
@@ -813,10 +893,20 @@ function flushcycle(groups, stateprotos::Tuple, t, grouping, protos::Tuple,
 end
 
 # The present keys sorted into a reused buffer.
-function sortinto!(scratch::Vector{<:Pair}, groups::AbstractDict)
-    empty!(scratch)
-    append!(scratch, groups)
-    return sort!(scratch; lt = groupisless)
+function sortinto!(scratch::SortedBuffer{K,V}, groups::AbstractDict{K,V}) where {K,V}
+    keys = scratch.keys
+    vals = scratch.vals
+    n = length(groups)
+    resize!(keys, n)
+    resize!(vals, n)
+    i = 0
+    @inbounds for (k, v) in groups
+        i += 1
+        keys[i] = k => i
+        vals[i] = v
+    end
+    sort!(keys; lt = groupisless)
+    return scratch
 end
 
 # Retire every state tuple to the pool (`groupstates!` zeroes them on reuse)
@@ -832,8 +922,10 @@ end
 # Emit one row per present key, in key order, then retire the table. Allocates
 # only the rows it pushes.
 function closecycle!(rows, gt::GroupTable, t, outs::Val)
-    for (k, states) in sortinto!(gt.scratch, gt.table)
-        push!(rows, summaryrow(t, k, states, outs))
+    buf = sortinto!(gt.scratch, gt.table)
+    vals = buf.vals
+    for (k, idx) in buf.keys
+        push!(rows, summaryrow(t, k, @inbounds(vals[idx]), outs))
     end
     retireall!(gt)
     return rows
@@ -860,8 +952,8 @@ end
 # `Val`s. A `grid` transform's keyless output is dense over `nokeyset`. The
 # `grouping` is what the fold's groups are built by (`newgroups`): the declared
 # key set if any, else the key names. `cfg` bundles what a `SummaryFold` reads.
-function summaryspec(summarizers, key, op::String; keyset = nothing,
-    grid::Bool = false)
+function summaryspec(@nospecialize(summarizers), @nospecialize(key), op::String;
+    @nospecialize(keyset = nothing), grid::Bool = false)
     keycols = keycolumns(key, op)
     protos, requested, terms = prototypes(tosummarizers(summarizers), keycols, op)
     keyed = !isempty(keycols)
@@ -901,17 +993,47 @@ end
     end
 end
 
+# Single-row DataFrame without specializing `unzipcolumns` per row type. Each
+# column's element type is the NamedTuple's declared field type, matching
+# `rowsdataframe([row])`.
+typedone(::Type{T}, v) where {T} = T[v]
+function rowdataframe(@nospecialize(row::NamedTuple))
+    T = typeof(row)
+    n = nfields(row)
+    names = Symbol[fieldnames(T)...]
+    cols = Vector{AbstractVector}(undef, n)
+    for j in 1:n
+        @inbounds cols[j] = typedone(fieldtype(T, j), getfield(row, j))
+    end
+    return DataFrame(cols, names; copycols = false)
+end
+
 # The grid of empty values for no data: a row per time per declared key, the
-# empty key for a keyless grid.
+# empty key for a keyless grid. Built column-wise so no row-type unzip compiles.
 function emptygrid(@nospecialize(times), @nospecialize(keys),
     @nospecialize(e::NamedTuple))
-    RT = gridrowtype(eltype(times), eltype(keys), typeof(e))
-    rows = Vector{RT}(undef, length(times) * length(keys))
-    i = 0
-    for t in times, k in keys
-        @inbounds rows[i+=1] = convert(RT, gridrow(t, k, e))
+    nt = length(times)
+    nk = length(keys)
+    n = nt * nk
+    n == 0 && return nothing
+    K = eltype(keys)
+    kn = fieldnames(K)
+    en = fieldnames(typeof(e))
+    names = Symbol[:time; kn...; en...]
+    cols = AbstractVector[repeat(times; inner = nk)]
+    for j in eachindex(kn)
+        T = fieldtype(K, j)
+        col = Vector{T}(undef, n)
+        idx = 0
+        for _ in 1:nt, k in keys
+            @inbounds col[idx+=1] = getfield(k, j)
+        end
+        push!(cols, col)
     end
-    return rowsframe(rows)
+    for j in eachindex(en)
+        push!(cols, fill(getfield(e, j), n))
+    end
+    return DataFrame(cols, names; copycols = false)
 end
 
 """
@@ -931,7 +1053,7 @@ A transform summarizing the whole window, emitted at `stop`, with columns
   values for an empty input. With a key it is one row per key, sorted by key,
   and nothing for an empty input.
 """
-function summarize(summarizers; key = nothing)
+function summarize(@nospecialize(summarizers); @nospecialize(key = nothing))
     (; keycols, terms, cfg) = summaryspec(summarizers, key, "summarize")
     # Folds the whole run and emits at its stop.
     return pipetransform(; startfree = false, stopfree = false) do upstream, ctx
@@ -940,7 +1062,7 @@ function summarize(summarizers; key = nothing)
             flush = () -> summarizeflush(fold, ctx.stop))
     end
 end
-summarize(p::CausalPipeline, summarizers; kwargs...) =
+summarize(p::CausalPipeline, @nospecialize(summarizers); kwargs...) =
     summarize(summarizers; kwargs...)(p)
 
 function summarizechunk!(fold::SummaryFold, c::DataFrame)
@@ -957,14 +1079,16 @@ function summarizeflush(fold::SummaryFold, stop)
     vals =
         groups === nothing ? emptyvalues(cfg.protos, cfg.outs) :
         summaryvalues(groups, cfg.outs)
-    return rowsdataframe([merge((; time = stop), vals)])
+    return rowdataframe(merge((; time = stop), vals))
 end
 
 # `summarize`'s keyed output, a row per key, sorted.
 function sortedrows(gt::GroupTable{K,S}, stop, outs::Val) where {K,S}
     rows = rowtype(typeof(stop), K, S, outs)[]
-    for (k, gs) in sortinto!(gt.scratch, gt.table)
-        push!(rows, summaryrow(stop, k, gs, outs))
+    buf = sortinto!(gt.scratch, gt.table)
+    vals = buf.vals
+    for (k, idx) in buf.keys
+        push!(rows, summaryrow(stop, k, @inbounds(vals[idx]), outs))
     end
     return rowsframe(rows)
 end
@@ -990,7 +1114,8 @@ then the summaries; the input columns are dropped.
   declared order, with empty values (`count = 0`, `mean = missing`) for keys
   without rows.
 """
-function summarizecycles(summarizers; key = nothing, keyset = nothing)
+function summarizecycles(@nospecialize(summarizers); @nospecialize(key = nothing),
+    @nospecialize(keyset = nothing))
     (; keycols, terms, cfg) =
         summaryspec(summarizers, key, "summarizecycles"; keyset)
     return pipetransform() do upstream, ctx
@@ -999,7 +1124,7 @@ function summarizecycles(summarizers; key = nothing, keyset = nothing)
             flush = () -> cycleflush(fold))
     end
 end
-summarizecycles(p::CausalPipeline, summarizers; kwargs...) =
+summarizecycles(p::CausalPipeline, @nospecialize(summarizers); kwargs...) =
     summarizecycles(summarizers; kwargs...)(p)
 
 function cyclechunk!(fold::SummaryFold, c::DataFrame)
@@ -1035,7 +1160,7 @@ so far, itself included.
   than `:time`. With a key, each key keeps its own running summary, so a keyed
   [`Count`](@ref) numbers the rows of each key.
 """
-function addsummarycolumns(summarizers; key = nothing)
+function addsummarycolumns(@nospecialize(summarizers); @nospecialize(key = nothing))
     (; keycols, requested, terms, cfg) =
         summaryspec(summarizers, key, "addsummarycolumns")
     # Cumulative from the run's start.
@@ -1047,7 +1172,7 @@ function addsummarycolumns(summarizers; key = nothing)
         return chunkmap(c -> runningchunk!(fold, c), upstream)
     end
 end
-addsummarycolumns(p::CausalPipeline, summarizers; kwargs...) =
+addsummarycolumns(p::CausalPipeline, @nospecialize(summarizers); kwargs...) =
     addsummarycolumns(summarizers; kwargs...)(p)
 
 function runningchunk!(fold::SummaryFold, c::DataFrame)

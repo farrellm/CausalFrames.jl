@@ -51,8 +51,10 @@ end
 # Iteration-state sentinel: this ChunkMap's flush has already run.
 struct Flushed end
 
+noflush() = nothing
+
 """
-    chunkmap(step, upstream; flush = () -> nothing)
+    chunkmap(step, upstream; flush = noflush)
 
 Internal lazy chunk transformer. Applies `step(chunk::DataFrame) ->
 Union{Nothing, DataFrame}` to each upstream chunk, skipping `nothing` and empty
@@ -60,7 +62,7 @@ results, then calls `flush() -> Union{Nothing, DataFrame}` once after upstream
 ends and yields its result if non-empty. Single-pass, so `step` and `flush` may
 close over mutable per-run state.
 """
-chunkmap(step, upstream; flush = () -> nothing) = ChunkMap(step, flush, upstream)
+chunkmap(step, upstream; flush = noflush) = ChunkMap(step, flush, upstream)
 
 struct ChunkMap{S,F,U}
     step::S

@@ -24,10 +24,9 @@ function windowsoracle(df::DataFrame, ticks, L, ss; key = nothing,
             declared = [NamedTuple{kn}(v isa Tuple ? v : (v,)) for v in keyset]
             got = reduce(vcat,
                 [
-                    DataFrame([
-                        haskey(at, d) ? copy(got[at[d], :]) :
-                        merge((; time = τ), d, empty),
-                    ]) for d in declared
+                    haskey(at, d) ? got[at[d]:at[d], :] :
+                    CausalFrames.rowdataframe(merge((; time = τ), d, empty))
+                    for d in declared
                 ])
         elseif !isempty(keycols)
             present = [
@@ -36,7 +35,11 @@ function windowsoracle(df::DataFrame, ticks, L, ss; key = nothing,
             ]
             vanished = [k for k in prev if !any(isequal(k), present)]
             if !isempty(vanished)
-                vdf = DataFrame([merge((; time = τ), k, empty) for k in vanished])
+                vdf = reduce(vcat,
+                    [
+                        CausalFrames.rowdataframe(merge((; time = τ), k, empty)) for
+                        k in vanished
+                    ])
                 got = nrow(got) == 0 ? vdf : vcat(got, vdf; cols = :setequal)
                 sort!(got, keycols)
             end

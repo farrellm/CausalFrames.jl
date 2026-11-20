@@ -36,7 +36,7 @@ DataFrame(load(Context(0, 10), p))
 A chunk whose column names differ from the first chunk's is an
 `ArgumentError`.
 """
-function lastrow(; key = nothing)
+function lastrow(; @nospecialize(key = nothing))
     keycols = keycolumns(key, "lastrow")
     # Emits at the run's stop what it saw since its start.
     return pipetransform(; startfree = false, stopfree = false) do upstream, ctx
@@ -100,7 +100,7 @@ end
 function lastrowflush!(st::LastRowState, stop)
     if isempty(st.keycols)
         st.row === nothing && return nothing
-        return rowsdataframe([retime(st.row, stop)])
+        return rowdataframe(retime(st.row, stop))
     end
     st.store === nothing && return nothing
     ordered = sortedgroups(st.store.index)

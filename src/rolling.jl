@@ -109,8 +109,8 @@ An empty time window, including one for an unseen key, gives the summarizers'
 empty values, so a column's type may widen (`Min` gives `Union{Missing, T}`).
 A `Bars` window holding fewer than `n` rows gives `missing` instead.
 """
-function addrollingcolumns(windows, summarizers; key = nothing,
-    from::Union{Nothing,CausalPipeline} = nothing)
+function addrollingcolumns(@nospecialize(windows), @nospecialize(summarizers);
+    @nospecialize(key = nothing), from::Union{Nothing,CausalPipeline} = nothing)
     windownames, lookbacks = towindows(windows)
     isempty(windownames) &&
         throw(ArgumentError("addrollingcolumns requires at least one window"))
@@ -150,7 +150,8 @@ function addrollingcolumns(windows, summarizers; key = nothing,
         end
     end
 end
-addrollingcolumns(p::CausalPipeline, windows, summarizers; kwargs...) =
+addrollingcolumns(p::CausalPipeline, @nospecialize(windows),
+    @nospecialize(summarizers); kwargs...) =
     addrollingcolumns(windows, summarizers; kwargs...)(p)
 
 # The augmented chunks, pulled only once the lead-in is admitted: pulling one
@@ -163,9 +164,9 @@ prefixedname(w, n) = Symbol(w, '_', n)
 
 # Normalized window spec: names as a Symbol tuple and look-backs as a tuple, so
 # heterogeneous look-back types (say Minute and Hour) stay concrete.
-towindows(w::NamedTuple) = (keys(w), values(w))
-towindows(w::Pair) = ((Symbol(first(w)),), (last(w),))
-function towindows(w)
+towindows(@nospecialize(w::NamedTuple)) = (keys(w), values(w))
+towindows(@nospecialize(w::Pair)) = ((Symbol(first(w)),), (last(w),))
+function towindows(@nospecialize(w))
     ps = collect(w)
     all(p -> p isa Pair, ps) || throw(
         ArgumentError(
@@ -176,9 +177,13 @@ end
 
 # Look-backs may be of incomparable types, so the earliest widened start is
 # found in the time type. A bar count has no span and widens nothing.
-function rollingcontext(ctx::Context, lookbacks::Tuple)
-    starts = map(lb -> lookbackstart(ctx, lb), lookbacks)
-    return Context(minimum(starts), ctx.stop)
+function rollingcontext(ctx::Context, @nospecialize(lookbacks::Tuple))
+    earliest = lookbackstart(ctx, lookbacks[1])
+    for j in 2:length(lookbacks)
+        s = lookbackstart(ctx, lookbacks[j])
+        s < earliest && (earliest = s)
+    end
+    return Context(earliest, ctx.stop)
 end
 
 lookbackstart(ctx::Context, ::Bars) = ctx.start
@@ -197,6 +202,14 @@ struct RollingConfig
     prefixednames::Vector{Symbol}
     terms::NamedTuple  # the row terms, from `prototypes`
     stored::Union{Nothing,Tuple{Vararg{Symbol}}}  # from `storedcolumns`
+    RollingConfig(@nospecialize(windownames::Tuple{Vararg{Symbol}}),
+        @nospecialize(lookbacks::Tuple), keycols::Vector{Symbol},
+        @nospecialize(keynames::Val), @nospecialize(protos::Tuple),
+        @nospecialize(outs::Val), prefixednames::Vector{Symbol},
+        @nospecialize(terms::NamedTuple),
+        @nospecialize(stored::Union{Nothing,Tuple{Vararg{Symbol}}})) =
+        new(windownames, lookbacks, keycols, keynames, protos, outs,
+            prefixednames, terms, stored)
 end
 
 # Per-run state. The untyped fields are per-chunk setup; per-row work sits
@@ -265,7 +278,11 @@ function rolltiers(@nospecialize(tg::Tiering), @nospecialize(types::NamedTuple),
             running = nothing
         else
             RT = RunningTable{K,typeof(tg.running)}
-            running = ntuple(w -> RT(), Val(nwindows))
+            rts = Vector{Any}(undef, nwindows)
+            for w in 1:nwindows
+                @inbounds rts[w] = RT()
+            end
+            running = Tuple(rts)
         end
         monoids =
             isempty(tg.monoid) ? nothing :
@@ -277,9 +294,10 @@ function rolltiers(@nospecialize(tg::Tiering), @nospecialize(types::NamedTuple),
         anybars, barcap)
 end
 
-function widenrolltiers(tg::Tiering, ::Type{K}, ::Type{R}, ::Type{T},
-    keynames::Val, lookbacks::Tuple, old, nwindows::Int, anybars::Bool,
-    barcap::Int) where {K,R,T}
+function widenrolltiers(@nospecialize(tg::Tiering), @nospecialize(K::Type),
+    @nospecialize(R::Type), @nospecialize(T::Type),
+    @nospecialize(keynames::Val), @nospecialize(lookbacks::Tuple),
+    @nospecialize(old), nwindows::Int, anybars::Bool, barcap::Int)
     oldbuffered = old.buffer !== nothing
     oldhead = oldbuffered ? minimum(old.winheads) : 1
     # A time window's rows are in the buffer; a Bars window's in the rings.
@@ -296,10 +314,13 @@ function widenrolltiers(tg::Tiering, ::Type{K}, ::Type{R}, ::Type{T},
         running = nothing
     else
         RT = RunningTable{K,typeof(tg.running)}
-        running = ntuple(
-            w -> replaywindow!(RT(), lookbacks[w], buffer,
+        rts = Vector{Any}(undef, nwindows)
+        for w in 1:nwindows
+            @inbounds rts[w] = replaywindow!(RT(), lookbacks[w], buffer,
                 buffer === nothing ? 1 : winheads[w], rings, tg.running,
-                keynames), Val(nwindows))
+                keynames)
+        end
+        running = Tuple(rts)
     end
     monoids =
         suffixes === nothing ?
@@ -333,8 +354,8 @@ end
 # the old tiers holds a suffix of every key's stream (its ring, its queues'
 # live rows, its rows in the buffer from `head`), so the longest one holds them
 # all.
-function barsuffixes(::Type{K}, ::Type{R}, old, head::Int,
-    keynames::Val) where {K,R}
+function barsuffixes(@nospecialize(K::Type), @nospecialize(R::Type),
+    @nospecialize(old), head::Int, @nospecialize(keynames::Val))
     suffixes = KeyDict{K,Vector{R}}()
     function offer!(k, rows)
         cur = get(suffixes, k, nothing)
@@ -365,7 +386,8 @@ function barsuffixes(::Type{K}, ::Type{R}, old, head::Int,
 end
 
 # Each key's ring, holding the newest `cap` rows of its suffix, if any.
-function rebuildrings(::Type{K}, ::Type{R}, cap::Int, suffixes) where {K,R}
+function rebuildrings(@nospecialize(K::Type), @nospecialize(R::Type), cap::Int,
+    @nospecialize(suffixes))
     rings = KeyDict{K,RowRing{R}}()
     suffixes === nothing && return rings
     for (k, rows) in suffixes
@@ -379,8 +401,9 @@ function rebuildrings(::Type{K}, ::Type{R}, cap::Int, suffixes) where {K,R}
 end
 
 # The monoid tier, replayed from every key's live rows.
-function suffixmonoids(tg::Tiering, ::Type{K}, ::Type{R}, ::Type{T}, suffixes,
-    keynames::Val, lookbacks::Tuple) where {K,R,T}
+function suffixmonoids(@nospecialize(tg::Tiering), @nospecialize(K::Type),
+    @nospecialize(R::Type), @nospecialize(T::Type), @nospecialize(suffixes),
+    @nospecialize(keynames::Val), @nospecialize(lookbacks::Tuple))
     isempty(tg.monoid) && return nothing
     monoids =
         KeyDict{K,queuestype(tg.monoid, R, T)}()
@@ -433,11 +456,47 @@ function setvaltype!(rs::RollingState, cfg::RollingConfig,
     VB = barsvaluetype(tg, cfg.outs)
     empty = convert(V, emptyvalues(cfg.protos, cfg.outs))
     partial = missingrow(VB, cfg.outs)
-    rs.valtypes = map(lb -> isbars(lb) ? VB : V, cfg.lookbacks)
-    rs.emptyrows = map(lb -> isbars(lb) ? partial : empty, cfg.lookbacks)
-    rs.vals === nothing ||
-        (rs.vals = map((v, T) -> convert(Vector{T}, v), rs.vals, rs.valtypes))
+    n = length(cfg.lookbacks)
+    vts = Vector{Any}(undef, n)
+    ers = Vector{Any}(undef, n)
+    for j in 1:n
+        b = isbars(cfg.lookbacks[j])
+        @inbounds vts[j] = b ? VB : V
+        @inbounds ers[j] = b ? partial : empty
+    end
+    rs.valtypes = Tuple(vts)
+    rs.emptyrows = Tuple(ers)
+    if rs.vals !== nothing
+        converted = Vector{Any}(undef, n)
+        for j in 1:n
+            @inbounds converted[j] = convert(Vector{rs.valtypes[j]}, rs.vals[j])
+        end
+        rs.vals = Tuple(converted)
+    end
     return nothing
+end
+
+# Per-chunk helpers that avoid specializing `Base.map` on every window count
+# and value-type tuple; the single-window fast path allocates nothing extra.
+function allocvals(@nospecialize(valtypes::Tuple),
+    @nospecialize(emptyrows::Tuple), n::Int)
+    w = length(valtypes)
+    w == 1 && return (newvals(valtypes[1], emptyrows[1], n),)
+    out = Vector{Any}(undef, w)
+    for j in 1:w
+        @inbounds out[j] = newvals(valtypes[j], emptyrows[j], n)
+    end
+    return Tuple(out)
+end
+function packwins(@nospecialize(lookbacks::Tuple),
+    @nospecialize(emptyrows::Tuple), @nospecialize(vals::Tuple))
+    w = length(lookbacks)
+    w == 1 && return ((lookbacks[1], emptyrows[1], vals[1]),)
+    out = Vector{Any}(undef, w)
+    for j in 1:w
+        @inbounds out[j] = (lookbacks[j], emptyrows[j], vals[j])
+    end
+    return Tuple(out)
 end
 
 # The augmented side's key and output-name checks, once per run.
@@ -457,12 +516,12 @@ function rollchunk!(rs::RollingState, cfg::RollingConfig,
     rs.passthrough && return assembleempty(cfg, c)
     lnt = NamedTuple{(:time, cfg.keycols...)}(Tables.columntable(c))
     # Pre-filled so a mid-chunk widening never converts an undefined slot.
-    rs.vals = map((T, e) -> newvals(T, e, nrow(c)), rs.valtypes, rs.emptyrows)
+    rs.vals = allocvals(rs.valtypes, rs.emptyrows, nrow(c))
     i = 1
     # The tiers and windows are re-read each pass, since pullsummarized! may
     # rebuild the tiers and re-type the value vectors.
     while true
-        wins = map(tuple, cfg.lookbacks, rs.emptyrows, rs.vals)
+        wins = packwins(cfg.lookbacks, rs.emptyrows, rs.vals)
         i, rs.spos, needpull = rollsegment!(wins, rs.tiers, rs.derived, rs.perm,
             lnt, i, rs.snt, rs.spos, rs.summarized.done, cfg.lookbacks,
             cfg.keynames, cfg.outs)
@@ -472,13 +531,17 @@ function rollchunk!(rs::RollingState, cfg::RollingConfig,
     return assemble(cfg, rs, c)
 end
 
+hasleadin(times::AbstractVector, pos::Int, start) =
+    pos <= length(times) && @inbounds(times[pos]) < start
+
 # Admit every summarized row before `start` ahead of the first augmented pull,
 # evicting as it goes, so the windows hold only the rows a row at or after
-# `start` can still see. Type-unstable, once per chunk of the lead-in.
+# `start` can still see. Type-unstable, once per chunk of the lead-in. Guarding
+# `hasleadin` skips compiling `leadinsegment!` when no row precedes `start`.
 function admitleadin!(rs::RollingState, cfg::RollingConfig,
     start, self::Bool)
     rs.snt === nothing && pullsummarized!(rs, cfg, self)
-    while rs.snt !== nothing
+    while rs.snt !== nothing && hasleadin(rs.snt.time, rs.spos, start)
         rs.spos, more = leadinsegment!(rs.tiers, rs.snt, rs.spos, start,
             cfg.lookbacks, cfg.keynames)
         more && !rs.summarized.done || break
@@ -753,8 +816,11 @@ end
 
 function assemble(cfg::RollingConfig, rs::RollingState,
     c::DataFrame)
-    for (wname, v) in zip(cfg.windownames, rs.vals)
-        wdf = rowsdataframe(v)
+    wnames = cfg.windownames
+    vals = rs.vals
+    for j in 1:length(wnames)
+        wname = wnames[j]
+        wdf = rowsdataframe(vals[j])
         rename!(n -> prefixedname(wname, n), wdf)
         # The chunk is owned, so its columns are adopted, not copied.
         c = hcat(c, wdf; copycols = false)
@@ -766,10 +832,16 @@ end
 # the empty values, or missing under a Bars window.
 function assembleempty(cfg::RollingConfig, c::DataFrame)
     e = emptyvalues(cfg.protos, cfg.outs)
-    for (wname, lb) in zip(cfg.windownames, cfg.lookbacks), (name, val) in pairs(e)
-        c[!, prefixedname(wname, name)] =
-            isbars(lb) ? Vector{Union{Missing,typeof(val)}}(missing, nrow(c)) :
-            fill(val, nrow(c))
+    wnames = cfg.windownames
+    lbs = cfg.lookbacks
+    for j in 1:length(wnames)
+        wname = wnames[j]
+        lb = lbs[j]
+        for (name, val) in pairs(e)
+            c[!, prefixedname(wname, name)] =
+                isbars(lb) ? Vector{Union{Missing,typeof(val)}}(missing, nrow(c)) :
+                fill(val, nrow(c))
+        end
     end
     return c
 end
