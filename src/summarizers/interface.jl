@@ -337,7 +337,7 @@ s = CausalFrames.withterms(Sum{:d}(), :d => double)
 (true, true)
 ```
 """
-function withterms(s::Summarizer, specs::ColumnSpec...)
+function withterms(@nospecialize(s::Summarizer), @nospecialize(specs::ColumnSpec...))
     any(p -> p isa Pair, specs) || return s
     op = string(nameof(typeof(s)))
     pairs = Pair{Symbol,Any}[]

@@ -45,7 +45,11 @@ end
 # they keep their structural tiers, so some tier tracks which windows are empty.
 function tiering(@nospecialize(protos::Tuple), @nospecialize(intypes::NamedTuple))
     states = newstates(protos, intypes)
-    windowed = map(s -> freshwindowed(s, intypes), protos)
+    n = length(protos)
+    windowed = Vector{Any}(undef, n)
+    for i in 1:n
+        @inbounds windowed[i] = freshwindowed(protos[i], intypes)
+    end
     folding = any(st -> !Base.issingletontype(typeof(st)), states)
     running, monoid, refold, derived = Any[], Any[], Any[], Any[]
     perm = Tuple{Int,Int}[]
@@ -88,12 +92,13 @@ mergedstates(tg::Tiering) =
 # The emitted value type, from the merged templates. Windowed states have the
 # ordinary states' value type (the `freshwindowed` contract), so every tier
 # combination emits it.
-tieredvaluetype(tg::Tiering, protos::Tuple, outs::Val) =
+tieredvaluetype(@nospecialize(tg::Tiering), @nospecialize(protos::Tuple),
+    @nospecialize(outs::Val)) =
     promotedvaluetype(typeof(mergedstates(tg)), protos, outs)
 
 # A count window's value type, which is all `missing` until the window fills
 # (`Bars`, `barwindow`).
-barsvaluetype(tg::Tiering, outs::Val) =
+barsvaluetype(@nospecialize(tg::Tiering), @nospecialize(outs::Val)) =
     missingfields(valuetype(typeof(mergedstates(tg)), outs), outs)
 
 # Append an admitted row to the shared buffer, when the call keeps one.
@@ -272,7 +277,8 @@ end
 # running nor the refold tier needs one (the queues own their rows); empty on a
 # first build; after a widening, the previous buffer converted to the new row
 # type, or gathered from the previous queues (`monoidbuffer`) if there was none.
-function rebuildbuffer(tg::Tiering, ::Type{R}, old) where {R}
+function rebuildbuffer(@nospecialize(tg::Tiering), @nospecialize(R::Type),
+    @nospecialize(old))
     isempty(tg.running) && isempty(tg.refold) && return nothing
     old === nothing && return R[]
     old.buffer === nothing && return monoidbuffer(R, old.monoids)
@@ -283,8 +289,9 @@ end
 # else per-key queues (one per look-back) replayed from the previous queues'
 # live rows if any, else from the previous buffer's live rows (from `head`),
 # else (a first build) empty.
-function rebuildmonoids(tg::Tiering, ::Type{K}, ::Type{R}, ::Type{T}, old,
-    head::Int, keynames::Val, lookbacks::Tuple) where {K,R,T}
+function rebuildmonoids(@nospecialize(tg::Tiering), @nospecialize(K::Type),
+    @nospecialize(R::Type), @nospecialize(T::Type), @nospecialize(old),
+    head::Int, @nospecialize(keynames::Val), @nospecialize(lookbacks::Tuple))
     isempty(tg.monoid) && return nothing
     monoids =
         KeyDict{K,queuestype(tg.monoid, R, T)}()
@@ -297,8 +304,9 @@ function rebuildmonoids(tg::Tiering, ::Type{K}, ::Type{R}, ::Type{T}, old,
 end
 
 # Replay every live row of the previous queues, which own their rows.
-function replayoldmonoids!(monoids::KeyDict, old::AbstractDict, stateprotos::Tuple,
-    keynames::Val, lookbacks::Tuple)
+function replayoldmonoids!(@nospecialize(monoids::KeyDict),
+    @nospecialize(old::AbstractDict), @nospecialize(stateprotos::Tuple),
+    @nospecialize(keynames::Val), @nospecialize(lookbacks::Tuple))
     for (_, mq) in old
         replaymonoids!(monoids, mq.rows, oldestlo(mq) - mq.dropped, stateprotos,
             keynames, lookbacks)

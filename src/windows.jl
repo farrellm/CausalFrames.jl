@@ -47,8 +47,9 @@ Each summarizer's window slides in O(1) per row when it is a
 [`GroupSummarizer`](@ref), in O(1) amortized per row when it is another
 [`MonoidSummarizer`](@ref), and is re-folded in O(window) otherwise.
 """
-function summarizewindows(clk::CausalPipeline, lookback, summarizers;
-    key = nothing, keyset = nothing)
+function summarizewindows(clk::CausalPipeline, @nospecialize(lookback),
+    @nospecialize(summarizers); @nospecialize(key = nothing),
+    @nospecialize(keyset = nothing))
     lookback isa Bars && throw(
         ArgumentError(
             "summarizewindows lookback must be a time span, got $lookback; " *
@@ -75,8 +76,9 @@ function summarizewindows(clk::CausalPipeline, lookback, summarizers;
         end
     end
 end
-summarizewindows(p::CausalPipeline, clk::CausalPipeline, lookback, summarizers;
-    kwargs...) = summarizewindows(clk, lookback, summarizers; kwargs...)(p)
+summarizewindows(p::CausalPipeline, clk::CausalPipeline, @nospecialize(lookback),
+    @nospecialize(summarizers); kwargs...) =
+    summarizewindows(clk, lookback, summarizers; kwargs...)(p)
 
 struct WindowConfig
     keycols::Vector{Symbol}
@@ -87,6 +89,12 @@ struct WindowConfig
     ks::Union{Nothing,KeySet}
     terms::NamedTuple  # the row terms, from `prototypes`
     stored::Union{Nothing,Tuple{Vararg{Symbol}}}  # from `storedcolumns`
+    WindowConfig(keycols::Vector{Symbol}, @nospecialize(keynames::Val),
+        @nospecialize(lookback), @nospecialize(protos::Tuple),
+        @nospecialize(outs::Val), ks::Union{Nothing,KeySet},
+        @nospecialize(terms::NamedTuple),
+        @nospecialize(stored::Union{Nothing,Tuple{Vararg{Symbol}}})) =
+        new(keycols, keynames, lookback, protos, outs, ks, terms, stored)
 end
 
 # Per-run state. The untyped fields are per-chunk setup; per-row work sits
@@ -126,7 +134,7 @@ struct WindowTiers{R,B,G,MQ,GT,SR<:Tuple,ST<:Tuple,SF<:Tuple,SC}
     runningprotos::SR # the running tier's templates
     monoidprotos::ST  # the monoid tier's templates
     refoldprotos::SF  # the refold tier's templates
-    scratch::SC       # Vector{Pair{K,V}} over the primary's dict: the sort buffer
+    scratch::SC       # SortedBuffer{K,V} over the primary's dict: the sort buffer
 end
 
 WindowTiers{R}(buffer::B, running::G, monoids::MQ, refold::GT,
@@ -176,7 +184,7 @@ function preparewindows!(st::WindowState, cfg::WindowConfig,
     end
     groups = primarygroups(running, monoids, refold)
     st.tiers = WindowTiers{R}(buffer, running, monoids, refold, tg.running,
-        tg.monoid, tg.refold, Pair{K,valtype(groups)}[])
+        tg.monoid, tg.refold, SortedBuffer{K,valtype(groups)}())
     st.derived = tg.derived
     st.perm = tg.perm
     st.valtype = tieredvaluetype(tg, cfg.protos, cfg.outs)
@@ -389,7 +397,7 @@ end
 # present keys sorted into the reused scratch, then `emitwindow!`; with one
 # (keyless included), `emitdense!`.
 @inline function emitgroups!(rows::Vector, τ, groups::AbstractDict,
-    scratch::Vector{<:Pair}, prevkeys::Vector, tiers::WindowTiers,
+    scratch::SortedBuffer, prevkeys::Vector, tiers::WindowTiers,
     derived::Tuple, perm::Val, outs::Val, emptyrow, ::Nothing)
     sortinto!(scratch, groups)
     return emitwindow!(rows, τ, scratch, prevkeys, tiers, derived, perm, outs,
@@ -425,17 +433,20 @@ end
 # row for each key present at the previous tick and absent now; the present
 # keys then become `prevkeys`. Both lists are sorted by `keyisless`, so one
 # merge walk suffices.
-function emitwindow!(rows::Vector{RT}, τ, present::Vector{<:Pair},
+function emitwindow!(rows::Vector{RT}, τ, present::SortedBuffer,
     prevkeys::Vector{K}, tiers::WindowTiers, derived::Tuple, perm::Val,
     outs::Val, emptyrow) where {RT,K}
     j = 1
     np = length(prevkeys)
-    for (k, g) in present
+    keys = present.keys
+    vals = present.vals
+    for (k, idx) in keys
         while j <= np && keyisless(@inbounds(prevkeys[j]), k)
             push!(rows, convert(RT, gridrow(τ, @inbounds(prevkeys[j]), emptyrow)))
             j += 1
         end
         j <= np && keyisequal(@inbounds(prevkeys[j]), k) && (j += 1)
+        g = @inbounds vals[idx]
         push!(rows,
             convert(RT, gridrow(τ, k, tiervalues(tiers, derived, perm, k, g, outs))))
     end
@@ -444,7 +455,7 @@ function emitwindow!(rows::Vector{RT}, τ, present::Vector{<:Pair},
         j += 1
     end
     empty!(prevkeys)
-    for (k, _) in present
+    for (k, _) in keys
         push!(prevkeys, k)
     end
     return rows

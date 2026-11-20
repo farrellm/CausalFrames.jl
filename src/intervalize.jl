@@ -38,8 +38,9 @@ columns are dropped. Rows before `b₀` are dropped.
 
 Empty values widen the output types (`Mean` gives `Union{Missing, Float64}`).
 """
-function intervalize(clk::CausalPipeline, summarizers; key = nothing,
-    keyset = nothing, closelast::Bool = false)
+function intervalize(clk::CausalPipeline, @nospecialize(summarizers);
+    @nospecialize(key = nothing), @nospecialize(keyset = nothing),
+    closelast::Bool = false)
     (; keycols, terms, cfg) =
         summaryspec(summarizers, key, "intervalize"; keyset, grid = true)
     # The first interval closes at the first boundary of the run, and
@@ -55,8 +56,8 @@ function intervalize(clk::CausalPipeline, summarizers; key = nothing,
         end
     end
 end
-intervalize(p::CausalPipeline, clk::CausalPipeline, summarizers; kwargs...) =
-    intervalize(clk, summarizers; kwargs...)(p)
+intervalize(p::CausalPipeline, clk::CausalPipeline, @nospecialize(summarizers);
+    kwargs...) = intervalize(clk, summarizers; kwargs...)(p)
 
 # Per-run state. `bounds` holds the pulled boundaries not yet behind the
 # current interval, which ends at `bounds[bi]` and begins at `bounds[bi-1]`.

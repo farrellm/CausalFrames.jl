@@ -62,9 +62,9 @@ DataFrame(load(Context(0, 10), p))
    2 │     2      3.0
 ```
 """
-function readtable(table; columns = nothing, time = nothing,
-    checkorder::Bool = true, sort::Bool = false, closed::Bool = false,
-    skipmissing::Bool = false)
+function readtable(@nospecialize(table); @nospecialize(columns = nothing),
+    @nospecialize(time = nothing), checkorder::Bool = true, sort::Bool = false,
+    closed::Bool = false, skipmissing::Bool = false)
     checksourcetimespec(time, "readtable")
     names = sourcecolumns(columns, "readtable")
     Tables.istable(table) || throw(ArgumentError("readtable table must be a \
@@ -84,7 +84,8 @@ end
 # window, so the plan never splits its runs: a sort, a row table's conversion to
 # columns, the order check, times computed by a function, and the scan for
 # missing times when the schema doesn't rule them out.
-function tablerescans(table, time, checkorder::Bool, sort::Bool)
+function tablerescans(@nospecialize(table), @nospecialize(time),
+    checkorder::Bool, sort::Bool)
     (sort || checkorder || time isa Function || !Tables.columnaccess(table)) &&
         return true
     schema = Tables.schema(table)
@@ -134,8 +135,8 @@ readtable(frame::CausalFrame; closed::Union{Nothing,Bool} = nothing,
 
 # The generic path's producer. The untyped fields are per-partition setup; the
 # per-row work sits behind `tablerows`, `copytimes` and `maptime`.
-mutable struct TableProducer{T,X}
-    const table::X
+mutable struct TableProducer{T}
+    const table::Any
     const columns::Union{Nothing,Vector{Symbol}}  # kept besides :time; nothing: all
     const time::Any      # Nothing | Symbol (column name) | Function (row -> time)
     const checkorder::Bool
@@ -147,9 +148,9 @@ mutable struct TableProducer{T,X}
     parts::Any           # PullCursor over the partitions, created on first pull
     prevtime::Any        # last time of the previous partition, for its order
     done::Bool
-    TableProducer{T}(table::X, columns, time, checkorder, sort, closed,
-        skipmissing, start, stop) where {T,X} =
-        new{T,X}(table, columns, time, checkorder, sort, closed, skipmissing,
+    TableProducer{T}(@nospecialize(table), columns, @nospecialize(time),
+        checkorder, sort, closed, skipmissing, start, stop) where {T} =
+        new{T}(table, columns, time, checkorder, sort, closed, skipmissing,
             start, stop, nothing, nothing, false)
 end
 
@@ -176,7 +177,7 @@ end
 
 # A partition as an uncopied DataFrame of the columns `columns` keeps or, with
 # none kept, its first, to carry the row count as `keptfilecolumns` does.
-function keptpartition(p::TableProducer, part)
+function keptpartition(p::TableProducer, @nospecialize(part))
     df = DataFrame(part; copycols = false)
     p.columns === nothing && return df
     keep = keptcolumns(p.columns, p.time, propertynames(df), "table", "")
@@ -187,7 +188,7 @@ end
 # One partition's in-window rows as a chunk, or nothing if none. Carries the
 # last time to the next partition's order check, and ends the source on a time
 # past the window.
-function tablechunk!(p::TableProducer{T}, part) where {T}
+function tablechunk!(p::TableProducer{T}, @nospecialize(part)) where {T}
     cols = Tables.columns(part)
     colnames = Tables.columnnames(cols)
     n = isempty(colnames) ? 0 : length(Tables.getcolumn(cols, first(colnames)))
@@ -268,7 +269,8 @@ copytimes(::Type{T}, times::AbstractVector, rows) where {T} =
 # The chunk, in the table's column order: `timecol` where its source column
 # stood (appended when a function produced it and there is no `:time`), every
 # other column indexed by `rows`.
-function assemblechunk(cols, colnames, source, timecol::Vector, rows)
+function assemblechunk(@nospecialize(cols), @nospecialize(colnames),
+    @nospecialize(source), timecol::Vector, @nospecialize(rows))
     timename = something(source, :time)
     outnames = Symbol[]
     outcols = AbstractVector[]

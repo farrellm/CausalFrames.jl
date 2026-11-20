@@ -46,8 +46,9 @@ DataFrame(load(Context(0, 10), trades |> lookupjoin(dim; key = :sym)))
    2 │     2  b         200  energy
 ```
 """
-function lookupjoin(table; key = nothing, unmatched::Symbol = :missing,
-    leftprefix = nothing, rightprefix = nothing)
+function lookupjoin(@nospecialize(table); @nospecialize(key = nothing),
+    unmatched::Symbol = :missing, @nospecialize(leftprefix = nothing),
+    @nospecialize(rightprefix = nothing))
     keycols = keycolumns(key, "lookupjoin")
     isempty(keycols) && throw(ArgumentError("lookupjoin requires a key"))
     mode = unmatchedmode(unmatched)
@@ -81,7 +82,8 @@ function lookupjoin(table; key = nothing, unmatched::Symbol = :missing,
         return chunkmap(c -> lookupchunk(cfg, c), upstream)
     end
 end
-lookupjoin(p::CausalPipeline, table; kwargs...) = lookupjoin(table; kwargs...)(p)
+lookupjoin(p::CausalPipeline, @nospecialize(table); kwargs...) =
+    lookupjoin(table; kwargs...)(p)
 
 # What an unmatched row does, as a type for static dispatch.
 struct MissingOnUnmatched end

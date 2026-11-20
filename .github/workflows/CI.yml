@@ -13,7 +13,7 @@ concurrency:
   cancel-in-progress: ${{ startsWith(github.ref, 'refs/pull/') }}
 jobs:
   test:
-    name: Julia ${{ matrix.version }} - ${{ matrix.os }} - ${{ matrix.arch }}
+    name: Julia ${{ matrix.version }} - ${{ matrix.group }} - ${{ matrix.os }} - ${{ matrix.arch }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     permissions: # needed to allow julia-actions/cache to proactively delete old caches that it has created
@@ -27,6 +27,11 @@ jobs:
           - '1.10'
           - '1'
           - 'pre'
+        group:
+          - core
+          - rolling
+          - windows
+          - summarizers
         os:
           - ubuntu-latest
         arch:
@@ -39,9 +44,15 @@ jobs:
           arch: ${{ matrix.arch }}
       - uses: julia-actions/cache@v3
       - uses: julia-actions/julia-buildpkg@v1
+        env:
+          # julia-runtest runs under --check-bounds=yes --depwarn=yes (and
+          # --code-coverage=user on '1'), which invalidates pkgimages built
+          # under default flags, so skip precompiling twice.
+          JULIA_PKG_PRECOMPILE_AUTO: '0'
       - uses: julia-actions/julia-runtest@v1
         with:
           coverage: ${{ matrix.version == '1' }}
+          test_args: ${{ matrix.group }}
           # JET 0.10+ drops Julia 1.10, so the floor job lets the resolver pick
           # the newest 1.10-compatible JET rather than forcing the latest, which
           # (as Dependabot/CompatHelper PRs request) fails to resolve on 1.10.
@@ -53,6 +64,7 @@ jobs:
         if: matrix.version == '1'
         with:
           files: lcov.info
+          name: ${{ matrix.group }}
           use_oidc: true
           fail_ci_if_error: false
   format:
